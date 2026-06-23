@@ -1,0 +1,10 @@
+/* parqit.plugin exports exactly the two symbols Stata's plugin loader needs.
+ * Everything else — the statically linked DuckDB above all — stays local so
+ * a second plugin embedding its own DuckDB can never interpose ours. */
+{
+  global:
+    stata_call;
+    pginit;
+  local:
+    *;
+};

@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as follows:"
+title: "parqit"
+authors:
+  - family-names: "Portela"
+    given-names: "Miguel"
+    affiliation: "NIPE / Universidade do Minho and BPLIM / Banco de Portugal"
+    email: "miguel.portela@eeg.uminho.pt"
+    website: "https://reisportela.github.io"
+version: "0.1.7"
+date-released: 2026-06-16
+url: "https://github.com/reisportela/parqit"
+license: MIT
+# Built with the assistance of two AI coding agents used in tandem — Anthropic's
+# Claude (via Claude Code) and OpenAI's Codex — under the author's direction and
+# review. They are acknowledged as development tools, not as citation authors.

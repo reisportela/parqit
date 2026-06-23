@@ -1,0 +1,10 @@
+CompileFlags:
+  Add:
+    - -I./src
+    - -I./vendor/duckdb
+    - -I./vendor/stata
+    - -I./vendor/arrow
+    - -I./vendor/json
+    - -I./vendor/doctest
+    - -std=c++17
+    - -DSYSTEM=2

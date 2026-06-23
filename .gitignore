@@ -1,0 +1,88 @@
+# ----------------------------------------------------------------------------
+# parqit — .gitignore  (C++ / CMake / DuckDB plugin + Stata ado)
+# ----------------------------------------------------------------------------
+
+# --- Build output ----------------------------------------------------------
+/build/
+/cmake-build-*/
+/out/
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.lib
+
+# --- Compiled Stata plugins / shared libraries -----------------------------
+# The per-platform binary is renamed to parqit.plugin only inside release zips,
+# so ignore every raw artifact here.
+*.plugin
+*.so
+*.so.*
+*.dylib
+*.dll
+*.pdb
+*.exp
+*.ilk
+
+# --- CMake ------------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CMakeUserPresets.json
+Makefile
+compile_commands.json
+/_deps/
+Testing/
+
+# --- Vendored DuckDB: keep amalgamation sources, ignore its build tree ------
+/vendor/duckdb/build/
+/extern/duckdb/build/
+/third_party/duckdb/build/
+
+# --- Stata / test run artifacts --------------------------------------------
+*.smcl
+*.log
+*.stswp
+sysprofile.do.bak
+profile.do.bak
+
+# --- Data: never commit datasets; commit small fixtures explicitly ----------
+*.parquet
+*.dta
+*.sav
+*.zsav
+*.sas7bdat
+!test/fixtures/**
+!tests/fixtures/**
+
+# --- Local agent / runner / secrets ----------------------------------------
+# Per-machine instructions and runners stay out of version control.
+AGENTS.md
+GEMINI.md
+CLAUDE.local.md
+.claude/
+.env
+.env.*
+scripts/run-stata.local.*
+scripts/*.local.*
+
+# --- Editor / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+/build_done.flag
+
+# --- Repo-local installable ado tree (built artifacts; never commit) -------
+/ado/
+
+# --- Local benchmark outputs -----------------------------------------------
+/benchmarks/_out/
+
+# --- Distribution artifacts (built zips; shared out-of-band, never commit) --
+/dist/
+*.zip

@@ -1,0 +1,9 @@
+v 3
+d parqit — a grammar of data manipulation for Parquet on an embedded DuckDB engine
+d Miguel Portela, Universidade do Minho & NIPE
+d
+d Reads, joins and manipulates columnar Parquet with ordinary Stata verbs that
+d run out-of-core on an embedded DuckDB engine, materialising one result at a
+d time into memory (parqit collect) or back to Parquet (parqit save).
+d
+p parqit  a grammar of data manipulation for Parquet (embedded DuckDB engine)

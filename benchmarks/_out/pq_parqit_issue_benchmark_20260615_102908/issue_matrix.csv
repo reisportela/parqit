@@ -1,0 +1,15 @@
+issue,title,pq_verdict,pq_resolved,slab_verdict,slab_resolved,slab_evidence,note
+1,save varlist/options positional corruption family,NOT REPRODUCED,yes,PASS,yes,T02_USE_OPTIONS; T03_VERBS; V30_RESIDUAL_FIXES,pq 3.0.7 fixes the audited varlist family; slab passed named projection/order and save/partition replacement checks on supported surface.
+2,renamed/import-sanitized columns load all missing,CONFIRMED,no,PASS,yes,V02_RENAMED,slab loads reserved/digit/space/long/unicode names with original values preserved.
+3,tm/tq/th/ty/tw period values written as daily dates,CONFIRMED,no,PASS,yes,V03_PERIOD_DATES; v22_collect_date_no_overflow,slab preserves period counts and display formats without daily-date reinterpretation.
+4,chunk plus partition_by data loss / replace semantics,CONFIRMED,no,PASS,yes,T10_AUDIT_FIXES; V30_RESIDUAL_FIXES,slab chunk row groups and partition replacement tests passed; partition replace is re-runnable and stale rows are refused without replace.
+5,HH:MM display format writes all-null time column,CONFIRMED,no,PASS,yes,V05_HHMM,slab does not classify %tcHH:MM:SS as time-of-day and preserves values.
+6,uint32 values above int32 max become missing,CONFIRMED,no,PASS,yes,V06_UINT32,slab preserves unsigned/wide integer values instead of silent missing.
+7,label option blanks unlabeled numeric values,CONFIRMED,no,PASS,yes,V07_LABELS; T01_ROUNDTRIP,slab keeps numeric values on disk and round-trips labels separately.
+8,failed save reports rc=0 / errors swallowed,CONFIRMED,no,PASS,yes,V08_SAVE_ERRORS,"slab save failures return nonzero rc, including missing dirs/codecs/partition conflicts."
+9,"use, clear destroys in-memory data before validation",CONFIRMED,no,PASS,yes,V09_ATOMIC_CLEAR,slab failed loads preserve the current in-memory dataset.
+10,duplicate parquet column names silently drop one column,CONFIRMED,no,PASS,yes,V10_DUP_COLUMNS,slab disambiguates duplicate names and retains both columns.
+11,unsupported parquet types load as all-missing rc=0,CONFIRMED,no,PASS,yes,V11_UNSUPPORTED,slab handles decimal values and loudly drops/refuses unsupported list/struct instead of all-missing success.
+12,user column _pq_strl_key clobbered by strL helper,CONFIRMED,no,PASS,yes,V12_INTERNAL_NAMES,slab preserves hostile helper-named columns.
+13,invalid in() ranges silently return empty/full data,CONFIRMED,no,PASS,yes,V13_IN_RANGES,slab validates invalid ranges and does not silently return empty/all rows.
+14,space in parquet column name makes file unreadable,CONFIRMED,no,PASS,yes,V02_RENAMED; V16_INJECTION_HOSTILE,slab treats whitespace/hostile names as data and sanitizes safely.

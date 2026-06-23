@@ -1,0 +1,1741 @@
+-------------------------------------------------------------------------------
+      name:  <unnamed>
+       log:  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_
+> benchmark_20260615_102908/common_benchmark_small/stata_slab_pq.log
+  log type:  text
+ opened on:  15 Jun 2026, 10:35:48
+
+.
+. di as txt "benchmark: slab vs pq, Python canonical validation external"
+benchmark: slab vs pq, Python canonical validation external
+
+. di as txt "repo:    " as res `"`repo'"'
+repo:    /home/mangelo/Documents/GitHub/slab
+
+. di as txt "plugin:  " as res `"`plugin'"'
+plugin:  /home/mangelo/Documents/GitHub/slab/build/dev/slab.plugin
+
+. di as txt "datadir: " as res `"`datadir'"'
+datadir: /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benc
+> hmark_20260615_102908/synthetic_small_data
+
+. di as txt "outdir:  " as res `"`outdir'"'
+outdir:  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benc
+> hmark_20260615_102908/common_benchmark_small
+
+. di as txt "reps:    " as res "`reps'"
+reps:    3
+
+. di as txt "started: " as res "`c(current_date)' `c(current_time)'"
+started: 15 Jun 2026 10:35:48
+
+. di as txt "Stata:   " as res "`c(stata_version)' `c(os)' `c(machine_type)'"
+Stata:   19.5 Unix PC (64-bit x86-64)
+
+.
+. adopath ++ `"`repo'/src/ado/s"'
+  [1]              "/home/mangelo/Documents/GitHub/slab/src/ado/s"
+  [2]  (BASE)      "/usr/local/stata/ado/base/"
+  [3]  (SITE)      "/usr/local/ado/"
+  [4]              "."
+  [5]  (PERSONAL)  "~/ado/personal/"
+  [6]  (PLUS)      "~/ado/plus/"
+  [7]  (OLDPLACE)  "~/ado/"
+
+. global SLAB_PLUGIN_PATH `"`plugin'"'
+
+.
+. which pq
+/home/mangelo/ado/plus/p/pq.ado
+*! pq - read/write parquet files with stata
+*! Version 3.0.7 - Fix for write subset of variables, support for arrow extensi
+> on types
+*!                                 Fix for relaxed on directory read
+*!                                 Auto infer file format on pq read-like
+*!         3.0.6 - Update underlying rust library for better SPSS write compati
+> bility
+*!         3.0.5 - Fix random_n() off-by-one; fix pq use with wide varlists hit
+> ting Stata's plugin-call
+*!                 string limit; aggressive memory return on Linux for HPC/cgro
+> up environments. Fix for weird label char edge case
+*!         3.0.0 - Add robust SPSS/CSV round-trip support, faster CSV read/writ
+> e than native stata CSV
+*!                                 faster SAS reads.
+*!                                 Better handling reads of strl columns, handl
+> e datasets that exceed the limit
+*!                                 of Stata's C plugin API.  Better options for
+>  low-memory parquet writes
+*!         2.0.0 - Fix float32 compress, improve strL (string) load, allow larg
+> e file load/save
+*!                 1.9.1 - Fix parquet->stata integer cast overflow bug
+*!         1.9.0 - Vastly simplified use/append code to make it easier to manag
+> e and debug.  No change to API/function signature or functionality
+*!                 1.8.0 - Fix pq append for subsets of variables, add settable
+>  batch_size *
+*!                 1.7.4 - fix str length bug for special characters (str lengt
+> hs is number of bytes not characters) *
+*!                 1.7.3 - Minor change to saves with partition and compress -
+> don't downcast to boolean to avoid a=true/a=false columns (so it's a=1/a=0)*
+*!             1.7.2 - Fix overzealous compress on parquet use (to respect stat
+> a's odd integer limits) *
+*!             1.7.1 - fix bug where variables that contain another variable in
+>  them not loading with *
+*!         1.7.0 - upgrade to rust polars 0.49, add option to save labels rathe
+> r than numeric value
+
+. which slab
+/home/mangelo/Documents/GitHub/slab/src/ado/s/slab.ado
+*! version 0.1.5 14jun2026
+*! slab — a grammar of data manipulation for Stata, backed by Parquet (embedded
+>  DuckDB engine)
+*! Author: Miguel Portela, Universidade do Minho & NIPE
+*! License: MIT (see LICENSE in the slab repository)
+
+. slab version
+slab version 0.1.5  (engine: DuckDB v1.5.3, Stata Plugin Interface 3.0)
+
+. capture noisily shell sha256sum "`plugin'"
+
+e5f1fe31173807efcabca31fee66821aa50c9c7abe0170e8830101c867f1b271  /home/mangelo
+> /Documents/GitHub/slab/build/dev/slab.plugin
+
+. capture noisily shell uname -a
+
+Linux athena 5.14.0-611.5.1.el9_7.x86_64 #1 SMP PREEMPT_DYNAMIC Tue Nov 11 08:0
+> 9:09 EST 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+. capture noisily shell uptime
+
+ 10:35:49 up 187 days, 22:34, 20 users,  load average: 18,42, 18,33, 16,41
+
+.
+. tempname rawpost
+
+. tempfile raw
+
+. postfile `rawpost' str32 workflow str8 method int iteration int sequence ///
+>     double seconds int rc double rows int cols str244 artifact using `"`raw'"
+> ', replace
+(file /tmp/St873226.000001 not found)
+
+.
+. local workflows "describe path use save merge append workflow_filter_gen work
+> flow_collapse"
+
+. local methods "pq slab"
+
+. local nwork : word count `workflows'
+
+. local nmethods : word count `methods'
+
+. local sequence = 0
+
+.
+. forvalues i = 1/`reps' {
+  2.     local wshift = mod(`i' - 1, `nwork')
+  3.     local mshift = mod(`i' - 1, `nmethods')
+  4.     local worder ""
+  5.     forvalues j = 1/`nwork' {
+  6.         local idx = mod(`j' - 1 + `wshift', `nwork') + 1
+  7.         local w : word `idx' of `workflows'
+  8.         local worder "`worder' `w'"
+  9.     }
+ 10.     local morder ""
+ 11.     forvalues j = 1/`nmethods' {
+ 12.         local idx = mod(`j' - 1 + `mshift', `nmethods') + 1
+ 13.         local m : word `idx' of `methods'
+ 14.         local morder "`morder' `m'"
+ 15.     }
+ 16.     di as txt "iteration `i' workflow order:`worder' method order:`morder'
+> "
+ 17.
+.     foreach workflow of local worder {
+ 18.         foreach method of local morder {
+ 19.             local ++sequence
+ 20.             local artifact `"`outdir'/artifacts/`method'/`workflow'_`i'.pa
+> rquet"'
+ 21.             local rows = .
+ 22.             local cols = .
+ 23.
+.             clear
+ 24.             capture slab close _all
+ 25.             timer clear 1
+ 26.             timer on 1
+ 27.
+.             if "`method'" == "pq" {
+ 28.                 if "`workflow'" == "describe" {
+ 29.                     local artifact `"`workers'"'
+ 30.                     capture noisily pq describe using `"`workers'"', quiet
+> ly
+ 31.                     local rc = _rc
+ 32.                     if (`rc' == 0) {
+ 33.                         local rows = real("`r(n_rows)'")
+ 34.                         local cols = real("`r(n_columns)'")
+ 35.                     }
+ 36.                 }
+ 37.                 else if "`workflow'" == "path" {
+ 38.                     capture noisily pq path `"`workers'"'
+ 39.                     local rc = _rc
+ 40.                     if (`rc' == 0) local artifact `"`r(fullpath)'"'
+ 41.                 }
+ 42.                 else if "`workflow'" == "use" {
+ 43.                     capture noisily pq use using `"`workers'"', clear
+ 44.                     local rc = _rc
+ 45.                     if (`rc' == 0) {
+ 46.                         local rows = _N
+ 47.                         local cols = c(k)
+ 48.                     }
+ 49.                 }
+ 50.                 else if "`workflow'" == "save" {
+ 51.                     timer off 1
+ 52.                     capture noisily slab use using `"`workers'"', clear
+ 53.                     local rc = _rc
+ 54.                     timer clear 1
+ 55.                     timer on 1
+ 56.                     if (`rc' == 0) {
+ 57.                         capture noisily pq save using `"`artifact'"', repl
+> ace
+ 58.                         local rc = _rc
+ 59.                     }
+ 60.                 }
+ 61.                 else if "`workflow'" == "merge" {
+ 62.                     capture noisily pq use using `"`workers'"', clear
+ 63.                     local rc = _rc
+ 64.                     if (`rc' == 0) {
+ 65.                         capture noisily keep if year == 2022
+ 66.                         local rc = _rc
+ 67.                     }
+ 68.                     if (`rc' == 0) {
+ 69.                         capture noisily pq merge m:1 firm_id using `"`firm
+> s'"', keep(match) keepusing(tfp capital industry) nogenerate
+ 70.                         local rc = _rc
+ 71.                     }
+ 72.                     if (`rc' == 0) {
+ 73.                         capture noisily pq save using `"`artifact'"', repl
+> ace
+ 74.                         local rc = _rc
+ 75.                     }
+ 76.                 }
+ 77.                 else if "`workflow'" == "append" {
+ 78.                     capture noisily pq use using `"`patents'"', clear
+ 79.                     local rc = _rc
+ 80.                     if (`rc' == 0) {
+ 81.                         capture noisily pq append using `"`patents'"'
+ 82.                         local rc = _rc
+ 83.                     }
+ 84.                     if (`rc' == 0) {
+ 85.                         capture noisily pq save using `"`artifact'"', repl
+> ace
+ 86.                         local rc = _rc
+ 87.                     }
+ 88.                 }
+ 89.                 else if "`workflow'" == "workflow_filter_gen" {
+ 90.                     capture noisily pq use using `"`workers'"', clear
+ 91.                     local rc = _rc
+ 92.                     if (`rc' == 0) {
+ 93.                         capture noisily keep if !missing(wage) & year >= 2
+> 020 & wage > 0
+ 94.                         local rc = _rc
+ 95.                     }
+ 96.                     if (`rc' == 0) {
+ 97.                         capture noisily gen double lwage = log(wage)
+ 98.                         local rc = _rc
+ 99.                     }
+100.                     if (`rc' == 0) {
+101.                         capture noisily pq save using `"`artifact'"', repl
+> ace
+102.                         local rc = _rc
+103.                     }
+104.                 }
+105.                 else if "`workflow'" == "workflow_collapse" {
+106.                     capture noisily pq use using `"`workers'"', clear
+107.                     local rc = _rc
+108.                     if (`rc' == 0) {
+109.                         capture noisily collapse (mean) wage (sd) sd_wage
+> = wage (count) n = wage, by(firm_id year)
+110.                         local rc = _rc
+111.                     }
+112.                     if (`rc' == 0) {
+113.                         capture noisily pq save using `"`artifact'"', repl
+> ace
+114.                         local rc = _rc
+115.                     }
+116.                 }
+117.                 else local rc = 198
+118.             }
+119.             else if "`method'" == "slab" {
+120.                 if "`workflow'" == "describe" {
+121.                     local artifact `"`workers'"'
+122.                     capture noisily slab describe `"`workers'"'
+123.                     local rc = _rc
+124.                     if (`rc' == 0) {
+125.                         local rows = r(n_rows)
+126.                         local cols = r(n_cols)
+127.                     }
+128.                 }
+129.                 else if "`workflow'" == "path" {
+130.                     capture noisily slab path `"`workers'"'
+131.                     local rc = _rc
+132.                     if (`rc' == 0) local artifact `"`r(path)'"'
+133.                 }
+134.                 else if "`workflow'" == "use" {
+135.                     capture noisily slab use using `"`workers'"', clear
+136.                     local rc = _rc
+137.                     if (`rc' == 0) {
+138.                         local rows = _N
+139.                         local cols = c(k)
+140.                     }
+141.                 }
+142.                 else if "`workflow'" == "save" {
+143.                     timer off 1
+144.                     capture noisily slab use using `"`workers'"', clear
+145.                     local rc = _rc
+146.                     timer clear 1
+147.                     timer on 1
+148.                     if (`rc' == 0) {
+149.                         capture noisily slab save `"`artifact'"', replace
+> data
+150.                         local rc = _rc
+151.                     }
+152.                 }
+153.                 else if "`workflow'" == "merge" {
+154.                     capture noisily slab use using `"`workers'"'
+155.                     local rc = _rc
+156.                     if (`rc' == 0) {
+157.                         capture noisily slab keep if year == 2022
+158.                         local rc = _rc
+159.                     }
+160.                     if (`rc' == 0) {
+161.                         capture noisily slab merge m:1 firm_id using `"`fi
+> rms'"', keep(match) keepusing(tfp capital industry) nogenerate
+162.                         local rc = _rc
+163.                     }
+164.                     if (`rc' == 0) {
+165.                         capture noisily slab save `"`artifact'"', replace
+166.                         local rc = _rc
+167.                     }
+168.                 }
+169.                 else if "`workflow'" == "append" {
+170.                     capture noisily slab use using `"`patents'"'
+171.                     local rc = _rc
+172.                     if (`rc' == 0) {
+173.                         capture noisily slab append using `"`patents'"'
+174.                         local rc = _rc
+175.                     }
+176.                     if (`rc' == 0) {
+177.                         capture noisily slab save `"`artifact'"', replace
+178.                         local rc = _rc
+179.                     }
+180.                 }
+181.                 else if "`workflow'" == "workflow_filter_gen" {
+182.                     capture noisily slab use using `"`workers'"'
+183.                     local rc = _rc
+184.                     if (`rc' == 0) {
+185.                         capture noisily slab keep if !missing(wage) & year
+>  >= 2020 & wage > 0
+186.                         local rc = _rc
+187.                     }
+188.                     if (`rc' == 0) {
+189.                         capture noisily slab gen double lwage = log(wage)
+190.                         local rc = _rc
+191.                     }
+192.                     if (`rc' == 0) {
+193.                         capture noisily slab save `"`artifact'"', replace
+194.                         local rc = _rc
+195.                     }
+196.                 }
+197.                 else if "`workflow'" == "workflow_collapse" {
+198.                     capture noisily slab use using `"`workers'"'
+199.                     local rc = _rc
+200.                     if (`rc' == 0) {
+201.                         capture noisily slab collapse (mean) wage (sd) sd_
+> wage = wage (count) n = wage, by(firm_id year)
+202.                         local rc = _rc
+203.                     }
+204.                     if (`rc' == 0) {
+205.                         capture noisily slab save `"`artifact'"', replace
+206.                         local rc = _rc
+207.                     }
+208.                 }
+209.                 else local rc = 198
+210.             }
+211.             else local rc = 198
+212.
+.             timer off 1
+213.             quietly timer list 1
+214.             local seconds = r(t1)
+215.
+.             if (`rc' == 0 & inlist("`workflow'", "use")) {
+216.                 timer off 1
+217.                 if "`method'" == "pq" {
+218.                     capture noisily pq save using `"`artifact'"', replace
+219.                     local dump_rc = _rc
+220.                 }
+221.                 else {
+222.                     capture noisily slab save `"`artifact'"', replace data
+223.                     local dump_rc = _rc
+224.                 }
+225.                 if (`dump_rc' != 0) local rc = `dump_rc'
+226.             }
+227.
+.             if (`rc' == 0 & !inlist("`workflow'", "describe", "path")) {
+228.                 capture noisily slab describe `"`artifact'"'
+229.                 if (_rc == 0) {
+230.                     local rows = r(n_rows)
+231.                     local cols = r(n_cols)
+232.                 }
+233.             }
+234.
+.             di as txt "RESULT workflow=`workflow' method=`method' iteration=`
+> i' sequence=`sequence' rc=`rc' seconds=" ///
+>                 as res %12.3f `seconds' as txt " rows=" as res %18.0fc `rows'
+>  as txt " cols=" as res `cols'
+235.             post `rawpost' ("`workflow'") ("`method'") (`i') (`sequence')
+> (`seconds') ///
+>                 (`rc') (`rows') (`cols') (`"`artifact'"')
+236.
+.             capture slab close _all
+237.             clear
+238.         }
+239.     }
+240. }
+iteration 1 workflow order: describe path use save merge append workflow_filter
+> _gen workflow_collapse method order: pq slab
+RESULT workflow=describe method=pq iteration=1 sequence=1 rc=0 seconds=       0
+> .105 rows=         1,500,000 cols=13
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+  rows:            1,500,000   columns: 13   row groups: 23   files: 1   slab m
+> etadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=describe method=slab iteration=1 sequence=2 rc=0 seconds=
+>  0.063 rows=         1,500,000 cols=13
+RESULT workflow=path method=pq iteration=1 sequence=3 rc=0 seconds=       0.000
+>  rows=                 . cols=.
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+RESULT workflow=path method=slab iteration=1 sequence=4 rc=0 seconds=       0.0
+> 01 rows=                 . cols=.
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/use_1.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/use_1.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=use method=pq iteration=1 sequence=5 rc=0 seconds=       0.836
+> rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/use_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/use_1.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=use method=slab iteration=1 sequence=6 rc=0 seconds=       0.32
+> 2 rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/save_1.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/save_1.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            double
+  year                             SMALLINT           long
+  wage                             DOUBLE             double
+  age                              TINYINT            int
+  gender                           VARCHAR            str1
+  education                        TINYINT            int
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          INTEGER            double
+  hours                            TINYINT            int
+  tenure                           TINYINT            int
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=save method=pq iteration=1 sequence=7 rc=0 seconds=       1.056
+>  rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/save_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/save_1.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=save method=slab iteration=1 sequence=8 rc=0 seconds=       1.3
+> 95 rows=         1,500,000 cols=13
+(1,200,000 observations deleted)
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+     firm_id |    500,000    250000.5    144337.7          1     500000
+         tfp |    500,000     1.08319     .450795      .1656     9.0384
+     capital |    500,000    2524.945    1428.815         50       5000
+    industry |          0
+Merging to data
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                           300,000
+    -----------------------------------------
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/merge_1.parque
+> t
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/merge_1.parquet
+  rows:              300,000   columns: 16   row groups: 1   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=pq iteration=1 sequence=9 rc=0 seconds=       1.57
+> 5 rows=           300,000 cols=16
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(300000 obs, 16 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/merge_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/merge_1.parquet
+  rows:              300,000   columns: 16   row groups: 3   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=slab iteration=1 sequence=10 rc=0 seconds=       0
+> .319 rows=           300,000 cols=16
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/append_1.parqu
+> et
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/append_1.parquet
+  rows:              200,000   columns: 3   row groups: 1   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          DOUBLE             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=pq iteration=1 sequence=11 rc=0 seconds=       0.
+> 182 rows=           200,000 cols=3
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/patents_perf
+> .parquet: 3 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(200000 obs, 3 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts/
+> slab/append_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/append_1.parquet
+  rows:              200,000   columns: 3   row groups: 2   files: 1   slab met
+> adata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=slab iteration=1 sequence=12 rc=0 seconds=
+> 0.042 rows=           200,000 cols=3
+(649,775 observations deleted)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_filte
+> r_gen_1.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_filter_gen_1.parq
+> uet
+  rows:              850,225   columns: 14   row groups: 3   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=pq iteration=1 sequence=13 rc=0 seco
+> nds=       1.656 rows=           850,225 cols=14
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(850225 obs, 14 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_filter_gen_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_filter_gen_1.pa
+> rquet
+  rows:              850,225   columns: 14   row groups: 7   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=slab iteration=1 sequence=14 rc=0 se
+> conds=       0.220 rows=           850,225 cols=14
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_colla
+> pse_1.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_collapse_1.parque
+> t
+  rows:            1,127,425   columns: 5   row groups: 4   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  year                             INTEGER            double
+  firm_id                          DOUBLE             double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                INTEGER            double
+
+RESULT workflow=workflow_collapse method=pq iteration=1 sequence=15 rc=0 second
+> s=       1.640 rows=         1,127,425 cols=5
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(1127425 obs, 5 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_collapse_1.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_collapse_1.parq
+> uet
+  rows:            1,127,425   columns: 5   row groups: 10   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                BIGINT             double
+
+RESULT workflow=workflow_collapse method=slab iteration=1 sequence=16 rc=0 seco
+> nds=       0.224 rows=         1,127,425 cols=5
+iteration 2 workflow order: path use save merge append workflow_filter_gen work
+> flow_collapse describe method order: slab pq
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+RESULT workflow=path method=slab iteration=2 sequence=17 rc=0 seconds=       0.
+> 000 rows=                 . cols=.
+RESULT workflow=path method=pq iteration=2 sequence=18 rc=0 seconds=       0.00
+> 0 rows=                 . cols=.
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/use_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/use_2.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=use method=slab iteration=2 sequence=19 rc=0 seconds=       0.2
+> 53 rows=         1,500,000 cols=13
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/use_2.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/use_2.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=use method=pq iteration=2 sequence=20 rc=0 seconds=       0.731
+>  rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/save_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/save_2.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=save method=slab iteration=2 sequence=21 rc=0 seconds=       1.
+> 126 rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/save_2.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/save_2.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            double
+  year                             SMALLINT           long
+  wage                             DOUBLE             double
+  age                              TINYINT            int
+  gender                           VARCHAR            str1
+  education                        TINYINT            int
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          INTEGER            double
+  hours                            TINYINT            int
+  tenure                           TINYINT            int
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=save method=pq iteration=2 sequence=22 rc=0 seconds=       1.17
+> 1 rows=         1,500,000 cols=13
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(300000 obs, 16 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/merge_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/merge_2.parquet
+  rows:              300,000   columns: 16   row groups: 3   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=slab iteration=2 sequence=23 rc=0 seconds=       0
+> .292 rows=           300,000 cols=16
+(1,200,000 observations deleted)
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+     firm_id |    500,000    250000.5    144337.7          1     500000
+         tfp |    500,000     1.08319     .450795      .1656     9.0384
+     capital |    500,000    2524.945    1428.815         50       5000
+    industry |          0
+Merging to data
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                           300,000
+    -----------------------------------------
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/merge_2.parque
+> t
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/merge_2.parquet
+  rows:              300,000   columns: 16   row groups: 1   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=pq iteration=2 sequence=24 rc=0 seconds=       1.4
+> 84 rows=           300,000 cols=16
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/patents_perf
+> .parquet: 3 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(200000 obs, 3 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts/
+> slab/append_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/append_2.parquet
+  rows:              200,000   columns: 3   row groups: 2   files: 1   slab met
+> adata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=slab iteration=2 sequence=25 rc=0 seconds=
+> 0.075 rows=           200,000 cols=3
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/append_2.parqu
+> et
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/append_2.parquet
+  rows:              200,000   columns: 3   row groups: 1   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          DOUBLE             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=pq iteration=2 sequence=26 rc=0 seconds=       0.
+> 168 rows=           200,000 cols=3
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(850225 obs, 14 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_filter_gen_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_filter_gen_2.pa
+> rquet
+  rows:              850,225   columns: 14   row groups: 7   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=slab iteration=2 sequence=27 rc=0 se
+> conds=       0.245 rows=           850,225 cols=14
+(649,775 observations deleted)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_filte
+> r_gen_2.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_filter_gen_2.parq
+> uet
+  rows:              850,225   columns: 14   row groups: 3   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=pq iteration=2 sequence=28 rc=0 seco
+> nds=       1.593 rows=           850,225 cols=14
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(1127425 obs, 5 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_collapse_2.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_collapse_2.parq
+> uet
+  rows:            1,127,425   columns: 5   row groups: 10   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                BIGINT             double
+
+RESULT workflow=workflow_collapse method=slab iteration=2 sequence=29 rc=0 seco
+> nds=       0.239 rows=         1,127,425 cols=5
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_colla
+> pse_2.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_collapse_2.parque
+> t
+  rows:            1,127,425   columns: 5   row groups: 4   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  year                             INTEGER            double
+  firm_id                          DOUBLE             double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                INTEGER            double
+
+RESULT workflow=workflow_collapse method=pq iteration=2 sequence=30 rc=0 second
+> s=       1.466 rows=         1,127,425 cols=5
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+  rows:            1,500,000   columns: 13   row groups: 23   files: 1   slab m
+> etadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=describe method=slab iteration=2 sequence=31 rc=0 seconds=
+>   0.015 rows=         1,500,000 cols=13
+RESULT workflow=describe method=pq iteration=2 sequence=32 rc=0 seconds=
+> 0.083 rows=         1,500,000 cols=13
+iteration 3 workflow order: use save merge append workflow_filter_gen workflow_
+> collapse describe path method order: pq slab
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/use_3.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/use_3.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=use method=pq iteration=3 sequence=33 rc=0 seconds=       0.722
+>  rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/use_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/use_3.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=use method=slab iteration=3 sequence=34 rc=0 seconds=       0.3
+> 25 rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/save_3.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/save_3.parquet
+  rows:            1,500,000   columns: 13   row groups: 5   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            double
+  year                             SMALLINT           long
+  wage                             DOUBLE             double
+  age                              TINYINT            int
+  gender                           VARCHAR            str1
+  education                        TINYINT            int
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          INTEGER            double
+  hours                            TINYINT            int
+  tenure                           TINYINT            int
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=save method=pq iteration=3 sequence=35 rc=0 seconds=       1.05
+> 6 rows=         1,500,000 cols=13
+(13 vars, 1500000 obs read from /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_per
+> f.parquet)
+(1500000 obs, 13 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks
+> /_out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifact
+> s/slab/save_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/save_3.parquet
+  rows:            1,500,000   columns: 13   row groups: 13   files: 1   slab m
+> etadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               INTEGER            long       %12.0g
+  year                             SMALLINT           int        %8.0g
+  wage                             DOUBLE             double     %10.0g
+  age                              TINYINT            byte       %8.0g
+  gender                           VARCHAR            str1       %9s
+  education                        TINYINT            byte       %8.0g
+  region                           VARCHAR            str8       %9s
+  sector                           VARCHAR            str6       %9s
+  firm_id                          INTEGER            long       %12.0g
+  hours                            TINYINT            byte       %8.0g
+  tenure                           TINYINT            byte       %8.0g
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str5       %9s
+
+RESULT workflow=save method=slab iteration=3 sequence=36 rc=0 seconds=       1.
+> 249 rows=         1,500,000 cols=13
+(1,200,000 observations deleted)
+
+    Variable |        Obs        Mean    Std. dev.       Min        Max
+-------------+---------------------------------------------------------
+     firm_id |    500,000    250000.5    144337.7          1     500000
+         tfp |    500,000     1.08319     .450795      .1656     9.0384
+     capital |    500,000    2524.945    1428.815         50       5000
+    industry |          0
+Merging to data
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                           300,000
+    -----------------------------------------
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/merge_3.parque
+> t
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/merge_3.parquet
+  rows:              300,000   columns: 16   row groups: 1   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=pq iteration=3 sequence=37 rc=0 seconds=       1.4
+> 71 rows=           300,000 cols=16
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(300000 obs, 16 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/merge_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/merge_3.parquet
+  rows:              300,000   columns: 16   row groups: 3   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  tfp                              DOUBLE             double
+  capital                          DOUBLE             double
+  industry                         VARCHAR            str1
+
+RESULT workflow=merge method=slab iteration=3 sequence=38 rc=0 seconds=       0
+> .334 rows=           300,000 cols=16
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/append_3.parqu
+> et
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/append_3.parquet
+  rows:              200,000   columns: 3   row groups: 1   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          DOUBLE             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=pq iteration=3 sequence=39 rc=0 seconds=       0.
+> 219 rows=           200,000 cols=3
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/patents_perf
+> .parquet: 3 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(200000 obs, 3 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts/
+> slab/append_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/append_3.parquet
+  rows:              200,000   columns: 3   row groups: 2   files: 1   slab met
+> adata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  pat_year                         INTEGER            double
+  patent                           VARCHAR            str1
+
+RESULT workflow=append method=slab iteration=3 sequence=40 rc=0 seconds=
+> 0.044 rows=           200,000 cols=3
+(649,775 observations deleted)
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_filte
+> r_gen_3.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_filter_gen_3.parq
+> uet
+  rows:              850,225   columns: 14   row groups: 3   files: 1   slab me
+> tadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               DOUBLE             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          DOUBLE             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=pq iteration=3 sequence=41 rc=0 seco
+> nds=       1.814 rows=           850,225 cols=14
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(850225 obs, 14 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_filter_gen_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_filter_gen_3.pa
+> rquet
+  rows:              850,225   columns: 14   row groups: 7   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+  lwage                            DOUBLE             double
+
+RESULT workflow=workflow_filter_gen method=slab iteration=3 sequence=42 rc=0 se
+> conds=       0.246 rows=           850,225 cols=14
+File saved to /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue
+> _benchmark_20260615_102908/common_benchmark_small/artifacts/pq/workflow_colla
+> pse_3.parquet
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/pq/workflow_collapse_3.parque
+> t
+  rows:            1,127,425   columns: 5   row groups: 4   files: 1   slab met
+> adata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  year                             INTEGER            double
+  firm_id                          DOUBLE             double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                INTEGER            double
+
+RESULT workflow=workflow_collapse method=pq iteration=3 sequence=43 rc=0 second
+> s=       1.617 rows=         1,127,425 cols=5
+(lazy view default opened over /home/mangelo/Documents/GitHub/slab/benchmarks/_
+> out/pq_slab_issue_benchmark_20260615_102908/synthetic_small_data/workers_perf
+> .parquet: 13 columns; nothing read — use slab collect or slab save)
+(materialising view default — the dataset in memory is untouched; use the data
+> option to export memory instead)
+(1127425 obs, 5 vars written to /home/mangelo/Documents/GitHub/slab/benchmarks/
+> _out/pq_slab_issue_benchmark_20260615_102908/common_benchmark_small/artifacts
+> /slab/workflow_collapse_3.parquet)
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/common_benchmark_small/artifacts/slab/workflow_collapse_3.parq
+> uet
+  rows:            1,127,425   columns: 5   row groups: 10   files: 1   slab me
+> tadata: yes
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  firm_id                          BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  sd_wage                          DOUBLE             double
+  n                                BIGINT             double
+
+RESULT workflow=workflow_collapse method=slab iteration=3 sequence=44 rc=0 seco
+> nds=       0.250 rows=         1,127,425 cols=5
+RESULT workflow=describe method=pq iteration=3 sequence=45 rc=0 seconds=
+> 0.079 rows=         1,500,000 cols=13
+
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+  rows:            1,500,000   columns: 13   row groups: 23   files: 1   slab m
+> etadata: no
+
+  variable                         parquet type       stata type format
+  ------------------------------------------------------------------------
+  id                               BIGINT             double
+  year                             INTEGER            double
+  wage                             DOUBLE             double
+  age                              INTEGER            double
+  gender                           VARCHAR            str1
+  education                        INTEGER            double
+  region                           VARCHAR            str1
+  sector                           VARCHAR            str1
+  firm_id                          BIGINT             double
+  hours                            INTEGER            double
+  tenure                           INTEGER            double
+  hire_date                        DATE               long       %td
+  note                             VARCHAR            str1
+
+RESULT workflow=describe method=slab iteration=3 sequence=46 rc=0 seconds=
+>   0.017 rows=         1,500,000 cols=13
+RESULT workflow=path method=pq iteration=3 sequence=47 rc=0 seconds=       0.00
+> 0 rows=                 . cols=.
+  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmark_2
+> 0260615_102908/synthetic_small_data/workers_perf.parquet
+RESULT workflow=path method=slab iteration=3 sequence=48 rc=0 seconds=       0.
+> 000 rows=                 . cols=.
+
+. postclose `rawpost'
+
+.
+. use `"`raw'"', clear
+
+. gen byte ok = (rc == 0)
+
+. gen byte failed = (rc != 0)
+
+. order workflow method iteration sequence seconds rc ok failed rows cols artif
+> act
+
+. save `"`outdir'/stata_raw.dta"', replace
+(file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_raw.dta not found)
+file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_raw.dta saved
+
+. export delimited using `"`outdir'/stata_raw.csv"', replace
+(file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_raw.csv not found)
+file /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmar
+> k_20260615_102908/common_benchmark_small/stata_raw.csv saved
+
+.
+. preserve
+
+. collapse (count) runs=seconds (sum) failures=failed ///
+>     (mean) mean_seconds=seconds (sd) sd_seconds=seconds ///
+>     (min) min_seconds=seconds (p50) p50_seconds=seconds ///
+>     (max) max_seconds=seconds, by(workflow method)
+
+. sort workflow method
+
+. save `"`outdir'/stata_summary.dta"', replace
+(file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_summary.dta not found)
+file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_summary.dta saved
+
+. export delimited using `"`outdir'/stata_summary.csv"', replace
+(file
+    /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchma
+    > rk_20260615_102908/common_benchmark_small/stata_summary.csv not found)
+file /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_benchmar
+> k_20260615_102908/common_benchmark_small/stata_summary.csv saved
+
+. di as txt "summary:"
+summary:
+
+. list workflow method runs failures mean_seconds sd_seconds min_seconds p50_se
+> conds ///
+>     max_seconds, noobs abbreviate(24)
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |              append |     pq |    3 |        0 |    .18966667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .02635021  |         .168  |         .182  |         .219   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |              append |   slab |    3 |        0 |    .05366667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .01850225  |         .042  |         .044  |         .075   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |            describe |     pq |    3 |        0 |         .089 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |        .014  |         .079  |         .083  |         .105   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |            describe |   slab |    3 |        0 |    .03166667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .02715388  |         .015  |         .017  |         .063   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |               merge |     pq |    3 |        0 |         1.51 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .05666569  |        1.471  |        1.484  |        1.575   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |               merge |   slab |    3 |        0 |         .315 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |    .0212838  |         .292  |         .319  |         .334   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                path |     pq |    3 |        0 |            0 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |           0  |            0  |            0  |            0   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                path |   slab |    3 |        0 |    .00033333 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .00057735  |            0  |            0  |         .001   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                save |     pq |    3 |        0 |    1.0943333 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .06639528  |        1.056  |        1.056  |        1.171   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                save |   slab |    3 |        0 |    1.2566667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .13466378  |        1.126  |        1.249  |        1.395   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                 use |     pq |    3 |        0 |         .763 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .06337981  |         .722  |         .731  |         .836   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |                 use |   slab |    3 |        0 |           .3 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .04073082  |         .253  |         .322  |         .325   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |   workflow_collapse |     pq |    3 |        0 |    1.5743333 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |    .0945216  |        1.466  |        1.617  |         1.64   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  |   workflow_collapse |   slab |    3 |        0 |    .23766667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .01305118  |         .224  |         .239  |          .25   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  | workflow_filter_gen |     pq |    3 |        0 |    1.6876667 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .11385224  |        1.593  |        1.656  |        1.814   |
+  +---------------------------------------------------------------+
+
+  +---------------------------------------------------------------+
+  |            workflow | method | runs | failures | mean_seconds |
+  | workflow_filter_gen |   slab |    3 |        0 |         .237 |
+  |------------------------------+--------------------------------|
+  |  sd_seconds  |  min_seconds  |  p50_seconds  |  max_seconds   |
+  |   .01473092  |          .22  |         .245  |         .246   |
+  +---------------------------------------------------------------+
+
+. restore
+
+.
+. di as txt "raw results:     " as res `"`outdir'/stata_raw.csv"'
+raw results:     /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_is
+> sue_benchmark_20260615_102908/common_benchmark_small/stata_raw.csv
+
+. di as txt "summary results: " as res `"`outdir'/stata_summary.csv"'
+summary results: /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_is
+> sue_benchmark_20260615_102908/common_benchmark_small/stata_summary.csv
+
+. di as txt "finished:        " as res "`c(current_date)' `c(current_time)'"
+finished:        15 Jun 2026 10:36:27
+
+. log close
+      name:  <unnamed>
+       log:  /home/mangelo/Documents/GitHub/slab/benchmarks/_out/pq_slab_issue_
+> benchmark_20260615_102908/common_benchmark_small/stata_slab_pq.log
+  log type:  text
+ closed on:  15 Jun 2026, 10:36:27
+-------------------------------------------------------------------------------

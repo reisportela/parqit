@@ -1,0 +1,157 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: release-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version/date surface coherence
+        run: bash tests/release_lint.sh
+
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            preset: linux
+            artifact: parqit_linux_x86_64
+          # macos-x86_64 (Intel) is temporarily omitted: GitHub's macos-13
+          # runners queue for hours on the free tier. The build is proven —
+          # identical code/fix to macos-arm64, which passes. Re-add this entry
+          # to ship the Intel binary again once a runner is reliably available.
+          # - label: macos-x86_64
+          #   os: macos-13
+          #   preset: macos-x86_64
+          #   artifact: parqit_macos_x86_64
+          - label: macos-arm64
+            os: macos-14
+            preset: macos-arm64
+            artifact: parqit_macos_arm64
+          - label: windows-x86_64
+            os: windows-2022
+            preset: windows
+            artifact: parqit_windows_x86_64
+
+    container: ${{ matrix.label == 'linux-x86_64' && 'almalinux:8' || null }}
+
+    steps:
+      - name: Install toolchain (AlmaLinux 8, old glibc for HPC)
+        if: matrix.label == 'linux-x86_64'
+        run: |
+          # gcc-toolset-12-libstdc++-devel ships the STATIC libstdc++.a so the
+          # plugin can statically embed it (the whole point of the EL8 container);
+          # without it the CMake probe falls through to a DYNAMIC libstdc++ link
+          # and the shipped .so fails to dlopen on older HPC nodes.
+          dnf -y install gcc-toolset-12 gcc-toolset-12-libstdc++-devel \
+                         binutils git cmake make python3 zip
+          echo "/opt/rh/gcc-toolset-12/root/usr/bin" >> $GITHUB_PATH
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} -j 4
+
+      - name: Verify Linux plugin self-containment
+        if: matrix.label == 'linux-x86_64'
+        shell: bash
+        run: |
+          # The HPC promise: no libstdc++/libgcc_s runtime dependency. Fail the
+          # release build (not just warn) if the shipped binary needs either.
+          f=$(find build -name parqit.plugin | head -1)
+          echo "checking $f"; readelf -d "$f" | grep NEEDED || true
+          if readelf -d "$f" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s)'; then
+            echo "ERROR: shipped plugin dynamically links libstdc++/libgcc_s" >&2
+            exit 1
+          fi
+          echo "OK: no libstdc++/libgcc_s NEEDED entry"
+
+      - name: Unit tests
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -C Release
+
+      - name: Collect plugin
+        shell: bash
+        run: |
+          mkdir -p out
+          cp build/${{ matrix.preset }}/parqit.plugin out/parqit.plugin 2>/dev/null || \
+          cp build/${{ matrix.preset }}/Release/parqit.plugin out/parqit.plugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/parqit.plugin
+          if-no-files-found: error
+
+  release:
+    name: Release zips
+    needs: [lint, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the git tag matches the project version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(grep -oE 'project\(parqit VERSION [0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt \
+                  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$tag" != "$ver" ]; then
+            echo "ERROR: tag v$tag != project(parqit VERSION) $ver — refusing to ship a wrongly labeled release" >&2
+            exit 1
+          fi
+          echo "OK: tag v$tag matches project version $ver"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble per-platform and all-platforms net-install zips
+        run: |
+          set -euo pipefail
+          # stata.toc + parqit.pkg make each folder a `net install`-able package;
+          # the binary is shipped under the source name parqit.pkg expects, and
+          # net install renames it to parqit.plugin on the target machine.
+          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp"
+          mkdir -p dist/parqit_all_platforms
+          for plat in linux_x86_64 macos_arm64 windows_x86_64; do
+            case $plat in
+              linux_x86_64)   bin=parqit_linux64.plugin ;;
+              macos_arm64)    bin=parqit_macarm64.plugin ;;
+              windows_x86_64) bin=parqit_win64.plugin ;;
+            esac
+            mkdir -p "dist/$plat"
+            cp $STATA_FILES "dist/$plat/"
+            cp "artifacts/parqit_$plat/parqit.plugin" "dist/$plat/$bin"
+            (cd "dist/$plat" && zip -r "../parqit_${plat}.zip" .)
+          done
+          # one all-platforms package: every binary under its pkg source name, so
+          # a colleague on any OS can net install from the same zip.
+          cp $STATA_FILES dist/parqit_all_platforms/
+          cp artifacts/parqit_linux_x86_64/parqit.plugin   dist/parqit_all_platforms/parqit_linux64.plugin
+          cp artifacts/parqit_macos_arm64/parqit.plugin    dist/parqit_all_platforms/parqit_macarm64.plugin
+          cp artifacts/parqit_windows_x86_64/parqit.plugin dist/parqit_all_platforms/parqit_win64.plugin
+          (cd dist/parqit_all_platforms && zip -r ../parqit_all_platforms.zip .)
+          ls -la dist/*.zip
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

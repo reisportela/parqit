@@ -1,0 +1,51 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 16, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "PARQIT_BUILD_TESTS": "ON" }
+    },
+    { "name": "linux",   "inherits": "base", "displayName": "Linux x86_64 (Release)" },
+    {
+      "name": "macos",
+      "inherits": "base",
+      "displayName": "macOS (Release, current arch)",
+      "cacheVariables": { "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0" }
+    },
+    {
+      "name": "macos-x86_64",
+      "inherits": "macos",
+      "displayName": "macOS x86_64 (Release)",
+      "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "x86_64" }
+    },
+    {
+      "name": "macos-arm64",
+      "inherits": "macos",
+      "displayName": "macOS arm64 (Release)",
+      "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "arm64" }
+    },
+    { "name": "windows", "inherits": "base", "displayName": "Windows x86_64 (MSVC Release)" },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Developer build (RelWithDebInfo + tests)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "PARQIT_BUILD_TESTS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux",        "configurePreset": "linux" },
+    { "name": "macos",        "configurePreset": "macos" },
+    { "name": "macos-x86_64", "configurePreset": "macos-x86_64" },
+    { "name": "macos-arm64",  "configurePreset": "macos-arm64" },
+    { "name": "windows",      "configurePreset": "windows", "configuration": "Release" },
+    { "name": "dev",          "configurePreset": "dev" }
+  ],
+  "testPresets": [
+    { "name": "linux",   "configurePreset": "linux",   "output": { "outputOnFailure": true } },
+    { "name": "dev",     "configurePreset": "dev",     "output": { "outputOnFailure": true } },
+    { "name": "windows", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}
