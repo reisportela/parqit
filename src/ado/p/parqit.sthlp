@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.7 16jun2026}{...}
+{* *! version 0.1.8 23jun2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -422,11 +422,18 @@ character because DuckDB/Arrow strings must remain valid UTF-8.
 
 {pstd}
 {it:Missing-value semantics.} By default expressions use SQL semantics:
-missing is NULL, comparisons with missing are unknown, and {cmd:keep if}
-drops rows whose condition is unknown — which coincides with Stata's
-outcome for simple conditions. The idioms {cmd:x == .}, {cmd:x != .},
-{cmd:x < .}, {cmd:x >= .} are translated to IS NULL tests. {cmd:parqit set statamissing on} switches to full Stata ordering ("missing is greater than
-every number") for every comparison. Strings have no missing: NULL and
+missing is NULL and any comparison involving a missing value is unknown
+(NULL). For {cmd:keep if}/{cmd:drop if} this matches native Stata for the
+lower-tail and equality idioms ({cmd:x < c}, {cmd:x <= c}, {cmd:x == c}),
+but it differs for the upper tail and inequality ({cmd:x > c}, {cmd:x >= c},
+{cmd:x != c}): native Stata treats missing as larger than every number and
+so {it:keeps} those rows, whereas SQL drops them. Likewise
+{cmd:gen y = x > c} yields system missing (not 0/1) for rows where {cmd:x}
+is missing. Run {cmd:parqit set statamissing on} for full Stata ordering
+("missing is greater than every number"): under it every comparison — in
+filters and in assignments alike — reproduces Stata's result. The literal
+idioms {cmd:x == .}, {cmd:x != .}, {cmd:x < .}, {cmd:x >= .} are translated
+to IS NULL tests in either mode. Strings have no missing: NULL and
 {cmd:""} are the same thing on read, write and compare.
 
 {pstd}

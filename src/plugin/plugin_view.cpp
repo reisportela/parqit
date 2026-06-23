@@ -1119,6 +1119,15 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
 namespace parqit_plugin {
 namespace {
 
+/* Render a numeric column as text the way Stata does: an integer value prints
+ * without a trailing ".0" (11, not 11.0). Used by levelsof and tabulate so the
+ * two never disagree (TAB-FLOAT-1). `ref` is already a quoted identifier. */
+static std::string stata_num_varchar(const std::string &ref) {
+    return "(CASE WHEN " + ref + " = trunc(" + ref + ") AND abs(" + ref +
+           ") < 1e15 THEN CAST(CAST(" + ref + " AS BIGINT) AS VARCHAR) ELSE CAST(" +
+           ref + " AS VARCHAR) END)";
+}
+
 /* boundary-cast a using source (files on disk) into a View::UsingSide */
 ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
                          View::UsingSide *out, std::vector<std::string> *drops,
@@ -1466,11 +1475,19 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
             " are not unique within i() groups");
         return kRcUsage;
     }
+    const std::string jq = quote_ident(jname);
+    /* RESHAPE-WIDE-COLORDER: numeric j must order numerically (2,10,11), not by
+     * the lexicographic VARCHAR cast (10,11,2), to match native reshape wide.
+     * String j keeps alphabetic order (Stata does too). */
     duckdb_result res;
-    if (!s.query("SELECT DISTINCT CAST(" + quote_ident(jname) +
-                     " AS VARCHAR) AS v FROM " + base + " WHERE " +
-                     quote_ident(jname) + " IS NOT NULL ORDER BY v",
-                 &res, &err)) {
+    std::string jquery =
+        j_is_string
+            ? "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v FROM " + base +
+                  " WHERE " + jq + " IS NOT NULL ORDER BY v"
+            : "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v, " + jq +
+                  " AS jn FROM " + base + " WHERE " + jq +
+                  " IS NOT NULL ORDER BY jn";
+    if (!s.query(jquery, &res, &err)) {
         cry("parqit reshape: " + err);
         return kRcEngine;
     }
@@ -1823,13 +1840,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         long long limit = req.value("limit", 5000LL);
         const std::string r = quote_ident(vars[0]);
         /* numeric levels print like Stata: integers without a trailing .0 */
-        std::string expr =
-            (kind == 's')
-                ? r
-                : "(CASE WHEN " + r + " = trunc(" + r + ") AND abs(" + r +
-                      ") < 1e15 THEN CAST(CAST(" + r +
-                      " AS BIGINT) AS VARCHAR) ELSE CAST(" + r +
-                      " AS VARCHAR) END)";
+        std::string expr = (kind == 's') ? r : stata_num_varchar(r);
         std::string where = (kind == 's') ? (r + " IS NOT NULL AND " + r + " <> ''")
                                           : (r + " IS NOT NULL");
         duckdb_result res;
@@ -1895,9 +1906,12 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 "swap the variables or collapse instead");
             return kRcUsage;
         }
+        /* TAB-FLOAT-1: integer-valued numeric labels print without a .0 */
+        const std::string v1 = (k1 == 's') ? r1 : stata_num_varchar(r1);
+        const std::string v2 = (k2 == 's') ? r2 : stata_num_varchar(r2);
         duckdb_result res;
-        if (!s.query("SELECT CAST(" + r1 + " AS VARCHAR), CAST(" + r2 +
-                         " AS VARCHAR), count(*) FROM " + base2 + " GROUP BY " + r1 +
+        if (!s.query("SELECT " + v1 + ", " + v2 +
+                         ", count(*) FROM " + base2 + " GROUP BY " + r1 +
                          ", " + r2 + " ORDER BY " + r1 + " NULLS LAST, " + r2 +
                          " NULLS LAST",
                      &res, &err)) {
@@ -1942,8 +1956,11 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                             : (k1 == 's' ? " WHERE " + r + " IS NOT NULL AND " + r +
                                                " <> '' "
                                          : " WHERE " + r + " IS NOT NULL ");
+        /* TAB-FLOAT-1: render integer-valued numeric levels without a trailing
+         * .0 (11, not 11.0), matching native tabulate and parqit levelsof. */
+        const std::string vexpr = (k1 == 's') ? r : stata_num_varchar(r);
         duckdb_result res;
-        if (!s.query("SELECT CAST(" + r + " AS VARCHAR) AS v, count(*) AS n FROM " +
+        if (!s.query("SELECT " + vexpr + " AS v, count(*) AS n FROM " +
                          base + where + " GROUP BY " + r + " ORDER BY " + r +
                          " NULLS LAST",
                      &res, &err)) {
@@ -1998,37 +2015,46 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit codebook: no matching variables");
             return kRcVarNotFound;
         }
+        /* PERF-CODEBOOK-KSCAN: one combined scan instead of one per variable
+         * (mirrors summarize/distinct). count(*) appears once; each target
+         * contributes 4 columns (miss, count(DISTINCT), min, max). */
+        std::string sel = "count(*)";
         for (const auto &t : targets) {
             const std::string r = quote_ident(t.first);
             std::string miss = (t.second == 's')
                                    ? "count(*) FILTER (WHERE " + r +
                                          " IS NULL OR " + r + " = '')"
                                    : "count(*) - count(" + r + ")";
-            duckdb_result res;
-            if (!s.query("SELECT count(*), " + miss + ", count(DISTINCT " + r +
-                             "), CAST(min(" + r + ") AS VARCHAR), CAST(max(" + r +
-                             ") AS VARCHAR) FROM " + base,
-                         &res, &err)) {
-                cry("parqit codebook: " + err);
-                return kRcEngine;
-            }
-            auto cell = [&](idx_t c) -> std::string {
-                if (duckdb_value_is_null(&res, c, 0)) return ".";
-                char *v = duckdb_value_varchar(&res, c, 0);
-                std::string out = v ? v : ".";
-                if (v) duckdb_free(v);
-                return out;
-            };
+            sel += ", " + miss + ", count(DISTINCT " + r + "), CAST(min(" + r +
+                   ") AS VARCHAR), CAST(max(" + r + ") AS VARCHAR)";
+        }
+        duckdb_result res;
+        if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
+            cry("parqit codebook: " + err);
+            return kRcEngine;
+        }
+        auto cell = [&](idx_t c) -> std::string {
+            if (duckdb_value_is_null(&res, c, 0)) return ".";
+            char *v = duckdb_value_varchar(&res, c, 0);
+            std::string out = v ? v : ".";
+            if (v) duckdb_free(v);
+            return out;
+        };
+        const std::string ntot = cell(0);
+        for (size_t ti = 0; ti < targets.size(); ti++) {
+            const idx_t off = 1 + static_cast<idx_t>(ti) * 4;
             std::string fmt, lab;
             for (const auto &c : g_view_ref().cols())
-                if (c.name == t.first) {
+                if (c.name == targets[ti].first) {
                     fmt = c.fmt;
                     lab = c.varlab;
                 }
-            w.rec("cb", {cell(0), cell(1), cell(2), std::string(1, t.second)},
-                  {t.first, cell(3), cell(4), lab});
-            duckdb_destroy_result(&res);
+            w.rec("cb",
+                  {ntot, cell(off), cell(off + 1),
+                   std::string(1, targets[ti].second)},
+                  {targets[ti].first, cell(off + 2), cell(off + 3), lab});
         }
+        duckdb_destroy_result(&res);
     } else if (what == "distinct") {
         std::vector<std::string> targets = vars;
         if (targets.empty())

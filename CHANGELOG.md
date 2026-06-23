@@ -6,6 +6,84 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-06-23
+
+Residual-hazard round from a multi-agent adversarial audit. Every fix is locked
+by an independent oracle (native Stata twin or pyarrow) in the new verify test
+`v33_audit_fixes_20260623`; the prior 42 suites and the C++ unit suite stay
+green.
+
+### Fixed
+- **`parqit gen <byte|int|long|float>` honours the storage type like native
+  Stata (EXPR-1).** A narrow integer target now truncates toward zero and maps
+  an out-of-range value to system missing (`gen byte b = 3.9` → `3`,
+  `gen byte b = 200` → `.`, `gen byte b = -2.5` → `-2`), and the collected
+  column is sized to the requested type (byte/int/long) rather than silently
+  widening to double; `gen float` rounds to float32. Previously the requested
+  type was discarded and the raw double stored. The default (no-type) path is
+  unchanged.
+- **`parqit save` verify/fast-path reads escape glob metacharacters (GLOB-1).**
+  The internal self-read that confirms a written file (and the unchanged-source
+  fast path that re-reads the source) treated a literal path like
+  `panel[2020].parquet` as a glob, so a sibling matching the bracket class could
+  be scanned in place of the real file — a spurious verify failure, or silently
+  the wrong rows. Internal literal reads are now glob-escaped; user-facing
+  `parqit use` keeps its glob semantics.
+- **Partitioned `parqit save … , replace` is crash-safe (ATOM-PART-1).** The old
+  partition tree is now renamed aside and removed only after the new tree is
+  swapped in (restored on failure), instead of being deleted before the rename —
+  closing a window in which a crash left neither tree. The Windows flat-file
+  replace uses the same rename-aside (IO-2).
+- **`collapse (first)/(last)` without a prior sort is deterministic
+  (COLLAPSE-3).** It now falls back to a reproducible total order over all
+  columns instead of an engine-defined `row_number() OVER ()` that varied with
+  parallelism / row-group layout.
+- **`merge m:m` master-side pairing is reproducible (TT-A1).** The within-key
+  row index now orders by all master columns (mirroring the using side) when the
+  view is unsorted or sorted only on the key, so the pairing no longer depends on
+  scan order.
+- **`parqit append … , generate(name)` colliding with a using-file column is a
+  clear error (TT-A2)** instead of a cryptic DuckDB "duplicate name in UNION BY
+  NAME" binder error.
+- **`parqit collapse` with a weight expression is a clear, loud error
+  (COLLAPSE-WEIGHTS).** `collapse (mean) x [fweight=n]` no longer mis-parses into
+  "variable n] not found"; weights are reported as unsupported.
+- **`reshape wide` with a numeric `j()` orders generated columns numerically**
+  (`inc2` before `inc10`, RESHAPE-WIDE-COLORDER), matching native Stata, instead
+  of by the lexicographic string cast.
+- **`parqit tabulate` of an integer-valued float/double prints `11`, not `11.0`
+  (TAB-FLOAT-1)**, reusing the same integer-trimming as `levelsof`; the two-way
+  table also orders numeric axes numerically (TAB2-ORDER-1).
+- **`DECIMAL` columns whose integer part can exceed 2^53 now warn on read
+  (DEC-1)** with the same ">2^53 rounded to nearest double" note that BIGINT /
+  HUGEINT already emit, so the precision loss is no longer silent.
+- **`TIME` nanosecond columns flag the sub-millisecond truncation (TS-NS-1)** the
+  way nanosecond `TIMESTAMP` already did.
+
+### Added
+- **Chained relational comparisons (EXPR-4).** `1 < x < 3000` now parses
+  left-associatively as `(1 < x) < 3000` (a 0/1 result) instead of erroring. A
+  column reference named like the internal `_n`/`_N` sentinel is now a loud
+  error rather than malformed SQL (INJID-1).
+
+### Changed
+- **`parqit codebook` scans the file once, not once per variable
+  (PERF-CODEBOOK-KSCAN).** Like `summarize`/`distinct`, it now issues a single
+  combined aggregate; `parqit codebook` over `k` variables is ~`k`× less I/O on
+  wide or cold/network files. Returned values are unchanged.
+
+### Documentation
+- **Missing-value semantics for `keep if`/`gen` are stated precisely** in the
+  help: the SQL default coincides with Stata for `<`, `<=`, `==` but differs for
+  `>`, `>=`, `!=` against missings (and `gen y = x > c` yields missing where `x`
+  is missing); `parqit set statamissing on` reproduces Stata in both filters and
+  assignments. This corrects the previous over-broad "coincides with Stata"
+  claim; the SQL default is the charter-mandated behaviour and is unchanged.
+- A foreign column whose name was sanitised is recorded via `char[src_name]` on
+  the eager `parqit use … , clear` path but not yet on the lazy `use` → `collect`
+  path (INJID-2, deferred); `summarize, detail` still scans once per variable
+  (PERF-DETAIL-KSCAN, deferred). See ASSUMPTIONS.
+
 ## [0.1.7] — 2026-06-16
 
 ### Fixed

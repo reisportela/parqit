@@ -526,3 +526,54 @@ entry notes the conservative fallback if the assumption proves wrong.
     serialised separately) is unaffected. Conservative fallback if too strict for
     some workflow: switch to lossy-with-warning, reusing `utf8_lossy` and the
     existing `_parqit_lossy_notes` plumbing. Verify test `v32_invalid_utf8_save`.
+
+50. **Residual-hazard fixes from the 2026-06-23 multi-agent adversarial audit.**
+    Decisions taken where the brief was silent or where Stata fidelity was the
+    deciding factor (all locked by `v33_audit_fixes_20260623` against native
+    Stata / pyarrow oracles):
+    - **`gen <byte|int|long|float>` coerces the value like native Stata
+      (EXPR-1).** Verified against Stata 19.5: integer targets *truncate toward
+      zero* (`3.9`→`3`, `-2.5`→`-2`, not round-half) and an out-of-range value is
+      *system missing* (`gen byte = 200`→`.`, `=101`→`.`; byte data range is
+      −127..100). `View::gen` wraps the value in
+      `CASE WHEN trunc(v) ∉ [min,max] THEN NULL ELSE CAST(trunc(v) AS <int>) END`
+      (and `CAST(v AS FLOAT)` for float), which also sizes the collected column
+      to the requested type instead of widening to double. Applied to `gen`
+      only (the documented storage-request entry point), not `replace` (which
+      keeps the column's existing type and re-sizes at collect). Period/date
+      formats are never attached by `gen`, so the coercion never re-truncates a
+      day/period count.
+    - **Default SQL missing-comparison semantics are unchanged (EXPR-2/EXPR-3).**
+      The brief fixes "default to SQL semantics; `statamissing on` emulates
+      Stata". So `keep if x > c` and `gen y = x > c` keep their SQL-NULL outcome
+      for missing `x` by default; only the *help text* was corrected (it had
+      claimed the SQL default "coincides with Stata" — true for `<`,`<=`,`==`,
+      false for `>`,`>=`,`!=`). Changing the default was rejected as a silent
+      public-semantics change (AGENTS.md non-regression rule); `statamissing on`
+      already reproduces Stata in both filters and assignments.
+    - **Internal literal reads are glob-escaped (GLOB-1).** Only parqit's own
+      self-reads of a known-literal path (the save verify, the unchanged-source
+      fast-path source re-read) are escaped; user-facing `parqit use` keeps glob
+      semantics, so `parqit use "y*.parquet"` still expands as before.
+    - **Atomic replace via rename-aside (ATOM-PART-1 / IO-2).** Both the
+      partitioned-tree replace and the Windows flat-file replace move the old
+      target aside and delete it only after the new one is in place (restoring on
+      failure), so a crash never leaves neither. POSIX flat-file replace is still
+      a single atomic `rename` (#47c superseded for the partitioned case).
+    - **`collapse (first)/(last)` and `merge m:m` master pairing fall back to a
+      total order over all columns when no/partial sort is present
+      (COLLAPSE-3 / TT-A1)** — reproducible for fixed inputs, at a small extra
+      ORDER BY cost only on those paths. Reproducing a *specific* native-Stata
+      physical order still needs an explicit `parqit sort` (documented).
+    - **Weights are rejected, not implemented (COLLAPSE-WEIGHTS).** `collapse`
+      with `[fweight=…]`/`[aweight=…]`/… is a clear "not supported" error rather
+      than a mis-parse; implementing weighted aggregates is left for a later
+      feature pass (no precision loss — the path never produced a result).
+    - **Deferred (loud/safe today, low reward vs risk):** lazy `use`→`collect`
+      does not yet record a sanitised foreign column's original name in
+      `char[src_name]` the way the eager `use, clear` path does (INJID-2 — the
+      data and types load correctly; only the recovery characteristic is absent
+      on the lazy path); `summarize, detail` still scans once per variable
+      (PERF-DETAIL-KSCAN — a CTE rewrite risks changing a returned scalar, so it
+      is gated on a measured A/B with full re-test). Both are tracked for a
+      follow-up.

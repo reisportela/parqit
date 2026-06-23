@@ -106,6 +106,22 @@ TEST_CASE("string semantics: NULL behaves as empty string") {
     CHECK(eval_at("real(\"3.5\")", 1) == "3.5");
 }
 
+TEST_CASE("EXPR-4: relational operators chain left-associatively") {
+    /* `1 < x < 3000` parses as `(1 < x) < 3000` (a 0/1 result), never an error */
+    CHECK(eval_at("1 < x < 3000", 2) == eval_at("(1 < x) < 3000", 2));
+    CHECK(eval_at("(1 < x) < 3000", 2) == "1");
+    /* left-assoc: (5<10)=1, then 1<3 -> 1; right-assoc would be 5<(10<3)=0 */
+    CHECK(eval_at("5 < 10 < 3", 1) == "1");
+    /* a column reference named like the internal row-context sentinel is a loud
+     * error, not malformed SQL (INJID-1) */
+    {
+        ExprSchema sc;
+        sc.kinds = {{"__PARQIT_ROW__", 'n'}};
+        ExprResult r = translate_expression("__PARQIT_ROW__ + 1", sc, false);
+        CHECK_FALSE(r.ok);
+    }
+}
+
 TEST_CASE("arithmetic and functions match Stata definitions") {
     CHECK(eval_at("x + y", 1) == "11.0");
     CHECK(eval_at("x + y", 4) == "");          /* missing propagates */

@@ -550,6 +550,23 @@ long long g_tag_counter = 0;
 
 } // namespace
 
+/* Escape glob metacharacters in a LITERAL path so DuckDB read_parquet/read_csv
+ * (which treat a quoted path as a glob) read exactly that file, not a sibling
+ * matching the bracket class: '*'->'[*]', '?'->'[?]', '['->'[[]'. Verified
+ * against the vendored DuckDB: read_parquet('out[[]9].parquet') reads the
+ * literal 'out[9].parquet' (GLOB-1a/GLOB-1b). */
+static std::string glob_escape(const std::string &p) {
+    std::string out;
+    out.reserve(p.size());
+    for (char c : p) {
+        if (c == '*') out += "[*]";
+        else if (c == '?') out += "[?]";
+        else if (c == '[') out += "[[]";
+        else out.push_back(c);
+    }
+    return out;
+}
+
 void set_prepared_read(const std::string &source_scan_sql,
                        std::vector<ColumnPlan> plans, long long nrows,
                        const std::string &strl_path, bool drop_source_after,
@@ -659,20 +676,45 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         std::error_code ec2;
         fs::remove(tmpdest, ec2);
         if (!run_copy(tmpdest, "")) return kRcEngine;
-        if (!verify(quote_literal(tmpdest))) {
+        /* GLOB-1a: read_parquet globs its argument; escape so the verify reads
+         * exactly the staged file, never a glob-matching sibling. */
+        if (!verify(quote_literal(glob_escape(tmpdest)))) {
             std::error_code ec3;
             fs::remove(tmpdest, ec3);
             return kRcEngine;
         }
 #ifdef _WIN32
-        if (exists) fs::remove(dest, ec2);
-#endif
+        /* IO-2: Windows rename() fails if the target exists, so we must clear it
+         * first — but rename the old file ASIDE rather than deleting it, so a
+         * crash or rename failure in the window never leaves no file at all. */
+        std::string oldaside = dest + ".parqit_old";
+        if (exists) {
+            fs::remove(oldaside, ec2);
+            std::error_code ecm;
+            fs::rename(dest, oldaside, ecm);
+            if (ecm) {
+                fs::remove(tmpdest, ec2);
+                *err = "could not set aside existing file " + dest + ": " + ecm.message();
+                return kRcEngine;
+            }
+        }
         std::error_code ec4;
         fs::rename(tmpdest, dest, ec4);
+        if (ec4) {
+            if (exists) { std::error_code ecb; fs::rename(oldaside, dest, ecb); }
+            fs::remove(tmpdest, ec2);
+            *err = "could not move temporary file onto " + dest + ": " + ec4.message();
+            return kRcEngine;
+        }
+        if (exists) fs::remove(oldaside, ec2);
+#else
+        std::error_code ec4;
+        fs::rename(tmpdest, dest, ec4); /* POSIX rename atomically replaces dest */
         if (ec4) {
             *err = "could not move temporary file onto " + dest + ": " + ec4.message();
             return kRcEngine;
         }
+#endif
     } else {
         std::string pby;
         for (size_t i = 0; i < partition_by.size(); i++) {
@@ -690,32 +732,49 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             cleanup_tmp();
             return kRcEngine;
         }
-        std::string glob = tmpdest;
+        /* GLOB-1a: escape the staged-dir prefix so only the intentional
+         * recursive-glob tail appended below is a real glob; a bracket char in
+         * the dest path must not turn the prefix into a pattern matching a
+         * sibling tree. */
+        std::string glob = glob_escape(tmpdest);
         if (!glob.empty() && glob.back() != '/' && glob.back() != '\\') glob += "/";
         glob += "**/*.parquet";
         if (!verify(quote_literal(glob) + ", hive_partitioning = true")) {
             cleanup_tmp();
             return kRcEngine;
         }
-        /* honour replace: drop the old tree only now, after the new one is built
-         * and verified, so a failure here never loses the staged data (IO-3) */
+        /* honour replace, but rename the old tree ASIDE rather than deleting it
+         * before the swap: a crash or rename failure in the gap between a
+         * remove and the rename would otherwise leave NEITHER tree (ATOM-PART-1).
+         * The aside copy is removed only after the swap succeeds, and restored
+         * if the swap fails. */
+        std::string oldaside = dest + ".parqit_old";
+        bool saved_aside = false;
         if (exists && replace) {
+            std::error_code ecc;
+            fs::remove_all(oldaside, ecc); /* clear any stale aside */
             std::error_code ecr;
-            fs::remove_all(dest, ecr);
+            fs::rename(dest, oldaside, ecr);
             if (ecr) {
                 cleanup_tmp();
-                *err = "could not replace existing partition tree " + dest +
+                *err = "could not set aside existing partition tree " + dest +
                        ": " + ecr.message();
                 return kRcEngine;
             }
+            saved_aside = true;
         }
         std::error_code ec4;
         fs::rename(tmpdest, dest, ec4);
         if (ec4) {
+            if (saved_aside) { std::error_code ecb; fs::rename(oldaside, dest, ecb); }
             cleanup_tmp();
             *err = "could not move temporary partition tree onto " + dest +
                    ": " + ec4.message();
             return kRcEngine;
+        }
+        if (saved_aside) {
+            std::error_code ecd;
+            fs::remove_all(oldaside, ecd); /* swap done: drop the old tree */
         }
     }
     return 0;
@@ -2494,8 +2553,10 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
     }
     if (expect_n >= 0) {
         std::string nstr;
+        /* GLOB-1b: the fast path re-reads the source; escape glob metachars so a
+         * sibling matching a bracket class can never be read in its place. */
         if (!s.query_scalar("SELECT count(*) FROM read_parquet(" +
-                                quote_literal(source_file) + ")",
+                                quote_literal(glob_escape(source_file)) + ")",
                             &nstr, &err)) {
             cry("parqit save: " + err);
             return kRcEngine;
@@ -2554,7 +2615,7 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
     ST_retcode crc =
         copy_out_parquet(s,
                          "SELECT " + sel + " FROM read_parquet(" +
-                             quote_literal(source_file) + ")",
+                             quote_literal(glob_escape(source_file)) + ")",
                          dest, replace, compression, comp_level, partition_by,
                          chunk, kv, &written, &err);
     if (crc != 0) {

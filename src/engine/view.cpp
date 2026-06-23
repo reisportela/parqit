@@ -8,10 +8,38 @@
 
 #include "engine/exprtrans.hpp"
 #include "engine/session.hpp"
+#include "engine/typemap.hpp"
 
 namespace parqit {
 
 using json = nlohmann::json;
+
+/* Stata's gen/egen with an explicit narrow storage type coerces the value the
+ * way native Stata does at assignment time: integers TRUNCATE toward zero and
+ * an out-of-range value becomes system missing (gen byte x=3.9 -> 3,
+ * gen byte x=200 -> ., gen byte x=-2.5 -> -2 — verified against Stata). float
+ * targets round to float32 precision. The CAST to the matching DuckDB integer
+ * type also makes the collected column size to the requested storage type
+ * (byte/int/long), not silently widen to double (EXPR-1). double/strL: no-op. */
+static std::string coerce_storage(const std::string &v,
+                                  const std::string &type_req) {
+    if (type_req.empty()) return v;
+    StType mt;
+    int mb = 0;
+    if (!sttype_parse(type_req, &mt, &mb)) return v;
+    double lo, hi;
+    const char *duckint;
+    switch (mt) {
+    case StType::Byte: lo = kStataByteMin; hi = kStataByteMax; duckint = "TINYINT"; break;
+    case StType::Int:  lo = kStataIntMin;  hi = kStataIntMax;  duckint = "SMALLINT"; break;
+    case StType::Long: lo = kStataLongMin; hi = kStataLongMax; duckint = "INTEGER"; break;
+    case StType::Float: return "CAST(" + v + " AS FLOAT)";
+    default: return v; /* double / strL: keep full precision */
+    }
+    return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN trunc(" + v + ") < " +
+           dtoa(lo) + " OR trunc(" + v + ") > " + dtoa(hi) +
+           " THEN NULL ELSE CAST(trunc(" + v + ") AS " + duckint + ") END)";
+}
 
 void View::close() { *this = View(); }
 
@@ -236,11 +264,14 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     if (col_index(name) >= 0) return "variable " + name + " already defined";
     ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
     if (!r.ok) return r.error;
-    std::string value = r.sql;
+    /* honour an explicit narrow storage type the way native Stata gen does
+     * (truncate toward zero; out-of-range -> missing; float32 rounding) — EXPR-1 */
+    std::string vexpr = (r.kind == 'n') ? coerce_storage(r.sql, type_req) : r.sql;
+    std::string value = vexpr;
     if (!if_expr.empty()) {
         ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
         if (!c.ok) return c.error;
-        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + r.sql +
+        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + vexpr +
                 " ELSE NULL END)";
         if (uses_rowctx(c.sql)) return "_n/_N are not supported in the if "
                                        "qualifier of gen (yet)";
@@ -399,7 +430,18 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
     std::string pre;
     if (needs_rn) {
         std::string ord = order_by_sql();
-        std::string over = ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
+        if (ord.empty()) {
+            /* COLLAPSE-3: (first)/(last) need a defined order. With no pending
+             * sort, row_number() OVER () is engine-defined and varies with
+             * parallelism / row-group layout. Fall back to a reproducible total
+             * order over all columns (NULLS LAST) so the result is at least
+             * deterministic; a user who needs Stata's exact "first in current
+             * order" should parqit sort first (documented). */
+            for (size_t i = 0; i < cols_.size(); i++)
+                ord += (i ? ", " : " ORDER BY ") + quote_ident(cols_[i].name) +
+                       " NULLS LAST";
+        }
+        std::string over = "OVER (" + ord.substr(1) + ")";
         src = "(SELECT *, row_number() " + over + " AS " + quote_ident(rn) +
               " FROM " + prev + ")";
     }
@@ -759,8 +801,21 @@ std::string View::merge_with(const std::string &kind,
     if (seq) {
         /* Stata's sequential m:m: within key, row i of the spine takes
          * master row min(i, nm) and using row min(i, nu) */
+        /* TT-A1: the master within-key i-index must be reproducible. An empty
+         * or key-only view sort would leave row_number() OVER (PARTITION BY key)
+         * with no/partial ORDER BY -> engine-defined pairing. Honour any user
+         * sort first, then break remaining ties by all master columns (NULLS
+         * LAST) — mirroring the using side, which already orders by all its
+         * columns — so the pairing never depends on row-group/thread order. */
+        std::string m_order;
+        std::string usort = order_by_sql();
+        if (!usort.empty()) m_order = usort.substr(1); /* "ORDER BY ..." */
+        for (size_t i = 0; i < cols_.size(); i++) {
+            m_order += (m_order.empty() ? "ORDER BY " : ", ");
+            m_order += quote_ident(cols_[i].name) + " NULLS LAST";
+        }
         mrel = "(SELECT *, TRUE AS " + quote_ident(mm) + ", row_number() OVER (PARTITION BY " +
-               keypart + order_by_sql() + ") AS " + quote_ident(rnm) +
+               keypart + " " + m_order + ") AS " + quote_ident(rnm) +
                ", count(*) OVER (PARTITION BY " + keypart + ") AS " + quote_ident(nmx) +
                " FROM " + prev + ")";
         /* deterministic using-side pairing: order the row_number window by all
@@ -899,6 +954,15 @@ std::string View::append_with(std::vector<UsingSide> sources,
     if (sources.empty()) return "append: at least one using file required";
     if (!gen_name.empty() && col_index(gen_name) >= 0)
         return "append: generate() variable " + gen_name + " already exists";
+    /* TT-A2: a generate() name colliding with a using-file column would emit a
+     * duplicate output name into UNION ALL BY NAME and surface a cryptic DuckDB
+     * Binder Error; check the using sides too and fail loudly and clearly. */
+    if (!gen_name.empty())
+        for (size_t s = 0; s < sources.size(); s++)
+            for (const auto &c : sources[s].cols)
+                if (c.name == gen_name)
+                    return "append: generate() variable " + gen_name +
+                           " already exists in using file " + std::to_string(s + 1);
 
     /* kind conflicts are loud (a column cannot be string here and numeric
      * there); new columns are adopted with the using side's metadata */
@@ -991,8 +1055,10 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
         std::string ref = std::string(side) + "." + quote_ident(k);
         int mi = col_index(k);
         if (mi >= 0 && cols_[mi].kind == 's') return "nullif(" + ref + ", '')";
-        return "(CASE WHEN " + ref + " = 'nan'::DOUBLE THEN NULL ELSE " + ref +
-               " END)";
+        /* TT-A3: use the same NaN-folding idiom as merge_with/the uniqueness
+         * guard (isnan(CAST(... AS DOUBLE))) so the three never diverge. */
+        return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " +
+               ref + " END)";
     };
     std::string joincond;
     for (size_t i = 0; i < keys.size(); i++) {

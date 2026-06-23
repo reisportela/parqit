@@ -158,6 +158,13 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.transfer = Transfer::Float64;
         p.stata_type = StType::Double;
         p.note = "decimal converted to double";
+        /* DEC-1: a wide DECIMAL whose integer part can exceed 2^53 loses
+         * low-order digits when cast to double. Flag it so refine_plan emits the
+         * same explicit ">2^53 rounded" note that BIGINT/HUGEINT already get,
+         * instead of leaving the loss indistinguishable from an exact load.
+         * Narrow decimals (integer part < 2^53) skip the extra range pass. */
+        if (duckdb_decimal_width(t) - duckdb_decimal_scale(t) >= 16)
+            p.needs_big53 = true;
         break;
     case DUCKDB_TYPE_DATE:
         p.transfer = Transfer::Date32;
@@ -205,7 +212,10 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.transfer = Transfer::TimeUs;
         p.stata_type = StType::Double;
         p.stata_format = "%tcHH:MM:SS";
-        p.note = "time-of-day stored as milliseconds since midnight";
+        /* TS-NS-1: like TIMESTAMP_NS, sub-millisecond precision is discarded —
+         * say so explicitly rather than leaving the loss unannounced. */
+        p.note = "nanosecond time-of-day truncated to Stata millisecond "
+                 "resolution; stored as milliseconds since midnight";
         break;
     case DUCKDB_TYPE_TIME_TZ:
         p.cast_sql = "CAST(DATE '1970-01-01' + CAST(" + ref + " AS TIME) AS TIMESTAMP)";

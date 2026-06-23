@@ -453,6 +453,15 @@ struct Parser {
         case Tok::Ident: {
             std::string name = cur.text;
             advance();
+            /* INJID-1: the row-context sentinels are substituted by a raw
+             * find/replace in the view compiler; a column (or function) named
+             * with one would be corrupted into malformed SQL. Reject it loudly
+             * here, mirroring the string-literal guard above. */
+            if (name.find("__PARQIT_ROW__") != std::string::npos ||
+                name.find("__PARQIT_NROWS__") != std::string::npos)
+                return fail("identifier may not contain the reserved token "
+                            "__PARQIT_ROW__/__PARQIT_NROWS__ (used internally "
+                            "for _n/_N)");
             if (cur.t == Tok::LParen) {
                 advance();
                 return call(name, out);
@@ -593,8 +602,12 @@ struct Parser {
 
     bool rel(Val *out) {
         if (!arith(out)) return false;
-        if (cur.t == Tok::Eq || cur.t == Tok::Ne || cur.t == Tok::Lt ||
-            cur.t == Tok::Gt || cur.t == Tok::Le || cur.t == Tok::Ge) {
+        /* EXPR-4: relational operators chain LEFT-associatively in Stata, so
+         * `1 < wage < 3000` parses as `(1 < wage) < 3000` — a 0/1 result, never
+         * an error. Loop and fold; relational() coerces the boolean left operand
+         * back to a number via as_num(). */
+        while (cur.t == Tok::Eq || cur.t == Tok::Ne || cur.t == Tok::Lt ||
+               cur.t == Tok::Gt || cur.t == Tok::Le || cur.t == Tok::Ge) {
             Tok op = cur.t;
             advance();
             Val r;

@@ -1,4 +1,4 @@
-*! version 0.1.7 16jun2026
+*! version 0.1.8 23jun2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -672,6 +672,14 @@ end
 program define _parqit_collapse
     version 16.0
     * (stat) [tgt=]src ... [(stat) ...] , by(varlist)
+    * COLLAPSE-WEIGHTS: weights are not supported; reject them clearly rather
+    * than letting the spec parser mangle "[fweight=n]" into a confusing
+    * "variable n] not found" error. A "[" here can only be a weight expression.
+    if (strpos(`"`0'"', "[") > 0) {
+        di as err "parqit collapse: weights ([fweight=exp], [aweight=exp], " ///
+            "[pweight=exp], [iweight=exp]) are not supported"
+        exit 198
+    }
     local stat "mean"
     local specs
     local pend
@@ -2898,6 +2906,27 @@ void _parqit_print_detail(string scalar resp)
     printf("\n")
 }
 
+/* Distinct axis labels in the order tabulate should show them: numeric when
+ * every label parses as a number (2,10,11 — not the lexicographic 10,11,2 that
+ * uniqrows gives on the VARCHAR-cast labels), else alphabetic (TAB2-ORDER-1). */
+string colvector _parqit_axis_order(string colvector vals)
+{
+    string colvector u
+    real colvector   x
+    real scalar      i, allnum
+
+    u = uniqrows(vals)
+    if (rows(u) == 0) return(u)
+    allnum = 1
+    x = J(rows(u), 1, .)
+    for (i = 1; i <= rows(u); i++) {
+        x[i] = strtoreal(u[i])
+        if (u[i] == "" | x[i] == .) allnum = 0
+    }
+    if (allnum) u = u[order(x, 1)]
+    return(u)
+}
+
 void _parqit_print_tab2(string scalar resp)
 {
     real scalar      fh, i, j, r, c, n, total
@@ -2920,8 +2949,8 @@ void _parqit_print_tab2(string scalar resp)
         cells_c = cells_c \ _parqit_unhex(f[4])
     }
     fclose(fh)
-    rv = uniqrows(cells_r)
-    cv = uniqrows(cells_c)
+    rv = _parqit_axis_order(cells_r)
+    cv = _parqit_axis_order(cells_c)
     r = rows(rv)
     c = rows(cv)
     M = J(r, c, 0)
