@@ -1111,6 +1111,10 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
             if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
         return true;
     };
+    auto canonical_num_suffix = [](const std::string &suf) {
+        size_t first = suf.find_first_not_of('0');
+        return first == std::string::npos ? std::string("0") : suf.substr(first);
+    };
     std::map<std::string, std::map<std::string, const ViewCol *>> cand;
     bool any_numeric_suffix = false, any_suffix = false;
     for (const auto &c : cols_) {
@@ -1134,12 +1138,21 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
     bool jnum = any_numeric_suffix;
     std::set<std::string> suffixes;
     std::map<std::string, std::map<std::string, const ViewCol *>> by_stub_suffix;
+    std::map<std::string, std::set<std::string>> leading_zero_hint;
     std::set<std::string> stubcols;
     for (const auto &st : stubs) {
         for (const auto &kv : cand[st]) {
             if (jnum && !is_num_suffix(kv.first)) continue; /* carried, not xij */
-            suffixes.insert(kv.first);
-            by_stub_suffix[st][kv.first] = kv.second;
+            std::string suf = jnum ? canonical_num_suffix(kv.first) : kv.first;
+            suffixes.insert(suf);
+            if (jnum && kv.first != suf) {
+                /* Stata treats inc01 as evidence that j=1 exists, but it
+                 * carries inc01 as an ordinary column and looks for inc1 as
+                 * the xij value. If inc1 is absent, the long stub is missing. */
+                leading_zero_hint[st].insert(suf);
+                continue;
+            }
+            by_stub_suffix[st][suf] = kv.second;
             stubcols.insert(kv.second->name);
         }
     }
@@ -1149,18 +1162,22 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
     for (const auto &st : stubs)
         for (const auto &suf : suffixes)
             if (!by_stub_suffix[st].count(suf))
-                return "reshape long: variable " + st + suf +
-                       " is missing (unbalanced stubs)";
+                if (!(jnum && leading_zero_hint[st].count(suf)))
+                    return "reshape long: variable " + st + suf +
+                           " is missing (unbalanced stubs)";
     /* stub output kind: union of source kinds must agree per stub */
     std::map<std::string, char> stubkind;
     for (const auto &st : stubs) {
         char k0 = 0;
         for (const auto &suf : suffixes) {
-            char k = by_stub_suffix[st][suf]->kind;
+            auto it = by_stub_suffix[st].find(suf);
+            if (it == by_stub_suffix[st].end()) continue;
+            char k = it->second->kind;
             if (k0 == 0) k0 = k;
             else if (k0 != k)
                 return "reshape long: " + st + "* mixes string and numeric columns";
         }
+        if (k0 == 0) k0 = 'n'; /* only leading-zero hints: native Stata emits . */
         stubkind[st] = k0;
     }
 
@@ -1198,8 +1215,17 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
             sel += quote_ident(c->name);
         }
         sel += ", " + (jnum ? suf : quote_literal(suf)) + " AS " + quote_ident(jname);
-        for (const auto &st : stubs)
-            sel += ", " + quote_ident(st + suf) + " AS " + quote_ident(st);
+        for (const auto &st : stubs) {
+            auto it = by_stub_suffix[st].find(suf);
+            std::string val;
+            if (it != by_stub_suffix[st].end()) {
+                val = quote_ident(it->second->name);
+            } else {
+                val = stubkind[st] == 's' ? "CAST(NULL AS VARCHAR)"
+                                          : "CAST(NULL AS DOUBLE)";
+            }
+            sel += ", " + val + " AS " + quote_ident(st);
+        }
         body += "SELECT " + sel + " FROM " + prev;
     }
 
@@ -1216,18 +1242,21 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
         /* metadata rides along from the LOWEST j-value column (numeric order
          * for a numeric j, else lexicographic) — not whatever sorts first as a
          * string ("10" < "2"). */
-        const ViewCol *c0 = by_stub_suffix[st].begin()->second;
-        if (jnum) {
-            double best = std::strtod(by_stub_suffix[st].begin()->first.c_str(),
-                                      nullptr);
-            for (const auto &kv : by_stub_suffix[st]) {
-                double jv = std::strtod(kv.first.c_str(), nullptr);
-                if (jv < best) { best = jv; c0 = kv.second; }
+        const ViewCol *c0 = nullptr;
+        if (!by_stub_suffix[st].empty()) {
+            c0 = by_stub_suffix[st].begin()->second;
+            if (jnum) {
+                double best = std::strtod(by_stub_suffix[st].begin()->first.c_str(),
+                                          nullptr);
+                for (const auto &kv : by_stub_suffix[st]) {
+                    double jv = std::strtod(kv.first.c_str(), nullptr);
+                    if (jv < best) { best = jv; c0 = kv.second; }
+                }
             }
+            sc.fmt = c0->fmt;
+            sc.vallab = c0->vallab;
+            sc.meta_type = c0->meta_type;
         }
-        sc.fmt = c0->fmt;
-        sc.vallab = c0->vallab;
-        sc.meta_type = c0->meta_type;
         ncols.push_back(sc);
     }
     cols_ = std::move(ncols);

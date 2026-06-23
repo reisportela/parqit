@@ -11,6 +11,7 @@
 #   * ado banner date == sthlp banner date, and both == parqit.pkg Distribution-Date
 #   * CHANGELOG has exactly one "## [Unreleased]" heading
 #   * the newest dated CHANGELOG section matches the project version
+#   * no CHANGELOG section repeats the same "### <Type>" heading
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -82,11 +83,11 @@ chg_top=$(grep -oE "^## \[$semver\]" "$REPO/CHANGELOG.md" | head -1 | grep -oE "
 [ -n "$chg_top" ] && [ "$chg_top" != "$cmake_v" ] && \
     err "newest CHANGELOG release [$chg_top] != project version $cmake_v"
 
-# No duplicate "### <Type>" heading inside the [Unreleased] block (a
+# No duplicate "### <Type>" heading inside any one section (a
 # Keep-a-Changelog malformation the section-level checks above cannot see).
-dups=$(awk '/^## \[Unreleased\]/{u=1;next} /^## \[/{u=0} u && /^### /{print $0}' \
+dups=$(awk '/^## \[/{sec=$0; next} /^### /{print sec "\t" $0}' \
         "$REPO/CHANGELOG.md" | sort | uniq -d)
-[ -z "$dups" ] || err "CHANGELOG [Unreleased] has duplicate heading(s): $(echo $dups)"
+[ -z "$dups" ] || err "CHANGELOG has duplicate heading(s) inside one section: $(echo "$dups")"
 
 # --- no private / home-absolute paths in shipping/source/test/benchmark files -
 # (REL-2b: a leaked username or third-party data path must never reach VCS;

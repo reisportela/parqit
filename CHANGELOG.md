@@ -6,6 +6,16 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Fixed
+- **`reshape long` handles numeric suffixes with leading zeros like native
+  Stata.** A column such as `inc01` now contributes the `j=1` level but is
+  carried as an ordinary column; the long value comes from the canonical
+  `inc1` column when present, otherwise the long stub is missing. This prevents
+  silent row fabrication when both `inc1` and `inc01` exist.
+- **`release_lint.sh` now rejects duplicate `###` headings in every
+  `CHANGELOG.md` section**, not only in `[Unreleased]`; the duplicated
+  `0.1.3` `### Added` section was consolidated.
+
 ## [0.1.8] — 2026-06-23
 
 Residual-hazard round from a multi-agent adversarial audit. Every fix is locked
@@ -379,42 +389,6 @@ fixes add 94 executed assertions and a new `v27_audit_fixes` verify test.
   in-memory data intact. For *big-on-big* prefer the out-of-core `parqit use …;
   parqit merge` path. See `ASSUMPTIONS.md` #42.
 
-### Changed
-- **Faster `parqit save … , data` and `parqit open _data`** (the in-memory →
-  Parquet path). The Stata→DuckDB transfer now fills DuckDB data chunks in
-  column-vector batches (2048 rows) and appends them whole, instead of one
-  `duckdb_append_*` call per cell. On a 10M×13 in-memory dataset the write
-  drops **≈8.8 s → ≈7.4 s**; every type / date / period / missing conversion is
-  byte-identical (the roundtrip suite and V03/V05/V06/V15/V19 verify it). The
-  remaining cost is the per-cell `SF_vdata`/`SF_sdata` read out of Stata memory
-  (~5.5 s/10M), which — unlike the `SF_vstore` *writes* the parallel fill uses —
-  is **not safe to call from worker threads**, so it stays single-threaded; a
-  future bulk path (Mata `st_data`, which extracts the same columns in ~0.2 s)
-  can lift it. See `ASSUMPTIONS.md` #42.
-- **`parqit use FILE` + `parqit collect` no longer re-scans to size columns**
-  when the view is an untouched full-file passthrough. The collect path
-  now reuses the same Parquet row-group-statistics sizing the direct
-  `parqit use …, clear` path uses (the F2 metadata path), instead of a
-  redundant second full scan. On the all-numeric 47.6M×8 reference file
-  this closes the gap to the direct read (`use`→`collect` ≈+0.24 s →
-  ≈+0.007 s, same-session min-of-6); string-heavy files were already
-  scan-bound and are unchanged — the residual sizing scan only ever
-  narrows, so no read regresses. Output is byte-identical to the direct
-  path (storage type, format, values). See `ASSUMPTIONS.md` #38.
-- **Parquet → Stata reads now fill in parallel** (`parqit use …, clear`,
-  `parqit collect`). The materialiser runs a producer/consumer pipeline: the
-  calling thread fetches + Arrow-converts DuckDB chunks while a pool of
-  worker threads stores whole chunks into the staged frame through the
-  per-cell SPI, overlapping the engine scan with the fill. On the 47.6M×8
-  reference file `parqit use` drops **≈2.9 s → ≈1.5 s** (same session, ~49%).
-  No feature or precision change — `fill_column` is reused byte-for-byte,
-  so every type/missing/Inf/NUL rule is identical to before; only the
-  scheduling differs, and reads below 50k rows keep the serial path. The
-  technique follows the prior art `stata_parquet_io`, which stores from
-  many threads over disjoint rows (the SPI store is reentrant for distinct
-  cells). See `ASSUMPTIONS.md` #37.
-
-### Added
 - **Read non-Parquet inputs.** `parqit use` and the `using` side of
   `parqit merge`/`joinby`/`append` now accept, by file extension:
   - **delimited text** (`.csv`/`.tsv`/`.txt`) — scanned *out of core* with
@@ -455,6 +429,41 @@ fixes add 94 executed assertions and a new `v27_audit_fixes` verify test.
 - Verify test `v22_collect_date_no_overflow` — a Parquet DATE column
   spanning 1900–2099 collects to `long` with the exact day-count on both
   paths (independent oracle), guarding the date-aware storage floor.
+
+### Changed
+- **Faster `parqit save … , data` and `parqit open _data`** (the in-memory →
+  Parquet path). The Stata→DuckDB transfer now fills DuckDB data chunks in
+  column-vector batches (2048 rows) and appends them whole, instead of one
+  `duckdb_append_*` call per cell. On a 10M×13 in-memory dataset the write
+  drops **≈8.8 s → ≈7.4 s**; every type / date / period / missing conversion is
+  byte-identical (the roundtrip suite and V03/V05/V06/V15/V19 verify it). The
+  remaining cost is the per-cell `SF_vdata`/`SF_sdata` read out of Stata memory
+  (~5.5 s/10M), which — unlike the `SF_vstore` *writes* the parallel fill uses —
+  is **not safe to call from worker threads**, so it stays single-threaded; a
+  future bulk path (Mata `st_data`, which extracts the same columns in ~0.2 s)
+  can lift it. See `ASSUMPTIONS.md` #42.
+- **`parqit use FILE` + `parqit collect` no longer re-scans to size columns**
+  when the view is an untouched full-file passthrough. The collect path
+  now reuses the same Parquet row-group-statistics sizing the direct
+  `parqit use …, clear` path uses (the F2 metadata path), instead of a
+  redundant second full scan. On the all-numeric 47.6M×8 reference file
+  this closes the gap to the direct read (`use`→`collect` ≈+0.24 s →
+  ≈+0.007 s, same-session min-of-6); string-heavy files were already
+  scan-bound and are unchanged — the residual sizing scan only ever
+  narrows, so no read regresses. Output is byte-identical to the direct
+  path (storage type, format, values). See `ASSUMPTIONS.md` #38.
+- **Parquet → Stata reads now fill in parallel** (`parqit use …, clear`,
+  `parqit collect`). The materialiser runs a producer/consumer pipeline: the
+  calling thread fetches + Arrow-converts DuckDB chunks while a pool of
+  worker threads stores whole chunks into the staged frame through the
+  per-cell SPI, overlapping the engine scan with the fill. On the 47.6M×8
+  reference file `parqit use` drops **≈2.9 s → ≈1.5 s** (same session, ~49%).
+  No feature or precision change — `fill_column` is reused byte-for-byte,
+  so every type/missing/Inf/NUL rule is identical to before; only the
+  scheduling differs, and reads below 50k rows keep the serial path. The
+  technique follows the prior art `stata_parquet_io`, which stores from
+  many threads over disjoint rows (the SPI store is reentrant for distinct
+  cells). See `ASSUMPTIONS.md` #37.
 
 ### Fixed
 - **A Parquet DATE column could collect as Stata `int` and overflow** for
