@@ -6,15 +6,68 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-06-23
+
+Third adversarial-audit round (multi-agent), run over the v0.1.8 + Codex tree.
+Every fix is locked by an independent oracle (native Stata twin or pyarrow) in
+`v35_audit_fixes_20260623b` (and the Codex reshape fix in `v34`); the prior 44
+suites and the C++ unit suite stay green (45/45 Stata, 50/784 C++).
+
 ### Fixed
 - **`reshape long` handles numeric suffixes with leading zeros like native
   Stata.** A column such as `inc01` now contributes the `j=1` level but is
   carried as an ordinary column; the long value comes from the canonical
   `inc1` column when present, otherwise the long stub is missing. This prevents
-  silent row fabrication when both `inc1` and `inc01` exist.
+  silent row fabrication when both `inc1` and `inc01` exist. (Codex round; test
+  `v34_reshape_leading_zero_suffix`.)
+- **`gen str#` truncates the value to the declared byte width (STR-GENWIDTH-1).**
+  `parqit gen str3 x = "hello"` now stores `"hel"` (str3) like native Stata,
+  the string analog of the v0.1.8 numeric `gen byte/int/long` coercion. A
+  codepoint split exactly at the byte boundary yields U+FFFD (parqit keeps valid
+  UTF-8, as `substr()` already does); the common case is byte-exact.
+- **`merge m:m` folds NULL/NaN/`""` keys into one missing group (TT-MM-MISSING-1).**
+  The within-key windows and the spine partitioned on the RAW key while the join
+  normalized it, so mixed missing encodings across master/using (a master NULL
+  key, a using NaN key) over-matched. The keys are now normalized in place so the
+  windows, spine and join all see one missing group — consistent with the other
+  merge kinds, which were already correct.
+- **`collapse`/`contract`/`duplicates drop`/`egen … , by()` fold `""`/NaN to
+  missing in the group key (GROUPKEY-1).** Like `merge`/`joinby` (and native
+  Stata, where `""` is the missing string and a NaN/NULL float is `.`), an empty
+  string now groups with NULL and a NaN with NULL, instead of splitting
+  Stata-identical keys into separate groups (and `duplicates drop` missing real
+  dups). Matters for foreign files that mix encodings; parqit-written files were
+  already single-encoding.
+- **Partitioned `parqit save … , replace` over the open view's glob/directory
+  source is refused (SAVE-SELFGLOB-1).** The IO-1 self-overwrite guard skipped
+  glob sources, so `save dir, replace partition_by()` over a `use "dir/"` view
+  renamed-aside and deleted the source tree. The guard now also checks
+  directory containment for glob/dir sources.
+- **`parqit set threads` validates strictly (SET-THREADS-1/2).** A non-integer
+  (`4.5`→silently 4), trailing garbage (`4 8`→4), or out-of-range value (a raw
+  DuckDB INTERNAL cast-overflow assertion + stack trace) are now a clear
+  `value must be a positive integer (1..2147483647)` error.
+- **A foreign `parqit.dtalabel` longer than 80 chars no longer aborts the load
+  (DTALABEL-LEN-1).** The dataset label is applied best-effort and truncated to
+  Stata's 80-char limit instead of failing the whole `use`/`collect` with r(133).
+- **`strpos(s, "")` returns 0 like Stata (STRPOS-EMPTY-1)** (DuckDB returns 1 for
+  an empty needle); **`length()` on a numeric is a clear error naming `length()`**
+  rather than the misleading "strlen() needs a string" (LENGTH-NUMERIC-1).
+- **`parqit open _data` no longer orphans its temp bridge** if the subsequent
+  view-open fails (OPENDATA-BRIDGE-ORPHAN-1): the bridge is tracked for the
+  `close _all` sweep and erased on the failure path.
+
+### Changed
+- **Two-way `parqit tabulate` drops a redundant pre-scan (PERF-TAB2-PRECOUNT-1).**
+  The distinct-column count is now derived from the already cell-bounded GROUP BY
+  result instead of a separate `count(DISTINCT)` full scan — one pass over the
+  data instead of two. Output unchanged.
+- **`parqit set tempdir` warns when the directory does not exist** rather than
+  deferring a confusing failure to spill time (it still accepts the path; the
+  user may create it before the first out-of-core query).
 - **`release_lint.sh` now rejects duplicate `###` headings in every
   `CHANGELOG.md` section**, not only in `[Unreleased]`; the duplicated
-  `0.1.3` `### Added` section was consolidated.
+  `0.1.3` `### Added` section was consolidated. (Codex round.)
 
 ## [0.1.8] — 2026-06-23
 

@@ -1,4 +1,4 @@
-*! version 0.1.8 23jun2026
+*! version 0.1.9 23jun2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -313,7 +313,13 @@ program define _parqit_load_core
             mata: _parqit_resp_decorate(`"`resp'"')
             if (`"`parqit_dtalabel'"' != "") {
                 mata: st_local("dl", _parqit_unhex(st_local("parqit_dtalabel")))
-                label data `"`dl'"'
+                * DTALABEL-LEN-1: a foreign >80-char dataset label must never
+                * abort the load (Stata `label data` errors r(133)); truncate to
+                * fit and apply best-effort, matching the metadata-restore charter.
+                capture label data `"`dl'"'
+                if (_rc) {
+                    capture label data `"`=substr(`"`dl'"', 1, 80)'"'
+                }
             }
         }
         local loadrc = _rc
@@ -1356,6 +1362,10 @@ program define _parqit_open, rclass
     global PARQIT_OPENDATA_SEQ = ${PARQIT_OPENDATA_SEQ} + 1
     local bridge "`c(tmpdir)'/_parqit_opendata_`c(pid)'_${PARQIT_OPENDATA_SEQ}.parquet"
     capture erase `"`bridge'"'
+    * OPENDATA-BRIDGE-ORPHAN-1: the plugin only takes ownership (erase-on-close)
+    * once view_open succeeds. Track the bridge for the close _all sweep up front
+    * so a save/view_open failure below cannot orphan it under c(tmpdir).
+    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `bridge'"'
     qui _parqit_save `"`bridge'"', replace data
     * The bridge snapshot applies the same lossy conversions as any in-memory
     * save (extended missings -> null, fractional dates rounded). _parqit_save's
@@ -1363,8 +1373,17 @@ program define _parqit_open, rclass
     * silent when the dataset is later collected/saved through the view (ATOM-2).
     local _parqit_open_ext  `"`r(ext_missing)'"'
     local _parqit_open_frac `"`r(frac_dates)'"'
-    if ("`name'" == "") qui _parqit_use using `"`bridge'"', owned
-    else                qui _parqit_use using `"`bridge'"', name(`name') owned
+    capture noisily {
+        if ("`name'" == "") qui _parqit_use using `"`bridge'"', owned
+        else                qui _parqit_use using `"`bridge'"', name(`name') owned
+    }
+    if (_rc) {
+        capture erase `"`bridge'"'
+        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `bridge' "', " ", .)'"'
+        exit _rc
+    }
+    * view now owns the bridge (plugin erases on close/replace): drop our tracker
+    global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `bridge' "', " ", .)'"'
     di as txt "(in-memory dataset promoted to a lazy view; " ///
         as txt "manipulate with parqit verbs, then parqit collect or parqit save)"
     _parqit_lossy_notes, ext(`"`_parqit_open_ext'"') frac(`"`_parqit_open_frac'"')
@@ -1471,6 +1490,16 @@ program define _parqit_set
     if ("`what'" == "statamissing" & !inlist("`value'", "on", "off")) {
         di as err "parqit set statamissing: on or off"
         exit 198
+    }
+    * SET-TEMPDIR-1: DuckDB accepts a non-existent spill dir silently and only
+    * fails much later at spill time. Warn now (but do not block: the user may
+    * create it before the first out-of-core query).
+    if ("`what'" == "tempdir" & `"`value'"' != "") {
+        mata: st_local("_dirok", strofreal(direxists(st_local("value"))))
+        if ("`_dirok'" == "0") {
+            di as txt "note: parqit set tempdir — directory does not exist yet: " ///
+                as res `"`value'"' as txt "; spill will fail unless it is created"
+        }
     }
     _parqit_ensure_plugin
     mata: st_local("whathex", _parqit_hex(st_local("what")))

@@ -4,6 +4,8 @@
  * compiled pipeline straight to parquet — Stata memory untouched). */
 #include "plugin/plugin_view.hpp"
 
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -946,15 +948,36 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
                 }
                 sp += psql[i++];
             }
-            if (sp.find('*') != std::string::npos || sp.find('?') != std::string::npos)
-                continue;
+            /* SAVE-SELFGLOB-1: a glob/directory source (the recursive-glob form
+             * produced by "parqit use" over a directory) has no single path, but
+             * a partitioned "save dir, replace" renames-aside dir and would
+             * delete the source tree. For a glob source compare against its base
+             * directory (glob tail stripped) and refuse on containment either
+             * way; for a plain file keep the exact-path match. */
+            bool is_glob = sp.find('*') != std::string::npos ||
+                           sp.find('?') != std::string::npos;
+            std::string cmp_src = sp;
+            if (is_glob) {
+                size_t g = sp.find_first_of("*?");
+                size_t slash = sp.rfind('/', g);
+                cmp_src = (slash == std::string::npos) ? std::string(".")
+                                                       : sp.substr(0, slash);
+            }
             std::error_code ec2;
-            std::string sabs = std::filesystem::weakly_canonical(sp, ec2).string();
-            if (ec2 || sabs.empty()) sabs = std::filesystem::absolute(sp, ec2).string();
-            if (!sabs.empty() && !dabs.empty() && sabs == dabs) {
+            std::string sabs = std::filesystem::weakly_canonical(cmp_src, ec2).string();
+            if (ec2 || sabs.empty()) sabs = std::filesystem::absolute(cmp_src, ec2).string();
+            auto path_contains = [](const std::string &a, const std::string &b) {
+                if (a.empty() || b.empty()) return false;
+                if (a == b) return true;
+                return b.size() > a.size() && b.compare(0, a.size(), a) == 0 &&
+                       b[a.size()] == '/';
+            };
+            bool clash = is_glob ? (path_contains(sabs, dabs) || path_contains(dabs, sabs))
+                                 : (!sabs.empty() && !dabs.empty() && sabs == dabs);
+            if (clash) {
                 cry("parqit save: " + dest +
-                    " is the open view's own source file; write to a different "
-                    "path, or parqit collect first");
+                    " overlaps the open view's own source (" + sp +
+                    "); write to a different path, or parqit collect first");
                 return kRcUsage;
             }
         }
@@ -1086,7 +1109,24 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
         return 0;
     }
     if (what == "threads") {
-        long long n = std::strtoll(value.c_str(), nullptr, 10);
+        /* SET-THREADS-1/2: parse strictly. strtoll silently truncates "4.5"->4
+         * and "4 8"->4, and an out-of-INT32 value reaches DuckDB as a raw
+         * INTERNAL cast-overflow assertion + stack trace. Require the whole
+         * token to be digits (one optional leading '+') and fit DuckDB's INT32
+         * thread count, with a clear message otherwise. */
+        size_t p = 0;
+        if (p < value.size() && value[p] == '+') p++;
+        bool ok = p < value.size();
+        for (size_t i = p; ok && i < value.size(); i++)
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) ok = false;
+        errno = 0;
+        char *end = nullptr;
+        long long n = ok ? std::strtoll(value.c_str(), &end, 10) : 0;
+        if (!ok || errno == ERANGE || n < 1 || n > 2147483647LL) {
+            cry("parqit set threads: value must be a positive integer (1..2147483647), got '" +
+                value + "'");
+            return kRcUsage;
+        }
         if (!s.set_threads(n, &err)) {
             cry("parqit set threads: " + err);
             return kRcUsage;
@@ -1895,17 +1935,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             base2 = "(SELECT * FROM " + base + " WHERE " + nn(r1, k1) + " AND " +
                     nn(r2, k2) + ")";
         }
-        std::string ncols;
-        if (!s.query_scalar("SELECT count(DISTINCT " + r2 + ") FROM " + base2, &ncols,
-                            &err)) {
-            cry("parqit tabulate: " + err);
-            return kRcEngine;
-        }
-        if (std::strtoll(ncols.c_str(), nullptr, 10) > 30) {
-            cry("parqit tabulate: " + vars[1] + " has more than 30 distinct values; "
-                "swap the variables or collapse instead");
-            return kRcUsage;
-        }
         /* TAB-FLOAT-1: integer-valued numeric labels print without a .0 */
         const std::string v1 = (k1 == 's') ? r1 : stata_num_varchar(r1);
         const std::string v2 = (k2 == 's') ? r2 : stata_num_varchar(r2);
@@ -1919,6 +1948,24 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcEngine;
         }
         idx_t n = duckdb_row_count(&res);
+        /* PERF-TAB2-PRECOUNT-1: derive the distinct-r2 count from the already
+         * materialised (cell-bounded) GROUP BY result instead of a second full
+         * scan (count(DISTINCT) over the data). count(DISTINCT) ignores NULL, so
+         * skip NULL column-1 cells to match the prior >30 check exactly. */
+        {
+            std::set<std::string> distinct_c;
+            for (idx_t i = 0; i < n; i++) {
+                if (duckdb_value_is_null(&res, 1, i)) continue;
+                char *v = duckdb_value_varchar(&res, 1, i);
+                if (v) { distinct_c.insert(v); duckdb_free(v); }
+            }
+            if (distinct_c.size() > 30) {
+                cry("parqit tabulate: " + vars[1] + " has more than 30 distinct values; "
+                    "swap the variables or collapse instead");
+                duckdb_destroy_result(&res);
+                return kRcUsage;
+            }
+        }
         if (n > 10000) {
             cry("parqit tabulate: more than 10,000 cells; collapse instead");
             duckdb_destroy_result(&res);

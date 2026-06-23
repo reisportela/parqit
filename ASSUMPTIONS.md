@@ -577,3 +577,57 @@ entry notes the conservative fallback if the assumption proves wrong.
       (PERF-DETAIL-KSCAN — a CTE rewrite risks changing a returned scalar, so it
       is gated on a measured A/B with full re-test). Both are tracked for a
       follow-up.
+
+51. **Residual-hazard fixes from the 2026-06-23 third audit round (post-Codex).**
+    Decisions where Stata fidelity or cross-tool consistency was the deciding
+    factor (all locked by `v35_audit_fixes_20260623b`):
+    - **`gen str#` truncates to the declared byte width (STR-GENWIDTH-1),** the
+      string analog of #50's numeric `gen byte/int/long` coercion, via the
+      byte-indexed `parqit_substr_bytes`. The common case (ASCII, or a multibyte
+      char not split at the boundary) is byte-exact with native Stata. A codepoint
+      split exactly at the str# byte boundary yields U+FFFD (and the column may be
+      one codepoint wider) rather than Stata's raw partial byte, because the engine
+      keeps valid UTF-8 — consistent with parqit's `substr()` (#44) and the save
+      UTF-8 requirement (#49). Applied to `gen` only (the documented storage-
+      request entry point), not `replace`.
+    - **Grouping/join keys fold ""/NaN to Stata-missing everywhere (GROUPKEY-1,
+      TT-MM-MISSING-1).** The `merge`/`joinby` join already normalized keys
+      (#45); the within-key windows + spine of `merge m:m`, and the GROUP
+      BY/PARTITION BY of `collapse`/`contract`/`duplicates drop`/`egen , by()`,
+      now use the same idiom (string `nullif(k,'')`, numeric
+      `CASE WHEN isnan(CAST(k AS DOUBLE)) THEN NULL`). This matters only for
+      FOREIGN files that mix missing encodings in one key column (a NULL and a
+      NaN, or a "" and a NULL); parqit-written files are single-encoding (#34) so
+      behaviour is unchanged, and the per-row scalar cost is the same one already
+      paid on the merge path. Reshape i()/j() grouping was left as-is this round
+      (it was just restructured for leading-zero suffixes; lower incremental risk
+      to defer).
+    - **`parqit save` refuses a partitioned `replace` whose destination contains
+      (or is contained by) the open view's glob/directory source (SAVE-SELFGLOB-1)**
+      — the IO-1 guard previously skipped glob sources and could delete the source
+      tree. Internal literal self-reads are glob-escaped (#50 GLOB-1); the
+      user-facing `parqit use` keeps glob semantics.
+    - **`parqit set threads` parses strictly** (whole-token digits, 1..INT32),
+      turning a silent truncation / raw DuckDB INTERNAL assertion into a clear
+      error (SET-THREADS-1/2). **`parqit set tempdir` warns (does not block) on a
+      non-existent directory** (SET-TEMPDIR-1) — the user may create it before the
+      first spill, so erroring was rejected as too strict.
+    - **Metadata restore never fails the load:** a foreign `parqit.dtalabel`
+      over Stata's 80-char limit is truncated best-effort rather than aborting
+      `use`/`collect` with r(133) (DTALABEL-LEN-1) — consistent with the
+      best-effort metadata-restore posture.
+    - **`strpos(s,"")` -> 0** (Stata), not DuckDB's 1 (STRPOS-EMPTY-1);
+      **`length()` on a numeric is a clear error naming `length()`**
+      (LENGTH-NUMERIC-1) — numeric (format-aware) `length()` is not implemented in
+      the translator (no per-variable format there); use `parqit sql`.
+    - **Performance:** two-way `parqit tabulate` derives its distinct-column count
+      from the already-materialised, cell-bounded GROUP BY result instead of a
+      separate `count(DISTINCT)` scan (PERF-TAB2-PRECOUNT-1) — one pass not two,
+      output unchanged. This offsets the per-row group-key normalisation above.
+    - **Deferred (loud/safe today):** the no-by `collapse` over zero rows
+      fabricates a single row instead of Stata's r(2000) (COLLAPSE-EMPTY-1 — a
+      guard would add a count scan to every no-by collapse for a rare case); a
+      load->save->load round trip can re-apply a now-stale `[src_name]` char
+      (RESAVE-STALE-SRCNAME-1); strL save return codes stay unchecked (#47a class);
+      per-percentile re-sort of the sorted list (PERF-PCTILE-REBUILD-1, same class
+      as PERF-DETAIL-KSCAN). All are tracked for a follow-up.

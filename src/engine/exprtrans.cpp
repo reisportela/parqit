@@ -893,7 +893,14 @@ bool Parser::call(const std::string &fname, Val *out) {
     /* ---- strings (lengths are BYTES, like Stata) ---- */
     if (fname == "strlen" || fname == "length") {
         if (!need(1, 1)) return false;
-        if (args[0].kind != 's') return fail("strlen() needs a string");
+        /* LENGTH-NUMERIC-1: parqit's length()/strlen() are byte-length of a
+         * string; Stata's length() is also defined on numerics (display width),
+         * which parqit does not implement here (no per-variable format in the
+         * translator). Name the actual function in the error so the message is
+         * not misleading; use parqit sql for a numeric width. */
+        if (args[0].kind != 's')
+            return fail(fname + "() here needs a string argument (parqit does not "
+                        "implement numeric " + fname + "(); use parqit sql)");
         out->sql = "strlen(coalesce(" + args[0].sql + ", ''))";
         out->kind = 'n';
         return true;
@@ -962,8 +969,10 @@ bool Parser::call(const std::string &fname, Val *out) {
         std::string sub = "coalesce(" + args[1].sql + ", '')";
         /* Stata strpos() returns a BYTE offset (ustrpos() is the character
          * variant). Convert DuckDB's character position to a byte offset via
-         * the byte length of the matched prefix. */
-        out->sql = "(CASE WHEN strpos(" + s + ", " + sub + ") = 0 THEN 0 ELSE "
+         * the byte length of the matched prefix. Stata strpos(s,"") == 0 for an
+         * empty needle, but DuckDB strpos(s,'') == 1 — guard it (STRPOS-EMPTY-1). */
+        out->sql = "(CASE WHEN " + sub + " = '' THEN 0 "
+                   "WHEN strpos(" + s + ", " + sub + ") = 0 THEN 0 ELSE "
                    "strlen(substr(" + s + ", 1, strpos(" + s + ", " + sub +
                    ") - 1)) + 1 END)";
         out->kind = 'n';

@@ -20,13 +20,22 @@ using json = nlohmann::json;
  * gen byte x=200 -> ., gen byte x=-2.5 -> -2 — verified against Stata). float
  * targets round to float32 precision. The CAST to the matching DuckDB integer
  * type also makes the collected column size to the requested storage type
- * (byte/int/long), not silently widen to double (EXPR-1). double/strL: no-op. */
+ * (byte/int/long), not silently widen to double (EXPR-1). A str# string target
+ * truncates the value to the declared byte width (gen str3 x="hello" -> "hel"),
+ * matching Stata (STR-GENWIDTH-1); a codepoint split exactly at the boundary
+ * yields U+FFFD like parqit's substr(), since the engine keeps valid UTF-8.
+ * double/strL/mismatched: no-op. `kind` is the value kind ('n' or 's'). */
 static std::string coerce_storage(const std::string &v,
-                                  const std::string &type_req) {
+                                  const std::string &type_req, char kind) {
     if (type_req.empty()) return v;
     StType mt;
     int mb = 0;
     if (!sttype_parse(type_req, &mt, &mb)) return v;
+    if (kind == 's') {
+        if (mt == StType::Str && mb > 0)
+            return "parqit_substr_bytes(" + v + ", 1, " + std::to_string(mb) + ")";
+        return v; /* strL / numeric-typed target on a string: no width clamp */
+    }
     double lo, hi;
     const char *duckint;
     switch (mt) {
@@ -34,11 +43,23 @@ static std::string coerce_storage(const std::string &v,
     case StType::Int:  lo = kStataIntMin;  hi = kStataIntMax;  duckint = "SMALLINT"; break;
     case StType::Long: lo = kStataLongMin; hi = kStataLongMax; duckint = "INTEGER"; break;
     case StType::Float: return "CAST(" + v + " AS FLOAT)";
-    default: return v; /* double / strL: keep full precision */
+    default: return v; /* double / str# on a numeric value: keep full precision */
     }
     return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN trunc(" + v + ") < " +
            dtoa(lo) + " OR trunc(" + v + ") > " + dtoa(hi) +
            " THEN NULL ELSE CAST(trunc(" + v + ") AS " + duckint + ") END)";
+}
+
+/* GROUPKEY-1: fold a grouping key's missing encodings together the way the
+ * merge/joinby join key_norm and native Stata already do — an empty string and
+ * NULL are both the missing string "", a NaN and NULL are both numeric missing.
+ * A GROUP BY / PARTITION BY on a bare user key would otherwise split '' from
+ * NULL (and NaN from NULL) into separate groups, diverging from Stata and from
+ * parqit's own merge. `kind` is the key column's kind ('n' or 's'). */
+static std::string norm_group_key(const std::string &ref, char kind) {
+    if (kind == 's') return "nullif(" + ref + ", '')";
+    return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " + ref +
+           " END)";
 }
 
 void View::close() { *this = View(); }
@@ -265,8 +286,9 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
     if (!r.ok) return r.error;
     /* honour an explicit narrow storage type the way native Stata gen does
-     * (truncate toward zero; out-of-range -> missing; float32 rounding) — EXPR-1 */
-    std::string vexpr = (r.kind == 'n') ? coerce_storage(r.sql, type_req) : r.sql;
+     * (numeric: truncate toward zero / out-of-range -> missing / float32 rounding,
+     * EXPR-1; string: truncate to the declared str# byte width, STR-GENWIDTH-1) */
+    std::string vexpr = coerce_storage(r.sql, type_req, r.kind);
     std::string value = vexpr;
     if (!if_expr.empty()) {
         ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
@@ -450,7 +472,11 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
     std::string sel;
     for (const auto &b : byn) {
         if (!sel.empty()) sel += ", ";
-        sel += quote_ident(b);
+        /* GROUPKEY-1: project the normalized key so the output group value and
+         * the GROUP BY below agree (the missing group's key renders as Stata
+         * missing, not as a distinct '' / NaN). */
+        sel += norm_group_key(quote_ident(b), cols_[col_index(b)].kind) +
+               " AS " + quote_ident(b);
         ncols.push_back(cols_[col_index(b)]);
     }
     std::set<std::string> outnames(byn.begin(), byn.end());
@@ -525,7 +551,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         body += " GROUP BY ";
         for (size_t i = 0; i < byn.size(); i++) {
             if (i) body += ", ";
-            body += quote_ident(byn[i]);
+            body += norm_group_key(quote_ident(byn[i]),
+                                    cols_[col_index(byn[i])].kind);
         }
         desc += " by(";
         for (size_t i = 0; i < byn.size(); i++)
@@ -554,7 +581,9 @@ std::string View::contract(const std::vector<std::string> &by,
     std::vector<ViewCol> ncols;
     for (const auto &b : byn) {
         if (!sel.empty()) sel += ", ";
-        sel += quote_ident(b);
+        /* GROUPKEY-1: normalize the grouped key (''/NaN -> missing), see collapse */
+        sel += norm_group_key(quote_ident(b), cols_[col_index(b)].kind) +
+               " AS " + quote_ident(b);
         ncols.push_back(cols_[col_index(b)]);
     }
     sel += ", count(*) AS " + quote_ident(fname);
@@ -567,7 +596,7 @@ std::string View::contract(const std::vector<std::string> &by,
                        " GROUP BY ";
     for (size_t i = 0; i < byn.size(); i++) {
         if (i) body += ", ";
-        body += quote_ident(byn[i]);
+        body += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
     }
     cols_ = std::move(ncols);
     push_stage(body, "contract");
@@ -593,7 +622,9 @@ std::string View::duplicates_drop(const std::vector<std::string> &by, bool force
     std::string part;
     for (size_t i = 0; i < byn.size(); i++) {
         if (i) part += ", ";
-        part += quote_ident(byn[i]);
+        /* GROUPKEY-1: dedup by the normalized key so a ''-vs-NULL (or NaN-vs-NULL)
+         * pair on the by-vars is recognised as a duplicate, like native Stata. */
+        part += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
     }
     std::string rn = fresh_helper("rn");
     push_stage("SELECT " + select_list() + " FROM (SELECT *, row_number() OVER "
@@ -657,7 +688,8 @@ std::string View::egen(const std::string &name, const std::string &fcn,
         if (!err.empty()) return err;
         for (size_t i = 0; i < byn.size(); i++) {
             if (i) part += ", ";
-            part += quote_ident(byn[i]);
+            /* GROUPKEY-1: per-group window keys fold ''/NaN to missing like Stata */
+            part += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
         }
     }
     std::string over = part.empty() ? "OVER ()" : "OVER (PARTITION BY " + part + ")";
@@ -807,6 +839,31 @@ std::string View::merge_with(const std::string &kind,
          * sort first, then break remaining ties by all master columns (NULLS
          * LAST) — mirroring the using side, which already orders by all its
          * columns — so the pairing never depends on row-group/thread order. */
+        /* TT-MM-MISSING-1: the within-key windows and the spine partition on the
+         * RAW key, but the spine<->side joins use the normalized key (key_norm,
+         * ""≡NULL≡NaN). With mixed missing encodings across master/using (a
+         * master NULL key, a using NaN key) the raw partition/spine forms two
+         * groups that the normalized join then folds together, over-matching.
+         * Normalize each key IN PLACE via SELECT * REPLACE so the windows, the
+         * spine UNION and the joins all see one missing group; key_norm is
+         * idempotent on an already-normalized value, and the output coalesce of
+         * the normalized key renders missing exactly as Stata does. */
+        std::string krepl = " REPLACE (";
+        for (size_t i = 0; i < keys.size(); i++) {
+            const std::string ref = quote_ident(keys[i]);
+            std::string nk = (cols_[col_index(keys[i])].kind == 's')
+                ? "nullif(" + ref + ", '')"
+                : "(CASE WHEN isnan(CAST(" + ref +
+                      " AS DOUBLE)) THEN NULL ELSE " + ref + " END)";
+            krepl += (i ? ", " : "") + nk + " AS " + ref;
+        }
+        krepl += ")";
+        /* TT-A1: the master within-key i-index must be reproducible. An empty
+         * or key-only view sort would leave row_number() OVER (PARTITION BY key)
+         * with no/partial ORDER BY -> engine-defined pairing. Honour any user
+         * sort first, then break remaining ties by all master columns (NULLS
+         * LAST) — mirroring the using side, which already orders by all its
+         * columns — so the pairing never depends on row-group/thread order. */
         std::string m_order;
         std::string usort = order_by_sql();
         if (!usort.empty()) m_order = usort.substr(1); /* "ORDER BY ..." */
@@ -814,7 +871,7 @@ std::string View::merge_with(const std::string &kind,
             m_order += (m_order.empty() ? "ORDER BY " : ", ");
             m_order += quote_ident(cols_[i].name) + " NULLS LAST";
         }
-        mrel = "(SELECT *, TRUE AS " + quote_ident(mm) + ", row_number() OVER (PARTITION BY " +
+        mrel = "(SELECT *" + krepl + ", TRUE AS " + quote_ident(mm) + ", row_number() OVER (PARTITION BY " +
                keypart + " " + m_order + ") AS " + quote_ident(rnm) +
                ", count(*) OVER (PARTITION BY " + keypart + ") AS " + quote_ident(nmx) +
                " FROM " + prev + ")";
@@ -824,7 +881,7 @@ std::string View::merge_with(const std::string &kind,
         std::string u_order;
         for (size_t i = 0; i < u.cols.size(); i++)
             u_order += (i ? ", " : " ORDER BY ") + quote_ident(u.cols[i].name);
-        urel = "(SELECT *, TRUE AS " + quote_ident(um) + ", row_number() OVER (PARTITION BY " +
+        urel = "(SELECT *" + krepl + ", TRUE AS " + quote_ident(um) + ", row_number() OVER (PARTITION BY " +
                keypart + u_order + ") AS " + quote_ident(rnu) + ", count(*) OVER (PARTITION BY " +
                keypart + ") AS " + quote_ident(nux) + " FROM (" + u.select_sql + "))";
     } else {
