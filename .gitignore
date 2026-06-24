@@ -86,3 +86,6 @@ Thumbs.db
 # --- Distribution artifacts (built zips; shared out-of-band, never commit) --
 /dist/
 *.zip
+
+# --- Audit-kit scratch (the test pack writes synthetic data + outputs here) --
+verifications/**/tests/outputs/

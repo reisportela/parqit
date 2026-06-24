@@ -6,6 +6,27 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-06-24
+
+`parqit set tempdir` portability fix, surfaced by the external test pack once its
+`set tempdir` test was made to pass native forward-slash paths. Locked by
+`v40_set_tempdir_paths`; verified live against native Stata.
+
+### Fixed
+- **`parqit set tempdir` now accepts absolute and space-containing paths
+  (SET-TEMPDIR-2).** The value arrives quoted (mandatory for a path with spaces,
+  and usual for any path), and `_parqit_set` kept those surrounding quotes in the
+  parsed value. A later regular-quoted reference (`"`value'"`) then expanded to
+  `""/abs/path""`, which Stata parses as an *arithmetic expression* — a leading
+  `/` divides by the first path component — so `parqit set tempdir "/scratch/me"`
+  aborted with ``<component> not found``, `rc 111`. This broke the spill-to-scratch
+  directory on every Unix absolute path (the HPC case the feature exists for);
+  Windows escaped it only because its paths start with a drive letter (`C:`). The
+  setter now strips one surrounding pair of double quotes so the value is the
+  literal path, which `direxists`, the hex wire, and the engine all then receive
+  intact. Scalar settings (`statamissing`, `threads`, `memory_limit`) and the
+  loud unknown-name error are unaffected.
+
 ## [0.1.12] — 2026-06-24
 
 Fifth adversarial-audit round (external test-pack, `verifications/parqit_audit_package`).

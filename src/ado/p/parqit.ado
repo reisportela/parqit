@@ -1,4 +1,4 @@
-*! version 0.1.12 24jun2026
+*! version 0.1.13 24jun2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -1482,7 +1482,17 @@ end
 program define _parqit_set
     version 16.0
     gettoken what 0 : 0, parse(" ")
-    local value = strtrim(`"`0'"')
+    /* SET-TEMPDIR-2: take the value via macro expansion so ONE surrounding pair
+     * of quotes the caller used — regular "..." OR compound `"..."' (mandatory
+     * for a path with spaces) — is stripped and `value' is the literal setting.
+     * Keeping the quotes left a later regular-quoted reference ("`value'")
+     * expanding to ""/abs/path"", which Stata parses as an arithmetic expression
+     * (a leading "/" divides by the first path component) and aborts with
+     * `<first component> not found`, rc 111 — so `parqit set tempdir "/scratch/me"`
+     * failed on every Unix absolute path. With the quotes gone, direxists/hex and
+     * the engine all receive the real path. */
+    local value `0'
+    local value = strtrim(`"`value'"')
     if !inlist("`what'", "statamissing", "threads", "memory_limit", "tempdir") {
         di as err "parqit set: expected statamissing|threads|memory_limit|tempdir <value>"
         exit 198
