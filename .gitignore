@@ -48,12 +48,44 @@ Testing/
 sysprofile.do.bak
 profile.do.bak
 
-# --- Data: never commit datasets; commit small fixtures explicitly ----------
+# --- Data: never commit datasets of ANY kind; commit small fixtures
+#     explicitly under tests/fixtures/ (the !rules below must stay last). ------
+# columnar / statistical-package formats
 *.parquet
+*.feather
+*.arrow
+*.orc
+*.avro
 *.dta
 *.sav
 *.zsav
+*.por
 *.sas7bdat
+*.xpt
+*.rds
+*.RData
+*.rdata
+# delimited text / spreadsheets
+*.csv
+*.tsv
+*.psv
+*.dat
+*.xls
+*.xlsx
+*.xlsm
+*.ods
+# array / scientific / serialized
+*.h5
+*.hdf5
+*.nc
+*.mat
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.jsonl
+*.ndjson
+# version-controlled fixtures are the one exception (keep these last)
 !test/fixtures/**
 !tests/fixtures/**
 
@@ -86,6 +118,17 @@ Thumbs.db
 # --- Distribution artifacts (built zips; shared out-of-band, never commit) --
 /dist/
 *.zip
+
+# --- Heavy build / fetched archives (DuckDB tarball etc.; refetched, never
+#     committed — they bloat the online repo and are rebuilt on demand) -------
+*.tar
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.zst
+*.7z
+*.rar
 
 # --- Audit-kit scratch (the test pack writes synthetic data + outputs here) --
 verifications/**/tests/outputs/
