@@ -17,7 +17,7 @@ it lazily on disk (datasets far larger than RAM), and only the final result is
 brought into Stata — or written straight back to Parquet without ever touching
 memory. SQL is available for power users, but no one has to learn it.
 
-> **Status:** v0.1.9 — the full surface below is implemented and covered by a
+> **Status:** v0.1.11 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -66,18 +66,39 @@ plugin embeds DuckDB; there are **no external library dependencies** to install.
 > cloning alone does not give you a working command. Pick one of the two routes
 > below.
 
-### Option 1 — install with `net install` (no compiler needed)
+### Option 1 — `net install` from GitHub (no compiler needed)
 
-`parqit` ships as a standard Stata package: download the zip for your platform from
-the [latest release](https://github.com/reisportela/parqit/releases), extract it
-into a folder, and run `net install` from that folder. This release covers
-**Linux x86_64**, **Windows x86_64** and **Apple-Silicon macOS (arm64)**;
-`parqit_all_platforms.zip` bundles all three. `net install` reads `parqit.pkg`, picks
-the right binary for your machine, and installs it as `parqit.plugin` onto your
-`PLUS` adopath (run `sysdir` in Stata to see where). `replace` upgrades an
-existing install in place; `ado uninstall parqit` removes it. Each zip holds the
-package files at its root, so always extract into a dedicated folder and point
-`from()` at that folder (the one containing `parqit.pkg`).
+`parqit` ships as a standard Stata package. Its compiled plugin (`parqit.plugin`,
+~40 MB, one binary per OS) is **not** in the git tree — it is distributed through
+[GitHub Releases](https://github.com/reisportela/parqit/releases). You can install
+it **straight from GitHub over the internet in one line**, or download a zip and
+install offline. Both routes cover **Linux x86_64**, **Windows x86_64** and
+**Apple-Silicon macOS (arm64)**.
+
+#### Install directly from GitHub (recommended)
+
+In Stata, point `net install` at the release's download URL. Stata reads
+`parqit.pkg`, picks the binary for your machine, and installs it as `parqit.plugin`
+onto your `PLUS` adopath (run `sysdir` to see where):
+
+```stata
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.11") replace
+. parqit version        // confirms the plugin loaded
+. parqit selftest       // end-to-end self-check, prints "ok"
+```
+
+- `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
+- For a different version, change `v0.1.11` to the tag you want; for the newest, use
+  `.../releases/latest/download`.
+- If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
+  cluster), use the offline zip route below — it is byte-for-byte the same package.
+
+#### Install from a downloaded zip (offline)
+
+Download the zip for your platform from the
+[latest release](https://github.com/reisportela/parqit/releases), extract it into a
+**dedicated folder**, and run `net install` from that folder (the one holding
+`parqit.pkg`). `parqit_all_platforms.zip` bundles all three OSes.
 
 **Linux (x86_64)** — runs on EL7/EL8+, Ubuntu 18.04+ and HPC clusters (the binary
 needs only glibc 2.25):
@@ -88,8 +109,8 @@ mkdir -p parqit_pkg && unzip parqit_linux_x86_64.zip -d parqit_pkg
 ```
 ```stata
 . net install parqit, from("/home/<you>/Downloads/parqit_pkg") replace
-. parqit version        // confirms the plugin loaded
-. parqit selftest       // end-to-end self-check, prints "ok"
+. parqit version
+. parqit selftest
 ```
 
 **macOS — Apple Silicon (arm64: M1/M2/M3/M4):**
@@ -117,10 +138,6 @@ in the path:
 . parqit selftest
 ```
 
-> The compiled plugin is deliberately **not** committed to the git tree, so
-> `net install` from a GitHub raw URL is not available — install from a release
-> zip as above.
->
 > **macOS Intel (x86_64)** is not in this release yet (the CI Intel-Mac runner was
 > unavailable); build from source (Option 2) for an Intel Mac in the meantime. A
 > binary you build yourself on a newer Linux (glibc ≥ 2.34) will **not** run on an
@@ -370,10 +387,17 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
 
 ## Acknowledgements
 
-`parqit` stands on the shoulders of [DuckDB](https://duckdb.org), the
-[Apache Arrow C Data Interface](https://arrow.apache.org/docs/format/CDataInterface.html),
-and [`pq`](https://github.com/jrothbaum/stata_parquet_io) by Jon Rothbaum, whose
-correctness work directly informed `parqit`'s test suite.
+`parqit` takes [`pq`](https://github.com/jrothbaum/stata_parquet_io) by **Jon
+Rothbaum** as its starting point — the work from which the `parqit` solution was
+designed — and re-bases the manipulation layer on an embedded
+[DuckDB](https://duckdb.org) engine through the
+[Apache Arrow C Data Interface](https://arrow.apache.org/docs/format/CDataInterface.html).
+Jon Rothbaum's package, and the care he puts into its correctness, directly shaped
+`parqit`'s design and test suite; the debt is gratefully acknowledged.
+
+We warmly thank the **[BPLIM](https://bplim.bportugal.pt/)** team at **Banco de
+Portugal**, whose interaction throughout greatly benefited the development of
+`parqit`.
 
 `parqit` was built with the assistance of two AI coding agents used in tandem —
 Anthropic's **Claude** (via Claude Code) and OpenAI's **Codex** — for
@@ -387,4 +411,5 @@ MIT — see [LICENSE](LICENSE).
 ## Citation
 
 If you use `parqit` in published work, please cite it (a `CITATION.cff` is included).
-Author: **Miguel Portela** · Universidade do Minho & NIPE (miguel.portela@eeg.uminho.pt).
+Author: **Miguel Portela** · NIPE / Universidade do Minho and BPLIM / Banco de Portugal
+(miguel.portela@eeg.uminho.pt).

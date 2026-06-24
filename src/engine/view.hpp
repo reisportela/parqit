@@ -31,6 +31,13 @@ struct ViewCol {
     std::string vallab;    /* value-label name attached */
     std::string meta_type; /* original Stata storage type ("" unknown) */
     std::string note;      /* per-column loud note carried to collect */
+    /* MISS-1: true once the column is guaranteed free of IEEE specials and
+     * (for strings) of SQL NULL — i.e. it came through the lazy boundary's
+     * float/string normalization and has not since been recomputed by a
+     * gen/replace/aggregate. Lets missing() and lazy save skip a redundant
+     * per-row finite/coalesce guard on already-clean columns. Carried verbs
+     * (keep/drop/order/rename) preserve it; recomputing verbs leave it false. */
+    bool normalized = false;
 };
 
 /* Stata's percentile rule (summarize/_pctile) as a SQL aggregate expression

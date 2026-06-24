@@ -5,7 +5,8 @@
 #include <cstdlib>
 #include <vector>
 
-#include "engine/session.hpp" /* quote_ident / quote_literal */
+#include "engine/session.hpp" /* quote_ident / quote_literal / dtoa */
+#include "engine/typemap.hpp" /* kStataMissThreshold */
 
 namespace parqit {
 
@@ -179,6 +180,19 @@ long long stata_days(int y, int m, int d) {
     return days_unix + 3653;                           /* since 1960-01-01 */
 }
 
+/* proleptic Gregorian leap year and month length, for calendar validation of
+ * td()/tc()/tC() literals (DATE-LIT-1). Native Stata rejects an impossible
+ * calendar date (31feb2020, 29feb2019, 31apr2020, day 0/32) with r(198); parqit
+ * must not silently roll it forward via stata_days() arithmetic. */
+static bool is_leap_year(int y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+static int month_length(int y, int m) {
+    static const int dpm[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m == 2 && is_leap_year(y)) return 29;
+    return dpm[m];
+}
+
 bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
     /* ddmonyyyy with optional spaces: "1 jan 2020", "01jan2020" */
     std::string t;
@@ -204,7 +218,10 @@ bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
         yd++;
     }
     if (p != t.size() || yd != 4) return false;
-    if (d < 1 || d > 31) return false;
+    /* DATE-LIT-1: reject impossible day-of-month (m is already 1..12 from the
+     * month-name lookup), matching native Stata's r(198) rather than rolling
+     * the date forward. */
+    if (d < 1 || d > month_length(y, m)) return false;
     *dd = d;
     *mm = m;
     *yy = y;
@@ -267,7 +284,12 @@ bool parse_hms(const std::string &raw, long long *ms_out) {
         if (p == start) return false;
         if (!atod(t.substr(start, p - start), &sec)) return false;
     }
-    if (p != t.size() || h > 23 || m > 59 || sec >= 61.0) return false;
+    /* DATE-LIT-1: a clock second is 0..59 (fractional ok); 60 is not a valid
+     * tc() second (native rejects with r(198)). %tC leap seconds (a real :60 on
+     * a leap-second instant) are intentionally rejected too: parqit stores tC as
+     * the same count as tc (no leap-second table — documented), so a :60 here
+     * could only be silently mis-converted, and a loud error is the safe match. */
+    if (p != t.size() || h > 23 || m > 59 || sec >= 60.0) return false;
     *ms_out = static_cast<long long>(((h * 60 + m) * 60) * 1000 +
                                      static_cast<long long>(sec * 1000.0 + 0.5));
     return true;
@@ -278,6 +300,9 @@ bool parse_hms(const std::string &raw, long long *ms_out) {
 struct Val {
     std::string sql;
     char kind = 'n'; /* n / s / b */
+    std::string col; /* MISS-1: source column name iff this is a bare column
+                      * reference (else ""); lets missing() skip the finite
+                      * scan on a boundary-normalized column. */
 };
 
 struct Parser {
@@ -471,6 +496,7 @@ struct Parser {
                 return fail("variable " + name + " not found in the view");
             out->sql = quote_ident(name);
             out->kind = it->second == 's' ? 's' : 'n';
+            out->col = name; /* MISS-1: remember this is a bare column ref */
             return true;
         }
         default:
@@ -751,10 +777,33 @@ bool Parser::call(const std::string &fname, Val *out) {
         std::string sql = "(";
         for (size_t k = 0; k < args.size(); k++) {
             if (k) sql += " OR ";
-            if (args[k].kind == 's')
+            if (args[k].kind == 's') {
                 sql += "(coalesce(" + args[k].sql + ", '') = '')";
-            else
-                sql += "(" + as_num(args[k]) + " IS NULL)";
+            } else if (!args[k].col.empty() &&
+                       args[k].sql == quote_ident(args[k].col) &&
+                       schema.normalized.count(args[k].col)) {
+                /* MISS-1 fast path: a bare reference to a boundary-normalized
+                 * column cannot hold a non-finite/out-of-range value (the lazy
+                 * boundary already nulled any NaN/±Inf), so the cheap IS NULL is
+                 * exact — and lets DuckDB use the column's null statistics. The
+                 * sql==quote_ident(col) guard makes this robust against a stale
+                 * col on a transformed Val: a compound expression never matches,
+                 * so it always takes the full finite check below. */
+                sql += "(" + args[k].sql + " IS NULL)";
+            } else {
+                /* MISS-1: a numeric value is Stata-missing when it is SQL NULL,
+                 * or a non-finite/out-of-Stata-range float (NaN, ±Inf, or a
+                 * magnitude >= the missing sentinel 2^1023). A gen/replace
+                 * result or a compound expression can still generate one (e.g.
+                 * exp(10000) -> +Inf), which native Stata reports as missing;
+                 * mirror that here so missing()/mi() never silently calls a
+                 * generated special "not missing". */
+                const std::string n = as_num(args[k]);
+                const std::string d = "CAST(" + n + " AS DOUBLE)";
+                sql += "(" + n + " IS NULL OR NOT isfinite(" + d +
+                       ") OR abs(" + d + ") >= " + dtoa(kStataMissThreshold) +
+                       ")";
+            }
         }
         out->sql = sql + ")";
         out->kind = 'b';

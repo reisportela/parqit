@@ -180,6 +180,67 @@ TEST_CASE("date pseudo-literals and date functions on day counts") {
     CHECK(eval_at("yofd(d)", 5) == "2020");
 }
 
+TEST_CASE("DATE-LIT-1: impossible calendar dates / 60s times are loud, not rolled") {
+    ExprSchema sch = test_schema();
+    /* an impossible day-of-month is a loud error (native r(198)), never silently
+     * advanced by stata_days() arithmetic */
+    CHECK_FALSE(translate_expression("td(31feb2020)", sch, false).ok);
+    CHECK_FALSE(translate_expression("td(29feb2019)", sch, false).ok); /* not leap */
+    CHECK_FALSE(translate_expression("td(00jan2020)", sch, false).ok); /* day 0 */
+    CHECK_FALSE(translate_expression("td(32jan2020)", sch, false).ok);
+    CHECK_FALSE(translate_expression("td(31apr2020)", sch, false).ok); /* apr=30 */
+    CHECK_FALSE(translate_expression("td(31jun2020)", sch, false).ok); /* jun=30 */
+    /* valid dates (including a true leap day) still parse */
+    CHECK(translate_expression("td(29feb2020)", sch, false).ok); /* 2020 leap */
+    CHECK(translate_expression("td(28feb2019)", sch, false).ok);
+    CHECK(translate_expression("td(30apr2020)", sch, false).ok);
+    CHECK(translate_expression("td(31dec2025)", sch, false).ok);
+    /* the 60th second is not a valid tc()/tC() clock second (native r(198)),
+     * and impossible hour/minute are rejected; fractional seconds remain valid */
+    CHECK_FALSE(translate_expression("tc(01jan2020 00:00:60)", sch, false).ok);
+    CHECK_FALSE(translate_expression("tC(01jan2020 00:00:60)", sch, false).ok);
+    CHECK_FALSE(translate_expression("tc(01jan2020 24:00:00)", sch, false).ok);
+    CHECK_FALSE(translate_expression("tc(01jan2020 00:60:00)", sch, false).ok);
+    CHECK(translate_expression("tc(01jan2020 00:00:59)", sch, false).ok);
+    CHECK(translate_expression("tc(01jan2020 00:00:59.5)", sch, false).ok);
+    /* an impossible date inside a tc() literal is rejected via the same path */
+    CHECK_FALSE(translate_expression("tc(31feb2020 00:00:00)", sch, false).ok);
+}
+
+TEST_CASE("MISS-1: missing() reports generated IEEE specials as Stata missing") {
+    /* finite, non-missing values are not missing */
+    CHECK(eval_at("missing(1)", 1) == "0");
+    CHECK(eval_at("missing(x)", 1) == "0");
+    /* a real SQL NULL column value is missing (id 3 has x = NULL) */
+    CHECK(eval_at("missing(x)", 3) == "1");
+    /* an expression that generates +Inf/NaN is missing — native Stata overflows
+     * such results to '.', so missing() must not call them "not missing" */
+    CHECK(eval_at("missing(exp(10000))", 1) == "1");
+    CHECK(eval_at("missing(1/0)", 1) == "1");        /* div guard nulls it too */
+    CHECK(eval_at("missing((-8)^0.5)", 1) == "1");   /* non-real power -> missing */
+}
+
+TEST_CASE("MISS-1 fast path: normalized columns use cheap IS NULL, others full") {
+    ExprSchema sc;
+    sc.kinds = {{"fx", 'n'}, {"gz", 'n'}};
+    sc.normalized = {"fx"}; /* fx came through the boundary; gz did not */
+    /* a bare ref to a normalized column needs only IS NULL (no per-row scan) */
+    ExprResult a = translate_filter("missing(fx)", sc, false);
+    REQUIRE(a.ok);
+    CHECK(a.sql.find("IS NULL") != std::string::npos);
+    CHECK(a.sql.find("isfinite") == std::string::npos);
+    /* a non-normalized column (e.g. a gen result) keeps the full finite check */
+    ExprResult b = translate_filter("missing(gz)", sc, false);
+    REQUIRE(b.ok);
+    CHECK(b.sql.find("isfinite") != std::string::npos);
+    /* a compound expression over a normalized column still gets the full check —
+     * the sql==quote_ident(col) guard defeats any stale col on the transformed
+     * Val, so a generated special inside the expression is never missed */
+    ExprResult c = translate_filter("missing(fx + 0)", sc, false);
+    REQUIRE(c.ok);
+    CHECK(c.sql.find("isfinite") != std::string::npos);
+}
+
 TEST_CASE("errors are loud, anchored, and honest") {
     ExprSchema sch = test_schema();
     ExprResult r = translate_filter("nosuchvar > 1", sch, false);

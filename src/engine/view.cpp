@@ -191,7 +191,10 @@ std::string View::expand_patterns(const std::vector<std::string> &patterns,
 
 static ExprSchema schema_of(const std::vector<ViewCol> &cols) {
     ExprSchema s;
-    for (const auto &c : cols) s.kinds[c.name] = c.kind;
+    for (const auto &c : cols) {
+        s.kinds[c.name] = c.kind;
+        if (c.normalized) s.normalized.insert(c.name); /* MISS-1 */
+    }
     return s;
 }
 
@@ -285,6 +288,24 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     if (col_index(name) >= 0) return "variable " + name + " already defined";
     ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
     if (!r.ok) return r.error;
+    /* GEN-TYPEFAMILY-1: native Stata rejects an explicit storage type whose
+     * family disagrees with the expression (gen str# x = <numeric> and
+     * gen <numeric> x = "<string>" both stop with r(109)); coerce_storage()
+     * cannot bridge families, so it would silently no-op and leave a column
+     * whose metadata contradicts its value kind. Reject it loudly instead. */
+    if (!type_req.empty()) {
+        StType mt;
+        int mb = 0;
+        if (sttype_parse(type_req, &mt, &mb)) {
+            bool target_string = (mt == StType::Str || mt == StType::StrL);
+            bool expr_string = (r.kind == 's');
+            if (target_string != expr_string)
+                return "type mismatch: cannot generate " + type_req + " " + name +
+                       " from a " +
+                       std::string(expr_string ? "string" : "numeric") +
+                       " expression";
+        }
+    }
     /* honour an explicit narrow storage type the way native Stata gen does
      * (numeric: truncate toward zero / out-of-range -> missing / float32 rounding,
      * EXPR-1; string: truncate to the declared str# byte width, STR-GENWIDTH-1) */
@@ -350,7 +371,10 @@ std::string View::replace(const std::string &name, const std::string &expr,
             sel += quote_ident(cols_[i].name);
     }
     /* replacing changes content, not storage intent — but a wider value may
-     * no longer fit a saved narrow type; collect re-sizes anyway */
+     * no longer fit a saved narrow type; collect re-sizes anyway. MISS-1: the
+     * new expression may introduce an IEEE special (e.g. replace f = f*f), so
+     * the column is no longer guaranteed clean — drop its normalized flag. */
+    cols_[idx].normalized = false;
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
                "replace " + name + " = " + expr +
                    (if_expr.empty() ? "" : " if " + if_expr));
@@ -558,6 +582,13 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         for (size_t i = 0; i < byn.size(); i++)
             desc += (i ? " " : "") + byn[i];
         desc += ")";
+    } else {
+        /* COLLAPSE-EMPTY-1: a no-by aggregate over zero input rows would emit one
+         * fabricated row (mean ., sum 0, count 0). Stata stops with r(2000) "no
+         * observations"; emit zero rows instead so the fabricated row never
+         * reaches the data, consistent with the by() case (which already yields
+         * zero groups on empty input). */
+        body += " HAVING count(*) > 0";
     }
     cols_ = std::move(ncols);
     push_stage(body, desc);
@@ -703,8 +734,24 @@ std::string View::egen(const std::string &name, const std::string &fcn,
     else
         return "egen function " + fcn + "() is not supported (yet); supported: "
                "total mean sd min max count";
-    push_stage("SELECT " + select_list() + ", " + agg + " AS " + quote_ident(name) +
-                   " FROM " + prev_name(stages_.size()),
+    /* EGEN-STORAGE-1: an explicit storage type on egen is value semantics, not
+     * just metadata, exactly like generate. A string storage type is a type
+     * mismatch for these numeric egen functions (native r(109)); a narrow
+     * numeric type truncates toward zero and sends out-of-range results to
+     * missing (e.g. native `egen byte t = total(x)` with sum 200 is `.`, not
+     * 200). Reject strings loudly and coerce the numeric aggregate so the
+     * collected value matches native Stata, not just the recorded meta_type. */
+    if (!type_req.empty()) {
+        StType mt;
+        int mb = 0;
+        if (sttype_parse(type_req, &mt, &mb) &&
+            (mt == StType::Str || mt == StType::StrL))
+            return "type mismatch: egen " + fcn +
+                   "() produces a numeric result, not " + type_req;
+    }
+    std::string stored = coerce_storage(agg, type_req, 'n');
+    push_stage("SELECT " + select_list() + ", " + stored + " AS " +
+                   quote_ident(name) + " FROM " + prev_name(stages_.size()),
                "egen " + name + " = " + fcn + "(...)" +
                    (by.empty() ? "" : ", by(...)"));
     ViewCol nc;

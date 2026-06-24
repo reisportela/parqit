@@ -106,6 +106,25 @@ struct BoundaryCol {
     std::string note;
 };
 
+/* The exact float/double -> Stata-missing guard the eager fill (plugin_io
+ * fill_column) and the direct in-memory save path already apply: a value that is
+ * SQL NULL, NaN, +-Inf, or whose magnitude collides with Stata's missing
+ * sentinel (|x| >= SV_missval == 2^1023) cannot be stored as an ordinary Stata
+ * number, so it becomes NULL (Stata missing). Applying it at the lazy boundary
+ * (and defensively on save) gives lazy views the same missingness, ordering,
+ * filtering, statistics, dedup, and saved-payload semantics as the eager
+ * `use, clear` path (PQ-AUD-001). `inner` is the value kept when the guard does
+ * not fire (the column itself at the boundary; the storage-cast value on save).
+ * SV_missval is the live Stata sentinel, identical to the engine-side
+ * kStataMissThreshold used by the expression translator. */
+std::string float_missing_guard(const std::string &ref, const std::string &inner) {
+    char missbuf[64];
+    std::snprintf(missbuf, sizeof(missbuf), "%.17g", SV_missval);
+    const std::string dref = "CAST(" + ref + " AS DOUBLE)";
+    return "CASE WHEN " + ref + " IS NULL OR NOT isfinite(" + dref + ") OR abs(" +
+           dref + ") >= " + missbuf + " THEN NULL ELSE " + inner + " END";
+}
+
 BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
     BoundaryCol b;
     const std::string ref = quote_ident(name);
@@ -115,9 +134,16 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
     case DUCKDB_TYPE_SMALLINT:
     case DUCKDB_TYPE_INTEGER:
     case DUCKDB_TYPE_BIGINT:
+        b.sql = ref;
+        break;
     case DUCKDB_TYPE_FLOAT:
     case DUCKDB_TYPE_DOUBLE:
-        b.sql = ref;
+        /* PQ-AUD-001: a foreign Parquet FLOAT/DOUBLE can carry NaN/+-Inf or a
+         * magnitude Stata reads as missing. Normalize at the boundary so every
+         * lazy verb sees Stata missing, matching the eager fill (which the
+         * verify suite uses as the oracle). Integer columns above cannot hold an
+         * IEEE special, so they pay nothing. */
+        b.sql = float_missing_guard(ref, ref);
         break;
     case DUCKDB_TYPE_UTINYINT: b.sql = "CAST(" + ref + " AS SMALLINT)"; break;
     case DUCKDB_TYPE_USMALLINT: b.sql = "CAST(" + ref + " AS INTEGER)"; break;
@@ -157,10 +183,17 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
         b.note = "time-of-day as milliseconds since midnight";
         break;
     }
-    case DUCKDB_TYPE_VARCHAR: b.sql = ref; b.kind = 's'; break;
+    case DUCKDB_TYPE_VARCHAR:
+        /* PQ-AUD-002: Stata has no string NULL; the string missing value is the
+         * empty string "". Fold a foreign Parquet NULL to '' at the boundary so
+         * it ties with '' for sort / _n / keep-in / duplicates, and never saves
+         * back as a SQL NULL — matching the eager fill. */
+        b.sql = "coalesce(" + ref + ", '')";
+        b.kind = 's';
+        break;
     case DUCKDB_TYPE_ENUM:
     case DUCKDB_TYPE_UUID:
-        b.sql = "CAST(" + ref + " AS VARCHAR)";
+        b.sql = "coalesce(CAST(" + ref + " AS VARCHAR), '')";
         b.kind = 's';
         break;
     default: {
@@ -222,6 +255,28 @@ std::string compile_for_save(const View &v) {
             expr = "CAST(round(" + ref + ") AS INTEGER)";
             break;
         default:
+            /* PQ-AUD-001/002 defensive final guard for non-date columns. A
+             * MISS-1-normalized column (a boundary column carried through
+             * unchanged) is already clean — its specials were nulled and string
+             * NULLs folded at the boundary — so it pays nothing here. A value
+             * generated/recomputed after the boundary (gen/replace/aggregate)
+             * can still be an IEEE special (e.g. gen z = exp(10000) -> +Inf) or
+             * a SQL NULL string, so guard those to mirror the eager/direct-save
+             * paths and never write a NaN/Inf or string NULL. Bounded integer
+             * columns (coerce_storage already clamped them) cannot be special. */
+            if (c.normalized) {
+                break; /* already boundary-normalized; keep raw ref */
+            } else if (c.kind == 's') {
+                expr = "coalesce(" + ref + ", '')";
+            } else {
+                parqit::StType mt;
+                int mb = 0;
+                bool bounded_int =
+                    parqit::sttype_parse(c.meta_type, &mt, &mb) &&
+                    (mt == parqit::StType::Byte || mt == parqit::StType::Int ||
+                     mt == parqit::StType::Long);
+                if (!bounded_int) expr = float_missing_guard(ref, ref);
+            }
             break;
         }
         if (i) sel += ", ";
@@ -456,6 +511,9 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
         vc.note = bounds[c].note;
+        /* MISS-1: every boundary column is normalized — float/double specials
+         * are nulled and string NULLs are folded to "" by boundary_for(). */
+        vc.normalized = true;
         const json *jm = nullptr;
         auto it = meta_by_src.find(src_names[c]);
         if (it != meta_by_src.end()) jm = it->second;
@@ -1222,6 +1280,7 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
         vc.name = stata_names[c];
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
+        vc.normalized = true; /* MISS-1: boundary-normalized using column */
         const json *jm = nullptr;
         auto it = meta_by_src.find(src_names[c]);
         if (it != meta_by_src.end()) jm = it->second;
@@ -1613,6 +1672,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
         vc.note = bounds[c].note;
+        vc.normalized = true; /* MISS-1: boundary-normalized query/sql column */
         if (!sel.empty()) sel += ", ";
         sel += bounds[c].sql + " AS " + quote_ident(vc.name);
         cols.push_back(vc);

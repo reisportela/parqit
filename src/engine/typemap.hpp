@@ -33,6 +33,13 @@ constexpr double kDoubleExactInt = 9007199254740992.0; /* 2^53 */
 /* largest non-missing value of a Stata float variable: float32 sources
  * with finite |v| above this must be stored as double, never missing */
 constexpr double kStataFloatMax = 1.7014117331926443e+38;
+/* Stata's first missing value (.) sentinel == SV_missval == 2^1023.
+ * A finite double whose magnitude is >= this collides with Stata's missing
+ * codes and is unstorable as an ordinary number, exactly like NaN/±Inf; the
+ * eager fill and direct-save paths map such values to missing via SV_missval,
+ * and the lazy paths use this engine-side constant (which must equal the
+ * runtime SV_missval) so the two agree bit-for-bit. */
+constexpr double kStataMissThreshold = 0x1p1023; /* 8.98846567431158e+307 */
 
 enum class StType { Byte, Int, Long, Float, Double, Str, StrL };
 

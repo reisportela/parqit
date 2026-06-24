@@ -153,5 +153,20 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          # Two install routes from the same release:
+          #  * the per-platform / all-platforms ZIPs for offline download-then-install;
+          #  * the LOOSE package files (parqit.pkg, stata.toc, the .ado/.sthlp and the
+          #    per-OS *.plugin binaries) so a user can install directly over the
+          #    internet with
+          #      net install parqit, from("<this release's download URL>") replace
+          #    Stata fetches parqit.pkg from the release URL and the matching plugin.
+          files: |
+            dist/*.zip
+            dist/parqit_all_platforms/parqit.pkg
+            dist/parqit_all_platforms/stata.toc
+            dist/parqit_all_platforms/parqit.ado
+            dist/parqit_all_platforms/parqit.sthlp
+            dist/parqit_all_platforms/parqit_linux64.plugin
+            dist/parqit_all_platforms/parqit_macarm64.plugin
+            dist/parqit_all_platforms/parqit_win64.plugin
           generate_release_notes: true

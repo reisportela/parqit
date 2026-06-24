@@ -21,6 +21,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 
 namespace parqit {
@@ -29,6 +30,12 @@ struct ExprSchema {
     /* column name → kind: 'n' numeric (includes all date/period counts),
      * 's' string */
     std::map<std::string, char> kinds;
+    /* MISS-1: columns already guaranteed free of IEEE specials (NaN/±Inf/
+     * out-of-Stata-range) — the lazy boundary normalized them. missing()/mi()
+     * on a bare reference to such a column needs only the cheap `IS NULL` test,
+     * not a per-row isfinite scan. A column absent here (e.g. a gen/replace
+     * result, an aggregate, or any compound expression) gets the full check. */
+    std::set<std::string> normalized;
 };
 
 struct ExprResult {

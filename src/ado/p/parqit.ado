@@ -1,4 +1,4 @@
-*! version 0.1.9 23jun2026
+*! version 0.1.11 24jun2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)

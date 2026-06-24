@@ -6,6 +6,140 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-06-24
+
+Fourth adversarial-audit round plus a dedicated two-directional data-integrity
+audit. Every fix below was checked against an independent oracle (native Stata,
+or pyarrow/duckdb for the foreign side) — the static audits' predictions were
+unverified, and one (PQ-AUD-003) turned out to be wrong, see Notes. Locked by
+`v37_audit_fixes_20260623d` and `v38_xtool_fidelity` plus new C++ unit tests
+(`DATE-LIT-1`, `MISS-1`); 48/48 Stata suites and 53/826 C++ assertions green, no
+prior suite regressed.
+
+### Fixed
+- **Lazy float/double columns normalize IEEE specials to Stata missing at the
+  boundary (PQ-AUD-001).** A foreign Parquet `NaN`, `±Inf`, or a magnitude that
+  collides with Stata's missing sentinel (`|x| ≥ SV_missval = 2^1023`) now
+  becomes `.` the moment a lazy view scans it — the same guard
+  the eager `use, clear` fill and the direct in-memory save already applied. So
+  `missing(x)`, `keep if missing(x)`, sorts, stats, `duplicates`, and lazy
+  `save` over hostile Parquet now match the eager path instead of leaking a
+  value Stata cannot represent. A special generated *after* the boundary
+  (`gen z = exp(10000)` → `+Inf`) is caught by `missing()`/`mi()` and by lazy
+  `save` too, matching native Stata's overflow-to-missing.
+- **Lazy string columns fold a Parquet NULL to the empty string `""`
+  (PQ-AUD-002).** Stata has no string NULL; `""` is the string missing value.
+  Lazy views now coalesce `NULL` → `""` at the boundary, so a `NULL` and an
+  empty string tie for `sort`/`_n`/`keep in`/`duplicates` and lazy `save` never
+  writes a string NULL — again matching the eager fill.
+- **`duplicates drop` with no varlist now folds missing encodings
+  (PQ-AUD-006).** With the 001/002 boundary normalization in place, the
+  no-varlist `SELECT DISTINCT` collapses `NULL`-vs-`""` and `NaN`-vs-`NULL`
+  exactly like native Stata — fixed at the root with zero extra query cost
+  (the raw `DISTINCT` is kept; no `row_number()` partition was needed).
+- **`egen` enforces an explicit storage type as value semantics, not just
+  metadata (PQ-AUD-004).** `egen byte t = total(x)` whose sum is out of byte
+  range now stores `.` (native), not 200; a narrow numeric type truncates toward
+  zero / sends out-of-range to missing via the same `coerce_storage()` `generate`
+  uses, and a string storage type on a numeric `egen` is a loud type error.
+- **`generate` rejects a storage type whose family disagrees with the
+  expression (PQ-AUD-005).** `gen str3 s = 123` and `gen byte b = "abc"` are now
+  loud type mismatches (native r(109)) instead of silently producing a column
+  whose metadata contradicts its values.
+- **`td()`/`tc()`/`tC()` reject impossible calendar dates and a 60th second
+  (PQ-AUD-007).** `td(31feb2020)`, `td(29feb2019)`, `td(31apr2020)`,
+  `tc(... 00:00:60)`, `tc(... 24:00:00)` now fail loudly (native r(198)) instead
+  of rolling forward to a wrong date via day-count arithmetic; `parse_dmy()`
+  gained month-length + leap-year validation and `parse_hms()` now bounds the
+  second at `< 60`. (Valid leap days like `29feb2020` still parse.)
+- **`save` of an out-of-range `%tc` datetime now errors loudly at the exact
+  int64-microsecond ceiling (DT-001).** The guard literal `9.22…e15` ms rounded
+  *up* one ulp to the double `9223372036854776.0`, leaving a one-ulp hole where
+  a `%tc` value (a year ~294,247 date) passed the check and `llround(ms·1000)`
+  hit `2^63` (undefined → `INT64_MIN`) and was written to Parquet with `rc 0` —
+  exactly the "no INT64_MIN on disk / no silent out-of-range" promise the
+  contract makes. Both the fill and the staged/direct save paths now bound the
+  microsecond product directly against ±`2^63` (`0x1p63`, exactly representable),
+  also keeping the result off the `INT64_MIN` sentinel. Found by the
+  data-integrity audit; pinned in `v38_xtool_fidelity`. Real dates are
+  unaffected (the trigger is unreachable by any genuine date).
+
+### Performance
+- The 001/002 boundary normalization makes float/double and string columns
+  computed expressions, so operations that previously read a raw Parquet column
+  pay a small per-row guard. A `MISS-1` provenance flag (`ViewCol.normalized`)
+  removes the redundant double-guarding: a boundary column carried through
+  unchanged skips the guard in `missing()` and in lazy `save`, and only a
+  recomputed column (gen/replace/aggregate) pays. On an in-memory 4M-row probe,
+  collect/filter/sort/collapse stayed at baseline; `save` and
+  `count if missing()` over a pure float column carry the irreducible cost of
+  the boundary `CASE` (largest measured ~+25–60 ms/4M rows in memory, which
+  shrinks against I/O out-of-core). Correctness is the binding constraint here.
+
+### Notes
+- **PQ-AUD-003 was evaluated and intentionally NOT applied — it is a false
+  positive.** The audit claimed lazy `replace` should coerce into the existing
+  narrow storage type (so `replace b = 200` on a `byte` → `.`, `replace s =
+  "abcdef"` on a `str3` → `"abc"`). Native Stata does the opposite: `replace`
+  **auto-promotes** the storage type to fit the value (`byte`→`int` keeping 200,
+  `str3`→`str6` keeping `"abcdef"`, verified on Stata 16+). parqit already
+  matches that promotion (the collect-time `apply_meta_type()` widening), so
+  applying the audit's fix would have *introduced* a precision/value regression.
+  A regression guard in `v37` pins the correct promotion behaviour.
+- **Two-directional data-integrity audit — verdict: faithful.** A 9-dimension
+  source audit (type map, value fill, save, missing values, strings, date/time,
+  numeric precision, metadata, structure) plus an empirical round-trip campaign
+  with independent pyarrow/duckdb oracles found exactly one defect (DT-001,
+  fixed above) and no S1–S3 issues. Confirmed exact in BOTH directions: every
+  foreign (DuckDB/Arrow/pyarrow) integer/float/decimal/bool/date/timestamp/
+  string/NULL lands in Stata exactly (within the documented type contract), and
+  Stata byte/int/long/float/double/str#/strL/dates/missing/labels/notes/formats/
+  characteristics save to Parquet and round-trip exactly. The only losses are
+  Stata's *own* limits — no native int64 (values beyond 2^53 round to the
+  nearest double) and a single Parquet missing concept (extended missing `.a`–
+  `.z` collapse to `.`, labels kept) — and **every such loss is announced with a
+  loud `note:`**, never silent. Invalid UTF-8 on write is refused (`rc≠0`); an
+  embedded NUL round-trips faithfully to Stata's own NUL-terminated view of a
+  `str#`. Locked by `v38_xtool_fidelity`.
+
+### Documentation
+- Help (`parqit.sthlp`) and `README.md` now carry an explicit **Acknowledgements**
+  section crediting **`pq` by Jon Rothbaum** as the work from which the `parqit`
+  solution was designed, and thanking the **BPLIM team at Banco de Portugal**
+  (https://bplim.bportugal.pt/), whose interaction greatly benefited development.
+  The help's date-literal list now also documents `tC()` and the loud rejection
+  of impossible dates.
+- **`README.md` now teaches a one-line `net install` directly from GitHub** —
+  `net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.11") replace`
+  — alongside the offline download-then-install route. The release workflow
+  (`.github/workflows/build.yml`) now also publishes the loose package files
+  (`parqit.pkg`, `stata.toc`, `.ado`/`.sthlp`, per-OS `*.plugin`) as release
+  assets so that URL resolves; the `net install` mechanism was verified locally
+  against the package layout (`net install` → `version` → `selftest` all rc 0).
+
+## [0.1.10] — 2026-06-23
+
+Follow-up to the third audit round, applying the deferred items that are clean
+and constraint-safe. Locked by `v36_audit_fixes_20260623c`; 46/46 Stata suites
+and 50/784 C++ assertions green.
+
+### Fixed
+- **A no-by `parqit collapse` over zero input rows yields zero observations,
+  not one fabricated row (COLLAPSE-EMPTY-1).** `keep if <impossible>` then
+  `collapse (mean) x` no longer collects a single `mean .`, `sum 0`, `count 0`
+  row (native Stata stops with r(2000)); it now emits zero rows via
+  `HAVING count(*) > 0`, consistent with the `by()` case. Zero added cost.
+
+### Notes
+- **RESAVE-STALE-SRCNAME-1 was evaluated and intentionally NOT applied.**
+  Dropping a column's `[src_name]` characteristic on save would have lost the
+  ability to recover the original (foreign) column name after a parqit→parqit
+  round trip — a precision/feature loss. The "staleness" it targeted only
+  arises after an explicit rename, a niche case not worth that trade-off; the
+  characteristic is kept. The other deferred items (PERF-DETAIL-KSCAN /
+  PERF-PCTILE-REBUILD, strL save return codes, reshape i()/j() key folding)
+  remain deferred for the reasons in ASSUMPTIONS #51.
+
 ## [0.1.9] — 2026-06-23
 
 Third adversarial-audit round (multi-agent), run over the v0.1.8 + Codex tree.

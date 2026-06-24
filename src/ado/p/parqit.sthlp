@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.9 23jun2026}{...}
+{* *! version 0.1.11 24jun2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -412,7 +412,8 @@ literals, and functions including:
 {p 8 8 2}{cmd:strlen ustrlen upper lower trim ltrim rtrim substr strpos}
 {cmd:subinstr string real regexm}{p_end}
 {p 8 8 2}{cmd:year month day quarter dow doy mdy dofm mofd yofd} and the
-date literals {cmd:td() tm() tq() th() tw() ty() tc()}{p_end}
+date literals {cmd:td() tc() tC() tm() tq() th() tw() ty()} (impossible dates
+like {cmd:td(31feb2020)} and a 60th second are rejected loudly){p_end}
 
 {pstd}
 {cmd:string()} and {cmd:strofreal()} use Stata's default {cmd:%9.0g}
@@ -585,12 +586,40 @@ returns {cmd:r(path)} and {cmd:r(exists)}. {cmd:parqit version} returns
 returns {cmd:r(selftest)} ({cmd:ok}).
 
 
+{marker author}{...}
 {title:Author}
 
 {pstd}Miguel Portela{break}
 NIPE / Universidade do Minho and BPLIM / Banco de Portugal{break}
-{browse "mailto:miguel.portela@eeg.uminho.pt":miguel.portela@eeg.uminho.pt}
+Email: {browse "mailto:miguel.portela@eeg.uminho.pt":miguel.portela@eeg.uminho.pt}{p_end}
 
-{pstd}parqit embeds {browse "https://duckdb.org":DuckDB} and uses the Apache
-Arrow C Data Interface. It is not affiliated with StataCorp. Issues and
-source: {browse "https://github.com/reisportela/parqit"}.
+{pstd}Issues and source:
+{browse "https://github.com/reisportela/parqit":github.com/reisportela/parqit}.{p_end}
+
+
+{marker acknowledgements}{...}
+{title:Acknowledgements}
+
+{pstd}
+{cmd:parqit} takes {bf:pq} by Jon Rothbaum as its starting point -- the work from
+which the {cmd:parqit} solution was designed -- and re-bases the manipulation
+layer on an embedded engine. Full credit and thanks to:{p_end}
+{phang2}{bf:pq} by Jon Rothbaum (Stata) -
+{browse "https://github.com/jrothbaum/stata_parquet_io":github.com/jrothbaum/stata_parquet_io}{p_end}
+{phang2}{bf:DuckDB} - {browse "https://duckdb.org":duckdb.org}{p_end}
+{phang2}{bf:Apache Arrow C Data Interface} -
+{browse "https://arrow.apache.org/docs/format/CDataInterface.html":arrow.apache.org}{p_end}
+
+{pstd}
+Jon Rothbaum's package, and the care he puts into its correctness, directly shaped
+{cmd:parqit}'s design and its test suite; the debt is gratefully acknowledged.{p_end}
+
+{pstd}
+We warmly thank the {bf:BPLIM} team at {bf:Banco de Portugal}
+({browse "https://bplim.bportugal.pt/":bplim.bportugal.pt}), whose interaction
+throughout greatly benefited the development of {cmd:parqit}.{p_end}
+
+{pstd}
+{cmd:parqit} embeds {browse "https://duckdb.org":DuckDB} and uses the Apache Arrow
+C Data Interface; it is not affiliated with StataCorp. All remaining errors are the
+author's.{p_end}

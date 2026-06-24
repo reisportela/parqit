@@ -624,10 +624,78 @@ entry notes the conservative fallback if the assumption proves wrong.
       from the already-materialised, cell-bounded GROUP BY result instead of a
       separate `count(DISTINCT)` scan (PERF-TAB2-PRECOUNT-1) — one pass not two,
       output unchanged. This offsets the per-row group-key normalisation above.
-    - **Deferred (loud/safe today):** the no-by `collapse` over zero rows
-      fabricates a single row instead of Stata's r(2000) (COLLAPSE-EMPTY-1 — a
-      guard would add a count scan to every no-by collapse for a rare case); a
-      load->save->load round trip can re-apply a now-stale `[src_name]` char
-      (RESAVE-STALE-SRCNAME-1); strL save return codes stay unchecked (#47a class);
-      per-percentile re-sort of the sorted list (PERF-PCTILE-REBUILD-1, same class
-      as PERF-DETAIL-KSCAN). All are tracked for a follow-up.
+    - **Follow-up (v0.1.10):** the no-by `collapse` over zero rows no longer
+      fabricates a row — it emits zero observations via `HAVING count(*) > 0`
+      (COLLAPSE-EMPTY-1), at zero added cost and consistent with the `by()` case
+      (native Stata r(2000) is an error; zero rows is the non-corrupting analog).
+    - **RESAVE-STALE-SRCNAME-1 evaluated and intentionally NOT applied.** Dropping
+      `[src_name]` on save (to avoid a provenance char that can go stale after an
+      explicit rename) would lose the original (foreign) column-name recovery on a
+      parqit->parqit round trip — a precision/feature loss the maintainer's
+      constraints forbid. The characteristic is kept; the staleness is a niche,
+      rename-only cosmetic and not worth the trade-off.
+    - **Still deferred (loud/safe today):** strL save return codes stay unchecked
+      (#47a class); the sorted-array percentile list is rebuilt per percentile
+      (PERF-PCTILE-REBUILD-1) and `summarize, detail` scans once per variable
+      (PERF-DETAIL-KSCAN) — both gated on a measured A/B since a CTE rewrite could
+      change a returned scalar; `reshape long`/`wide` i()/j() grouping does not yet
+      fold ''/NaN keys (GROUPKEY-1 was applied to collapse/contract/duplicates/egen
+      but reshape was just restructured for leading-zero suffixes, so its key
+      folding is left for a focused follow-up).
+
+52. **Residual-hazard fixes from the 2026-06-24 fourth adversarial audit round
+    (v0.1.11).** Every claim was checked against a native Stata oracle before any
+    change — the audit ran statically and its runtime predictions were unverified.
+    - **Lazy boundary normalisation (PQ-AUD-001/002).** `boundary_for()` now maps
+      a foreign FLOAT/DOUBLE `NaN`/`±Inf`/`|x| ≥ SV_missval` to NULL and folds a
+      VARCHAR/ENUM/UUID `NULL` to `""`, the same guards the eager fill and direct
+      save already used. Lazy views therefore agree with the eager `use, clear`
+      path on missingness, order, stats, dedup and saved payloads. A column's
+      values are now computed expressions rather than raw Parquet columns, so a
+      `MISS-1` provenance flag (`ViewCol.normalized`, set only at the boundary,
+      dropped by any recomputing verb) lets `missing()` and lazy `save` skip the
+      redundant guard on already-clean columns — keeping the common path at
+      baseline while a gen/replace/aggregate result (which *can* hold a generated
+      special) still gets the full finite check. `duplicates drop` with no varlist
+      (PQ-AUD-006) is fixed for free by this normalisation: `SELECT DISTINCT` over
+      the now-folded columns collapses `NULL`-vs-`""` and `NaN`-vs-`NULL` exactly
+      like native Stata, so no `row_number()` rewrite (and no perf regression) was
+      needed.
+    - **`egen` storage = value semantics (PQ-AUD-004)** and **`gen` type-family
+      checking (PQ-AUD-005).** `egen` with an explicit narrow numeric type now runs
+      `coerce_storage()` (out-of-range → missing, native-verified) and rejects a
+      string storage type; `gen` rejects a storage type whose family disagrees with
+      the expression (native r(109)). Both were metadata-only before.
+    - **Date/time literal validation (PQ-AUD-007).** `parse_dmy()` validates month
+      length and leap years and `parse_hms()` bounds the second at `< 60`, so
+      `td(31feb2020)`, `td(29feb2019)`, `tc(... 00:00:60)` fail loudly (native
+      r(198)) instead of rolling forward. A `tc()`/`tC()` 60th second is rejected
+      even though native `%tC` accepts a *true* leap-second instant: parqit stores
+      `%tC` as the same count as `%tc` (no leap-second table — item #14), so a `:60`
+      here could only be silently mis-converted, and a loud error is the safe match.
+    - **PQ-AUD-003 evaluated and intentionally NOT applied (false positive).** The
+      audit wanted lazy `replace` to coerce into the *existing* narrow storage type
+      (byte `replace b = 200` → `.`, str3 `replace s = "abcdef"` → `"abc"`). Native
+      Stata `replace` does the opposite — it **auto-promotes** the storage type to
+      fit the value (byte→int keeping 200, str3→str6 keeping `"abcdef"`, int→long,
+      long→double; verified on Stata 16+). parqit already reproduces that promotion
+      via the collect-time `apply_meta_type()` range-widening, so adopting the
+      audit's "fix" would have *introduced* a value/precision regression. A
+      regression guard in `v37_audit_fixes_20260623d` pins the promotion behaviour
+      so it cannot be "corrected" away later.
+
+53. **Two-directional data-integrity audit (2026-06-24).** A 9-dimension source
+    audit plus an empirical pyarrow/duckdb round-trip campaign confirmed parqit is
+    exactly faithful both ways (foreign Parquet → Stata, and Stata → Parquet),
+    within the documented type contract, and that the only value losses are Stata's
+    own limits (no int64 type → >2^53 rounds to double; one Parquet missing concept
+    → extended `.a`–`.z` collapse to `.`), each announced with a loud `note:`.
+    - **DT-001 fixed:** the `%tc` save range guard rejected only `ms > 9.22…e15`,
+      but that ms literal rounds up one ulp to the double `9223372036854776.0`,
+      so a `%tc` value at the int64-microsecond ceiling (a year ~294,247 date)
+      passed the guard and `llround(ms·1000)` reached `2^63` (UB → `INT64_MIN`),
+      written with `rc 0`. Both save paths (`plugin_io.cpp` fill and staged) now
+      bound the microsecond product directly against ±`2^63` (`0x1p63`), which is
+      exactly representable and also excludes the `INT64_MIN` sentinel. The
+      sibling `%tC` guard already used a clean `2^53` power-of-two literal and was
+      not affected. Pinned by `v38_xtool_fidelity`; real dates are unaffected.

@@ -1727,14 +1727,21 @@ int convert_save_numeric(WKind wk, double d, void *dest, idx_t idx, bool *frac,
     }
     case WTs: {
         double ms = d - static_cast<double>(parqit::kEpochShiftMs);
-        if (ms < -9.223372036854775e15 || ms > 9.223372036854775e15) {
+        /* DT-001: bound the microsecond product directly against +-2^63 (which
+         * is exactly representable as a double, 0x1p63). The older
+         * `ms > 9.22..e15` ms-literal rounds UP one ulp, leaving a one-ulp hole
+         * at the int64 ceiling where llround(ms*1000) reaches 2^63 (undefined ->
+         * INT64_MIN) and is written with rc 0. Strict bounds also keep the
+         * result off the INT64_MIN sentinel the contract forbids on disk. */
+        double us = ms * 1000.0;
+        if (!(us > -0x1p63 && us < 0x1p63)) {
             *err = "parqit save: " + vname +
                    " has a %tc datetime value out of range for the on-disk "
                    "64-bit microsecond count";
             return kRcUsage;
         }
         static_cast<int64_t *>(dest)[idx] =
-            static_cast<int64_t>(std::llround(ms * 1000.0));
+            static_cast<int64_t>(std::llround(us));
         return 0;
     }
     case WTC: {
@@ -2306,8 +2313,12 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
                          * (TYPE-SAVE-1). This is the WTs sibling of the
                          * WDate/WTC/WPeriod range guards. */
                         double ms = d - static_cast<double>(parqit::kEpochShiftMs);
-                        if (ms < -9.223372036854775e15 ||
-                            ms > 9.223372036854775e15) {
+                        /* DT-001: bound the microsecond product against +-2^63
+                         * (0x1p63, exactly representable); the older ms-literal
+                         * rounded up one ulp, leaving an int64-ceiling hole that
+                         * wrote INT64_MIN with rc 0. */
+                        double us = ms * 1000.0;
+                        if (!(us > -0x1p63 && us < 0x1p63)) {
                             cry("parqit save: " + v.name +
                                 " has a %tc datetime value out of range for the "
                                 "on-disk 64-bit microsecond count");
@@ -2315,7 +2326,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
                             break;
                         }
                         static_cast<int64_t *>(vdata[i])[filln] =
-                            static_cast<int64_t>(std::llround(ms * 1000.0));
+                            static_cast<int64_t>(std::llround(us));
                         break;
                     }
                     case WTC: {
