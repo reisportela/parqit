@@ -6,6 +6,38 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-06-24
+
+Fifth adversarial-audit round (external test-pack, `verifications/parqit_audit_package`).
+The single live-reproduced finding was confirmed against native Stata before the
+fix, and the fix's Mata primitives were verified empirically (`st_global` on an
+absent variable aborts rc 3300; `st_varindex` aborts rc 3500 and is unusable as a
+guard; `_st_varindex` returns `.` for an absent name and for `"_dta"` without
+aborting or abbreviating). Locked by `v39_char_projection`; 49/49 Stata suites and
+the C++ suite green, no prior suite regressed.
+
+### Fixed
+- **Restoring a characteristic or note of a projected-away variable no longer
+  aborts materialisation (PARQIT-CHAR-01).** Reading a column subset of a Parquet
+  file that parqit wrote with a variable characteristic or note —
+  `parqit use <varlist> using f, clear`, or a `contract`/`collapse`/`keep`/`drop`/
+  `reshape` that removes a char- or note-bearing column before `collect` — emitted
+  the char/note record for the now-absent variable, and the ado's `st_global(tgt +
+  "[" + cname + "]", …)` aborted with `rc 3300 argument out of range`
+  (`_parqit_resp_decorate(): function returned error`). The materialisation failed
+  loudly and left memory intact (no stale/missing data), but the reach was broad:
+  a plain column-subset `use` of any parqit-written file carrying metadata could
+  trip it. Fixed at both layers, defence in depth: the plugin emitter now filters
+  char/note records to `_dta` and live result columns, mirroring the `save` path's
+  live-column filter; and the ado's `char` branch applies a characteristic only to
+  `_dta` or a variable that survives in the staged result (existence-gated with the
+  non-aborting `_st_varindex`, which also protects already-written and foreign
+  files without a rebuild). `rename` still carries the characteristic to the new
+  name (META-2), and notes/chars still round-trip on a full read — both are pinned
+  as non-regressions by the new test. Distinct from META-1 (rc 3300 from a
+  truncated long char line) and META-2 (chars following a rename); neither covered
+  a char on a variable removed by projection.
+
 ## [0.1.11] — 2026-06-24
 
 Fourth adversarial-audit round plus a dedicated two-directional data-integrity

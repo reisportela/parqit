@@ -1,4 +1,4 @@
-*! version 0.1.11 24jun2026
+*! version 0.1.12 24jun2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -2541,10 +2541,23 @@ void _parqit_resp_decorate(string scalar resp)
             cname = _parqit_unhex(f[3])
             /* a char whose target/name is not a legal Stata name would abort
              * st_global; warn and skip the characteristic instead */
-            if (st_isname(cname) & (tgt == "_dta" | st_isname(tgt)))
+            if (!st_isname(cname) | !(tgt == "_dta" | st_isname(tgt)))
+                printf("note: skipping characteristic %s[%s] (invalid name)\n",
+                       tgt, cname)
+            /* PARQIT-CHAR-01: a projection (subset use / contract / collapse /
+             * keep / drop / reshape …) can remove the variable that carried the
+             * char or note (notes are chars). Applying st_global to an absent
+             * variable aborts with rc 3300 and kills an otherwise-good load, so
+             * apply only to _dta or a variable that survives in the staged
+             * result. Use _st_varindex (returns . for an absent name) — the
+             * underscore-less st_varindex ABORTS rc 3500 on an absent name, so
+             * it cannot be the guard; and _st_varindex("_dta") is ., so the
+             * _dta branch must stay explicit. _st_varindex is reached only for
+             * a legal tgt (the invalid-name branch above already returned). */
+            else if (tgt == "_dta" | _st_varindex(tgt) < .)
                 st_global(tgt + "[" + cname + "]", _parqit_unhex(f[4]))
             else
-                printf("note: skipping characteristic %s[%s] (invalid name)\n",
+                printf("note: dropping characteristic %s[%s] (variable not in result)\n",
                        tgt, cname)
         }
         else if (f[1] == "dlabel") {

@@ -517,7 +517,16 @@ void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
         }
     }
     if (ctx.meta.present && ctx.meta.chars.is_object()) {
+        /* PARQIT-CHAR-01: emit a char/note only for _dta or a column that
+         * survives in the result. A projection (subset use / contract /
+         * collapse / keep / drop / reshape …) can drop the variable that
+         * carried the char; an orphan record makes the ado's st_global abort
+         * rc 3300 on a non-existent target. Mirror the save path's live-column
+         * filter (plugin_view.cpp). */
+        std::set<std::string> live;
+        for (const auto &p : ctx.active) live.insert(p.stata_name);
         for (const auto &tgt : ctx.meta.chars.items()) {
+            if (tgt.key() != "_dta" && !live.count(tgt.key())) continue;
             if (!tgt.value().is_object()) continue;
             for (const auto &c : tgt.value().items()) {
                 if (c.value().is_string())
