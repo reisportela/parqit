@@ -1021,12 +1021,68 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
     /* Refuse to overwrite the open view's own backing file. A lazy view rereads
      * its source at fetch time, so writing onto it truncates the data the view
      * (and any other view over the same file) still needs — silently (IO-1).
-     * Only an exact canonical-path match is refused; a temp bridge or a
-     * different file is fine. Glob sources are skipped (a pattern has no path). */
+     * A temp bridge or a different file is fine.
+     *
+     * SAVE-SELFGLOB-2 (was SAVE-SELFGLOB-1): a glob source is compared by
+     * actually MATCHING the destination against the pattern, not by refusing
+     * everything under the pattern's base directory — the old containment
+     * test rejected any existing destination in the same folder as a
+     * `qp_*.parquet` source (a false positive on the documented
+     * filter-then-save-next-to-the-source workflow), while a RELATIVE
+     * not-yet-existing destination escaped comparison entirely (a real hole:
+     * both paths are made absolute first now). The glob dialect is parqit's
+     * own (GLOB-2): `*`/`?` never cross a `/`, `**` does, `[` is literal. A
+     * directory destination is also refused when the pattern's base lies
+     * inside it (a partitioned `replace` renames the tree aside and would
+     * delete the source). */
     {
         std::error_code ec;
-        std::string dabs = std::filesystem::weakly_canonical(dest, ec).string();
-        if (ec || dabs.empty()) dabs = std::filesystem::absolute(dest, ec).string();
+        std::string dabs =
+            std::filesystem::weakly_canonical(
+                std::filesystem::absolute(dest, ec), ec)
+                .generic_string();
+        /* stored patterns carry source_for's escapes — decode "[*]"/"[?]"/
+         * "[[]" to literal bytes (sentinels for the two metachars, which no
+         * real path uses) so the matcher sees exactly parqit's dialect */
+        auto gdecode = [](const std::string &p) {
+            std::string out;
+            for (size_t i = 0; i < p.size(); i++) {
+                if (i + 2 < p.size() && p[i] == '[' && p[i + 2] == ']' &&
+                    (p[i + 1] == '*' || p[i + 1] == '?' || p[i + 1] == '[')) {
+                    out += (p[i + 1] == '*'   ? '\x01'
+                            : p[i + 1] == '?' ? '\x02'
+                                              : '[');
+                    i += 2;
+                } else {
+                    out += p[i];
+                }
+            }
+            return out;
+        };
+        std::function<bool(const char *, const char *)> gmatch =
+            [&](const char *p, const char *s) -> bool {
+            while (*p) {
+                if (*p == '*') {
+                    bool deep = (p[1] == '*');
+                    const char *rest = deep ? p + 2 : p + 1;
+                    for (const char *t = s;; t++) {
+                        if (gmatch(rest, t)) return true;
+                        if (!*t || (!deep && *t == '/')) break;
+                    }
+                    return false;
+                }
+                if (!*s) return false;
+                if (*p == '?') {
+                    if (*s == '/') return false;
+                } else {
+                    char pc = *p == '\x01' ? '*' : *p == '\x02' ? '?' : *p;
+                    if (pc != *s) return false;
+                }
+                p++;
+                s++;
+            }
+            return !*s;
+        };
         const std::string &psql = g_view_ref().source_paths_sql();
         for (size_t i = 0; i < psql.size();) {
             if (psql[i] != '\'') { i++; continue; }
@@ -1039,32 +1095,36 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
                 }
                 sp += psql[i++];
             }
-            /* SAVE-SELFGLOB-1: a glob/directory source (the recursive-glob form
-             * produced by "parqit use" over a directory) has no single path, but
-             * a partitioned "save dir, replace" renames-aside dir and would
-             * delete the source tree. For a glob source compare against its base
-             * directory (glob tail stripped) and refuse on containment either
-             * way; for a plain file keep the exact-path match. */
-            bool is_glob = sp.find('*') != std::string::npos ||
-                           sp.find('?') != std::string::npos;
-            std::string cmp_src = sp;
-            if (is_glob) {
-                size_t g = sp.find_first_of("*?");
-                size_t slash = sp.rfind('/', g);
-                cmp_src = (slash == std::string::npos) ? std::string(".")
-                                                       : sp.substr(0, slash);
-            }
+            std::string spd = gdecode(sp);
+            bool is_glob = spd.find('*') != std::string::npos ||
+                           spd.find('?') != std::string::npos;
             std::error_code ec2;
-            std::string sabs = std::filesystem::weakly_canonical(cmp_src, ec2).string();
-            if (ec2 || sabs.empty()) sabs = std::filesystem::absolute(cmp_src, ec2).string();
+            /* absolute pattern/path for the comparison (weakly_canonical keeps
+             * non-existing tails, so a fresh destination still compares) */
+            std::string sabs =
+                std::filesystem::weakly_canonical(
+                    std::filesystem::absolute(spd, ec2), ec2)
+                    .generic_string();
             auto path_contains = [](const std::string &a, const std::string &b) {
                 if (a.empty() || b.empty()) return false;
                 if (a == b) return true;
                 return b.size() > a.size() && b.compare(0, a.size(), a) == 0 &&
                        b[a.size()] == '/';
             };
-            bool clash = is_glob ? (path_contains(sabs, dabs) || path_contains(dabs, sabs))
-                                 : (!sabs.empty() && !dabs.empty() && sabs == dabs);
+            bool clash;
+            if (is_glob) {
+                /* dest (or anything a dest DIRECTORY could shadow) matches the
+                 * source pattern, or the pattern's base dir sits inside dest */
+                size_t g = sabs.find_first_of("*?");
+                size_t slash = sabs.rfind('/', g);
+                std::string base =
+                    (slash == std::string::npos) ? sabs : sabs.substr(0, slash);
+                clash = gmatch(sabs.c_str(), dabs.c_str()) ||
+                        path_contains(dabs, base);
+            } else {
+                clash = (!sabs.empty() && !dabs.empty() &&
+                         (sabs == dabs || path_contains(dabs, sabs)));
+            }
             if (clash) {
                 cry("parqit save: " + dest +
                     " overlaps the open view's own source (" + sp +
