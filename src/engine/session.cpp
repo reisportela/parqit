@@ -9,6 +9,12 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace parqit {
 
 namespace {
@@ -199,9 +205,38 @@ static void parqit_substr_bytes_fn(duckdb_function_info, duckdb_data_chunk input
     }
 }
 
+/* parqit_finite(x): x when it is a value Stata can hold, else NULL. A
+ * generated double can be NaN/±Inf (exp(800), 1e300*1e300) or reach the
+ * missing-code region |x| >= 2^1023; native Stata reports every one of those
+ * as missing. A real scalar function (not a CASE) so the operand is written
+ * and evaluated ONCE — the CASE idiom repeats the operand's SQL text, which
+ * grows exponentially when arithmetic guards nest (a+b+c+…). */
+static void parqit_finite_fn(duckdb_function_info, duckdb_data_chunk input,
+                             duckdb_vector output) {
+    idx_t n = duckdb_data_chunk_get_size(input);
+    duckdb_vector in = duckdb_data_chunk_get_vector(input, 0);
+    auto *vals = static_cast<double *>(duckdb_vector_get_data(in));
+    uint64_t *validity = duckdb_vector_get_validity(in);
+    auto *out_vals = static_cast<double *>(duckdb_vector_get_data(output));
+    duckdb_vector_ensure_validity_writable(output);
+    uint64_t *out_validity = duckdb_vector_get_validity(output);
+
+    static const double kMissThreshold = 8.988465674311579e307; /* 2^1023 */
+    for (idx_t r = 0; r < n; r++) {
+        if (valid_row(validity, r) && std::isfinite(vals[r]) &&
+            std::fabs(vals[r]) < kMissThreshold) {
+            out_vals[r] = vals[r];
+            duckdb_validity_set_row_valid(out_validity, r);
+        } else {
+            duckdb_validity_set_row_invalid(out_validity, r);
+        }
+    }
+}
+
 static bool register_scalar(duckdb_connection con, const char *name,
                             const std::vector<duckdb_type> &params,
-                            duckdb_scalar_function_t fn, std::string *err) {
+                            duckdb_type ret_type, duckdb_scalar_function_t fn,
+                            std::string *err) {
     duckdb_scalar_function f = duckdb_create_scalar_function();
     if (!f) {
         if (err) *err = std::string("could not create internal function ") + name;
@@ -213,7 +248,7 @@ static bool register_scalar(duckdb_connection con, const char *name,
         duckdb_scalar_function_add_parameter(f, lt);
         duckdb_destroy_logical_type(&lt);
     }
-    duckdb_logical_type ret = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_logical_type ret = duckdb_create_logical_type(ret_type);
     duckdb_scalar_function_set_return_type(f, ret);
     duckdb_destroy_logical_type(&ret);
     duckdb_scalar_function_set_special_handling(f);
@@ -229,11 +264,13 @@ static bool register_scalar(duckdb_connection con, const char *name,
 
 static bool register_internal_functions(duckdb_connection con, std::string *err) {
     return register_scalar(con, "parqit_stata_string", {DUCKDB_TYPE_DOUBLE},
-                           parqit_stata_string_fn, err) &&
+                           DUCKDB_TYPE_VARCHAR, parqit_stata_string_fn, err) &&
            register_scalar(con, "parqit_substr_bytes",
                            {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_DOUBLE,
                             DUCKDB_TYPE_DOUBLE},
-                           parqit_substr_bytes_fn, err);
+                           DUCKDB_TYPE_VARCHAR, parqit_substr_bytes_fn, err) &&
+           register_scalar(con, "parqit_finite", {DUCKDB_TYPE_DOUBLE},
+                           DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err);
 }
 
 } // namespace
@@ -412,6 +449,14 @@ bool atod(const std::string &s, double *out) {
     while (is >> extra)     /* anything left other than blanks is invalid */
         if (extra != ' ' && extra != '\t') return false;
     return true;
+}
+
+std::string spill_suffix() {
+#ifdef _WIN32
+    return "/_parqit_spill_" + std::to_string(_getpid());
+#else
+    return "/_parqit_spill_" + std::to_string(getpid());
+#endif
 }
 
 } // namespace parqit

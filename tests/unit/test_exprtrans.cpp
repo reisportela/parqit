@@ -158,6 +158,54 @@ TEST_CASE("arithmetic and functions match Stata definitions") {
     CHECK(eval_at("x > 2", 3) == "");
 }
 
+TEST_CASE("INF-1: generated infinities are missing everywhere, like Stata") {
+    /* native adjudication 2026-07-02: exp(710)=., 1e300*1e300=., 8e307+8e307=.,
+     * (exp(710) < .)==0, (exp(710) == .)==1, di 1e309 is missing (rc 0) */
+    CHECK(eval_at("exp(800)", 1) == "");
+    CHECK(eval_at("1e300 * 1e300", 1) == "");
+    CHECK(eval_at("8e307 + 8e307", 1) == "");
+    CHECK(eval_at("-8e307 - 8e307", 1) == "");
+    CHECK(eval_at("1e309", 1) == "");            /* out-of-range literal */
+    CHECK(count_where("exp(800) < .") == 0);     /* Inf must not pass < . */
+    CHECK(count_where("exp(800) == .") == 5);    /* and IS missing */
+    /* finite results pass through the guard unchanged */
+    CHECK(std::abs(std::strtod(eval_at("exp(1)", 1).c_str(), nullptr) -
+                   2.718281828459045) < 1e-12);
+}
+
+TEST_CASE("loud rejections match native Stata r(198)/r(109)") {
+    ExprSchema sch = test_schema();
+    CHECK_FALSE(translate_expression("x == .A", sch, false).ok);  /* uppercase */
+    CHECK(translate_expression("x == .a", sch, false).ok);        /* lowercase ok */
+    CHECK_FALSE(translate_expression("x < 1.2.3", sch, false).ok);
+    CHECK_FALSE(translate_expression("x == 1 || x == 2", sch, false).ok);
+    CHECK_FALSE(translate_expression("x == 1 && x == 2", sch, false).ok);
+    CHECK_FALSE(translate_expression("dow(s)", sch, false).ok);   /* r(109) */
+    CHECK_FALSE(translate_expression("year(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("mod(s, 2)", sch, false).ok);
+    CHECK_FALSE(translate_expression("round(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("ln(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("sqrt(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("exp(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("cond(x, \"a\", \"b\", 9)", sch, false).ok);
+    CHECK_FALSE(translate_expression("cond(x, 7, 8, \"z\")", sch, false).ok);
+}
+
+TEST_CASE("SUBINSTR-NULL-1 / DATE-2: null-safe strings, floored day counts") {
+    /* subinstr with an empty/NULL needle returns the string unchanged
+     * (native: subinstr("abc","","X",.) == "abc") */
+    CHECK(eval_at("subinstr(s, \"\", \"X\", .)", 1) == "a");
+    /* fractional day counts floor: day(-0.5) = day(-1) = 31dec1959 → 31,
+     * day(21915.9) = day(21915) → 1 (native-adjudicated 2026-07-02) */
+    CHECK(eval_at("day(21915.9)", 1) == "1");
+    CHECK(eval_at("day(-0.5)", 1) == "31");
+    CHECK(eval_at("dow(1.7)", 1) == "6");
+    /* an out-of-range day count is row-local missing, never a query abort */
+    CHECK(eval_at("year(3e9)", 1) == "");
+    CHECK(eval_at("day(3e9)", 1) == "");
+    CHECK(eval_at("mofd(3e9)", 1) == "");
+}
+
 TEST_CASE("date pseudo-literals and date functions on day counts") {
     CHECK(eval_at("td(01jan2020)", 1) == "21915");
     CHECK(eval_at("td(1 jan 1960)", 1) == "0");
@@ -166,7 +214,9 @@ TEST_CASE("date pseudo-literals and date functions on day counts") {
     CHECK(eval_at("tq(2026q2)", 1) == "265");
     CHECK(eval_at("ty(2026)", 1) == "2026");
     CHECK(eval_at("tc(01jan1960 00:00:01)", 1) == "1000");
-    CHECK(eval_at("d - td(01jan2020)", 2) == "1");
+    /* INF-1: arithmetic computes in double like every Stata expression, so a
+     * day-count difference evaluates as 1.0, not integer 1 */
+    CHECK(eval_at("d - td(01jan2020)", 2) == "1.0");
     CHECK(count_where("d >= td(01jan2020) & d < td(05jan2020)") == 3);
     CHECK(eval_at("year(d)", 1) == "2020");
     CHECK(eval_at("month(d)", 1) == "1");

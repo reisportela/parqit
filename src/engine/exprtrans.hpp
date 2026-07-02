@@ -7,10 +7,12 @@
  *
  * Missing-value semantics:
  *   default (SQL) mode — missing is NULL: comparisons with NULL are
- *     unknown, so `keep if x > 5` drops missings (NULL ⇒ not kept), which
- *     coincides with Stata's outcome for keep-if; explicit `x == .`,
- *     `x != .`, `x < .`, `x >= .` are rewritten to IS NULL tests, and
- *     missing(x)/mi(x) understands strings ("" or NULL).
+ *     unknown, so `keep if x > 5` drops missings (NULL ⇒ not kept). Note
+ *     native Stata KEEPS a missing x there (missing sorts above every
+ *     number) — the SQL default is a deliberate, documented divergence;
+ *     `parqit set statamissing on` restores Stata's ordering. Explicit
+ *     `x == .`, `x != .`, `x < .`, `x >= .` are rewritten to IS NULL tests,
+ *     and missing(x)/mi(x) understands strings ("" or NULL).
  *   statamissing mode — emulates "missing is larger than every number":
  *     every ordering comparison is expanded with IS NULL arms.
  *
@@ -50,8 +52,9 @@ ExprResult translate_expression(const std::string &expr, const ExprSchema &schem
                                 bool statamissing);
 
 /* Translate an expression used as a filter condition: boolean results pass
- * through; numeric results x become (x) <> 0 AND x IS NOT NULL — Stata's
- * "true is nonzero nonmissing". String results are an error. */
+ * through; a bare numeric result x becomes (x IS NULL OR (x) <> 0) — Stata's
+ * "true is nonzero OR missing" (`keep if x` keeps missing x, since missing
+ * counts as true). String results are an error. */
 ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
                             bool statamissing);
 

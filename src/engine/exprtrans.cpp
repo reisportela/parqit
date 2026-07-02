@@ -1,6 +1,8 @@
 #include "engine/exprtrans.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
@@ -73,14 +75,26 @@ struct Lexer {
             }
             tok.t = Tok::Num;
             tok.text = s.substr(i, j - i);
+            /* `1.2.3` lexes as one blob; unrejected it reaches DuckDB as a
+             * cryptic parser error. Stata: r(198). Reject here, anchored. */
+            if (std::count(tok.text.begin(), tok.text.end(), '.') > 1) {
+                error = "invalid number " + tok.text;
+                return tok;
+            }
             i = j;
             return tok;
         }
         if (c == '.') {
-            /* . or .a-.z as a missing literal (when not part of a number) */
+            /* . or .a-.z as a missing literal (when not part of a number);
+             * Stata extended missings are LOWERCASE only — `.A` is r(198) */
             if (i + 1 < s.size() && std::isalpha(static_cast<unsigned char>(s[i + 1]))) {
                 if (i + 2 < s.size() && ident_char(s[i + 2])) {
                     error = "invalid missing-value literal";
+                    return tok;
+                }
+                if (!std::islower(static_cast<unsigned char>(s[i + 1]))) {
+                    error = "invalid missing-value literal (extended missings "
+                            "are .a-.z, lowercase)";
                     return tok;
                 }
                 tok.t = Tok::MissingDot;
@@ -140,8 +154,20 @@ struct Lexer {
         if (two('>', '=')) { tok.t = Tok::Ge; i += 2; return tok; }
         if (two('<', '=')) { tok.t = Tok::Le; i += 2; return tok; }
         switch (c) {
-        case '|': tok.t = Tok::Or; i++; if (i < s.size() && s[i] == '|') i++; return tok;
-        case '&': tok.t = Tok::And; i++; if (i < s.size() && s[i] == '&') i++; return tok;
+        case '|':
+            /* `||` is not Stata expression syntax (r(198)); accepting it
+             * silently would invent a dialect. Reject, anchored. */
+            if (i + 1 < s.size() && s[i + 1] == '|') {
+                error = "|| is not Stata syntax; use |";
+                return tok;
+            }
+            tok.t = Tok::Or; i++; return tok;
+        case '&':
+            if (i + 1 < s.size() && s[i + 1] == '&') {
+                error = "&& is not Stata syntax; use &";
+                return tok;
+            }
+            tok.t = Tok::And; i++; return tok;
         case '!': case '~': tok.t = Tok::Not; i++; return tok;
         case '<': tok.t = Tok::Lt; i++; return tok;
         case '>': tok.t = Tok::Gt; i++; return tok;
@@ -438,11 +464,19 @@ struct Parser {
     bool primary(Val *out) {
         if (!error.empty()) return false;
         switch (cur.t) {
-        case Tok::Num:
-            out->sql = cur.text;
+        case Tok::Num: {
+            /* a literal beyond Stata's double range is a missing VALUE in
+             * native Stata (`di 1e309` prints `.`, rc 0), while DuckDB parses
+             * it to +Inf — which would then leak past comparisons (INF-1) */
+            double lv = std::strtod(cur.text.c_str(), nullptr);
+            if (!std::isfinite(lv) || std::fabs(lv) >= kStataMissThreshold)
+                out->sql = "NULL";
+            else
+                out->sql = cur.text;
             out->kind = 'n';
             advance();
             return true;
+        }
         case Tok::MissingDot:
             out->sql = "NULL"; /* .a-.z collapse to NULL (documented) */
             out->kind = 'n';
@@ -567,9 +601,8 @@ struct Parser {
             /* Stata returns missing for a non-real or overflowing power, e.g.
              * (-8)^0.5 = . ; DuckDB pow() yields nan/inf. Guard to missing so
              * collect and save agree (NUM-1). */
-            std::string pw = "pow(" + as_num(base) + ", " + as_num(expo) + ")";
-            base.sql = "(CASE WHEN isfinite(" + pw + ") THEN " + pw +
-                       " ELSE NULL END)";
+            base.sql = "parqit_finite(pow(" + as_num(base) + ", " +
+                       as_num(expo) + "))";
             base.kind = 'n';
         }
         *out = base;
@@ -590,12 +623,18 @@ struct Parser {
                  * double division yields inf/nan. Guard so a finite quotient
                  * passes through and any non-finite result (incl. 0/0) becomes
                  * missing — keeping collect and save in agreement (NUM-1). */
-                std::string d = "(" + as_num(*out) + " / CAST(" + as_num(r) +
-                                " AS DOUBLE))";
-                out->sql = "(CASE WHEN isfinite(" + d + ") THEN " + d +
-                           " ELSE NULL END)";
+                out->sql = "parqit_finite(" + as_num(*out) + " / CAST(" +
+                           as_num(r) + " AS DOUBLE))";
             } else {
-                out->sql = "(" + as_num(*out) + " * " + as_num(r) + ")";
+                /* INF-1: 1e300*1e300 overflows to +Inf in DuckDB; native
+                 * Stata reports missing (`di 1e300*1e300` = `.`). Unguarded,
+                 * the Inf poisons aggregates/sorts/filters downstream, so
+                 * every arithmetic producer is guarded like / and ^. The
+                 * operand casts make the multiply itself DOUBLE — Stata's
+                 * evaluator is all-double, and a raw INT32*INT32 near 2^31
+                 * would abort the whole query in DuckDB instead. */
+                out->sql = "parqit_finite(CAST(" + as_num(*out) +
+                           " AS DOUBLE) * CAST(" + as_num(r) + " AS DOUBLE))";
             }
             out->kind = 'n';
         }
@@ -619,8 +658,12 @@ struct Parser {
                 }
                 return fail("+/- need matching operand types");
             }
-            out->sql = "(" + as_num(*out) + (op == Tok::Plus ? " + " : " - ") +
-                       as_num(r) + ")";
+            /* INF-1: guard like * — 8e307 + 8e307 must be missing, not +Inf;
+             * DOUBLE operands so INT32 sums near 2^31 compute like Stata
+             * (all-double) instead of aborting on integer overflow */
+            out->sql = "parqit_finite(CAST(" + as_num(*out) +
+                       " AS DOUBLE)" + (op == Tok::Plus ? " + " : " - ") +
+                       "CAST(" + as_num(r) + " AS DOUBLE))";
             out->kind = 'n';
         }
         return true;
@@ -810,9 +853,19 @@ bool Parser::call(const std::string &fname, Val *out) {
         return true;
     }
     if (fname == "abs") return num1("abs");
-    if (fname == "exp") return num1("exp");
+    if (fname == "exp") {
+        if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("exp() needs a numeric argument");
+        /* INF-1: exp(800) is +Inf in DuckDB but missing in Stata (verified
+         * natively: `di exp(710)` = `.`, `exp(710) < .` = 0). Unguarded, the
+         * Inf passed `< .` filters and poisoned collapse/summarize. */
+        out->sql = "parqit_finite(exp(" + as_num(args[0]) + "))";
+        out->kind = 'n';
+        return true;
+    }
     if (fname == "ln" || fname == "log") {
         if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail(fname + "() needs a numeric argument");
         /* Stata: ln(x<=0) is missing; DuckDB ln(0)=-inf, ln(<0) NaN/error */
         out->sql = "(CASE WHEN " + as_num(args[0]) + " > 0 THEN ln(" +
                    as_num(args[0]) + ") ELSE NULL END)";
@@ -821,6 +874,7 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "log10") {
         if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("log10() needs a numeric argument");
         out->sql = "(CASE WHEN " + as_num(args[0]) + " > 0 THEN log10(" +
                    as_num(args[0]) + ") ELSE NULL END)";
         out->kind = 'n';
@@ -828,6 +882,7 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "sqrt") {
         if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("sqrt() needs a numeric argument");
         out->sql = "(CASE WHEN " + as_num(args[0]) + " >= 0 THEN sqrt(" +
                    as_num(args[0]) + ") ELSE NULL END)";
         out->kind = 'n';
@@ -838,6 +893,8 @@ bool Parser::call(const std::string &fname, Val *out) {
     if (fname == "int" || fname == "trunc") return num1("trunc");
     if (fname == "round") {
         if (!need(1, 2)) return false;
+        if (args[0].kind == 's' || (args.size() == 2 && args[1].kind == 's'))
+            return fail("round() needs numeric arguments");
         std::string x = as_num(args[0]);
         /* Stata round(x) = floor(x + 0.5): ties round toward +infinity, NOT
          * away from zero the way SQL round() does — round(-2.5) = -2 (not -3),
@@ -856,9 +913,13 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "mod") {
         if (!need(2, 2)) return false;
+        if (args[0].kind == 's' || args[1].kind == 's')
+            return fail("mod() needs numeric arguments");
         std::string a = as_num(args[0]), b = as_num(args[1]);
         /* Stata mod(x,y) is the nonnegative remainder, and is MISSING for a
-         * nonpositive modulus (mod(7,-3)==., mod(7,0)==.). */
+         * nonpositive modulus (mod(7,-3)==., mod(7,0)==.) — the y=0 case
+         * verified against native Stata 2026-07-02 (`di mod(7,0)` = `.`;
+         * the manual's mod(x,0)=x is stale). */
         out->sql = "(CASE WHEN (" + b + ") <= 0 THEN NULL ELSE (" + a +
                    ") - (" + b + ") * floor((" + a + ") / CAST(" + b +
                    " AS DOUBLE)) END)";
@@ -883,6 +944,11 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (c.empty()) return fail("cond(): first argument must be boolean");
         if (args[1].kind != args[2].kind &&
             !(args[1].kind != 's' && args[2].kind != 's'))
+            return fail("cond(): branches must have the same type");
+        /* the 4th branch must match too — Stata cond(1,"a","b",9) is r(109);
+         * unchecked, DuckDB would silently unify or abort at runtime */
+        if (args.size() == 4 &&
+            (args[3].kind == 's') != (args[1].kind == 's'))
             return fail("cond(): branches must have the same type");
         std::string a = args[1].kind == 'b' ? as_num(args[1]) : args[1].sql;
         std::string b = args[2].kind == 'b' ? as_num(args[2]) : args[2].sql;
@@ -1032,8 +1098,12 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (args[3].sql != "NULL")
             return fail("subinstr(): only the replace-all form (last argument .) "
                         "is supported");
-        out->sql = "replace(coalesce(" + args[0].sql + ", ''), " + args[1].sql +
-                   ", " + args[2].sql + ")";
+        /* SUBINSTR-NULL-1: coalesce ALL string arguments — a NULL needle or
+         * replacement makes DuckDB replace() return NULL, silently wiping the
+         * whole value; Stata subinstr("abc","","X",.) returns "abc" unchanged
+         * (verified natively), which replace(s,'','X') also does. */
+        out->sql = "replace(coalesce(" + args[0].sql + ", ''), coalesce(" +
+                   args[1].sql + ", ''), coalesce(" + args[2].sql + ", ''))";
         out->kind = 's';
         return true;
     }
@@ -1069,12 +1139,19 @@ bool Parser::call(const std::string &fname, Val *out) {
         out->kind = 'b';
         return true;
     }
-    /* date part extraction over Stata day counts */
+    /* date part extraction over Stata day counts. DATE-2: a fractional day
+     * count is FLOORED, not rounded — natively `day(-0.5)` = 31 (day -1 =
+     * 31dec1959) and `day(21915.9)` = day(21915) — and an out-of-range count
+     * (`year(3e9)`) is row-local missing, not a query abort: floor() + a
+     * try()-wrapped cast, exactly like mdy/dofm got in DATE-1. */
+    auto day_arg = [&](size_t k) {
+        return "(DATE '1960-01-01' + try(CAST(floor(" + as_num(args[k]) +
+               ") AS INTEGER)))";
+    };
     auto datepart = [&](const char *part) {
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail(fname + "() needs a numeric date");
-        out->sql = std::string(part) + "(DATE '1960-01-01' + CAST(" +
-                   as_num(args[0]) + " AS INTEGER))";
+        out->sql = std::string(part) + "(" + day_arg(0) + ")";
         out->kind = 'n';
         return true;
     };
@@ -1084,45 +1161,51 @@ bool Parser::call(const std::string &fname, Val *out) {
     if (fname == "quarter") return datepart("quarter");
     if (fname == "dow") {
         if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("dow() needs a numeric date");
         /* Stata: 0=Sunday; DuckDB dayofweek: 0=Sunday too */
-        out->sql = "dayofweek(DATE '1960-01-01' + CAST(" + as_num(args[0]) +
-                   " AS INTEGER))";
+        out->sql = "dayofweek(" + day_arg(0) + ")";
         out->kind = 'n';
         return true;
     }
     if (fname == "doy") {
         if (!need(1, 1)) return false;
-        out->sql = "dayofyear(DATE '1960-01-01' + CAST(" + as_num(args[0]) +
-                   " AS INTEGER))";
+        if (args[0].kind == 's') return fail("doy() needs a numeric date");
+        out->sql = "dayofyear(" + day_arg(0) + ")";
         out->kind = 'n';
         return true;
     }
     if (fname == "mdy") {
         if (!need(3, 3)) return false;
+        if (args[0].kind == 's' || args[1].kind == 's' || args[2].kind == 's')
+            return fail("mdy() needs numeric arguments");
         /* Stata mdy() of an invalid date (mdy(2,30,2020), mdy(13,1,2020)) is
          * row-local missing, not a hard error; try() turns DuckDB's range error
-         * into NULL so one bad triple no longer aborts the whole query (DATE-1). */
-        out->sql = "(try(make_date(CAST(" + as_num(args[2]) +
-                   " AS INTEGER), CAST(" + as_num(args[0]) + " AS INTEGER), CAST(" +
-                   as_num(args[1]) + " AS INTEGER)) - DATE '1960-01-01'))";
+         * into NULL so one bad triple no longer aborts the whole query (DATE-1).
+         * Components floor like day counts do (DATE-2). */
+        out->sql = "(try(make_date(CAST(floor(" + as_num(args[2]) +
+                   ") AS INTEGER), CAST(floor(" + as_num(args[0]) +
+                   ") AS INTEGER), CAST(floor(" + as_num(args[1]) +
+                   ") AS INTEGER)) - DATE '1960-01-01'))";
         out->kind = 'n';
         return true;
     }
     if (fname == "dofm") { /* month count → day count of month start */
         if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("dofm() needs a numeric argument");
         /* try(): an out-of-range month count yields missing, not a query abort
-         * (DATE-1). */
-        out->sql = "(try(make_date(1960 + CAST(floor((" + as_num(args[0]) +
-                   ") / 12.0) AS INTEGER), CAST((" + as_num(args[0]) +
-                   ") - 12 * floor((" + as_num(args[0]) +
+         * (DATE-1); fractional month counts floor (DATE-2). */
+        std::string m = "floor(" + as_num(args[0]) + ")";
+        out->sql = "(try(make_date(1960 + CAST(floor((" + m +
+                   ") / 12.0) AS INTEGER), CAST((" + m +
+                   ") - 12 * floor((" + m +
                    ") / 12.0) AS INTEGER) + 1, 1) - DATE '1960-01-01'))";
         out->kind = 'n';
         return true;
     }
     if (fname == "mofd") {
         if (!need(1, 1)) return false;
-        std::string dd = "(DATE '1960-01-01' + CAST(" + as_num(args[0]) +
-                         " AS INTEGER))";
+        if (args[0].kind == 's') return fail("mofd() needs a numeric date");
+        std::string dd = day_arg(0);
         out->sql = "((year" + std::string("(") + dd + ") - 1960) * 12 + month(" +
                    dd + ") - 1)";
         out->kind = 'n';
@@ -1130,8 +1213,8 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "yofd") {
         if (!need(1, 1)) return false;
-        out->sql = "year(DATE '1960-01-01' + CAST(" + as_num(args[0]) +
-                   " AS INTEGER))";
+        if (args[0].kind == 's') return fail("yofd() needs a numeric date");
+        out->sql = "year(" + day_arg(0) + ")";
         out->kind = 'n';
         return true;
     }

@@ -84,4 +84,11 @@ std::string quote_ident(const std::string &s);
 std::string dtoa(double v);
 bool atod(const std::string &s, double *out);
 
+/* Per-process spill subdirectory ("/_parqit_spill_<pid>"). The default spill
+ * lives under c(tmpdir), which is shared by every Stata instance on the
+ * machine (and every user on an HPC login node) — two concurrent parqit
+ * sessions pointing DuckDB at the SAME temp_directory can interfere, so the
+ * pid keeps each session's spill private (SPILL-1). */
+std::string spill_suffix();
+
 } // namespace parqit
