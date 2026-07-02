@@ -162,7 +162,7 @@ program define _parqit_import_to_bridge, rclass
     }
     frame drop `fr'
     * track for cleanup at `parqit close _all`
-    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `bridge'"'
+    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `"`bridge'"'"'
     return local bridge `"`bridge'"'
 end
 
@@ -285,7 +285,7 @@ program define _parqit_use, rclass
     * a dta/xls/xlsx bridge has been consumed into memory — drop it now
     if (`"`_sq_bridge'"' != "") {
         capture erase `"`_sq_bridge'"'
-        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `_sq_bridge' "', " ", .)'"'
+        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`_sq_bridge'"' "', " ", .)'"'
     }
 
     di as txt "(" as res "`parqit_k'" as txt " vars, " as res "`parqit_n'" ///
@@ -335,13 +335,18 @@ program define _parqit_load_core
     * after the new frame is complete, so the validate-then-mutate guarantee
     * (charter §6.9) holds: if the fill above had failed we exited before here
     * with `curframe` untouched. This makes the swap O(1) in the data size and
-    * avoids a transient second copy of the result in memory.
-    frame change `stage'
-    frame drop `curframe'
-    frame rename `stage' `curframe'
-    global S_FN
-    global S_FNDATE
-    mata: (void) st_updata(0)
+    * avoids a transient second copy of the result in memory. `nobreak` closes
+    * the one remaining hole: a user Break landing between `frame drop` and
+    * `frame rename` would lose BOTH the old and the new data, so the whole
+    * swap must be uninterruptible.
+    nobreak {
+        frame change `stage'
+        frame drop `curframe'
+        frame rename `stage' `curframe'
+        global S_FN
+        global S_FNDATE
+        mata: (void) st_updata(0)
+    }
 end
 
 * ----------------------------------------------------------------------------
@@ -869,6 +874,12 @@ program define _parqit_head, rclass
     syntax [anything(name=nrows)]
     if (`"`nrows'"' == "") local nrows 5
     confirm integer number `nrows'
+    * a negative/zero count would reach the plugin as "no limit" and
+    * materialise the entire view — refuse it here, loudly
+    if (`nrows' < 1 | `nrows' >= .) {
+        di as err "parqit head: # must be a positive integer"
+        exit 198
+    }
     _parqit_ensure_plugin
     tempfile req resp strl
     local _sq_limit `nrows'
@@ -1365,7 +1376,7 @@ program define _parqit_open, rclass
     * OPENDATA-BRIDGE-ORPHAN-1: the plugin only takes ownership (erase-on-close)
     * once view_open succeeds. Track the bridge for the close _all sweep up front
     * so a save/view_open failure below cannot orphan it under c(tmpdir).
-    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `bridge'"'
+    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `"`bridge'"'"'
     qui _parqit_save `"`bridge'"', replace data
     * The bridge snapshot applies the same lossy conversions as any in-memory
     * save (extended missings -> null, fractional dates rounded). _parqit_save's
@@ -1379,11 +1390,11 @@ program define _parqit_open, rclass
     }
     if (_rc) {
         capture erase `"`bridge'"'
-        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `bridge' "', " ", .)'"'
+        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`bridge'"' "', " ", .)'"'
         exit _rc
     }
     * view now owns the bridge (plugin erases on close/replace): drop our tracker
-    global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `bridge' "', " ", .)'"'
+    global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`bridge'"' "', " ", .)'"'
     di as txt "(in-memory dataset promoted to a lazy view; " ///
         as txt "manipulate with parqit verbs, then parqit collect or parqit save)"
     _parqit_lossy_notes, ext(`"`_parqit_open_ext'"') frac(`"`_parqit_open_frac'"')
@@ -1413,7 +1424,11 @@ program define _parqit_close
     if (_rc) exit _rc
     * sweep up any Parquet bridges made for dta/xls/xlsx/csv using sides
     if (`"`which'"' == "_all" & `"${PARQIT_IMPORT_BRIDGES}"' != "") {
-        foreach b of global PARQIT_IMPORT_BRIDGES {
+        * entries are compound-quoted (a tmpdir path may contain spaces):
+        * copy into a local so foreach binds on the quotes rather than
+        * whitespace-tokenising the paths
+        local _bridges `"${PARQIT_IMPORT_BRIDGES}"'
+        foreach b of local _bridges {
             capture erase `"`b'"'
         }
         global PARQIT_IMPORT_BRIDGES ""
@@ -1457,6 +1472,12 @@ program define _parqit_view, rclass
     if ("`prev'" != "" & "`prev'" != "`name'") {
         mata: st_local("phex", _parqit_hex(st_local("prev")))
         capture plugin call parqit_plugin, view_switch `phex'
+        if (_rc) {
+            local swrc = _rc
+            di as err "parqit view: could not switch back to view `prev'; "  ///
+                "the current view is now `name' — use {bf:parqit view `prev'} to return"
+            exit `swrc'
+        }
     }
     if (`rc') exit `rc'
     return add
@@ -1723,12 +1744,18 @@ end
 
 program define _parqit_appendin
     version 16.0
-    syntax using/ [, KEEP(varlist) FORCE]
+    * keep() names variables of the USING file (native append semantics), so it
+    * must not be validated against the in-memory master — pass it through as a
+    * string and let native append judge it
+    syntax using/ [, KEEP(string) FORCE]
+
+    * read only the keep() columns of the disk side (projection pushdown)
     tempname fr
     tempfile tmp
     frame create `fr'
     frame `fr' {
-        qui parqit use using `"`using'"', clear
+        if ("`keep'" != "") qui parqit use `keep' using `"`using'"', clear
+        else                qui parqit use using `"`using'"', clear
         local disk_n = _N
         qui save `"`tmp'"', replace
     }
@@ -2457,12 +2484,17 @@ string colvector _parqit_resp_lines(string scalar resp)
 
 void _parqit_resp_create(string scalar resp, real scalar n)
 {
-    real scalar      fh, idx
+    real scalar      idx, _li, _nl
     string scalar    line, name, code, fmt
     string rowvector f
+    string colvector _lines
 
-    fh = fopen(resp, "r")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    /* fread()+split, not fget(): a >32768-byte record (e.g. a long hex source
+     * name) would be split by fget's line cap and abort the load — META-1 */
+    _lines = _parqit_resp_lines(resp)
+    _nl = rows(_lines)
+    for (_li = 1; _li <= _nl; _li++) {
+        line = _lines[_li]
         f = _parqit_fields(line, 8)
         if (f[1] != "var") continue
         name = _parqit_unhex(f[3])
@@ -2541,6 +2573,16 @@ void _parqit_resp_decorate(string scalar resp)
             else if (v < . & (v != trunc(v) | abs(v) >= 2147483648))
                 printf("note: value label %s: skipping non-integer/out-of-range key %s\n", labname, vraw)
             else {
+                /* Stata caps value-label text at 32,000 characters; an
+                 * oversized text from a crafted parqit.vallabs footer would
+                 * abort st_vlmodify and kill the whole load — truncate and
+                 * warn instead, matching the warn-and-continue charter of the
+                 * name/key guards above (and DTALABEL-LEN-1). */
+                if (strlen(txt) > 32000) {
+                    printf("note: value label %s: text for key %s truncated to 32,000 bytes\n",
+                           labname, vraw)
+                    txt = substr(txt, 1, 32000)
+                }
                 vl_owner = vl_owner \ labname
                 vl_vals_all = vl_vals_all \ v
                 vl_texts_all = vl_texts_all \ txt
@@ -2593,14 +2635,18 @@ void _parqit_resp_decorate(string scalar resp)
 
 void _parqit_resp_describe(string scalar resp)
 {
-    real scalar      fh, i, k
+    real scalar      i, k, _li, _nl
     string scalar    line
     string rowvector f
-    string colvector dnames, dtypes, snames, stypes, sfmts
+    string colvector dnames, dtypes, snames, stypes, sfmts, _lines
 
-    fh = fopen(resp, "r")
+    /* fread()+split, not fget(): a >32768-byte record (e.g. a long hex source
+     * name) would be split by fget's line cap and abort the load — META-1 */
+    _lines = _parqit_resp_lines(resp)
+    _nl = rows(_lines)
     dnames = dtypes = snames = stypes = sfmts = J(0, 1, "")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    for (_li = 1; _li <= _nl; _li++) {
+        line = _lines[_li]
         f = _parqit_fields(line, 8)
         if (f[1] == "dtype") {
             dnames = dnames \ _parqit_unhex(f[2])
@@ -2617,7 +2663,6 @@ void _parqit_resp_describe(string scalar resp)
                    _parqit_unhex(f[2]), _parqit_unhex(f[3]))
         }
     }
-    fclose(fh)
 
     displayas("text")
     printf("  %-32s %-18s %-10s %s\n", "variable", "parquet type", "stata type", "format")

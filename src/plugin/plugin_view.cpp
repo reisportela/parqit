@@ -4,12 +4,15 @@
  * compiled pipeline straight to parquet — Stata memory untouched). */
 #include "plugin/plugin_view.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -450,7 +453,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     const Source src = source_for(files, req.value("relaxed", false),
                                   req.value("csv", false));
@@ -790,7 +793,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     ST_retcode rrc = validate_ranges(s, g_view_ref(), &err);
     if (rrc != 0) {
@@ -803,9 +806,28 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     const std::string table = "_parqit_collect_" + std::to_string(++g_collect_counter);
     std::string sql = g_view_ref().compile(true);
     long long pf = req.value("f", 0LL), pl = req.value("l", 0LL);
-    if (pf >= 1 && pl >= pf)
+    if (pf >= 1 && pl >= pf) {
+        /* validate the preview slice against the real row count, exactly like
+         * validate_ranges does for keep-in (charter §6.13): a bare LIMIT/OFFSET
+         * past the data would print nothing with rc 0 where native
+         * `list in f/l` stops with r(198). */
+        std::string nstr;
+        if (!s.query_scalar("SELECT count(*) FROM (" +
+                                g_view_ref().compile(false) + ")",
+                            &nstr, &err)) {
+            cry("parqit list: " + err);
+            return kRcEngine;
+        }
+        long long have = std::strtoll(nstr.c_str(), nullptr, 10);
+        if (pl > have) {
+            cry("parqit list: in " + std::to_string(pf) + "/" +
+                std::to_string(pl) + " is out of range: only " +
+                std::to_string(have) + " observations");
+            return kRcUsage;
+        }
         sql = "SELECT * FROM (" + sql + " LIMIT " + std::to_string(pl - pf + 1) +
               " OFFSET " + std::to_string(pf - 1) + ")";
+    }
     std::string pfilter;
     if (!parqit::req_text(req, "filter", &pfilter, &err, false)) {
         cry(err);
@@ -916,6 +938,17 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
                 p.stata_type = parqit::StType::Long;
             }
         }
+    } else {
+        /* never skip the overlay silently: a count mismatch (the planner
+         * dropped a column the view still carries, or vice versa) means the
+         * view's formats/labels/storage types cannot be matched positionally.
+         * Say so through the same warn-record channel plan_columns uses, so
+         * the collected data arrives loud, not quietly stripped of metadata. */
+        ctx.warnings.push_back(
+            "view metadata could not be matched to the collected columns (view "
+            "carries " + std::to_string(vcols.size()) + ", planned " +
+            std::to_string(ctx.active.size()) +
+            "); formats, labels and storage types were not restored");
     }
     /* vallab definitions + chars + data label from the view */
     ctx.meta.present = true;
@@ -1042,7 +1075,7 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
     }
 
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     ST_retcode rrc = validate_ranges(s, g_view_ref(), &err);
     if (rrc != 0) {
@@ -1377,7 +1410,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     std::vector<std::string> drops, warns;
     ST_retcode rc;
@@ -1560,6 +1593,30 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
     for (size_t i = 0; i < ivars.size(); i++)
         ipart += (i ? ", " : "") + quote_ident(ivars[i]);
     const std::string base = "(" + g_view_ref().compile(false) + ")";
+    const std::string jq = quote_ident(jname);
+
+    /* a missing j has no wide column, so its stub values would silently
+     * vanish from the pivot's j-value scan below. Native Stata stops with
+     * r(498) "variable <j> contains missing values" (for a NULL, NaN or ""
+     * j alike — verified natively); do the same, loudly, before building
+     * the pivot. */
+    {
+        std::string jmiss = j_is_string
+                                ? "coalesce(" + jq + ", '') = ''"
+                                : jq + " IS NULL OR isnan(CAST(" + jq +
+                                      " AS DOUBLE))";
+        std::string nmiss;
+        if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + jmiss,
+                            &nmiss, &err)) {
+            cry("parqit reshape: " + err);
+            return kRcEngine;
+        }
+        if (nmiss != "0") {
+            cry("parqit reshape wide: variable " + jname +
+                " contains missing values");
+            return kRcUsage;
+        }
+    }
 
     std::string dup;
     if (!s.query_scalar("SELECT count(*) FROM (SELECT 1 FROM " + base +
@@ -1574,7 +1631,6 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
             " are not unique within i() groups");
         return kRcUsage;
     }
-    const std::string jq = quote_ident(jname);
     /* RESHAPE-WIDE-COLORDER: numeric j must order numerically (2,10,11), not by
      * the lexicographic VARCHAR cast (10,11,2), to match native reshape wide.
      * String j keeps alphabetic order (Stata does too). */
@@ -1637,7 +1693,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
     }
     if (!vname.empty()) g_current = vname;
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     /* probe the query, then boundary-cast its result like any source */
     duckdb_result res;

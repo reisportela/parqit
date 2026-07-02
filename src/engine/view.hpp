@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -164,7 +165,20 @@ class View {
     std::string expand_patterns(const std::vector<std::string> &patterns,
                                 std::vector<std::string> *out) const;
     int col_index(const std::string &name) const;
-    std::string fresh_helper(const std::string &hint);
+    /* `taken`: extra names the helper must dodge beyond the live manifest —
+     * two-table verbs pass the using side's column names here, so a using
+     * column literally named like a generated helper can never make the
+     * compiled join reference ambiguous (charter §6.12). */
+    std::string fresh_helper(const std::string &hint,
+                             const std::set<std::string> &taken = {});
+    /* FROM-source for a keep/drop projection stage: when the projection is
+     * about to remove a sort-key column, bakes the full current ORDER BY into
+     * the source subquery (the physical order survives via DuckDB's default
+     * preserve_insertion_order) and truncates sort_ to the longest prefix of
+     * keys whose columns all survive — mirroring native Stata, where dropping
+     * a sortedby variable keeps the rows' physical order and truncates (or
+     * clears) sortedby. Otherwise just the previous stage name. */
+    std::string projection_source(const std::vector<ViewCol> &survivors);
     std::string select_list() const; /* quoted current columns, in order */
     std::string order_by_sql() const;
     /* wrap `prev` in a subquery exposing ONLY the row-context windows *sql

@@ -14,6 +14,8 @@ namespace parqit {
 
 using json = nlohmann::json;
 
+static void denormalize_strings(std::vector<ViewCol> *cols); /* defined below */
+
 /* Stata's gen/egen with an explicit narrow storage type coerces the value the
  * way native Stata does at assignment time: integers TRUNCATE toward zero and
  * an out-of-range value becomes system missing (gen byte x=3.9 -> 3,
@@ -83,10 +85,13 @@ int View::col_index(const std::string &name) const {
     return -1;
 }
 
-std::string View::fresh_helper(const std::string &hint) {
+std::string View::fresh_helper(const std::string &hint,
+                               const std::set<std::string> &taken) {
     for (;;) {
         std::string cand = "__parqit_" + hint + "_" + std::to_string(++helper_counter_);
-        if (col_index(cand) < 0) return cand; /* charter §6.12: never collide */
+        /* charter §6.12: never collide — with the live manifest, nor with any
+         * extra names the caller must dodge (a two-table verb's using side) */
+        if (col_index(cand) < 0 && !taken.count(cand)) return cand;
     }
 }
 
@@ -234,14 +239,48 @@ std::string View::rowctx_wrap(std::string *sql, const std::string &prev) {
 
 /* ---------------------------------------------------------------- verbs --- */
 
+std::string View::projection_source(const std::vector<ViewCol> &survivors) {
+    const std::string prev = prev_name(stages_.size());
+    /* A keep/drop that removes a sort-key column must not leave sort_
+     * referencing it: every later materialisation would die with a raw DuckDB
+     * Binder Error where native Stata succeeds. Native semantics (`sort y`
+     * then `drop y`, verified): the rows keep their y-sorted PHYSICAL order
+     * and sortedby is truncated. Reproduce that by baking the full current
+     * ORDER BY into this stage's source — DuckDB's default
+     * preserve_insertion_order carries a subquery's order through subsequent
+     * streaming stages — then truncating sort_ to the longest prefix of keys
+     * whose columns all survive (dropping the first key clears it entirely,
+     * mirroring Stata's sortedby truncation). */
+    if (sort_.empty()) return prev;
+    std::set<std::string> alive;
+    for (const auto &c : survivors) alive.insert(quote_ident(c.name));
+    size_t keep = sort_.size();
+    for (size_t i = 0; i < sort_.size(); i++) {
+        std::string base = sort_[i];
+        const std::string desc = " DESC";
+        if (base.size() > desc.size() &&
+            base.compare(base.size() - desc.size(), desc.size(), desc) == 0)
+            base.resize(base.size() - desc.size());
+        if (!alive.count(base)) {
+            keep = i;
+            break;
+        }
+    }
+    if (keep == sort_.size()) return prev; /* every key survives: nothing to do */
+    std::string src = "(SELECT * FROM " + prev + order_by_sql() + ")";
+    sort_.resize(keep);
+    return src;
+}
+
 std::string View::keep_vars(const std::vector<std::string> &patterns) {
     std::vector<std::string> keep;
     std::string err = expand_patterns(patterns, &keep);
     if (!err.empty()) return err;
     std::vector<ViewCol> ncols;
     for (const auto &want : keep) ncols.push_back(cols_[col_index(want)]);
+    const std::string src = projection_source(ncols); /* may bake a dropped sort */
     cols_ = std::move(ncols);
-    push_stage("SELECT " + select_list() + " FROM " + prev_name(stages_.size()),
+    push_stage("SELECT " + select_list() + " FROM " + src,
                "keep " + std::to_string(cols_.size()) + " variables");
     return "";
 }
@@ -256,8 +295,9 @@ std::string View::drop_vars(const std::vector<std::string> &patterns) {
     std::vector<ViewCol> ncols;
     for (const auto &c : cols_)
         if (!dropset.count(c.name)) ncols.push_back(c);
+    const std::string src = projection_source(ncols); /* may bake a dropped sort */
     cols_ = std::move(ncols);
-    push_stage("SELECT " + select_list() + " FROM " + prev_name(stages_.size()),
+    push_stage("SELECT " + select_list() + " FROM " + src,
                "drop " + std::to_string(dropset.size()) + " variables");
     return "";
 }
@@ -590,6 +630,10 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
          * zero groups on empty input). */
         body += " HAVING count(*) > 0";
     }
+    /* MISS-1 sibling: a string by-key groups through nullif(k,''), so an
+     * all-missing key group emits SQL NULL; string first/last aggregates can
+     * be NULL too — clear the flag so save's coalesce guard applies */
+    denormalize_strings(&ncols);
     cols_ = std::move(ncols);
     push_stage(body, desc);
     /* Stata collapse leaves the data sorted by the by-vars; earlier keep-in
@@ -629,6 +673,8 @@ std::string View::contract(const std::vector<std::string> &by,
         if (i) body += ", ";
         body += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
     }
+    /* MISS-1 sibling: string by-keys group through nullif(k,'') — see collapse */
+    denormalize_strings(&ncols);
     cols_ = std::move(ncols);
     push_stage(body, "contract");
     sort_.clear();
@@ -768,6 +814,21 @@ namespace parqit {
 
 /* ----------------------------------------------------- two-table verbs --- */
 
+/* MISS-1 after a two-table verb: the combine introduces SQL NULLs into carried
+ * string columns — merge's FULL/LEFT JOIN nulls the other side's strings on
+ * every unmatched row, append's UNION BY NAME fills a source's absent columns
+ * with NULL — so no string column of the result is guaranteed NULL-free any
+ * more, on the master OR the using side. Clear the normalized flag on every
+ * string column of the result manifest, else a lazy `parqit save` would skip
+ * the coalesce(ref, '') boundary guard and write SQL NULL strings to disk
+ * where the eager path writes '' for the same data. Numeric columns KEEP the
+ * flag: a NULL numeric is a legitimate missing on disk, and the flag only
+ * promises freedom from NaN/Inf — which a join/union cannot create. */
+static void denormalize_strings(std::vector<ViewCol> *cols) {
+    for (auto &c : *cols)
+        if (c.kind == 's') c.normalized = false;
+}
+
 /* merge metadata of brought using columns into the view (labels follow the
  * column; value-label definitions merge name-wise, master wins) */
 static void merge_using_meta(View *, nlohmann::json *dst_vallabs,
@@ -864,9 +925,14 @@ std::string View::merge_with(const std::string &kind,
                " already exists (use gen() or nogenerate)";
 
     const std::string prev = prev_name(stages_.size());
-    std::string mm = fresh_helper("mm"), um = fresh_helper("um");
-    std::string rnm = fresh_helper("rnm"), rnu = fresh_helper("rnu");
-    std::string nmx = fresh_helper("nmx"), nux = fresh_helper("nux");
+    /* helper names must dodge the USING side's columns too: a using column
+     * literally named like a generated helper would make the __u.<helper>
+     * references below ambiguous (charter §6.12). */
+    std::set<std::string> utaken;
+    for (const auto &c : u.cols) utaken.insert(c.name);
+    std::string mm = fresh_helper("mm", utaken), um = fresh_helper("um", utaken);
+    std::string rnm = fresh_helper("rnm", utaken), rnu = fresh_helper("rnu", utaken);
+    std::string nmx = fresh_helper("nmx", utaken), nux = fresh_helper("nux", utaken);
 
     std::string keypart;
     for (size_t i = 0; i < keys.size(); i++) {
@@ -962,7 +1028,7 @@ std::string View::merge_with(const std::string &kind,
     std::string merge_expr = "(CASE WHEN __u." + quote_ident(um) +
                              " IS NULL THEN 1 WHEN __m." + quote_ident(mm) +
                              " IS NULL THEN 2 ELSE 3 END)";
-    std::string mtmp = fresh_helper("mg");
+    std::string mtmp = fresh_helper("mg", utaken);
     sel += ", " + merge_expr + " AS " + quote_ident(mtmp);
 
     std::string body;
@@ -971,7 +1037,7 @@ std::string View::merge_with(const std::string &kind,
                " AS __u ON " + joincond;
     } else {
         /* spine: per key, i = 1..max(nm, nu) built from both rn sets */
-        std::string spine_i = fresh_helper("i");
+        std::string spine_i = fresh_helper("i", utaken);
         std::string spine =
             "(SELECT " + keypart + ", " + quote_ident(rnm) + " AS " +
             quote_ident(spine_i) + " FROM " + mrel + " AS t UNION SELECT " + keypart +
@@ -1044,6 +1110,7 @@ std::string View::merge_with(const std::string &kind,
              nlohmann::json::array({2, "Using only (2)"}),
              nlohmann::json::array({3, "Matched (3)"})})}};
     }
+    denormalize_strings(&ncols); /* MISS-1: unmatched rows NULL either side's strings */
     cols_ = std::move(ncols);
     push_stage(body, "merge " + kind + " on " + keypart);
     /* native merge leaves the result sorted by the keys */
@@ -1088,8 +1155,13 @@ std::string View::append_with(std::vector<UsingSide> sources,
                        " in using file " + std::to_string(s + 1);
             }
         }
-        merge_using_meta(this, &vallabs_, sources[s].vallabs, warnings);
     }
+    /* validate-then-mutate (charter §6): merge the sources' value-label
+     * definitions only after EVERY source passed the kind checks above — a
+     * conflict in source 2 must not leave source 1's labels already merged
+     * into a view the failed verb then abandons. */
+    for (size_t s = 0; s < sources.size(); s++)
+        merge_using_meta(this, &vallabs_, sources[s].vallabs, warnings);
 
     const std::string prev = prev_name(stages_.size());
     std::string body = "SELECT *" +
@@ -1118,6 +1190,7 @@ std::string View::append_with(std::vector<UsingSide> sources,
     }
     body = "SELECT " + osel + " FROM (" + body + ")";
 
+    denormalize_strings(&ncols); /* MISS-1: absent columns fill with NULL */
     cols_ = std::move(ncols);
     push_stage(body, "append (" + std::to_string(sources.size()) + " using file(s))");
     return "";
@@ -1179,6 +1252,12 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
         sel += ", __u." + quote_ident(c->name) + " AS " + quote_ident(c->name);
 
     merge_using_meta(this, &vallabs_, u.vallabs, warnings);
+    /* MISS-1: joinby is an inner join today, but its result manifest follows
+     * the same two-table contract as merge/append — clear the string flags so
+     * a future unmatched() option (or any NULL the combine surfaces) can never
+     * make a lazy save skip the coalesce('') guard. Conservative: the only
+     * cost is a redundant guard on an already-clean column. */
+    denormalize_strings(&ncols);
     cols_ = std::move(ncols);
     push_stage("SELECT " + sel + " FROM " + prev + " AS __m JOIN (" + u.select_sql +
                    ") AS __u ON " + joincond,
@@ -1447,6 +1526,9 @@ std::string View::reshape_wide(const std::vector<std::string> &stubs,
         if (i) gb += ", ";
         gb += quote_ident(ivars[i]);
     }
+    /* MISS-1 sibling: an unbalanced (i,j) cell's max() FILTER emits SQL NULL
+     * into a pivoted string column — clear the flag so save coalesces it */
+    denormalize_strings(&ncols);
     cols_ = std::move(ncols);
     push_stage("SELECT " + sel + " FROM " + prev + " GROUP BY " + gb,
                "reshape wide");

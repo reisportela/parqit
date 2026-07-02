@@ -7,7 +7,7 @@ namespace parqit {
 static const std::set<std::string> kReserved = {
     "_all", "_b",   "byte", "_coef", "_cons",  "double", "float", "if",
     "in",   "int",  "long", "_n",    "_N",     "_pi",    "_pred", "_rc",
-    "_skip", "str", "strL", "using", "with"};
+    "_se",  "_skip", "str", "strL",  "using",  "with"};
 
 bool is_reserved_stata_name(const std::string &name) {
     if (kReserved.count(name)) return true;

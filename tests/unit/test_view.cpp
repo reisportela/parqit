@@ -397,6 +397,172 @@ TEST_CASE("merge with another VIEW as the using side") {
     CHECK(run_scalar("SELECT count(*) FROM (" + s1.compile(false) + ")") == "3");
 }
 
+TEST_CASE("dropping a sort-key column bakes the order and truncates the sort") {
+    /* native Stata (verified): `sort y` then `drop y` keeps the rows in their
+     * y-sorted PHYSICAL order and clears sortedby — no error, no reshuffle.
+     * The old plan kept the dropped column in the final ORDER BY and every
+     * later materialisation died with a raw DuckDB Binder Error. */
+    View v = make_view();
+    CHECK(v.sort({"wage"}, {true}).empty()); /* wage DESC */
+    CHECK(v.drop_vars({"wage"}).empty());
+    CHECK(v.sort_keys().empty()); /* first (only) key dropped -> cleared */
+    std::string sql = v.compile(true);
+    /* the ordering is baked into the projection stage's source subquery */
+    CHECK(sql.find("ORDER BY \"wage\" DESC NULLS LAST") != std::string::npos);
+    Session &s = Session::instance();
+    duckdb_result res;
+    std::string err;
+    REQUIRE_MESSAGE(s.query(sql, &res, &err), err);
+    REQUIRE(duckdb_row_count(&res) == 6);
+    /* wage order 33,30,20,12,10,NULL → first row (id 3, 2020), the NULL-wage
+     * row (id 2, 2020) last — preserve_insertion_order carries the baked
+     * subquery order through the projection */
+    CHECK(duckdb_value_int64(&res, 0, 0) == 3);
+    CHECK(duckdb_value_int64(&res, 1, 0) == 2020);
+    CHECK(duckdb_value_int64(&res, 0, 5) == 2);
+    CHECK(duckdb_value_int64(&res, 1, 5) == 2020);
+    duckdb_destroy_result(&res);
+
+    /* prefix truncation: only the keys from the dropped one on are forgotten */
+    View v2 = make_view();
+    CHECK(v2.sort({"id", "wage", "year"}, {false, false, false}).empty());
+    CHECK(v2.keep_vars({"id", "year", "firm"}).empty());
+    REQUIRE(v2.sort_keys().size() == 1);
+    CHECK(v2.sort_keys()[0] == "\"id\"");
+    /* _n windows and keep-in still see a consistent sort state */
+    CHECK(v2.gen("r", "", "_n", "", false).empty());
+    CHECK(v2.keep_in(1, 2).empty());
+    CHECK(run_count(v2) == 2);
+
+    /* keeping every sort key bakes nothing and keeps the sort intact */
+    View v3 = make_view();
+    CHECK(v3.sort({"id"}, {false}).empty());
+    CHECK(v3.keep_vars({"id", "wage"}).empty());
+    REQUIRE(v3.sort_keys().size() == 1);
+    CHECK(v3.compile(false).find("ORDER BY") == std::string::npos);
+}
+
+TEST_CASE("no-varlist duplicates drop folds '' with NULL and NaN with NULL") {
+    /* a ('', NULL) string pair — or NaN beside NULL — is reachable
+     * mid-pipeline (after merge/append) even though the boundary normalizes
+     * sources; each pair must count as ONE duplicate row, like native Stata
+     * and like the varlist branch (GROUPKEY-1). */
+    View v;
+    std::vector<ViewCol> cols;
+    ViewCol cs, cx;
+    cs.name = "s";
+    cs.kind = 's';
+    cx.name = "x";
+    cx.kind = 'n';
+    cols.push_back(cs);
+    cols.push_back(cx);
+    v.open("SELECT * FROM (VALUES ('', 1.0::DOUBLE), (NULL, 1.0::DOUBLE), "
+           "('a', 'NaN'::DOUBLE), ('a', NULL::DOUBLE)) t(s, x)",
+           cols, nlohmann::json::object(), nlohmann::json::object(), "",
+           "dup fixture");
+    CHECK(v.duplicates_drop({}, false).empty());
+    std::string sql = v.compile(false);
+    /* the normalized-key dedupe replaced the raw SELECT DISTINCT */
+    CHECK(sql.find("SELECT DISTINCT") == std::string::npos);
+    CHECK(sql.find("nullif(\"s\", '')") != std::string::npos);
+    CHECK(run_count(v) == 2);
+}
+
+TEST_CASE("two-table verbs clear the normalized flag on string columns") {
+    /* merge/append/joinby introduce SQL NULLs into carried string columns
+     * (unmatched/absent rows); the MISS-1 flag must not survive, or a lazy
+     * save would skip the coalesce('') guard and write NULL strings. Numeric
+     * columns keep the flag: a join/union cannot create NaN/Inf. */
+    auto normalized_view = []() {
+        View v;
+        std::vector<ViewCol> cols;
+        for (const char *n : {"id", "wage", "firm"}) {
+            ViewCol c;
+            c.name = n;
+            c.kind = (std::string(n) == "firm") ? 's' : 'n';
+            c.normalized = true; /* as the lazy boundary marks them */
+            cols.push_back(c);
+        }
+        v.open("SELECT * FROM (VALUES (1, 10.0, 'a'), (2, 20.0, 'b')) "
+               "t(id, wage, firm)",
+               cols, nlohmann::json::object(), nlohmann::json::object(), "",
+               "normalized fixture");
+        return v;
+    };
+    auto flag_of = [](const View &v, const char *n) {
+        for (const auto &c : v.cols())
+            if (c.name == n) return c.normalized;
+        return false;
+    };
+    std::vector<std::string> warns;
+
+    View m = normalized_view();
+    auto u = make_using("SELECT * FROM (VALUES (1, 'x')) t(id, tag)",
+                        {{"id", 'n'}, {"tag", 's'}});
+    u.cols[0].normalized = u.cols[1].normalized = true;
+    REQUIRE(m.merge_with("m:1", {"id"}, u, {}, 0, "", true, &warns).empty());
+    CHECK_FALSE(flag_of(m, "firm")); /* master string: cleared */
+    CHECK_FALSE(flag_of(m, "tag"));  /* using string: cleared */
+    CHECK(flag_of(m, "wage"));       /* numerics keep the flag */
+    CHECK(flag_of(m, "id"));
+
+    View a = normalized_view();
+    auto s1 = make_using("SELECT * FROM (VALUES (7, 'n1')) t(id, extra)",
+                         {{"id", 'n'}, {"extra", 's'}});
+    s1.cols[0].normalized = s1.cols[1].normalized = true;
+    std::vector<View::UsingSide> srcs;
+    srcs.push_back(s1);
+    REQUIRE(a.append_with(std::move(srcs), "", &warns).empty());
+    CHECK_FALSE(flag_of(a, "firm"));
+    CHECK_FALSE(flag_of(a, "extra"));
+    CHECK(flag_of(a, "wage"));
+
+    View j = normalized_view();
+    auto uj = make_using("SELECT * FROM (VALUES (1, 'p')) t(id, pat)",
+                         {{"id", 'n'}, {"pat", 's'}});
+    uj.cols[1].normalized = true;
+    REQUIRE(j.joinby_with({"id"}, uj, &warns).empty());
+    CHECK_FALSE(flag_of(j, "firm"));
+    CHECK_FALSE(flag_of(j, "pat"));
+    CHECK(flag_of(j, "wage"));
+}
+
+TEST_CASE("a failed append leaves the view untouched (validate-then-mutate)") {
+    /* a kind conflict in source 2 must not leave source 1's value labels
+     * already merged into the abandoned view */
+    View v = make_view();
+    std::vector<std::string> warns;
+    std::vector<View::UsingSide> srcs;
+    auto ok = make_using("SELECT * FROM (VALUES (7)) t(id)", {{"id", 'n'}});
+    ok.vallabs["lab1"] = {{"entries", nlohmann::json::array(
+                              {nlohmann::json::array({1, "one"})})}};
+    srcs.push_back(ok);
+    srcs.push_back(make_using("SELECT * FROM (VALUES ('oops')) t(wage)",
+                              {{"wage", 's'}})); /* kind conflict */
+    CHECK_FALSE(v.append_with(std::move(srcs), "", &warns).empty());
+    CHECK(v.vallabs().empty()); /* source 1's labels were NOT merged */
+    CHECK(v.n_stages() == 0);
+    CHECK(v.cols().size() == 4);
+    CHECK(warns.empty());
+}
+
+TEST_CASE("helper names dodge using-side columns in two-table verbs") {
+    /* a using column literally named like a generated helper must not make
+     * the compiled join reference ambiguous (charter §6.12) */
+    View v = make_view();
+    std::vector<std::string> warns;
+    auto u = make_using("SELECT * FROM (VALUES (1, 5.0)) t(id, __parqit_um_2)",
+                        {{"id", 'n'}, {"__parqit_um_2", 'n'}});
+    std::string e = v.merge_with("m:1", {"id"}, u, {}, 0, "", false, &warns);
+    REQUIRE_MESSAGE(e.empty(), e);
+    std::string sql = v.compile(false);
+    CHECK(run_scalar("SELECT count(*) FROM (" + sql + ")") == "6");
+    CHECK(run_scalar("SELECT \"__parqit_um_2\" FROM (" + sql +
+                     ") WHERE id = 1 LIMIT 1") == "5.0");
+    CHECK(run_scalar("SELECT count(*) FROM (" + sql + ") WHERE _merge = 3") ==
+          "2");
+}
+
 TEST_CASE("joinby and append with views as sources") {
     View m = make_view();
     View pats = make_view();

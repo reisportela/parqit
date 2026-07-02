@@ -91,6 +91,33 @@ bool regular_file_fingerprint(const std::string &path, std::string *abs,
 
 /* ---------------------------------------------------------------- sources */
 
+static std::string glob_escape(const std::string &p) {
+    std::string out;
+    out.reserve(p.size());
+    for (char c : p) {
+        if (c == '*') out += "[*]";
+        else if (c == '?') out += "[?]";
+        else if (c == '[') out += "[[]";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+/* GLOB-2: user-facing wildcards are `*` and `?` ONLY. A `[` is always a
+ * literal byte of the filename: bracket names are common (browser download
+ * copies like `data[1].parquet`), bracket character-classes in a Stata
+ * filename are not — and an unescaped class silently read a DIFFERENT file
+ * (`data[1].parquet` matched `data1.parquet`, rc 0, wrong data). */
+static std::string glob_escape_brackets(const std::string &p) {
+    std::string out;
+    out.reserve(p.size());
+    for (char c : p) {
+        if (c == '[') out += "[[]";
+        else out.push_back(c);
+    }
+    return out;
+}
+
 Source source_for(const std::vector<std::string> &files, bool relaxed,
                   bool csv) {
     std::string list;
@@ -100,8 +127,17 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
         std::error_code ec;
         if (!csv && std::filesystem::is_directory(f, ec)) {
             any_dir = true;
+            /* the directory name itself may contain glob metacharacters */
+            f = glob_escape(f);
             if (!f.empty() && f.back() != '/' && f.back() != '\\') f += "/";
             f += "**/*.parquet";
+        } else if (std::filesystem::exists(f, ec)) {
+            /* a path that names an existing file is that file, never a
+             * pattern — every metacharacter is literal (GLOB-2) */
+            f = glob_escape(f);
+        } else {
+            /* pattern: `*`/`?` stay live, `[` is literal (GLOB-2) */
+            f = glob_escape_brackets(f);
         }
         if (i) list += ", ";
         list += quote_literal(f);
@@ -564,18 +600,6 @@ long long g_tag_counter = 0;
  * matching the bracket class: '*'->'[*]', '?'->'[?]', '['->'[[]'. Verified
  * against the vendored DuckDB: read_parquet('out[[]9].parquet') reads the
  * literal 'out[9].parquet' (GLOB-1a/GLOB-1b). */
-static std::string glob_escape(const std::string &p) {
-    std::string out;
-    out.reserve(p.size());
-    for (char c : p) {
-        if (c == '*') out += "[*]";
-        else if (c == '?') out += "[?]";
-        else if (c == '[') out += "[[]";
-        else out.push_back(c);
-    }
-    return out;
-}
-
 void set_prepared_read(const std::string &source_scan_sql,
                        std::vector<ColumnPlan> plans, long long nrows,
                        const std::string &strl_path, bool drop_source_after,
@@ -818,7 +842,7 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
     }
 
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     const Source src = source_for(files, req.value("relaxed", false),
                                   req.value("csv", false));
@@ -1512,7 +1536,7 @@ ST_retcode cmd_describe(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     const Source src = source_for(files);
     PlanContext ctx;
@@ -1836,6 +1860,14 @@ ST_retcode save_assemble_arrow(
     const int k = static_cast<int>(vars.size());
     const ST_int in1 = SF_in1();
     const ST_int in2 = SF_in2();
+    /* Enforced, not assumed: buffers below index by `obs - in1`, so a
+     * restricted range or if-filtered row would leave a phantom 0 and a
+     * non-monotonic string offset (silent corruption). The staged fallback
+     * handles restrictions; this path refuses loudly (SAVE-RANGE-1). */
+    if (in1 != 1 || in2 != SF_nobs()) {
+        *err = "internal: direct save requires the full observation range";
+        return kRcEngine;
+    }
     const long long N = static_cast<long long>(in2) - in1 + 1;
 
     struct ACol {
@@ -2118,7 +2150,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
     }
 
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
     if (!s.ensure_open()) {
         cry("parqit save: " + s.last_error());
         return kRcEngine;
@@ -2566,7 +2598,7 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
         return 0;
 
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmpdir + "/_parqit_spill");
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
     if (!s.ensure_open()) {
         cry("parqit save: " + s.last_error());
         return kRcEngine;

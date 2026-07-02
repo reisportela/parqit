@@ -17,6 +17,11 @@ TEST_CASE("reserved words gain a prefix (charter finding 2)") {
     CHECK(sanitize_stata_name("str17", 1) == "_str17");
     CHECK(sanitize_stata_name("strL", 1) == "_strL");
     CHECK(sanitize_stata_name("_N", 1) == "__N");
+    /* SAN-SE-1: `_se` is a Stata system variable like `_b`/`_coef`; unsanitised
+     * it loads, then `summarize _se` silently resolves to the system variable
+     * (an empty no-op) instead of the data column */
+    CHECK(sanitize_stata_name("_se", 1) == "__se");
+    CHECK(sanitize_stata_name("_b", 1) == "__b");
     /* not reserved: case differs or non-numeric tail */
     CHECK(sanitize_stata_name("If", 1) == "If");
     CHECK(sanitize_stata_name("strx", 1) == "strx");
