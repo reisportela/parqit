@@ -284,8 +284,12 @@ void refine_plan(ColumnPlan &p, const ColumnStats &s) {
         } else {
             p.stata_type = integer_type_for_range(s.min, s.max);
         }
-        /* period/date formats keep their integer storage wide enough */
-        if (p.stata_type == StType::Byte && !p.stata_format.empty())
+        /* period/date formats keep their integer storage wide enough; a
+         * plain display format (%8.0g, %9.2f, …) says nothing about range
+         * and must never widen the storage type (TYPE-1: parqit-written
+         * files always carry a fmt, so byte columns loaded back as int) */
+        if (p.stata_type == StType::Byte &&
+            classify_format(p.stata_format) != FmtClass::None)
             p.stata_type = StType::Int;
     }
     if (p.needs_big53 && s.any_beyond_2p53) {

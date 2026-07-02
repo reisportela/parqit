@@ -67,6 +67,36 @@ TEST_CASE("uint32 plans can carry values beyond 2^31 (charter 6.6)") {
     CHECK(p.stata_type == StType::Long);
 }
 
+TEST_CASE("display formats never widen storage; period formats stay >= int (TYPE-1)") {
+    /* byte range + a plain display format: parqit-written files always carry
+     * the fmt, so this is every round-tripped byte variable */
+    ColumnPlan p = plan_for(DUCKDB_TYPE_TINYINT);
+    REQUIRE(p.needs_minmax);
+    p.stata_format = "%8.0g";
+    ColumnStats s;
+    s.has_minmax = true;
+    s.min = -1;
+    s.max = 3;
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Byte);
+
+    p = plan_for(DUCKDB_TYPE_TINYINT);
+    p.stata_format = "%9.2f";
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Byte);
+
+    /* a genuine period format keeps integer storage wide enough */
+    p = plan_for(DUCKDB_TYPE_TINYINT);
+    p.stata_format = "%tq";
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Int);
+
+    /* no format at all: pure range sizing */
+    p = plan_for(DUCKDB_TYPE_TINYINT);
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Byte);
+}
+
 TEST_CASE("decimal becomes double, never dropped or missing (charter 6.11)") {
     duckdb_logical_type lt = duckdb_create_decimal_type(18, 3);
     ColumnPlan p = plan_read_column("money", lt);
