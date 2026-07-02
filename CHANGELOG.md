@@ -6,6 +6,172 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-07-02
+
+Storage-type fidelity fix, reported from production use (a `byte` variable
+came back `int` after a save/use round-trip), plus the findings of a full
+adversarial audit (three code auditors + a native-Stata adjudication pass +
+three empirical Stata batteries against native oracles). Locked by
+`v41_type_fidelity`, `v42_expr_semantics`, `v43_io_hardening` and new unit
+tests; every disputed semantic was adjudicated against a live native Stata
+before being called a bug (two "confirmed" audit findings — `mod(x,0)` and
+`!x^y` precedence — turned out to be native behavior parqit already matched,
+and were pinned as correct instead of "fixed").
+
+### Fixed
+- **Storage types round-trip exactly; a display format never widens them
+  (TYPE-1).** `refine_plan`'s period-format guard ("period/date formats keep
+  their integer storage wide enough") widened a range-sized `byte` to `int`
+  whenever the column carried *any* display format, not just a `%t*` class.
+  Files written by parqit always record the format in `parqit.schema`, so
+  every parqit-written `byte` column — plain, labelled, formatted or
+  all-missing — loaded back as `int` on the eager-use, lazy-collect and
+  view-save paths alike, and `apply_meta_type` could not narrow it back
+  (the saved type is a floor, not a ceiling, by design). Foreign files
+  masked the bug: with no recorded format, pure range refinement sized
+  them correctly. The guard now fires only for genuine `%t*` format
+  classes; on-disk physical types were always correct (`int8`), so no
+  file written by an affected version needs rewriting — re-reading with
+  0.1.14 restores the original storage type.
+- **Generated infinities are missing everywhere (INF-1).** `exp(800)`,
+  `1e300*1e300`, `8e307+8e307` and the literal `1e309` produced IEEE `+Inf`
+  inside the pipeline (native Stata: `.`), which passed `< .` filters
+  (inverting them), poisoned `collapse`/`summarize` aggregates into `.`,
+  and disagreed with `missing()` on the same value. All arithmetic
+  producers (`+ - * /` and `^`, `exp()`) now route through a
+  `parqit_finite` scalar (missing when non-finite or ≥ Stata's missing
+  threshold), and out-of-range literals translate to missing. Consequence:
+  expressions compute in double precision like Stata's evaluator, so an
+  *untyped* `parqit gen` over integer columns now stores `double` (type a
+  `gen` to control storage; values are unchanged).
+- **Date functions floor and never abort (DATE-2).** `year/month/day/
+  quarter/dow/doy/mofd/yofd/mdy/dofm` used a bare `CAST(x AS INTEGER)`:
+  a fractional day count *rounded* (`day(21915.9)` was off by one; native
+  floors — `day(-0.5)` = 31) and an out-of-range argument (`year(3e9)`)
+  aborted the whole query instead of being row-local missing. Now
+  `floor()` + `try()`, the DATE-1 treatment, on the entire family — plus
+  loud type errors for string arguments (native r(109)).
+- **`subinstr()` no longer wipes values on a NULL needle/replacement
+  (SUBINSTR-NULL-1).** Only the first argument was coalesced; a NULL
+  second/third argument (reachable mid-pipeline after an unmatched merge)
+  made DuckDB `replace()` return NULL — the whole value silently
+  destroyed. All three string arguments are coalesced now; the empty-needle
+  identity matches native (`subinstr("abc","","X",.)` = `"abc"`).
+- **Loud rejections where native Stata rejects.** `||`/`&&` (r(198)
+  natively; previously accepted silently), uppercase extended-missing
+  literals (`x == .A`), malformed numbers (`1.2.3`), string arguments to
+  `mod/round/ln/log10/sqrt/exp` and the date family (r(109) natively),
+  and a `cond()` 4th branch whose type differs from the 2nd/3rd.
+- **Filename wildcards are `*` and `?` only; `[` is always literal
+  (GLOB-2).** With only `data1.parquet` on disk, `parqit use using
+  "data[1].parquet"` silently read `data1.parquet` (rc 0, wrong data,
+  message claiming the bracket name) — bracket names are common (browser
+  download copies), bracket glob classes in a Stata filename are not.
+  A path that exists literally is now always that file (fully escaped);
+  a non-existing path acts as a pattern with `*`/`?` live and `[`
+  literal, so a missing bracket-named file is a loud file-not-found.
+- **`_se` joins the reserved-name set (SAN-SE-1).** A parquet column named
+  `_se` loaded under that name — which Stata itself refuses — and a later
+  `summarize _se` silently matched the system variable (empty no-op). It
+  sanitises to `__se` like `_b`/`_pred` already did.
+- **Per-process spill directory (SPILL-1).** The DuckDB spill default was
+  `c(tmpdir)/_parqit_spill`, shared by every Stata instance on the machine
+  (and every user on an HPC login node); concurrent sessions could
+  interfere. Now `_parqit_spill_<pid>`.
+- **`reshape wide` with missing `j` is a loud error (RESHAPE-MISSJ-1).**
+  Rows whose `j` was missing (numeric `.`/NaN or string `""`) were
+  silently excluded from the pivot — their stub values destroyed with
+  rc 0; native Stata errors r(498) "variable j contains missing values".
+- **Lazy `save` after merge/append never writes SQL NULL strings
+  (MERGE-NULLSTR-1).** The MISS-1 `normalized` flag survived two-table
+  verbs, but FULL/LEFT JOIN and UNION-BY-NAME introduce NULLs into carried
+  string columns of unmatched/absent rows — the save guard was skipped and
+  the file carried string NULLs (third-party readers saw `None` where the
+  eager path writes `""`). Two-table verbs now clear the flag on string
+  columns.
+- **Dropping a sort key no longer kills the pipeline (SORT-DROP-1).**
+  `parqit sort y` … `parqit drop y` … `collect` died with a raw DuckDB
+  Binder Error; native keeps the physical order and clears `sortedby`.
+  The drop stage now bakes the ordering in and truncates the recorded
+  sort keys at the first dropped column.
+- **`duplicates drop` (no varlist) sees `""` ≡ NULL (DUP-NORM-1).** The
+  no-varlist form used a raw `SELECT DISTINCT`, so a `("", NULL)` string
+  pair (reachable after merge/append) survived as two rows while the
+  varlist form deduped it. Both forms now normalize keys identically.
+- **`parqit list ... in f/l` out of range errors like native** instead of
+  printing nothing with rc 0; **`parqit head` requires a positive count**
+  (a negative reached the plugin as "no limit" and materialised the whole
+  view); **`parqit appendin, keep()` validates against the using file**
+  (native semantics; it also projects the read to the kept columns);
+  **a failed `parqit append` no longer half-merges value-label metadata**
+  (validate-then-mutate); **the view-prefix restore reports failure**
+  instead of silently leaving the wrong view current; **the collect/use
+  frame swap is `nobreak`** (a Break in the swap window could lose both
+  the old and new data); **bridge cleanup survives paths with spaces**;
+  **response parsing drops the last `fget` 32 KB line cap** (META-1
+  pattern everywhere); **hostile oversized value-label text truncates
+  with a note** instead of aborting the load; **the direct Arrow save
+  path refuses a restricted observation range loudly** (latent
+  mis-indexing guard, SAVE-RANGE-1).
+
+### Fixed (found by executing the help-file examples)
+- **The save self-overwrite guard matches the source glob, not its base
+  directory, on absolute paths (SAVE-SELFGLOB-2).** With a view open over
+  `qp_*.parquet`, saving to any {it:existing} destination in the same
+  folder was refused (false positive — the documented
+  filter-then-save-next-to-the-source workflow failed on its second run,
+  once the partitioned tree existed), while a {it:relative} destination
+  that did not exist yet was never made absolute, so overwriting the
+  view's own source escaped the guard entirely on first contact. The
+  destination is now matched against the decoded source pattern (parqit's
+  glob dialect: `*`/`?` per segment, `**` deep, `[` literal), directory
+  destinations are refused when the pattern's base lies inside them, and
+  writing a NEW file the open view's glob would re-read is refused too.
+  Locked by `v45_save_selfoverlap`; every help example now runs twice
+  end-to-end in validation.
+
+### Performance (same release; no precision change, verified by native oracles)
+Benchmarked on the synthetic 10M×13 workers panel (min-of-3, quiet machine)
+against the pre-audit build; the full correctness suite plus a new
+native-oracle equivalence test gate every number.
+- **`summarize, detail` is ~6.4x faster (PERF-DET-1): 4.38s → 0.68s for four
+  10M-row variables.** Was one scan per variable with a per-variable mean
+  subquery and NINE single-threaded `list_sort(list(x))` materialisations;
+  now one count/mean/min/max scan for all variables, one central-moments
+  scan with each mean injected as an exact `dtoa` literal (identical
+  two-pass math), and per-variable order statistics via a CTAS through
+  DuckDB's PARALLEL sort operator plus O(1) rowid point-picks. The Stata
+  percentile rule (np = n·p/100: integral → mean of neighbours, else ceil)
+  is applied in exact integer arithmetic; values are the same data elements
+  the sorted-list form produced. A multi-stage pipeline is materialised
+  once so k variables do not re-run it k times. Locked by
+  `v44_summarize_detail_native` (native `summarize, detail` r() equality
+  across even/odd counts, n=1..7, constants, missings, int64/byte, and
+  all-missing columns). `quantile_disc` was measured and rejected: its
+  finalize is effectively single-threaded (1.1s/variable).
+- **`duplicates drop` (no varlist) uses a parallel hash GROUP BY +
+  `any_value` (PERF-DUP-1)** instead of the `row_number()` window the
+  DUP-NORM-1 fix had introduced — same normalized-key semantics, ~40%
+  faster on a 10M dedupe, back at the old `SELECT DISTINCT` speed
+  (1.15s vs 1.09s baseline) while keeping `''`≡NULL correctness.
+- **strL sidecar reads switch to 8 MiB gulps (PERF-STRL-1)** — two
+  `fread()` syscalls per cell become ~70 per file; local timing is
+  unchanged (the floor is Stata's own per-cell strL store, measured
+  0.5s/200k cells) but syscall-latency-bound filesystems (NFS/Lustre —
+  the HPC target) no longer pay per-record round-trips. Record format
+  unchanged; pinned by the existing v19 strL boundary test.
+- Whole-surface check: use/collect/save/collapse/sort/merge/joinby/
+  reshape/append remain at their engine floor (within noise of the
+  pre-audit build); the INF-1 correctness guards cost ~4.7% on an
+  expression-dense pipeline (5 generated columns over 2M rows) — the
+  price of overflow values no longer silently inverting filters.
+
+### Pinned as correct (native adjudication, not bugs)
+- `mod(7,0)` is missing natively (the manual's `mod(x,0)=x` is stale);
+  parqit already matched.
+- `!5^0` is 0 natively — `^` binds tighter than `!` in practice; parqit's
+  parser already matched. Documented in the translator.
+
 ## [0.1.13] — 2026-06-24
 
 `parqit set tempdir` portability fix, surfaced by the external test pack once its

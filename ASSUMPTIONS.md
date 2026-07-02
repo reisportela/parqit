@@ -699,3 +699,53 @@ entry notes the conservative fallback if the assumption proves wrong.
       exactly representable and also excludes the `INT64_MIN` sentinel. The
       sibling `%tC` guard already used a clean `2^53` power-of-two literal and was
       not affected. Pinned by `v38_xtool_fidelity`; real dates are unaffected.
+
+54. **Expressions compute in double; untyped `gen` results store `double`
+    (2026-07-02, INF-1).** Stata's expression evaluator is all-double, and the
+    audit showed DuckDB-typed arithmetic diverging twice: `INT32+INT32` near
+    2^31 aborts the whole query (Stata: 4e9), and double overflow produced a
+    live `+Inf` that passed `< .` filters and poisoned aggregates (Stata: `.`).
+    All arithmetic producers now cast operands to DOUBLE and route the result
+    through the `parqit_finite` scalar. Consequence: an *untyped*
+    `parqit gen z = a + 1` over integer columns collects/saves as `double`
+    (previously the narrowest integer type; native Stata's own untyped `gen`
+    default is `float` — no engine matches native storage here, values are
+    identical). Users who want narrow storage type their `gen`, as in native
+    Stata. Conservative fallback: a typed `gen` (`parqit gen byte z = …`)
+    still coerces exactly as before.
+55. **`||`/`&&` now rejected (2026-07-02).** Native Stata expressions reject
+    them (r(198)); parqit had silently accepted them as `|`/`&`. Accepting a
+    private dialect invites scripts that break under native Stata, against
+    the "Stata's vocabulary" thesis. Any existing parqit script using them
+    gets a loud, anchored error naming the fix.
+56. **`regexm()` stays on RE2, documented (2026-07-02).** Stata's own regex
+    engine treats `\d`/`\w`/`{n,m}`/non-greedy as literals; RE2 honours them.
+    Reimplementing Stata's engine is out of scope for v1; the dialect
+    difference is documented in the help (patterns restricted to POSIX
+    classes and `* + ? . [] ^ $` behave identically). Conservative fallback
+    if this bites users: translate-time rejection of patterns containing
+    backslash escapes.
+57. **`reshape wide` with both `stub1` and `stub01` present keeps parqit's
+    current pairing (2026-07-02).** Native Stata accepts that layout (rc 0,
+    verified live); the v34 leading-zero fix pins parqit's choice (`stub1`
+    is the j=1 payload, `stub01` carried as data). Not observed to diverge
+    on payload; revisit only with a concrete native counterexample.
+58. **Glob wildcards restricted to `*` and `?` (2026-07-02, GLOB-2).** DuckDB
+    globs also honour `[...]` classes, but a bracket is far more likely to be
+    a literal byte of a Stata user's filename (`data[1].parquet` download
+    copies) than an intentional character class — and an unescaped class
+    silently read a *different* file with rc 0, the worst failure mode in the
+    charter. `[` is now always literal; `*`/`?` remain live in non-existing
+    paths. Conservative fallback if a user genuinely needs classes:
+    `parqit sql` with read_parquet and a raw pattern.
+59. **`summarize, detail` order statistics via session-scoped scratch tables
+    (2026-07-02, PERF-DET-1).** The per-variable sorted projection lives in
+    `__parqit_sumdet_src`/`__parqit_sumdet_srt` TEMP tables (dropped before
+    create and after use). The name is fixed, not `fresh_helper`-generated:
+    the tables live in parqit's embedded session catalog, which only
+    `parqit sql` could also touch; a user table with that exact name would be
+    dropped. Documented trade-off — the `__parqit_` prefix is reserved across
+    the project (helpers, spill dirs), and `parqit sql` users are already
+    warned off the prefix by convention. rowid-on-CTAS = insertion order =
+    ORDER BY order relies on DuckDB's default preserve_insertion_order, which
+    parqit never changes (same dependency as `keep in`).

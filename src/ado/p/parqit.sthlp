@@ -1,11 +1,12 @@
 {smcl}
-{* *! version 0.1.13 24jun2026}{...}
+{* *! version 0.1.14 02jul2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
 {vieweralsosee "[D] merge" "help merge"}{...}
 {viewerjumpto "Syntax" "parqit##syntax"}{...}
 {viewerjumpto "Description" "parqit##description"}{...}
+{viewerjumpto "Stata metadata in Parquet" "parqit##metadata"}{...}
 {viewerjumpto "The lazy view" "parqit##lazy"}{...}
 {viewerjumpto "Input formats" "parqit##formats"}{...}
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
@@ -35,7 +36,9 @@ Parquet on an embedded DuckDB engine
 {p 8 16 2}
 {cmd:parqit use} {it:filename}{cmd:,} {opt clear}
 
-{pstd}{it:filename} may be a Parquet file, a glob such as {it:data_*.parquet},
+{pstd}{it:filename} may be a Parquet file, a glob such as {it:data_*.parquet}
+(wildcards are {cmd:*} and {cmd:?}; a {cmd:[} is a literal character, and a
+filename that exists is always read as itself, never as a pattern),
 a Hive-partitioned directory, a delimited-text file ({cmd:.csv}/{cmd:.tsv}/
 {cmd:.txt}), or a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file — see
 {help parqit##formats:Input formats}. Without {opt clear} a lazy view opens over
@@ -65,14 +68,14 @@ mismatch across the matched files is a loud error.
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source}{p_end}
 
 {p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file} [{cmd:,} {it:merge_options}]{p_end}
-{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)}]{p_end}
+{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)}]{space 3}({opt keep()} names variables {it:of the file}, as in native {helpb append}){p_end}
 
 {pstd}{cmd:mergein}/{cmd:appendin} join the data {it:already in Stata's memory}
 with a disk {it:file} via a {it:native} {help merge}/{help append}: the
 in-memory dataset stays put (no DuckDB round-trip), and parqit reads only the
 needed columns of the disk side. This is the fast route when the disk side is a
-{it:small lookup}; for big-on-big use the out-of-core {cmd:parqit use … ; parqit
-merge} path instead. {it:merge_options} are the native ones
+{it:small lookup}; for big-on-big use the out-of-core
+{cmd:parqit use} + {cmd:parqit merge} path instead. {it:merge_options} are the native ones
 ({opt keepus:ing()}, {opt keep()}, {opt gen:erate()}, {opt nogen:erate},
 {opt update}, {opt assert()}, …).
 
@@ -84,7 +87,7 @@ without materialising either side.
 
 {p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear}]{space 8}stream the result into memory (atomically){p_end}
 {p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)} {opt c:hunk(#)}]{p_end}
-{p 8 16 2}{cmd:parqit count} | {cmd:parqit head} [{it:#}] | {cmd:parqit list} [{it:#}]{p_end}
+{p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}]{p_end}
 {p 8 16 2}{cmd:parqit misstable} [{cmd:summarize}|{cmd:patterns}] [{it:varlist}]{p_end}
@@ -130,6 +133,41 @@ Stata metadata survives: variable labels, value labels, notes, display
 formats, characteristics and original column names are stored in standard
 Parquet key-value metadata under a {cmd:parqit.*} namespace and restored on
 read, while the file remains plain Parquet for pandas, polars, R and Spark.
+
+
+{marker metadata}{...}
+{title:Stata metadata in Parquet}
+
+{pstd}
+A file written by {cmd:parqit save} is an ordinary Parquet file: Python,
+R, Spark, DuckDB and other readers see the data columns normally. Stata-only
+metadata is stored in the Parquet footer as file-level key-value metadata.
+The keys are {cmd:parqit.schema}, {cmd:parqit.vallabs}, {cmd:parqit.chars}
+and {cmd:parqit.dtalabel}. {cmd:parqit.schema} carries Stata storage types,
+display formats, variable labels, attached value-label names and original
+source names; {cmd:parqit.vallabs} carries the value-label definitions;
+{cmd:parqit.chars} carries characteristics and notes; and
+{cmd:parqit.dtalabel} carries the Stata data label.
+
+{pstd}
+Third-party readers usually do not apply Stata labels automatically. For
+example, {cmd:pandas.read_parquet()} will read a labelled numeric variable as
+its numeric codes; the label definitions remain available in the footer. In
+Python, inspect them with {cmd:pyarrow}:
+
+{phang2}{cmd:import json, pyarrow.parquet as pq}{p_end}
+{phang2}{cmd:md = pq.read_metadata("file.parquet").metadata or dict()}{p_end}
+{phang2}{cmd:schema = json.loads(md[b"parqit.schema"].decode())}{p_end}
+{phang2}{cmd:vallabs = json.loads(md[b"parqit.vallabs"].decode())}{p_end}
+{phang2}{cmd:chars = json.loads(md[b"parqit.chars"].decode())}{p_end}
+{phang2}{cmd:dtalabel = json.loads(md[b"parqit.dtalabel"].decode())}{p_end}
+
+{pstd}
+When the file is read back with {cmd:parqit use} or materialised with
+{cmd:parqit collect}, parqit restores the metadata to Stata. Extended missing
+categories {cmd:.a}-{cmd:.z} become plain missing values in Parquet, because
+Parquet has one missing concept; their value-label definitions still survive
+in {cmd:parqit.vallabs}.
 
 
 {marker lazy}{...}
@@ -358,7 +396,11 @@ count {cmd:""}){p_end}
 {opt limit(#)} (default 5,000){p_end}
 {p 8 12 2}{cmd:parqit head} [{it:#}]{space 13}materialises only {it:#} rows (default 5) into a
 scratch frame, lists them, discards them{p_end}
-{p 8 12 2}{cmd:parqit describe}{space 14}the view's schema and pipeline depth{p_end}
+{p 8 12 2}{cmd:parqit describe}{space 14}the view's schema and pipeline depth.
+The Stata types shown are the honest display of the file's declared/saved
+types {it:without} a data scan; {cmd:collect} additionally sizes integers and
+strings from the observed range, so a foreign file's column can arrive
+narrower than {cmd:describe} showed{p_end}
 {p 8 12 2}{cmd:parqit count if} {it:exp}{space 8}filtered count {it:without touching the view's pipeline} (any parqit expression, including {cmd:missing(a,b,c)}){p_end}
 {p 8 12 2}{cmd:parqit list} [{it:vars}] [{cmd:if}] [{cmd:in}]{space 2}non-mutating preview
 with projection, filter and row-range (bare {cmd:if} caps at 200 rows){p_end}
@@ -422,6 +464,22 @@ format. {cmd:substr()} and {cmd:strpos()} index bytes, like Stata; if a
 character because DuckDB/Arrow strings must remain valid UTF-8.
 
 {pstd}
+Expressions compute in double precision, exactly like Stata's expression
+evaluator, and every value Stata cannot hold is missing: an overflowing
+result ({cmd:exp(800)}, {cmd:1e300*1e300}) or an out-of-range literal
+({cmd:1e309}) is {cmd:.} in filters, assignments and aggregates alike —
+never an IEEE infinity. Because untyped results are double, control the
+storage of a generated column with a typed {cmd:parqit gen} (e.g.
+{cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
+is {cmd:float}. Date functions floor a fractional day count (like Stata:
+{cmd:day(-0.5)} is 31) and an out-of-range argument is row-local missing.
+One documented dialect difference: {cmd:regexm()} runs on DuckDB's RE2
+engine, which understands {cmd:\d \w \s}, {cmd:{c -(}n,m{c )-}} and
+non-greedy quantifiers that Stata's own {cmd:regexm} treats as literals —
+patterns using only POSIX classes and {cmd:* + ? . [] ^ $} behave
+identically.
+
+{pstd}
 {it:Missing-value semantics.} By default expressions use SQL semantics:
 missing is NULL and any comparison involving a missing value is unknown
 (NULL). For {cmd:keep if}/{cmd:drop if} this matches native Stata for the
@@ -439,8 +497,10 @@ to IS NULL tests in either mode. Strings have no missing: NULL and
 
 {pstd}
 An unsupported function is a loud, position-anchored error that names the
-function — never a silent guess. {cmd:parqit sql} and {cmd:parqit query} are
-the escape hatches.
+function — never a silent guess; syntax native Stata rejects ({cmd:||},
+{cmd:&&}, uppercase extended missings like {cmd:.A}, malformed numbers) is
+rejected here too. {cmd:parqit sql} and {cmd:parqit query} are the escape
+hatches.
 
 
 {marker types}{...}
@@ -448,8 +508,12 @@ the escape hatches.
 
 {pstd}On read, integer and string columns are sized from the observed
 range using Stata's exact limits; when the file was written by parqit, the
-original storage type wins (a {cmd:long} comes back {cmd:long}, a
-{cmd:str8} keeps width 8). DECIMAL loads as {cmd:double}; UINT32 can carry
+original storage type wins (a {cmd:byte} comes back {cmd:byte}, a
+{cmd:long} comes back {cmd:long}, a {cmd:str8} keeps width 8). Storage
+types round-trip exactly: a plain display format ({cmd:%9.2f}, {cmd:%8.0g})
+never widens the storage type; only a genuine date/period format keeps its
+integer storage at {cmd:int} or wider so the period count always fits.
+DECIMAL loads as {cmd:double}; UINT32 can carry
 values above 2^31 (never silent missings); LIST/STRUCT and friends are
 dropped with a message. {cmd:%td} variables are DATE on disk, {cmd:%tc}
 TIMESTAMP, and {cmd:%tm %tq %th %tw %ty %tb} stay integer period counts —
@@ -477,44 +541,11 @@ with a per-column note (Stata strings are C strings).
 {marker examples}{...}
 {title:Examples}
 
-{pstd}Out-of-core firm-year panel from worker microdata:{p_end}
-{phang2}{cmd:. parqit use using /data/qp_*.parquet}{p_end}
-{phang2}{cmd:. parqit keep if year >= 2010 & inrange(age, 25, 64)}{p_end}
-{phang2}{cmd:. parqit gen double lwage = ln(wage)}{p_end}
-{phang2}{cmd:. parqit collapse (mean) lwage (count) n=lwage, by(firmid year)}{p_end}
-{phang2}{cmd:. parqit show}{p_end}
-{phang2}{cmd:. parqit collect, clear}{p_end}
-
-{pstd}Parquet → Parquet without touching memory:{p_end}
-{phang2}{cmd:. parqit use using /data/qp_*.parquet}{p_end}
-{phang2}{cmd:. parqit keep if wage > 0 & !missing(firmid)}{p_end}
-{phang2}{cmd:. parqit save firm_panel.parquet, replace partition_by(year)}{p_end}
-
-{pstd}Join firm characteristics that live on disk:{p_end}
-{phang2}{cmd:. parqit use using firm_panel.parquet}{p_end}
-{phang2}{cmd:. parqit merge m:1 firmid year using /data/scie.parquet, keep(match) keepusing(tfp)}{p_end}
-{phang2}{cmd:. parqit collect, clear}{p_end}
-
-{pstd}Mixed formats — a large Parquet master, a CSV read out of core, and a
-lookup that lives in a Stata {cmd:.dta} (bridged), all joined before anything
-enters Stata:{p_end}
-{phang2}{cmd:. parqit use using transactions_*.csv}{space 6}({it:delimited, scanned out of core}){p_end}
-{phang2}{cmd:. parqit keep if amount > 0}{p_end}
-{phang2}{cmd:. parqit merge m:1 client_id using clients.dta, keepusing(region segment)}{p_end}
-{phang2}{cmd:. parqit collapse (sum) amount (count) n=amount, by(region segment)}{p_end}
-{phang2}{cmd:. parqit collect, clear}{p_end}
-
-{pstd}Read a single Excel sheet straight into Stata (small file, bridged):{p_end}
-{phang2}{cmd:. parqit use using rates.xlsx, clear}{p_end}
-
-{pstd}Drop to SQL when a window function is clearest:{p_end}
-{phang2}{cmd:. parqit use using spells.parquet}{p_end}
-{phang2}{cmd:. parqit sort id start}{p_end}
-{phang2}{cmd:. parqit query "qualify row_number() over (partition by id order by start) = 1"}{p_end}
-{phang2}{cmd:. parqit collect, clear}{p_end}
-
-{pstd}First exploration of an unfamiliar file — nothing is materialised:{p_end}
-{phang2}{cmd:. parqit use using /data/unknown.parquet}{p_end}
+{pstd}{bf:First contact with an unknown file.} {cmd:describe} reads only the
+footer (instant on any size); nothing below materialises data:{p_end}
+{phang2}{cmd:. parqit describe /data/unknown.parquet}{space 4}({it:rows, columns, types, row groups}){p_end}
+{phang2}{cmd:. parqit use using /data/unknown.parquet}{space 2}({it:lazy view; nothing read}){p_end}
+{phang2}{cmd:. parqit head 10}{p_end}
 {phang2}{cmd:. parqit codebook}{p_end}
 {phang2}{cmd:. parqit misstable}{p_end}
 {phang2}{cmd:. parqit summarize wage, detail}{p_end}
@@ -522,18 +553,142 @@ enters Stata:{p_end}
 {phang2}{cmd:. parqit count if missing(wage, age)}{p_end}
 {phang2}{cmd:. parqit list id year wage if wage < 0 | wage > 10000}{p_end}
 {phang2}{cmd:. parqit histogram wage, bins(30)}{p_end}
+{phang2}{cmd:. parqit close}{p_end}
 
-{pstd}Several named views, joined without materialising either side:{p_end}
+{pstd}{bf:Whole-file I/O and the metadata round-trip.} Labels, value labels,
+notes, formats and storage types survive save → use exactly; the file stays
+plain Parquet for Python/R/Spark (see
+{help parqit##metadata:Stata metadata in Parquet}):{p_end}
+{phang2}{cmd:. sysuse auto, clear}{p_end}
+{phang2}{cmd:. parqit save auto.parquet, replace}{p_end}
+{phang2}{cmd:. parqit use using auto.parquet, clear}{p_end}
+{phang2}{cmd:. describe}{space 15}({it:same types, labels and formats as before}){p_end}
+
+{pstd}{bf:Convert an archive once, work out of core forever.} A {cmd:.dta} (or
+{cmd:.xlsx}/{cmd:.csv}) source can be a {cmd:parqit use} input directly — so
+conversion is two lines, metadata included:{p_end}
+{phang2}{cmd:. parqit use using big_archive.dta, clear}{p_end}
+{phang2}{cmd:. parqit save big_archive.parquet, replace compression(zstd)}{p_end}
+
+{pstd}{bf:Out-of-core panel build} — filter, derive, aggregate on disk; only
+the firm-year result enters Stata:{p_end}
+{phang2}{cmd:. parqit use using /data/qp_*.parquet}{p_end}
+{phang2}{cmd:. parqit keep if year >= 2010 & inrange(age, 25, 64)}{p_end}
+{phang2}{cmd:. parqit gen double lwage = ln(wage)}{p_end}
+{phang2}{cmd:. parqit collapse (mean) lwage (sd) sd_lw=lwage (p50) med=lwage (count) n=lwage, by(firmid year)}{p_end}
+{phang2}{cmd:. parqit show}{space 22}({it:print the SQL the pipeline compiled to}){p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Parquet → Parquet without touching memory} — {cmd:save} materialises
+the view straight to disk; add {opt partition_by()} for a Hive tree that later
+reads can prune:{p_end}
+{phang2}{cmd:. parqit use using /data/qp_*.parquet}{p_end}
+{phang2}{cmd:. parqit keep if wage > 0 & !missing(firmid)}{p_end}
+{phang2}{cmd:. parqit save firm_panel.parquet, replace partition_by(year)}{p_end}
+
+{pstd}{bf:Disk-to-disk joins.} The {cmd:using} side stays on disk; contracts
+({cmd:m:1} unique keys, …) are validated up front and {cmd:_merge} is
+Stata-compatible:{p_end}
+{phang2}{cmd:. parqit use using firm_panel.parquet}{p_end}
+{phang2}{cmd:. parqit merge m:1 firmid year using /data/scie.parquet, keep(match) keepusing(tfp)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Pairwise combinations} use {cmd:joinby}, as in native Stata
+({cmd:merge m:m} exists and reproduces Stata's sequential pairing — and is
+almost never what you want):{p_end}
+{phang2}{cmd:. parqit use using workers.parquet}{p_end}
+{phang2}{cmd:. parqit joinby firmid using patents.parquet}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Mixed formats in one pipeline} — a CSV scanned out of core and a
+{cmd:.dta} lookup bridged in, joined before anything enters Stata:{p_end}
+{phang2}{cmd:. parqit use using transactions_*.csv}{p_end}
+{phang2}{cmd:. parqit keep if amount > 0}{p_end}
+{phang2}{cmd:. parqit merge m:1 client_id using clients.dta, keepusing(region segment)}{p_end}
+{phang2}{cmd:. parqit collapse (sum) amount (count) n=amount, by(region segment)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Data already in memory, lookup on disk} — keep your data put and
+join natively, reading only the needed columns of the file
+({cmd:mergein}/{cmd:appendin}); or promote memory to a view for big-on-big:{p_end}
+{phang2}{cmd:. use master, clear}{p_end}
+{phang2}{cmd:. parqit mergein m:1 firmid using firms.parquet, keepusing(tfp) nogen}{p_end}
+{phang2}{cmd:. parqit appendin using late_arrivals.parquet, keep(firmid wage)}{p_end}
+{phang2}{cmd:. parqit open _data}{space 18}({it:big-on-big: promote and join out of core}){p_end}
+{phang2}{cmd:. parqit merge m:1 id using big_using.parquet, keepusing(x y)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Reshape on disk} — a billion-row long↔wide never enters memory:{p_end}
+{phang2}{cmd:. parqit use using wide_income.parquet}{p_end}
+{phang2}{cmd:. parqit reshape long inc, i(pid) j(year)}{p_end}
+{phang2}{cmd:. parqit save long_income.parquet, replace}{p_end}
+
+{pstd}{bf:Dedup, frequency tables, samples}:{p_end}
+{phang2}{cmd:. parqit use using events.parquet}{p_end}
+{phang2}{cmd:. parqit duplicates report id date}{space 5}({it:copies/surplus table, no materialisation}){p_end}
+{phang2}{cmd:. parqit sort id date}{p_end}
+{phang2}{cmd:. parqit duplicates drop id date, force}{space 2}({it:first occurrence in the declared order}){p_end}
+{phang2}{cmd:. parqit contract region sector, freq(n)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit use using events.parquet}{p_end}
+{phang2}{cmd:. parqit sample 1, seed(42)}{space 13}({it:1% engine-side sample; count for # of rows}){p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Expressions, types and dates.} Untyped results are double (like
+Stata's evaluator); type the {cmd:gen} to control storage. Dates are their
+Stata numbers inside the pipeline:{p_end}
+{phang2}{cmd:. parqit use using workers.parquet}{p_end}
+{phang2}{cmd:. parqit gen byte prime = inrange(age, 25, 54)}{p_end}
+{phang2}{cmd:. parqit gen hire_year = year(hire_date)}{p_end}
+{phang2}{cmd:. parqit gen str1 ini = substr(name, 1, 1)}{p_end}
+{phang2}{cmd:. parqit replace wage = . if wage <= 0}{p_end}
+{phang2}{cmd:. parqit egen double fw = mean(wage), by(firmid)}{p_end}
+{phang2}{cmd:. parqit keep if hire_date >= td(01jan2015)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
+{pstd}{bf:Missing-value semantics, explicitly.} SQL mode (the default) drops
+missings on {cmd:>} filters; Stata mode keeps them:{p_end}
+{phang2}{cmd:. parqit use using workers.parquet}{p_end}
+{phang2}{cmd:. parqit count if wage > 5000}{space 12}({it:SQL mode: missing wage NOT counted}){p_end}
+{phang2}{cmd:. parqit set statamissing on}{p_end}
+{phang2}{cmd:. parqit count if wage > 5000}{space 12}({it:Stata mode: missing wage counted, as native}){p_end}
+{phang2}{cmd:. parqit set statamissing off}{p_end}
+
+{pstd}{bf:Several named views}, switched like frames and joined without
+materialising either side ({cmd:view:}{it:name} as a {cmd:using} source):{p_end}
 {phang2}{cmd:. parqit use using qp_*.parquet, name(panel)}{p_end}
 {phang2}{cmd:. parqit keep if year >= 2018}{p_end}
 {phang2}{cmd:. parqit use using qp_*.parquet, name(stats)}{p_end}
 {phang2}{cmd:. parqit collapse (mean) mw=wage (count) n=wage, by(firmid)}{p_end}
+{phang2}{cmd:. parqit views}{p_end}
+{phang2}{cmd:. parqit view stats: count}{space 6}({it:one-off against another view}){p_end}
 {phang2}{cmd:. parqit view panel}{p_end}
 {phang2}{cmd:. parqit merge m:1 firmid using view:stats, keep(match)}{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit close _all}{p_end}
 
-{pstd}A complete, self-verifying tour over artificial data ships in the
-repository's {cmd:examples/} directory ({cmd:parqit_tour.do}).{p_end}
+{pstd}{bf:SQL escape hatches} — inject a fragment into the pipeline
+({cmd:query}), or run a standalone statement ({cmd:sql}); {cmd:show}/
+{cmd:explain} print what will run:{p_end}
+{phang2}{cmd:. parqit use using spells.parquet}{p_end}
+{phang2}{cmd:. parqit sort id start}{p_end}
+{phang2}{cmd:. parqit query "qualify row_number() over (partition by id order by start) = 1"}{p_end}
+{phang2}{cmd:. parqit explain}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit sql "select year, count(*) n from read_parquet('spells.parquet') group by 1 order by 1", clear}{p_end}
+
+{pstd}{bf:Housekeeping} — engine settings, environment checks:{p_end}
+{phang2}{cmd:. parqit set threads 8}{p_end}
+{phang2}{cmd:. parqit set memory_limit 8GB}{p_end}
+{phang2}{cmd:. parqit set tempdir "/scratch/$USER"}{space 4}({it:spill directory for out-of-core runs}){p_end}
+{phang2}{cmd:. parqit version}{p_end}
+{phang2}{cmd:. parqit selftest}{space 17}({it:end-to-end engine/codec check on a new machine}){p_end}
+
+{pstd}Two complete, runnable programs ship with the source repository: a
+{bf:self-verifying tour} ({cmd:examples/parqit_tour.do}: every feature above,
+asserted cell-by-cell against a native Stata twin) and a {bf:clean demo}
+({cmd:parqit_clean_demo.do}: a section-by-section showcase on synthetic data,
+re-runnable one section at a time).{p_end}
 
 
 {marker limitations}{...}
