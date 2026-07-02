@@ -1,0 +1,107 @@
+/*
+  parqit — choose, order, rename and sort the open view's variables (lazy)
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_vars     (installed on the menu by: parqit menu)
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 360
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	script vars_on
+END
+
+SCRIPT vars_on
+BEGIN
+	main.ed_vars.enable
+	main.ed_old.disable
+	main.ed_new.disable
+END
+
+SCRIPT ren_on
+BEGIN
+	main.ed_vars.disable
+	main.ed_old.enable
+	main.ed_new.enable
+END
+
+DIALOG main, label("parqit — variables and sort (lazy)") tabtitle("Main")
+BEGIN
+  GROUPBOX gb_what		_lft	_top	_iwd	_ht13,		///
+	label("Operation on the open view")
+
+  RADIO rb_keep			_ilft	_ss	_ibwd	.,		///
+	first label("Keep only these variables")			///
+	onclickon(script vars_on)
+  RADIO rb_drop			@	+22	@	.,		///
+	label("Drop these variables")					///
+	onclickon(script vars_on)
+  RADIO rb_order		@	+22	@	.,		///
+	label("Order these variables first")				///
+	onclickon(script vars_on)
+  RADIO rb_sort		@	+22	@	.,			///
+	label("Sort by these variables (ascending)")			///
+	onclickon(script vars_on)
+  RADIO rb_gsort		@	+22	@	.,		///
+	label("Sort with +/- prefixes, e.g. -wage id (gsort)")		///
+	onclickon(script vars_on)
+  TEXT tx_vars			@	+25	@	.,		///
+	label("Variable list (names as shown by parqit describe/ds)")
+  EDIT ed_vars			@	_ss	_ibwd	.,		///
+	error("Variable list") label("variables")
+
+  RADIO rb_rename		@	+35	@	.,		///
+	last label("Rename one variable")				///
+	onclickon(script ren_on)
+  TEXT tx_old			@	+25	120	.,		///
+	label("Old name:")
+  EDIT ed_old			+125	@	140	.,		///
+	label("old name")
+  TEXT tx_new			+150	@	60	.,		///
+	label("New:")
+  EDIT ed_new			+65	@	140	.,		///
+	label("new name")
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_keep {
+		put "parqit keep "
+		require main.ed_vars
+		put main.ed_vars
+	}
+	if main.rb_drop {
+		put "parqit drop "
+		require main.ed_vars
+		put main.ed_vars
+	}
+	if main.rb_order {
+		put "parqit order "
+		require main.ed_vars
+		put main.ed_vars
+	}
+	if main.rb_sort {
+		put "parqit sort "
+		require main.ed_vars
+		put main.ed_vars
+	}
+	if main.rb_gsort {
+		put "parqit gsort "
+		require main.ed_vars
+		put main.ed_vars
+	}
+	if main.rb_rename {
+		put "parqit rename "
+		require main.ed_old
+		require main.ed_new
+		put main.ed_old " " main.ed_new
+	}
+END

@@ -1,0 +1,92 @@
+/*
+  parqit — read Parquet (or CSV/dta/Excel) data
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_read
+  Install a User-menu entry with:  parqit menu
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 330
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	main.fi_using.formatfilter					///
+		"Parquet (*.parquet)|*.parquet|"			///
+		"Delimited text (*.csv *.tsv *.txt)|*.csv;*.tsv;*.txt|"	///
+		"Stata data (*.dta)|*.dta|"				///
+		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
+		"All files (*.*)|*.*"
+	main.tx_name.disable
+	main.ed_name.disable
+END
+
+SCRIPT clear_on
+BEGIN
+	main.tx_name.disable
+	main.ed_name.disable
+END
+
+SCRIPT clear_off
+BEGIN
+	main.tx_name.enable
+	main.ed_name.enable
+END
+
+DIALOG main, label("parqit — read Parquet data") tabtitle("Main")
+BEGIN
+  TEXT tx_using			_lft	_top	_iwd	.,		///
+	label("File to read: Parquet, glob (data_*.parquet), Hive directory, CSV/TSV, dta or Excel")
+  FILE fi_using			@	_ss	@	.,		///
+	error("File to read")						///
+	defext(parquet)							///
+	label("Browse...")
+
+  TEXT tx_vars			_lft	+35	_iwd	.,		///
+	label("Variables to read (optional; default is all columns)")
+  EDIT ed_vars			@	_ss	@	.,		///
+	label("variables to read")
+
+  CHECKBOX ck_clear		_lft	+35	_iwd	.,		///
+	option(clear) default(1)					///
+	label("Read into memory now (replaces the data in memory)")	///
+	onclickon(script clear_on)					///
+	onclickoff(script clear_off)
+
+  TEXT tx_lazy			_lft	+25	_iwd	.,		///
+	label("Unticked: open a lazy view — nothing is read until parqit collect/save")
+
+  TEXT tx_name			_lft	+25	_vnwd	.,		///
+	label("View name (optional)")
+  EDIT ed_name			@	_ss	@	.,		///
+	option(name)							///
+	label("view name")
+
+  CHECKBOX ck_relaxed		_lft	+35	_iwd	.,		///
+	option(relaxed)							///
+	label("Union a glob whose files have different schemas (relaxed)")
+END
+
+PROGRAM command
+BEGIN
+	put "parqit use "
+	if main.ed_vars {
+		put main.ed_vars " "
+	}
+	put "using "
+	require main.fi_using
+	put `"""' main.fi_using `"""'
+	beginoptions
+		option main.ck_clear
+		if !main.ck_clear & main.ed_name {
+			optionarg main.ed_name
+		}
+		option main.ck_relaxed
+	endoptions
+END

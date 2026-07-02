@@ -1,0 +1,194 @@
+/*
+  parqit — explore structure and data quality (nothing is materialised)
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_explore     (installed on the menu by: parqit menu)
+  Descriptive statistics (summarize, tabulate, tabstat, correlations,
+  histogram) live in the companion dialog:  db parqit_stats
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 480
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	main.fi_file.formatfilter					///
+		"Parquet (*.parquet)|*.parquet|"			///
+		"All files (*.*)|*.*"
+	script descview_on
+END
+
+SCRIPT all_off
+BEGIN
+	main.fi_file.disable
+	main.ed_head.disable
+	main.ed_cbvars.disable
+	main.ed_msvars.disable
+	main.ck_patterns.disable
+	main.ed_dvars.disable
+	main.ck_joint.disable
+	main.ed_dupkeys.disable
+	main.ex_cif.disable
+END
+
+SCRIPT descview_on
+BEGIN
+	script all_off
+END
+
+SCRIPT descfile_on
+BEGIN
+	script all_off
+	main.fi_file.enable
+END
+
+SCRIPT head_on
+BEGIN
+	script all_off
+	main.ed_head.enable
+END
+
+SCRIPT cb_on
+BEGIN
+	script all_off
+	main.ed_cbvars.enable
+END
+
+SCRIPT ms_on
+BEGIN
+	script all_off
+	main.ed_msvars.enable
+	main.ck_patterns.enable
+END
+
+SCRIPT dist_on
+BEGIN
+	script all_off
+	main.ed_dvars.enable
+	main.ck_joint.enable
+END
+
+SCRIPT dup_on
+BEGIN
+	script all_off
+	main.ed_dupkeys.enable
+END
+
+SCRIPT count_on
+BEGIN
+	script all_off
+	main.ex_cif.enable
+END
+
+DIALOG main, label("parqit — explore structure and quality (no materialisation)") tabtitle("Main")
+BEGIN
+  RADIO rb_descview		_lft	_top	_iwd	.,		///
+	first label("Describe the current view (schema and pipeline)")	///
+	onclickon(script descview_on)
+
+  RADIO rb_descfile		@	+25	@	.,		///
+	label("Describe a file on disk (footer only — instant on any size)") ///
+	onclickon(script descfile_on)
+  FILE fi_file			_indent	_ss	370	.,		///
+	error("File to describe")					///
+	defext(parquet)							///
+	label("Browse...")
+
+  RADIO rb_head			_lft	+30	_iwd	.,		///
+	label("Preview the first rows of the view")			///
+	onclickon(script head_on)
+  EDIT ed_head			_indent	_ss	60	.,		///
+	numonly default(5) label("rows")
+
+  RADIO rb_cb			_lft	+30	_iwd	.,		///
+	label("Codebook: kind, obs, missing, distinct, min/max per variable") ///
+	onclickon(script cb_on)
+  EDIT ed_cbvars		_indent	_ss	280	.,		///
+	label("variables (blank = all)")
+
+  RADIO rb_ms			_lft	+30	_iwd	.,		///
+	label("Missing values per variable, or missing-data patterns")	///
+	onclickon(script ms_on)
+  EDIT ed_msvars		_indent	_ss	230	.,		///
+	label("variables (blank = all)")
+  CHECKBOX ck_patterns		+240	@	100	.,		///
+	label("Patterns")
+
+  RADIO rb_dist		_lft	+30	_iwd	.,			///
+	label("Distinct values per variable")				///
+	onclickon(script dist_on)
+  EDIT ed_dvars		_indent	_ss	230	.,			///
+	label("variables (blank = all)")
+  CHECKBOX ck_joint		+240	@	80	.,		///
+	option(joint) label("Joint")
+
+  RADIO rb_dup			_lft	+30	_iwd	.,		///
+	label("Duplicates report over key variables")			///
+	onclickon(script dup_on)
+  EDIT ed_dupkeys		_indent	_ss	280	.,		///
+	label("key variables")
+
+  RADIO rb_count		_lft	+30	_iwd	.,		///
+	last label("Count rows of the view (optionally under a condition)") ///
+	onclickon(script count_on)
+  EXP ex_cif			_indent	_ss	370	.,		///
+	label("Create...")
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_descview {
+		put "parqit describe"
+	}
+	if main.rb_descfile {
+		put "parqit describe "
+		require main.fi_file
+		put `"""' main.fi_file `"""'
+	}
+	if main.rb_head {
+		put "parqit head "
+		require main.ed_head
+		put main.ed_head
+	}
+	if main.rb_cb {
+		put "parqit codebook"
+		if main.ed_cbvars {
+			put " " main.ed_cbvars
+		}
+	}
+	if main.rb_ms {
+		put "parqit misstable"
+		if main.ck_patterns {
+			put " patterns"
+		}
+		if main.ed_msvars {
+			put " " main.ed_msvars
+		}
+	}
+	if main.rb_dist {
+		put "parqit distinct"
+		if main.ed_dvars {
+			put " " main.ed_dvars
+		}
+		beginoptions
+			option main.ck_joint
+		endoptions
+	}
+	if main.rb_dup {
+		put "parqit duplicates report "
+		require main.ed_dupkeys
+		put main.ed_dupkeys
+	}
+	if main.rb_count {
+		put "parqit count"
+		if main.ex_cif {
+			put " if " main.ex_cif
+		}
+	}
+END

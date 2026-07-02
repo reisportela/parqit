@@ -1,0 +1,88 @@
+/*
+  parqit — filter the open view's observations (lazy)
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_filter     (installed on the menu by: parqit menu)
+  The Create... button opens Stata's expression builder, including the date
+  functions and pseudofunctions (td(), tm(), year(), inrange(), ...).
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 300
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	script if_on
+END
+
+SCRIPT if_on
+BEGIN
+	main.ex_if.enable
+	main.ed_from.disable
+	main.ed_to.disable
+END
+
+SCRIPT in_on
+BEGIN
+	main.ex_if.disable
+	main.ed_from.enable
+	main.ed_to.enable
+END
+
+DIALOG main, label("parqit — filter observations (lazy)") tabtitle("Main")
+BEGIN
+  GROUPBOX gb_mode		_lft	_top	_iwd	_ht10,		///
+	label("Keep or drop observations of the open view")
+
+  RADIO rb_keepif		_ilft	_ss	_ibwd	.,		///
+	first label("Keep observations satisfying a condition")	///
+	onclickon(script if_on)
+  RADIO rb_dropif		@	+22	@	.,		///
+	label("Drop observations satisfying a condition")		///
+	onclickon(script if_on)
+  TEXT tx_if			@	+25	@	.,		///
+	label("Condition (dates via td(), tm(), year(), ...; see Create...)")
+  EXP ex_if			@	_ss	_ibwd	.,		///
+	error("Condition") label("Create...")
+
+  RADIO rb_keepin		@	+35	@	.,		///
+	last label("Keep an observation range of the pipeline")		///
+	onclickon(script in_on)
+  TEXT tx_from			@	+25	60	.,		///
+	label("From:")
+  EDIT ed_from			+45	@	80	.,		///
+	numonly default(1) label("first")
+  TEXT tx_to			+95	@	30	.,		///
+	label("to:")
+  EDIT ed_to			+35	@	80	.,		///
+	numonly label("last")
+
+  TEXT tx_note			_lft	+45	_iwd	.,		///
+	label("Nothing runs until parqit collect/save; missing-value mode: parqit set statamissing")
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_keepif {
+		put "parqit keep if "
+		require main.ex_if
+		put main.ex_if
+	}
+	if main.rb_dropif {
+		put "parqit drop if "
+		require main.ex_if
+		put main.ex_if
+	}
+	if main.rb_keepin {
+		put "parqit keep in "
+		require main.ed_from
+		require main.ed_to
+		put main.ed_from "/" main.ed_to
+	}
+END

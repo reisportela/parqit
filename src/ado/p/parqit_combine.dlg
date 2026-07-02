@@ -1,0 +1,164 @@
+/*
+  parqit — combine the open view with a disk file or another view (lazy)
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_combine     (installed on the menu by: parqit menu)
+  The using side may be Parquet, a glob, a Hive directory, CSV, dta or Excel
+  (dta/Excel are bridged), or another open view typed as  view:name .
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 400
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	main.fi_using.formatfilter					///
+		"Parquet (*.parquet)|*.parquet|"			///
+		"Delimited text (*.csv *.tsv *.txt)|*.csv;*.tsv;*.txt|"	///
+		"Stata data (*.dta)|*.dta|"				///
+		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
+		"All files (*.*)|*.*"
+	script merge_on
+END
+
+SCRIPT merge_on
+BEGIN
+	main.cb_kind.enable
+	main.ed_keys.enable
+	main.ed_keepus.enable
+	main.ck_match.enable
+	main.ck_master.enable
+	main.ck_musing.enable
+	main.ck_nogen.enable
+	main.ed_gen.disable
+END
+
+SCRIPT append_on
+BEGIN
+	main.cb_kind.disable
+	main.ed_keys.disable
+	main.ed_keepus.disable
+	main.ck_match.disable
+	main.ck_master.disable
+	main.ck_musing.disable
+	main.ck_nogen.disable
+	main.ed_gen.enable
+END
+
+SCRIPT joinby_on
+BEGIN
+	script append_on
+	main.ed_keys.enable
+	main.ed_gen.disable
+END
+
+DIALOG main, label("parqit — merge / append / joinby (lazy)") tabtitle("Main")
+BEGIN
+  RADIO rb_merge		_lft	_top	120	.,		///
+	first label("Merge")						///
+	onclickon(script merge_on)
+  RADIO rb_append		+130	@	120	.,		///
+	label("Append")							///
+	onclickon(script append_on)
+  RADIO rb_joinby		+130	@	120	.,		///
+	last label("Joinby")						///
+	onclickon(script joinby_on)
+
+  TEXT tx_using			_lft	+30	_iwd	.,		///
+	label("Using side: file, glob, directory — or type  view:name")
+  FILE fi_using			@	_ss	@	.,		///
+	error("Using file or view:name")				///
+	defext(parquet)							///
+	label("Browse...")
+
+  TEXT tx_kind			_lft	+35	_cwd1	.,		///
+	label("Merge kind")
+  COMBOBOX cb_kind		@	_ss	_vnwd	.,		///
+	dropdownlist contents(kind_list) default("m:1")			///
+	label("kind")
+
+  TEXT tx_keys			_lft2	-20	_cwd2	.,		///
+	label("Key variables (merge/joinby)")
+  EDIT ed_keys			@	_ss	_vnwd	.,		///
+	label("keys")
+
+  TEXT tx_keepus		_lft	+35	_iwd	.,		///
+	label("Variables to bring from the using side (merge; blank = all)")
+  EDIT ed_keepus		@	_ss	@	.,		///
+	option(keepusing) label("keepusing")
+
+  GROUPBOX gb_keep		_lft	+35	_iwd	_ht4,		///
+	label("Merge results to keep")
+  CHECKBOX ck_match		_ilft	_ss	110	.,		///
+	label("matched")
+  CHECKBOX ck_master		+120	@	110	.,		///
+	label("master only")
+  CHECKBOX ck_musing		+120	@	110	.,		///
+	label("using only")
+
+  CHECKBOX ck_nogen		_lft	+50	_cwd1	.,		///
+	option(nogenerate) label("Do not create _merge")
+
+  TEXT tx_gen			_lft2	-20	_cwd2	.,		///
+	label("Source marker variable (append, optional)")
+  EDIT ed_gen			@	_ss	_vnwd	.,		///
+	option(generate) label("generate")
+END
+
+LIST kind_list
+BEGIN
+	"1:1"
+	"m:1"
+	"1:m"
+	"m:m"
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_merge {
+		put "parqit merge "
+		put main.cb_kind " "
+		require main.ed_keys
+		put main.ed_keys " using "
+		require main.fi_using
+		put `"""' main.fi_using `"""'
+		beginoptions
+			if main.ck_match | main.ck_master | main.ck_musing {
+				put "keep("
+				if main.ck_match {
+					put "match "
+				}
+				if main.ck_master {
+					put "master "
+				}
+				if main.ck_musing {
+					put "using"
+				}
+				put ") "
+			}
+			optionarg main.ed_keepus
+			option main.ck_nogen
+		endoptions
+	}
+	if main.rb_append {
+		put "parqit append using "
+		require main.fi_using
+		put `"""' main.fi_using `"""'
+		beginoptions
+			optionarg main.ed_gen
+		endoptions
+	}
+	if main.rb_joinby {
+		put "parqit joinby "
+		require main.ed_keys
+		put main.ed_keys " using "
+		require main.fi_using
+		put `"""' main.fi_using `"""'
+	}
+END

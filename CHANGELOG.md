@@ -6,6 +6,38 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-07-02
+
+A point-and-click environment for parqit: eight dialogs, a User-menu
+installer, and a validation harness that executes every command shape the
+dialogs can emit (which is how it found nothing left to fix — the dialogs
+build ordinary `parqit` commands, all already covered by the suite).
+
+### Added
+- **A point-and-click environment: eight dialogs + `parqit menu`.** Shipped
+  in the package and installed under **User > parqit** by `parqit menu`
+  (idempotent, GUI-only with a loud console message; one profile.do line
+  makes it permanent). Every dialog emits an ordinary `parqit` command, so
+  each click is reproducible from the Review window:
+  `parqit_read` (file picker with type filters, variable subset,
+  memory-vs-lazy-view with view name, relaxed), `parqit_explore`
+  (structure and quality: describe file/view, head, codebook, misstable
+  [patterns], distinct [joint], duplicates report, count under a
+  condition), `parqit_stats` (descriptive statistics: summarize [detail],
+  tabulate one/two-way [missing, row/col %], tabstat with
+  checkbox-selected statistics and by(), correlate/pwcorr [obs, sig],
+  histogram with engine-computed bins), `parqit_filter` (keep/drop if —
+  Stata's expression builder
+  supplies the date functions td()/tm()/year()/... — and keep-in ranges),
+  `parqit_vars` (keep/drop/order/sort/gsort/rename), `parqit_gen`
+  (generate with storage type, or replace, both with builder-assisted
+  expression and optional if), `parqit_combine` (merge with kind/keys/
+  keep()/keepusing/nogenerate, append with generate(), joinby; the using
+  side may be `view:name`), and `parqit_write` (collect, or save with
+  replace/compression/partition_by/chunk/data). Field enabling follows
+  the chosen mode; all command shapes the dialogs can emit are executed
+  by the validation harness.
+
 ## [0.1.14] — 2026-07-02
 
 Storage-type fidelity fix, reported from production use (a `byte` variable

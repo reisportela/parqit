@@ -1,0 +1,115 @@
+/*
+  parqit — run the pipeline: collect into memory, or save to Parquet
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_write     (installed on the menu by: parqit menu)
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 360
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	main.fi_out.formatfilter					///
+		"Parquet (*.parquet)|*.parquet|"			///
+		"All files (*.*)|*.*"
+	script collect_on
+END
+
+SCRIPT collect_on
+BEGIN
+	main.fi_out.disable
+	main.ck_replace.disable
+	main.cb_comp.disable
+	main.ed_part.disable
+	main.ed_chunk.disable
+	main.ck_data.disable
+END
+
+SCRIPT save_on
+BEGIN
+	main.fi_out.enable
+	main.ck_replace.enable
+	main.cb_comp.enable
+	main.ed_part.enable
+	main.ed_chunk.enable
+	main.ck_data.enable
+END
+
+DIALOG main, label("parqit — collect or save (runs the pipeline)") tabtitle("Main")
+BEGIN
+  RADIO rb_collect		_lft	_top	_iwd	.,		///
+	first								///
+	label("Collect: stream the result into Stata's memory (atomically)") ///
+	onclickon(script collect_on)
+
+  RADIO rb_save			@	+30	@	.,		///
+	last								///
+	label("Save: write the result straight to Parquet (memory untouched)") ///
+	onclickon(script save_on)
+
+  TEXT tx_out			_indent	+25	370	.,		///
+	label("Output file (or directory when partitioning)")
+  FILE fi_out			@	_ss	@	.,		///
+	error("Output file")						///
+	defext(parquet)							///
+	save								///
+	label("Save as...")
+
+  CHECKBOX ck_replace		@	+30	170	.,		///
+	option(replace) label("Overwrite if it exists")
+  CHECKBOX ck_data		+180	@	200	.,		///
+	option(data)							///
+	label("Export the in-memory dataset")
+
+  TEXT tx_comp			_indent	+30	170	.,		///
+	label("Compression")
+  COMBOBOX cb_comp		@	_ss	120	.,		///
+	dropdownlist contents(comp_list) default("snappy")		///
+	option(compression) label("compression")
+
+  TEXT tx_part			+190	-20	200	.,		///
+	label("Partition by (Hive tree)")
+  EDIT ed_part			@	_ss	170	.,		///
+	option(partition_by) label("partition variables")
+
+  TEXT tx_chunk			_indent	+35	230	.,		///
+	label("Rows per row group (optional)")
+  EDIT ed_chunk			@	_ss	120	.,		///
+	numonly option(chunk) label("rows per row group")
+END
+
+LIST comp_list
+BEGIN
+	snappy
+	zstd
+	gzip
+	lz4
+	brotli
+	uncompressed
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_collect {
+		put "parqit collect, clear"
+	}
+	if main.rb_save {
+		put "parqit save "
+		require main.fi_out
+		put `"""' main.fi_out `"""'
+		beginoptions
+			option main.ck_replace
+			optionarg /hidedefault main.cb_comp
+			optionarg main.ed_part
+			optionarg main.ed_chunk
+			option main.ck_data
+		endoptions
+	}
+END

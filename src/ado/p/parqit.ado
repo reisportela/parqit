@@ -1,4 +1,4 @@
-*! version 0.1.14 02jul2026
+*! version 0.1.15 02jul2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -16,7 +16,7 @@ program define parqit, rclass
         contract duplicates sample collect count head list show explain    ///
         set merge append joinby reshape sql query summarize tabulate path   ///
         view views misstable levelsof ds lookfor codebook distinct      ///
-        tabstat correlate pwcorr histogram mergein appendin
+        tabstat correlate pwcorr histogram mergein appendin menu
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -115,6 +115,40 @@ program define _parqit_selftest, rclass
     di as txt "parqit selftest: " as res "ok" ///
         as txt "  (codecs agree; engine opened; Parquet write/read and parqit metadata verified in-process)"
     return local selftest "ok"
+end
+
+program define _parqit_menu
+    version 16.0
+    syntax
+    * idempotent per session: `window menu append` would duplicate the entry
+    if ("${PARQIT_MENU_ON}" == "1") {
+        di as txt "(parqit is already on the User menu this session)"
+        exit
+    }
+    capture {
+        window menu append submenu "stUser" "&parqit"
+        window menu append item "&parqit" "&Read data (use)..." "db parqit_read"
+        window menu append item "&parqit" "&Explore / data quality..." "db parqit_explore"
+        window menu append item "&parqit" "Descriptive &statistics..." "db parqit_stats"
+        window menu append separator "&parqit"
+        window menu append item "&parqit" "&Filter observations (if/in)..." "db parqit_filter"
+        window menu append item "&parqit" "&Variables and sort..." "db parqit_vars"
+        window menu append item "&parqit" "&Generate / replace..." "db parqit_gen"
+        window menu append item "&parqit" "Co&mbine (merge/append/joinby)..." "db parqit_combine"
+        window menu append separator "&parqit"
+        window menu append item "&parqit" "&Collect / save (run pipeline)..." "db parqit_write"
+        window menu append separator "&parqit"
+        window menu append item "&parqit" "&Help on parqit" "help parqit"
+        window menu refresh
+    }
+    if (_rc) {
+        di as err "parqit menu: menus need GUI Stata — this session appears" ///
+            " to be console or batch mode"
+        exit 199
+    }
+    global PARQIT_MENU_ON 1
+    di as txt "(parqit added to the {bf:User} menu; add the line " ///
+        as res "parqit menu" as txt " to your profile.do to keep it across sessions)"
 end
 
 * ----------------------------------------------------------------------------

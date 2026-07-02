@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.14 02jul2026}{...}
+{* *! version 0.1.15 02jul2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -113,6 +113,36 @@ without materialising either side.
 {p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:threads}|{cmd:memory_limit}|{cmd:tempdir} {it:value}{p_end}
 {p 8 16 2}{cmd:parqit version}{space 4}(plugin + engine versions){p_end}
 {p 8 16 2}{cmd:parqit selftest}{space 3}(end-to-end engine and codec check, useful on new installs/HPC nodes){p_end}
+{p 8 16 2}{cmd:parqit menu}{space 8}(add parqit to the {bf:User} menu — GUI Stata only){p_end}
+
+{pstd}{bf:Point and click.} A family of dialogs covers the main workflow;
+each one builds and runs an ordinary {cmd:parqit} command, so every click is
+reproducible from the Review window. {cmd:parqit menu} installs them under a
+{bf:User > parqit} menu (add {cmd:parqit menu} to your {help profile}.do to
+keep it across sessions), or launch any dialog directly:
+
+{p 8 12 2}{cmd:db parqit_read}{space 6}read a file into memory or open a lazy
+view (file picker with type filters, variable subset, view name,
+{opt relaxed}){p_end}
+{p 8 12 2}{cmd:db parqit_explore}{space 3}structure and data quality: describe
+a file or the view, preview rows, codebook, missing values/patterns, distinct
+counts, duplicates report, count under a condition{p_end}
+{p 8 12 2}{cmd:db parqit_stats}{space 5}descriptive statistics: summarize
+(detail), tabulate one/two-way (missing, row/col %), tabstat with the
+statistics chosen by checkboxes and {opt by()}, correlate/pwcorr (obs, sig),
+histogram with engine-computed bins{p_end}
+{p 8 12 2}{cmd:db parqit_filter}{space 4}keep/drop observations by condition
+(the {bf:Create...} button opens Stata's expression builder — date functions
+{cmd:td()}, {cmd:tm()}, {cmd:year()}, ... included) or keep a row range{p_end}
+{p 8 12 2}{cmd:db parqit_vars}{space 6}keep/drop/order variables, sort and
+gsort, rename{p_end}
+{p 8 12 2}{cmd:db parqit_gen}{space 7}generate (with storage type) or replace,
+expression and optional if via the builder{p_end}
+{p 8 12 2}{cmd:db parqit_combine}{space 3}merge (kind, keys, keep(), keepusing,
+nogenerate), append (generate()), joinby — the using side may be a file or
+{cmd:view:}{it:name}{p_end}
+{p 8 12 2}{cmd:db parqit_write}{space 5}run the pipeline: collect into memory,
+or save to Parquet (replace, compression, partition_by, chunk, data){p_end}
 
 
 {marker description}{...}

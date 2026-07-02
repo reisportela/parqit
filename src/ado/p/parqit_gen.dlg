@@ -1,0 +1,96 @@
+/*
+  parqit — generate or replace a variable on the open view (lazy)
+
+*!  VERSION 0.1.15  02jul2026
+
+  Launch with:  db parqit_gen     (installed on the menu by: parqit menu)
+  Both Create... buttons open Stata's expression builder (dates via td(),
+  tm(), year(), mdy(), ...). Untyped results store as double; choose a
+  storage type to control it, exactly like a typed native generate.
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 330
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	script gen_on
+END
+
+SCRIPT gen_on
+BEGIN
+	main.cb_type.enable
+END
+
+SCRIPT repl_on
+BEGIN
+	main.cb_type.disable
+END
+
+DIALOG main, label("parqit — generate / replace (lazy)") tabtitle("Main")
+BEGIN
+  RADIO rb_gen			_lft	_top	_cwd1	.,		///
+	first label("Generate a new variable")				///
+	onclickon(script gen_on)
+  RADIO rb_repl			_lft2	@	_cwd2	.,		///
+	last label("Replace an existing variable")			///
+	onclickon(script repl_on)
+
+  TEXT tx_type			_lft	+30	_cwd1	.,		///
+	label("Storage type (generate only)")
+  COMBOBOX cb_type		@	_ss	_vnwd	.,		///
+	dropdownlist contents(type_list) default("(double)")		///
+	label("storage type")
+
+  TEXT tx_name			_lft2	-20	_cwd2	.,		///
+	label("Variable name")
+  EDIT ed_name			@	_ss	_vnwd	.,		///
+	error("Variable name") label("name")
+
+  TEXT tx_exp			_lft	+35	_iwd	.,		///
+	label("= expression (dates: td(01jan2015), year(x), ...)")
+  EXP ex_exp			@	_ss	_iwd	.,		///
+	error("Expression") label("Create...")
+
+  TEXT tx_if			_lft	+35	_iwd	.,		///
+	label("Only where (optional if condition)")
+  EXP ex_if			@	_ss	_iwd	.,		///
+	label("Create...")
+END
+
+LIST type_list
+BEGIN
+	"(double)"
+	byte
+	int
+	long
+	float
+	double
+	strL
+END
+
+PROGRAM command
+BEGIN
+	put "parqit "
+	if main.rb_gen {
+		put "gen "
+		if !main.cb_type.isdefault() {
+			put main.cb_type " "
+		}
+	}
+	if main.rb_repl {
+		put "replace "
+	}
+	require main.ed_name
+	put main.ed_name " = "
+	require main.ex_exp
+	put main.ex_exp
+	if main.ex_if {
+		put " if " main.ex_if
+	}
+END
