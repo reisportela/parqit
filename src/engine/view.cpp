@@ -685,7 +685,23 @@ std::string View::contract(const std::vector<std::string> &by,
 std::string View::duplicates_drop(const std::vector<std::string> &by, bool force) {
     const std::string prev = prev_name(stages_.size());
     if (by.empty()) {
-        push_stage("SELECT DISTINCT " + select_list() + " FROM " + prev,
+        /* GROUPKEY-1 for the no-varlist form too: a raw SELECT DISTINCT would
+         * keep a ('', NULL) string pair — or a NaN beside a NULL numeric, both
+         * reachable mid-pipeline after merge/append — as two rows, while native
+         * Stata (and the varlist branch below) sees one duplicate. Dedupe on
+         * the normalized keys over ALL columns and emit one representative row.
+         * A hash GROUP BY + any_value, not a row_number() window: rows within
+         * a group are identical up to their missing encoding, so ANY
+         * representative is correct, and the parallel hash aggregate measures
+         * ~40% faster than the window on a 10M-row dedupe (PERF-DUP-1). */
+        std::string sel, grp;
+        for (size_t i = 0; i < cols_.size(); i++) {
+            const std::string r = quote_ident(cols_[i].name);
+            if (i) { sel += ", "; grp += ", "; }
+            sel += "any_value(" + r + ") AS " + r;
+            grp += norm_group_key(r, cols_[i].kind);
+        }
+        push_stage("SELECT " + sel + " FROM " + prev + " GROUP BY " + grp,
                    "duplicates drop");
         return "";
     }

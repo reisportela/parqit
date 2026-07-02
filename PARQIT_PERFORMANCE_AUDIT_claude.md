@@ -469,3 +469,110 @@ violation, so they are recorded rather than landed (the same discipline §4 used
 sizing #38; date-aware collect floor #39). New tests `tests/verify_suite/v21_collect_passthrough_sizing.do`,
 `v22_collect_date_no_overflow.do`, fixture `tests/fixtures/far_dates.parquet`, probe
 `benchmarks/probe_collect_vs_use.do`.*
+
+---
+
+## 9. Round 3 (2026-07-02, v0.1.14) — summarize-detail 6.4x; regressions from the correctness round measured and repaired
+
+Method as §2, synthetic 10M×13 workers panel, min-of-3 on a quiet machine,
+baseline = pre-audit HEAD build in a separate worktree (same DuckDB tarball).
+Every change gated by the full suite plus a new native-oracle test.
+
+| Workflow (10M rows) | HEAD | v0.1.14 | Δ |
+|---|---:|---:|---:|
+| `use, clear` | 1.428 | 1.424 | — |
+| `use` + `collect` | 1.410 | 1.489 | noise |
+| filter+gen+save | 0.079 | 0.074 | — |
+| expr-heavy collect (5 gens, 2M) | 4.452 | 4.693 | **+4.7% (INF-1 guards — correctness price)** |
+| collapse 6 stats by firm | 0.378 | 0.363 | — |
+| gsort+save | 0.678 | 0.709 | noise |
+| merge m:1+save | 1.164 | 1.087 | — |
+| reshape long+save | 0.613 | 0.591 | — |
+| duplicates drop (no varlist) | 1.088 | 1.152 | +6% (was +38% with the DUP-NORM-1 window; repaired via hash GROUP BY + any_value) |
+| summarize (13 vars) | 0.147 | 0.148 | — |
+| **summarize, detail (4 vars)** | **4.375** | **0.684** | **−84% (6.4x)** |
+| codebook (13 vars) | 0.254 | 0.250 | — |
+| tabstat by() | 1.204 | 1.223 | — |
+
+**PERF-DET-1** (the §8.5 "highest-value follow-up", now landed): detail was one
+query per variable — mean subquery + nine `list_sort(list(x))` (single-threaded)
+per query. Now: pass 1 count/mean/min/max for all vars (one scan); pass 2
+central moments with the pass-1 mean as an exact dtoa literal (identical
+two-pass math); per-var order statistics via `CREATE TEMP TABLE … ORDER BY`
+(DuckDB's parallel sort: 0.17s for 10M doubles vs 1.1-1.4s for
+quantile_disc/list_sort, both effectively single-threaded in finalize) plus
+O(1) rowid point-picks; Stata's percentile rule applied in exact integer
+arithmetic. Multi-stage pipelines materialise once, so k variables cost one
+pipeline run. `quantile_disc` was prototyped first and **rejected on
+measurement** (index semantics verified against quantile_sort_tree.hpp, but
+1.1s/var finalize made 4 vars *slower* than baseline). Locked by
+**V44_SUMMARIZE_DETAIL_NATIVE**: r()-equality with native `summarize, detail`
+over even/odd counts, integral/non-integral n·p/100, n=1..7, constants,
+missings, int64/byte, all-missing.
+
+**PERF-DUP-1**: DUP-NORM-1's correctness fix (normalized-key dedupe) had used a
+`row_number()` window (+38%); a parallel hash `GROUP BY norm(key…)` +
+`any_value` keeps the semantics (rows within a group are identical up to
+missing encoding) at DISTINCT-like speed.
+
+**PERF-STRL-1**: the strL sidecar reader parses 8 MiB gulps instead of two
+`fread()` per cell. Local wall-clock unchanged — measured floor is Stata's own
+strL store (`st_sstore` alone: 0.50s/200k×2.9KB cells; parqit end-to-end 2.0s
+vs 0.44s for the same payload as str2000) — but ~70 syscalls replace 400k,
+which matters on syscall-latency-bound HPC filesystems. Measured and left:
+further strL work hits the st_sstore floor.
+
+**Measured and rejected this round:** `quantile_disc` for detail (above);
+UNION-ALL per-variable parallelism (branch finalizes serialize: 2.65→2.16s);
+folding the tabstat by() precount (grouped percentiles dominate its 1.2s, and
+the fold would slow the >200-group error path — same verdict as §8.5).
+
+---
+
+## 10. Headroom assessment (2026-07-02) — what is still achievable, and at what cost
+
+Requested explicitly: an assessment of the gains that remain on the table.
+Grounded in this session's measurements (10M×13 synthetic panel, 48-core EL9).
+
+### 10.1 At the floor — no meaningful headroom without platform changes
+
+| Path | Now | Floor | Why the gap is structural |
+|---|---:|---:|---|
+| `use, clear` / `collect` (10M×13) | 1.42 s | ~0.6 s engine | The gap is the SPI per-cell store. It is already parallel and **does not scale further**: `PARQIT_FILL_THREADS` 4/8/16/24 → 1.56/1.63/1.73/1.69 s (min-of-4). Memory-bandwidth/SPI bound; only a bulk Stata-memory API (does not exist) would move it. |
+| filter/collapse/sort/merge/joinby/reshape → `save` | 0.07–1.1 s | ≈ same | Measured at the DuckDB floor (§8.1, re-confirmed this round). The verbs are plan edits; the engine is the cost. |
+| strL reads | 2.0 s / 580 MB | ~0.5 s | Floor is Stata's own `st_sstore` (0.50 s / 200k×2.9KB cells, measured bare). Sidecar+parse ≈ 0.7 s could shrink ~0.3–0.5 s by overlapping the sidecar write with the scan — medium risk on a delicate path, low priority. Mata is the only strL writer; the disk round-trip cannot be eliminated. |
+| `summarize` (plain), `codebook`, `misstable`, `distinct` | 0.14–0.28 s | ≈ same | Already single-scan for all variables. |
+| `summarize, detail` | 0.68 s | ~0.5 s | Just landed at 6.4×; the residual is two scans + k parallel sorts, near-irreducible for exact percentiles. |
+
+### 10.2 Real remaining opportunities, ranked
+
+1. **Grouped exact percentiles with few, large groups** — `tabstat, by()` (1.2 s
+   for 3 stats × 3 vars × 4 groups) and `collapse (median/pNN)` on low-cardinality
+   by(): the per-group `list_sort` is single-threaded. A single parallel sort of
+   (by, x) + per-group rank picks (the §9 detail technique generalised with a
+   group-count join) could take that shape to ~0.4–0.6 s (**2–3×**). Many-small-
+   groups shapes (the common collapse) are already fine (0.36 s / 500k groups).
+   Complexity medium-high; the exact Stata rule per group is delicate. Do it if
+   users hit the few-large-groups shape in practice.
+2. **INF-1 guard flattening in the translator** — nested `parqit_finite` calls in
+   an arithmetic chain collapse to the outermost guard with identical missing
+   semantics (an inner overflow propagates as NULL/Inf either way). Recovers most
+   of the measured +4.7% on expression-dense pipelines (~0.15–0.2 s / 2M×5 gens).
+   Medium risk: a translator refactor over freshly audited code; needs chain-shape
+   unit tests. Worth it in a maintenance release, not urgent.
+3. **Bounded group-count probes** — `tabulate` (10k cap) and `tabstat by()` (200
+   cap) materialise all groups before rejecting. A LIMIT-bounded pre-probe would
+   cap the *error* path only; the success path is unchanged. Tiny win, tiny risk.
+4. **Not worth doing** (measured/analysed and rejected): more fill threads (no
+   scaling — above); UNION-ALL per-variable stats parallelism (finalizes
+   serialize); `quantile_disc` (single-threaded finalize); narrowing integral
+   doubles on save (data-dependent type flapping vs v41's fidelity contract);
+   dropping the save ORDER BY or the post-write verify (§8.4, unchanged).
+
+### 10.3 Bottom line
+
+The manipulation layer is at the engine floor and the read path is at the SPI
+floor; both are structural. What remains is: grouped-percentile parallelisation
+(2–3× on one specific shape), guard flattening (~5% on expression-heavy
+pipelines), and micro-bounds on two error paths. parqit's headline costs are now
+where they belong — in DuckDB and in Stata's own storage interfaces.
