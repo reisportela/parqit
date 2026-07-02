@@ -6,6 +6,41 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-07-02
+
+An Excel-style pivot table as one lazy verb, on the menu.
+
+### Added
+- **`parqit pivot (stat) [tgt=]src ..., rows(varlist) cols(varname)`** — the
+  Excel pivot-table layout as a single lazy verb: aggregate the `(stat)`
+  specs by (rows, cols) with exactly `collapse`'s statistics and contracts,
+  then spread each distinct `cols()` value into its own column
+  (`reshape wide`), one row per `rows()` combination, columns named
+  `tgt`+`value` (`wage2019`, `nNorth`). Multiple measures per pivot;
+  `rows()` accepts wildcards; both stages appear in `parqit show`. The two
+  stages are applied **atomically** in the plugin: a refused spread (missing
+  `cols()` values — a loud error, as native `reshape wide`; >2000 distinct
+  values; an illegal generated name) restores the view exactly as it was.
+- **`parqit_pivot` dialog**, installed by `parqit menu` under
+  **User > parqit > Pivot table (Excel-style)...**: rows, a columns
+  variable, and one or two aggregated measures (statistic dropdown +
+  optional result name), emitting a reproducible `parqit pivot` command.
+
+### Fixed
+- **Release assets now ship the dialogs.** `parqit.pkg` lists the eight
+  v0.1.15 `.dlg` files, but the release workflow bundled only
+  ado/sthlp/pkg/toc + plugins, so a `net install` from the v0.1.15 release
+  URL (or its zips) aborted on the first missing `.dlg`. The workflow's
+  file list now globs `parqit_*.dlg` into every zip and the loose assets.
+
+### Internal
+- The collapse spec parser is factored into `_parqit_parse_aggspecs`
+  (collapse and pivot speak the same grammar), and the reshape-wide j-scan
+  (missing check, (i,j) uniqueness, ordered enumeration with the 2000-column
+  cap and `.0` suffix strip) into `wide_j_scan`, shared by `view_reshape`
+  and the new `view_pivot` — one contract, pinned once, for both verbs.
+  `View::expand_patterns` is now public engine API.
+
 ## [0.1.15] — 2026-07-02
 
 A point-and-click environment for parqit: eight dialogs, a User-menu

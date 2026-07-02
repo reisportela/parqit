@@ -6,8 +6,8 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 `parqit` lets you read, write, join and **manipulate** columnar data files in Stata using
-ordinary Stata verbs — `keep`, `drop`, `gen`, `replace`, `collapse`, `merge`,
-`append`, `sort`, `reshape` — that run **out-of-core** on an embedded
+ordinary Stata verbs — `keep`, `drop`, `gen`, `replace`, `collapse`, `pivot`,
+`merge`, `append`, `sort`, `reshape` — that run **out-of-core** on an embedded
 [DuckDB](https://duckdb.org) engine over Parquet, and materialise **one result
 table at a time** into Stata's memory.
 
@@ -17,7 +17,7 @@ it lazily on disk (datasets far larger than RAM), and only the final result is
 brought into Stata — or written straight back to Parquet without ever touching
 memory. SQL is available for power users, but no one has to learn it.
 
-> **Status:** v0.1.15 — the full surface below is implemented and covered by a
+> **Status:** v0.1.16 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -240,6 +240,7 @@ lazy Parquet master can join a `.dta` lookup and only the result is collected.
 | `parqit keep in <range>` | validated `LIMIT/OFFSET` |
 | `parqit sample # [, count seed()]` | reservoir sample: percent by default, rows with `count`; reproducible with `seed()` |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
+| `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
 
 ### Two-table verbs (lazy)
 
@@ -307,6 +308,11 @@ parqit collect, clear
 parqit use using wide_income.parquet
 parqit reshape long inc, i(id) j(year)
 parqit save long_income.parquet, replace
+
+* Excel-style pivot table: mean wage and a count, region rows × year columns
+parqit use using panel.parquet
+parqit pivot (mean) wage (count) n=wage, rows(region) cols(year)
+parqit collect, clear                       // wage2019 n2019 wage2020 n2020 ...
 
 * Drop to SQL when a window function is clearest
 parqit use using spells.parquet

@@ -83,6 +83,13 @@ class View {
     }
     const std::string &source_paths_sql() const { return src_paths_sql_; }
 
+    /* expand Stata varlist wildcards (*, ?) against the live schema, in
+     * pattern order, deduplicated; "" or an error for a no-match pattern.
+     * Public so a multi-stage caller (pivot) can expand once and hand the
+     * same literal list to every stage. */
+    std::string expand_patterns(const std::vector<std::string> &patterns,
+                                std::vector<std::string> *out) const;
+
     /* ---- verbs; each returns "" or an error message ------------------- */
     std::string keep_vars(const std::vector<std::string> &patterns);
     std::string drop_vars(const std::vector<std::string> &patterns);
@@ -162,8 +169,6 @@ class View {
     std::string show() const;
 
   private:
-    std::string expand_patterns(const std::vector<std::string> &patterns,
-                                std::vector<std::string> *out) const;
     int col_index(const std::string &name) const;
     /* `taken`: extra names the helper must dodge beyond the live manifest —
      * two-table verbs pass the using side's column names here, so a using

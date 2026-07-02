@@ -396,6 +396,32 @@ parqit count
 assert r(N) == 50
 parqit close
 
+* pivot — the Excel pivot table as one lazy verb (collapse + reshape wide);
+* native twin: the same two steps in memory
+clear
+parqit use tour_workers.parquet, clear
+preserve
+qui collapse (mean) mw = wage (count) n = wage, by(region year)
+qui reshape wide mw n, i(region) j(year)
+sort region
+tempfile pvt
+qui save `"`pvt'"'
+restore
+
+clear
+parqit use using tour_workers.parquet
+parqit pivot (mean) mw=wage (count) n=wage, rows(region) cols(year)
+parqit collect, clear
+foreach v of varlist mw* n* {
+    rename `v' s_`v'
+}
+qui merge 1:1 region using `"`pvt'"', assert(match) nogenerate
+foreach v of varlist mw* n* {
+    assert (mi(s_`v') & mi(`v')) | reldif(s_`v', `v') < 1e-12
+}
+di as txt "pivot: every cell equals the native collapse+reshape twin"
+parqit close
+
 * ----------------------------------------------------------------------------
 di as txt _n "{hline 78}"
 di as txt "section 8: SQL escape hatches"

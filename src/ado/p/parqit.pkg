@@ -2,7 +2,7 @@ d 'PARQIT': module providing a grammar of data manipulation for Parquet files on
 d
 d     parqit reads, writes, joins and manipulates columnar Parquet
 d data with ordinary Stata verbs -- keep, drop, gen, replace,
-d collapse, merge, append, sort, reshape -- that run out-of-core
+d collapse, pivot, merge, append, sort, reshape -- that run out-of-core
 d on an embedded DuckDB engine and materialise one result table
 d at a time into Stata's memory, or write it straight back to
 d Parquet without touching memory. Variable labels, value labels,
@@ -33,6 +33,7 @@ f parqit_stats.dlg
 f parqit_filter.dlg
 f parqit_vars.dlg
 f parqit_gen.dlg
+f parqit_pivot.dlg
 f parqit_combine.dlg
 f parqit_write.dlg
 g LINUX64 parqit_linux64.plugin parqit.plugin

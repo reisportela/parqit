@@ -128,7 +128,9 @@ jobs:
           # stata.toc + parqit.pkg make each folder a `net install`-able package;
           # the binary is shipped under the source name parqit.pkg expects, and
           # net install renames it to parqit.plugin on the target machine.
-          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp"
+          # Every file parqit.pkg names with an `f` line must ship too (net
+          # install aborts on the first missing file) — hence the .dlg glob.
+          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_*.dlg"
           mkdir -p dist/parqit_all_platforms
           for plat in linux_x86_64 macos_arm64 windows_x86_64; do
             case $plat in
@@ -166,6 +168,7 @@ jobs:
             dist/parqit_all_platforms/stata.toc
             dist/parqit_all_platforms/parqit.ado
             dist/parqit_all_platforms/parqit.sthlp
+            dist/parqit_all_platforms/parqit_*.dlg
             dist/parqit_all_platforms/parqit_linux64.plugin
             dist/parqit_all_platforms/parqit_macarm64.plugin
             dist/parqit_all_platforms/parqit_win64.plugin

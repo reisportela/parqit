@@ -1,4 +1,4 @@
-*! version 0.1.15 02jul2026
+*! version 0.1.16 02jul2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -14,8 +14,8 @@ program define parqit, rclass
     local cmds version selftest use save describe glimpse open close       ///
         keep drop gen egen replace rename order sort gsort collapse        ///
         contract duplicates sample collect count head list show explain    ///
-        set merge append joinby reshape sql query summarize tabulate path   ///
-        view views misstable levelsof ds lookfor codebook distinct      ///
+        set merge append joinby reshape pivot sql query summarize tabulate ///
+        path view views misstable levelsof ds lookfor codebook distinct    ///
         tabstat correlate pwcorr histogram mergein appendin menu
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
@@ -134,6 +134,7 @@ program define _parqit_menu
         window menu append item "&parqit" "&Filter observations (if/in)..." "db parqit_filter"
         window menu append item "&parqit" "&Variables and sort..." "db parqit_vars"
         window menu append item "&parqit" "&Generate / replace..." "db parqit_gen"
+        window menu append item "&parqit" "Pivot &table (Excel-style)..." "db parqit_pivot"
         window menu append item "&parqit" "Co&mbine (merge/append/joinby)..." "db parqit_combine"
         window menu append separator "&parqit"
         window menu append item "&parqit" "&Collect / save (run pipeline)..." "db parqit_write"
@@ -714,14 +715,19 @@ program define _parqit_gsort
     if (_rc) exit _rc
 end
 
-program define _parqit_collapse
+* Shared parser for aggregate specs `(stat) [tgt=]src ... [(stat) ...]' —
+* collapse and pivot speak the same grammar. The first token is the calling
+* verb (for error messages); the rest is the caller's `0'. Returns via
+* c_local: `specs' as stat|tgt|src triples (tgt empty = keep source name)
+* and `rest' as everything from the comma on, ready for -syntax-.
+program define _parqit_parse_aggspecs
     version 16.0
-    * (stat) [tgt=]src ... [(stat) ...] , by(varlist)
+    gettoken verb 0 : 0, parse(" ")
     * COLLAPSE-WEIGHTS: weights are not supported; reject them clearly rather
     * than letting the spec parser mangle "[fweight=n]" into a confusing
     * "variable n] not found" error. A "[" here can only be a weight expression.
     if (strpos(`"`0'"', "[") > 0) {
-        di as err "parqit collapse: weights ([fweight=exp], [aweight=exp], " ///
+        di as err "parqit `verb': weights ([fweight=exp], [aweight=exp], " ///
             "[pweight=exp], [iweight=exp]) are not supported"
         exit 198
     }
@@ -745,14 +751,14 @@ program define _parqit_collapse
             gettoken stat 0 : 0, parse(" ()")
             gettoken close 0 : 0, parse(" ()")
             if (`"`close'"' != ")") {
-                di as err "parqit collapse: malformed (statistic)"
+                di as err "parqit `verb': malformed (statistic)"
                 exit 198
             }
             continue
         }
         if (`"`tok'"' == "=") {
             if ("`pend'" == "" | `pendtgt') {
-                di as err "parqit collapse: misplaced ="
+                di as err "parqit `verb': misplaced ="
                 exit 198
             }
             local pendtgt 1
@@ -767,6 +773,15 @@ program define _parqit_collapse
         if ("`pend'" != "") local specs `"`specs' `stat'||`pend'"'
         local pend `"`tok'"'
     }
+    c_local specs `"`specs'"'
+    c_local rest `"`0'"'
+end
+
+program define _parqit_collapse
+    version 16.0
+    * (stat) [tgt=]src ... [(stat) ...] , by(varlist)
+    _parqit_parse_aggspecs collapse `0'
+    local 0 `"`rest'"'
     if (strtrim(`"`specs'"') == "") {
         di as err "parqit collapse: nothing to compute"
         exit 198
@@ -778,6 +793,31 @@ program define _parqit_collapse
     local _sq_by `"`by'"'
     mata: _parqit_wr_op_collapse_request("`req'")
     capture noisily plugin call parqit_plugin, view_op `reqhex'
+    if (_rc) exit _rc
+end
+
+program define _parqit_pivot
+    version 16.0
+    * (stat) [tgt=]src ... [(stat) ...] , rows(varlist) cols(varname)
+    * The Excel-style pivot table as a lazy verb: collapse the specs by
+    * (rows, cols), then spread cols' values into one wide column per value
+    * (reshape wide of the targets, i(rows) j(cols)). The plugin applies the
+    * two stages atomically — a refused spread leaves the view untouched.
+    _parqit_parse_aggspecs pivot `0'
+    local 0 `"`rest'"'
+    if (strtrim(`"`specs'"') == "") {
+        di as err "parqit pivot: nothing to compute; e.g. " ///
+            "parqit pivot (sum) sales, rows(region) cols(quarter)"
+        exit 198
+    }
+    syntax , Rows(string) Cols(name)
+    _parqit_ensure_plugin
+    tempfile req
+    local _sq_specs `"`specs'"'
+    local _sq_rows `"`rows'"'
+    local _sq_col "`cols'"
+    mata: _parqit_wr_pivot_request("`req'")
+    capture noisily plugin call parqit_plugin, view_pivot `reqhex'
     if (_rc) exit _rc
 end
 
@@ -2325,6 +2365,30 @@ void _parqit_wr_op_collapse_request(string scalar req)
         _parqit_jtext("op", "collapse"),
         _parqit_jpair("specs", sj),
         _parqit_jpair("by", _parqit_jlist(tokens(st_local("_sq_by")))))))
+}
+
+void _parqit_wr_pivot_request(string scalar req)
+{
+    string rowvector items, parts
+    string scalar    sj
+    real scalar      i
+
+    items = tokens(st_local("_sq_specs"))
+    sj = "["
+    for (i = 1; i <= cols(items); i++) {
+        parts = _parqit_fields(items[i], 3)
+        if (i > 1) sj = sj + ","
+        sj = sj + _parqit_jobj((
+            _parqit_jtext("stat", parts[1]),
+            _parqit_jtext("target", parts[2]),
+            _parqit_jtext("source", parts[3])))
+    }
+    sj = sj + "]"
+    _parqit_emit(req, _parqit_jobj((
+        _parqit_jtext("cmd", "view_pivot"),
+        _parqit_jpair("specs", sj),
+        _parqit_jpair("rows", _parqit_jlist(tokens(st_local("_sq_rows")))),
+        _parqit_jtext("col", st_local("_sq_col")))))
 }
 
 void _parqit_wr_op_contract_request(string scalar req)

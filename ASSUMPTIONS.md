@@ -749,3 +749,21 @@ entry notes the conservative fallback if the assumption proves wrong.
     warned off the prefix by convention. rowid-on-CTAS = insertion order =
     ORDER BY order relies on DuckDB's default preserve_insertion_order, which
     parqit never changes (same dependency as `keep in`).
+60. **`parqit pivot` is defined as `collapse` + `reshape wide`, atomically
+    (2026-07-02).** The brief has no pivot-table verb; Excel's semantics
+    (rows × columns × aggregated values) decompose exactly into two verbs
+    the suite already trusts, so pivot compiles to those two stages rather
+    than a third aggregation path (`parqit show` shows both — honest and
+    pedagogical). Consequences accepted as design: the default statistic is
+    `mean` (collapse's default, not Excel's `sum` — the dialog always writes
+    the statistic explicitly, defaulting to sum there, so clicks match
+    Excel); a missing `cols()` value errors loudly like native
+    `reshape wide` r(498) (Excel's "(blank)" column would silently invent a
+    column name — a `missing` option can be added additively later); column
+    names are `tgt`+`value` under reshape's valid-Stata-name contract
+    (negative or decimal cols() values error rather than sanitise
+    silently); the 2000-distinct-values cap and numeric-vs-string j
+    ordering are shared with reshape via one helper (`wide_j_scan`), so the
+    v34 pinning covers both verbs. The plugin snapshots the View (a value
+    type) and restores it on any failure: a refused spread can never leave
+    the collapse stage half-applied.

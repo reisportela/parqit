@@ -1,0 +1,103 @@
+/*
+  parqit — pivot table over the open view (lazy)
+
+*!  VERSION 0.1.16  02jul2026
+
+  Launch with:  db parqit_pivot     (installed on the menu by: parqit menu)
+  Excel's pivot-table layout: Rows -> one output row per combination of
+  values, Columns -> one output column per distinct value, Values -> the
+  aggregated cells (a second measure is optional). Builds
+  parqit pivot (stat) [name=]var ..., rows() cols() — lazy like every verb;
+  materialise with the Collect / save dialog (db parqit_write).
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 340
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+DIALOG main, label("parqit — pivot table (lazy)") tabtitle("Main")
+BEGIN
+  GROUPBOX gb_layout		_lft	_top	_iwd	120,		///
+	label("Layout (as in an Excel pivot table)")
+  TEXT tx_rows			_ilft	_ss	_ibwd	.,		///
+	label("Rows: one output row per value combination (names as in parqit ds)")
+  EDIT ed_rows			@	_ss	_ibwd	.,		///
+	error("Row variables") label("rows")
+  TEXT tx_col			@	+30	_ibwd	.,		///
+	label("Columns: one output column per distinct value (one variable)")
+  EDIT ed_col			@	_ss	_ibwd	.,		///
+	error("Columns variable") label("columns")
+
+  GROUPBOX gb_vals		_lft	+45	_iwd	120,		///
+	label("Values (the aggregated cells)")
+  TEXT tx_stat			_ilft	_ss	120	.,		///
+	label("Statistic")
+  TEXT tx_val			+130	@	160	.,		///
+	label("Of variable")
+  TEXT tx_tgt			+170	@	170	.,		///
+	label("Result name (optional)")
+  COMBOBOX cb_stat		_ilft	_ss	120	.,		///
+	dropdownlist contents(stat_list) default("sum")			///
+	label("statistic")
+  EDIT ed_val			+130	@	160	.,		///
+	error("Values variable") label("values variable")
+  EDIT ed_tgt			+170	@	170	.,		///
+	label("result name")
+
+  TEXT tx_val2			_ilft	+30	_ibwd	.,		///
+	label("Second measure (optional)")
+  COMBOBOX cb_stat2		_ilft	_ss	120	.,		///
+	dropdownlist contents(stat_list) default("count")		///
+	label("second statistic")
+  EDIT ed_val2			+130	@	160	.,		///
+	label("second values variable")
+  EDIT ed_tgt2			+170	@	170	.,		///
+	label("second result name")
+
+  TEXT tx_note			_lft	+40	_iwd	.,		///
+	label("Lazy: materialise the table with Collect / save (db parqit_write).")
+END
+
+LIST stat_list
+BEGIN
+	sum
+	mean
+	count
+	min
+	max
+	sd
+	median
+	p25
+	p75
+	first
+	last
+END
+
+PROGRAM command
+BEGIN
+	put "parqit pivot "
+	put "(" main.cb_stat ") "
+	if main.ed_tgt {
+		put main.ed_tgt "="
+	}
+	require main.ed_val
+	put main.ed_val
+	if main.ed_val2 {
+		put " (" main.cb_stat2 ") "
+		if main.ed_tgt2 {
+			put main.ed_tgt2 "="
+		}
+		put main.ed_val2
+	}
+	put ", rows("
+	require main.ed_rows
+	put main.ed_rows
+	put ") cols("
+	require main.ed_col
+	put main.ed_col
+	put ")"
+END

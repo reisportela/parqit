@@ -12,6 +12,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args);
 ST_retcode cmd_view_op(const std::vector<std::string> &args);
 ST_retcode cmd_view_twotable(const std::vector<std::string> &args);
 ST_retcode cmd_view_reshape(const std::vector<std::string> &args);
+ST_retcode cmd_view_pivot(const std::vector<std::string> &args);
 ST_retcode cmd_view_sql(const std::vector<std::string> &args);
 ST_retcode cmd_view_query(const std::vector<std::string> &args);
 ST_retcode cmd_view_stats(const std::vector<std::string> &args);

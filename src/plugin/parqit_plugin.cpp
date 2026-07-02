@@ -158,6 +158,7 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "view_op") return parqit_plugin::cmd_view_op(args);
     if (cmd == "view_twotable") return parqit_plugin::cmd_view_twotable(args);
     if (cmd == "view_reshape") return parqit_plugin::cmd_view_reshape(args);
+    if (cmd == "view_pivot") return parqit_plugin::cmd_view_pivot(args);
     if (cmd == "view_sql") return parqit_plugin::cmd_view_sql(args);
     if (cmd == "view_query") return parqit_plugin::cmd_view_query(args);
     if (cmd == "view_stats") return parqit_plugin::cmd_view_stats(args);

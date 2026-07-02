@@ -583,3 +583,43 @@ TEST_CASE("joinby and append with views as sources") {
     CHECK(run_scalar("SELECT count(*) FROM (" + a.compile(false) +
                      ") WHERE src = 1") == "2");
 }
+
+TEST_CASE("pivot decomposition: collapse + reshape_wide, and the snapshot restore") {
+    /* parqit pivot compiles to exactly these two stages (cmd_view_pivot);
+     * pin the composition here so the decomposition cannot drift */
+    View v = make_view();
+    REQUIRE(v.collapse({{"mean", "mw", "wage"}, {"count", "n", "wage"}},
+                       {"firm", "year"})
+                .empty());
+    REQUIRE(v.reshape_wide({"mw", "n"}, {"firm"}, "year", {"2019", "2020"}, false)
+                .empty());
+    /* manifest: i, then stubs interleaved j-major */
+    REQUIRE(v.cols().size() == 5);
+    CHECK(v.cols()[0].name == "firm");
+    CHECK(v.cols()[1].name == "mw2019");
+    CHECK(v.cols()[2].name == "n2019");
+    CHECK(v.cols()[3].name == "mw2020");
+    CHECK(v.cols()[4].name == "n2020");
+    std::string sql = v.compile(false);
+    /* firm a: 2019 mean(10,30)=20 n 2; 2020 mean(12,33)=22.5 n 2 */
+    CHECK(run_scalar("SELECT mw2019 FROM (" + sql + ") WHERE firm='a'") == "20.0");
+    CHECK(run_scalar("SELECT mw2020 FROM (" + sql + ") WHERE firm='a'") == "22.5");
+    CHECK(run_scalar("SELECT n2019 FROM (" + sql + ") WHERE firm='a'") == "2");
+    /* firm b 2020: only the NULL wage → mean NULL, count 0 (not a lost row) */
+    CHECK(run_scalar("SELECT mw2020 IS NULL FROM (" + sql + ") WHERE firm='b'") ==
+          "true");
+    CHECK(run_scalar("SELECT n2020 FROM (" + sql + ") WHERE firm='b'") == "0");
+    CHECK(run_count(v) == 2);
+
+    /* the view_pivot atomicity mechanism: snapshot before collapse, restore
+     * after a refused spread — the restored plan is the original, executably */
+    View w = make_view();
+    View snap = w; /* what cmd_view_pivot saves */
+    REQUIRE(w.collapse({{"mean", "mw", "wage"}}, {"firm", "year"}).empty());
+    /* a decimal j value forms an illegal Stata name → reshape refuses loudly */
+    CHECK_FALSE(w.reshape_wide({"mw"}, {"firm"}, "year", {"2.5"}, false).empty());
+    w = snap;
+    CHECK(w.compile(false) == make_view().compile(false));
+    CHECK(w.cols().size() == 4);
+    CHECK(run_count(w) == 6);
+}

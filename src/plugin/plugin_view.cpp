@@ -1585,6 +1585,114 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
 
 namespace parqit_plugin {
 
+/* The wide-pivot j scan shared by reshape wide and pivot, run against the
+ * current compiled view. Contract (pinned by v34 and the reshape suites):
+ *   - a missing j has no wide column, so its stub values would silently
+ *     vanish from the j-value scan. Native Stata stops with r(498)
+ *     "variable <j> contains missing values" (for a NULL, NaN or "" j alike —
+ *     verified natively); do the same, loudly, before building the pivot;
+ *   - with check_dup, Stata's (i, j) uniqueness contract is enforced
+ *     (reshape wide needs it; pivot's aggregation guarantees it);
+ *   - RESHAPE-WIDE-COLORDER: numeric j must order numerically (2,10,11), not
+ *     by the lexicographic VARCHAR cast (10,11,2), to match native reshape
+ *     wide; string j keeps alphabetic order (Stata does too); a numeric
+ *     cast's trailing ".0" is stripped so suffixes read 2019, not 2019.0;
+ *   - more than 2000 distinct values refuse to run (cap_hint says what to
+ *     do about it, per verb).
+ * Messages cry under `verb` (engine failures) / `wide_verb` (contract
+ * violations), with `jdesc` naming the pivoted values in the cap message.
+ * On success fills jvals/j_is_string and returns 0. */
+static ST_retcode wide_j_scan(const std::string &jname,
+                              const std::vector<std::string> &ivars,
+                              bool check_dup, const std::string &verb,
+                              const std::string &wide_verb,
+                              const std::string &jdesc,
+                              const std::string &cap_hint,
+                              std::vector<std::string> *jvals,
+                              bool *j_is_string) {
+    Session &s = Session::instance();
+    std::string err;
+    *j_is_string = false;
+    for (const auto &c : g_view_ref().cols())
+        if (c.name == jname) *j_is_string = (c.kind == 's');
+
+    const std::string base = "(" + g_view_ref().compile(false) + ")";
+    const std::string jq = quote_ident(jname);
+
+    {
+        std::string jmiss = *j_is_string
+                                ? "coalesce(" + jq + ", '') = ''"
+                                : jq + " IS NULL OR isnan(CAST(" + jq +
+                                      " AS DOUBLE))";
+        std::string nmiss;
+        if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + jmiss,
+                            &nmiss, &err)) {
+            cry("parqit " + verb + ": " + err);
+            return kRcEngine;
+        }
+        if (nmiss != "0") {
+            cry("parqit " + wide_verb + ": variable " + jname +
+                " contains missing values");
+            return kRcUsage;
+        }
+    }
+
+    if (check_dup) {
+        std::string ipart;
+        for (size_t i = 0; i < ivars.size(); i++)
+            ipart += (i ? ", " : "") + quote_ident(ivars[i]);
+        std::string dup;
+        if (!s.query_scalar("SELECT count(*) FROM (SELECT 1 FROM " + base +
+                                " GROUP BY " + ipart + ", " + jq +
+                                " HAVING count(*) > 1 LIMIT 1)",
+                            &dup, &err)) {
+            cry("parqit " + verb + ": " + err);
+            return kRcEngine;
+        }
+        if (dup != "0") {
+            cry("parqit " + wide_verb + ": values of " + jname +
+                " are not unique within i() groups");
+            return kRcUsage;
+        }
+    }
+
+    duckdb_result res;
+    std::string jquery =
+        *j_is_string
+            ? "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v FROM " + base +
+                  " WHERE " + jq + " IS NOT NULL ORDER BY v"
+            : "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v, " + jq +
+                  " AS jn FROM " + base + " WHERE " + jq +
+                  " IS NOT NULL ORDER BY jn";
+    if (!s.query(jquery, &res, &err)) {
+        cry("parqit " + verb + ": " + err);
+        return kRcEngine;
+    }
+    jvals->clear();
+    idx_t n = duckdb_row_count(&res);
+    for (idx_t r = 0; r < n; r++) {
+        char *v = duckdb_value_varchar(&res, 0, r);
+        if (v) {
+            jvals->push_back(v);
+            duckdb_free(v);
+        }
+    }
+    duckdb_destroy_result(&res);
+    if (jvals->size() > 2000) {
+        cry("parqit " + wide_verb + ": " + std::to_string(jvals->size()) +
+            " distinct " + jdesc + " would create too many columns" + cap_hint);
+        return kRcUsage;
+    }
+    /* numeric j: strip any trailing .0 the VARCHAR cast may add */
+    if (!*j_is_string) {
+        for (auto &v : *jvals) {
+            size_t dot = v.find(".0");
+            if (dot != std::string::npos && dot + 2 == v.size()) v.resize(dot);
+        }
+    }
+    return 0;
+}
+
 ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
     std::string err;
     if (require_view(&err) != 0) {
@@ -1644,93 +1752,117 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
     }
 
     /* wide needs the j values and Stata's (i, j) uniqueness contract */
-    Session &s = Session::instance();
-    bool j_is_string = false;
-    for (const auto &c : g_view_ref().cols())
-        if (c.name == jname) j_is_string = (c.kind == 's');
-
-    std::string ipart;
-    for (size_t i = 0; i < ivars.size(); i++)
-        ipart += (i ? ", " : "") + quote_ident(ivars[i]);
-    const std::string base = "(" + g_view_ref().compile(false) + ")";
-    const std::string jq = quote_ident(jname);
-
-    /* a missing j has no wide column, so its stub values would silently
-     * vanish from the pivot's j-value scan below. Native Stata stops with
-     * r(498) "variable <j> contains missing values" (for a NULL, NaN or ""
-     * j alike — verified natively); do the same, loudly, before building
-     * the pivot. */
-    {
-        std::string jmiss = j_is_string
-                                ? "coalesce(" + jq + ", '') = ''"
-                                : jq + " IS NULL OR isnan(CAST(" + jq +
-                                      " AS DOUBLE))";
-        std::string nmiss;
-        if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + jmiss,
-                            &nmiss, &err)) {
-            cry("parqit reshape: " + err);
-            return kRcEngine;
-        }
-        if (nmiss != "0") {
-            cry("parqit reshape wide: variable " + jname +
-                " contains missing values");
-            return kRcUsage;
-        }
-    }
-
-    std::string dup;
-    if (!s.query_scalar("SELECT count(*) FROM (SELECT 1 FROM " + base +
-                            " GROUP BY " + ipart + ", " + quote_ident(jname) +
-                            " HAVING count(*) > 1 LIMIT 1)",
-                        &dup, &err)) {
-        cry("parqit reshape: " + err);
-        return kRcEngine;
-    }
-    if (dup != "0") {
-        cry("parqit reshape wide: values of " + jname +
-            " are not unique within i() groups");
-        return kRcUsage;
-    }
-    /* RESHAPE-WIDE-COLORDER: numeric j must order numerically (2,10,11), not by
-     * the lexicographic VARCHAR cast (10,11,2), to match native reshape wide.
-     * String j keeps alphabetic order (Stata does too). */
-    duckdb_result res;
-    std::string jquery =
-        j_is_string
-            ? "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v FROM " + base +
-                  " WHERE " + jq + " IS NOT NULL ORDER BY v"
-            : "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v, " + jq +
-                  " AS jn FROM " + base + " WHERE " + jq +
-                  " IS NOT NULL ORDER BY jn";
-    if (!s.query(jquery, &res, &err)) {
-        cry("parqit reshape: " + err);
-        return kRcEngine;
-    }
     std::vector<std::string> jvals;
-    idx_t n = duckdb_row_count(&res);
-    for (idx_t r = 0; r < n; r++) {
-        char *v = duckdb_value_varchar(&res, 0, r);
-        if (v) {
-            jvals.push_back(v);
-            duckdb_free(v);
-        }
-    }
-    duckdb_destroy_result(&res);
-    if (jvals.size() > 2000) {
-        cry("parqit reshape wide: " + std::to_string(jvals.size()) +
-            " distinct j values would create too many columns; collapse first");
-        return kRcUsage;
-    }
-    /* numeric j: strip any trailing .0 the VARCHAR cast may add */
-    if (!j_is_string) {
-        for (auto &v : jvals) {
-            size_t dot = v.find(".0");
-            if (dot != std::string::npos && dot + 2 == v.size()) v.resize(dot);
-        }
-    }
+    bool j_is_string = false;
+    ST_retcode jrc =
+        wide_j_scan(jname, ivars, /*check_dup=*/true, "reshape", "reshape wide",
+                    "j values", "; collapse first", &jvals, &j_is_string);
+    if (jrc != 0) return jrc;
     std::string e = g_view_ref().reshape_wide(stubs, ivars, jname, jvals, j_is_string);
     if (!e.empty()) {
         cry("parqit reshape: " + e);
+        return kRcUsage;
+    }
+    save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
+    return 0;
+}
+
+/* ========================================================= view_pivot ===== */
+
+/* parqit pivot — an Excel-style pivot table as sugar over the two verbs the
+ * engine already trusts: collapse the (stat) specs by (rows, col), then
+ * spread col's values into wide columns (reshape wide of the collapse
+ * targets, i(rows) j(col)). Aggregating first guarantees reshape's (i, j)
+ * uniqueness contract by construction, so only the missing-col and
+ * column-count scans run here. The two stages land atomically: the view is
+ * snapshotted up front and restored on any failure (an illegal generated
+ * name, >2000 columns, missing col values), never left half-pivoted. */
+ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
+    std::string err;
+    if (require_view(&err) != 0) {
+        cry("parqit pivot: " + err);
+        return kRcUsage;
+    }
+    json req;
+    if (!load_req(args, &req, &err)) {
+        cry(err);
+        return kRcUsage;
+    }
+    std::string col;
+    std::vector<std::string> rows;
+    if (!parqit::req_text(req, "col", &col, &err) ||
+        !parqit::req_text_list(req, "rows", &rows, &err)) {
+        cry(err);
+        return kRcUsage;
+    }
+    std::vector<View::CollapseSpec> specs;
+    if (req.contains("specs") && req["specs"].is_array()) {
+        for (const auto &js : req["specs"]) {
+            View::CollapseSpec sp;
+            std::string serr;
+            if (!parqit::req_text(js, "stat", &sp.stat, &serr) ||
+                !parqit::req_text(js, "target", &sp.target, &serr, false) ||
+                !parqit::req_text(js, "source", &sp.source, &serr)) {
+                cry(serr);
+                return kRcUsage;
+            }
+            specs.push_back(sp);
+        }
+    }
+    if (specs.empty()) {
+        cry("parqit pivot: nothing to compute — give at least one "
+            "(statistic) source variable");
+        return kRcUsage;
+    }
+    if (rows.empty()) {
+        cry("parqit pivot: rows() required");
+        return kRcUsage;
+    }
+
+    /* rows() may hold wildcards (as collapse by() does); reshape's i() takes
+     * literal names, so expand once and hand both stages the same list */
+    std::vector<std::string> rowv;
+    std::string e = g_view_ref().expand_patterns(rows, &rowv);
+    if (!e.empty()) {
+        cry("parqit pivot: " + e);
+        return kRcUsage;
+    }
+    for (const auto &rv : rowv)
+        if (rv == col) {
+            cry("parqit pivot: variable " + col +
+                " cannot be in both rows() and cols()");
+            return kRcUsage;
+        }
+
+    View saved = g_view_ref(); /* both stages land, or neither */
+
+    std::vector<std::string> by = rowv;
+    by.push_back(col);
+    e = g_view_ref().collapse(specs, by);
+    if (!e.empty()) {
+        g_view_ref() = saved;
+        cry("parqit pivot: " + e);
+        return kRcUsage;
+    }
+
+    std::vector<std::string> jvals;
+    bool j_is_string = false;
+    ST_retcode jrc = wide_j_scan(col, {}, /*check_dup=*/false, "pivot", "pivot",
+                                 "cols() values",
+                                 "; use a coarser cols() variable", &jvals,
+                                 &j_is_string);
+    if (jrc != 0) {
+        g_view_ref() = saved;
+        return jrc;
+    }
+
+    std::vector<std::string> stubs;
+    for (const auto &sp : specs)
+        stubs.push_back(sp.target.empty() ? sp.source : sp.target);
+    e = g_view_ref().reshape_wide(stubs, rowv, col, jvals, j_is_string);
+    if (!e.empty()) {
+        g_view_ref() = saved;
+        cry("parqit pivot: " + e);
         return kRcUsage;
     }
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));

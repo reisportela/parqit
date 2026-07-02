@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.15 02jul2026}{...}
+{* *! version 0.1.16 02jul2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -63,6 +63,7 @@ mismatch across the matched files is a loud error.
 {p 8 16 2}{cmd:parqit duplicates drop} [{it:varlist}{cmd:,} {opt force}]{p_end}
 {p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:,} {opt c:ount} {opt seed(#)}]{p_end}
 {p 8 16 2}{cmd:parqit reshape} {cmd:long}|{cmd:wide} {it:stubs}{cmd:,} {opt i(varlist)} {opt j(name)}{p_end}
+{p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
 {p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:source} [{cmd:,} {it:merge_options}]{p_end}
 {p 8 16 2}{cmd:parqit append using} {it:source} [{it:source} ...] [{cmd:,} {opt gen:erate(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source}{p_end}
@@ -138,6 +139,9 @@ histogram with engine-computed bins{p_end}
 gsort, rename{p_end}
 {p 8 12 2}{cmd:db parqit_gen}{space 7}generate (with storage type) or replace,
 expression and optional if via the builder{p_end}
+{p 8 12 2}{cmd:db parqit_pivot}{space 5}Excel-style pivot table: rows, a
+columns variable and one or two aggregated values (a lazy
+{cmd:parqit pivot}){p_end}
 {p 8 12 2}{cmd:db parqit_combine}{space 3}merge (kind, keys, keep(), keepusing,
 nogenerate), append (generate()), joinby — the using side may be a file or
 {cmd:view:}{it:name}{p_end}
@@ -277,6 +281,19 @@ the declared {cmd:parqit sort} order and keep a missing first value missing.
 
 {pstd}{cmd:egen} functions: {cmd:total mean sd min max count} with
 {opt by()}.
+
+{pstd}{cmd:pivot} is Excel's pivot table as one lazy verb: it aggregates
+the {cmd:(}{it:stat}{cmd:)} specs by ({opt rows()}, {opt cols()}) — exactly
+{cmd:collapse}'s statistics and contracts — and then spreads each distinct
+{opt cols()} value into its own column ({cmd:reshape wide}), so the result
+has one row per {opt rows()} combination and one column per {opt cols()}
+value, named {it:tgt}{it:value} (e.g. {cmd:wage2019}, {cmd:nNorth}).
+{opt rows()} accepts wildcards. Both stages appear in {cmd:parqit show},
+and their contracts apply: a missing {opt cols()} value is a loud error
+(as in native {cmd:reshape wide} — {cmd:parqit replace} or filter it
+first), generated names must be valid variable names, and more than 2,000
+distinct {opt cols()} values refuse to run. A refused pivot leaves the
+view exactly as it was.
 
 {pstd}Two-table {cmd:using} sources may be {cmd:view:}{it:name}: the other
 view's pipeline is embedded as a subquery, so filtered-view-to-
@@ -652,6 +669,11 @@ join natively, reading only the needed columns of the file
 {phang2}{cmd:. parqit use using wide_income.parquet}{p_end}
 {phang2}{cmd:. parqit reshape long inc, i(pid) j(year)}{p_end}
 {phang2}{cmd:. parqit save long_income.parquet, replace}{p_end}
+
+{pstd}{bf:Pivot table (Excel-style)} — mean wage and a count by region × year:{p_end}
+{phang2}{cmd:. parqit use using panel.parquet}{p_end}
+{phang2}{cmd:. parqit pivot (mean) wage (count) n=wage, rows(region) cols(year)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{space 5}({it:columns wage2019 n2019 wage2020 n2020 ...}){p_end}
 
 {pstd}{bf:Dedup, frequency tables, samples}:{p_end}
 {phang2}{cmd:. parqit use using events.parquet}{p_end}
