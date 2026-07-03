@@ -1,7 +1,7 @@
 /*
   parqit — choose, order, rename and sort the open view's variables (lazy)
 
-*!  VERSION 0.1.18  03jul2026
+*!  VERSION 0.1.19  03jul2026
 
   Launch with:  db parqit_vars     (installed on the menu by: parqit menu)
 */

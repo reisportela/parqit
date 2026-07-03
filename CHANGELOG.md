@@ -6,6 +6,10 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-07-03
+
+A field bug, root-caused on the real 2.67-billion-row dataset that hit it.
+
 ### Fixed
 - **A result beyond 2,147,483,647 rows refuses with a real message, not
   `option n() invalid` (N-2G31).** Live find: `parqit collect` over a

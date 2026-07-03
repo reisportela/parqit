@@ -17,7 +17,7 @@ it lazily on disk (datasets far larger than RAM), and only the final result is
 brought into Stata — or written straight back to Parquet without ever touching
 memory. SQL is available for power users, but no one has to learn it.
 
-> **Status:** v0.1.18 — the full surface below is implemented and covered by a
+> **Status:** v0.1.19 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -82,7 +82,7 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.18") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.19") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
