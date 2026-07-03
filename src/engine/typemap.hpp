@@ -83,6 +83,11 @@ struct ColumnPlan {
     int str_bytes = 0;         /* str# width (bytes) once known */
     std::string stata_format;  /* display format to apply; "" = none */
     std::string note;          /* loud per-column note (precision etc.) */
+    bool note_subms = false;   /* us-resolution temporal with no static
+                                * precision note: the fill emits a data-driven
+                                * "sub-ms truncated" note only if a value
+                                * actually loses sub-ms (T1). NS/TZ variants
+                                * that already carry a static note stay false. */
 
     /* range pass requirements */
     bool needs_minmax = false;     /* integer family: size byte/int/long/double */

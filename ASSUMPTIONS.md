@@ -828,3 +828,30 @@ entry notes the conservative fallback if the assumption proves wrong.
     would not. Documented non-goal: parqit will not invent a surrogate name
     for a NUL-bearing column (that is the eager path's src_name role, and the
     collision makes even that ambiguous).
+65. **Foreign display formats are applied through a capture (2026-07-03,
+    META-A).** Every restored metadatum has a warn-and-skip guard except the
+    display format, which went straight to st_varformat (abort rc 3300 on a
+    format Stata rejects). It now goes through `_stata("format ...", 1)` — a
+    non-aborting capture that returns the rc — after the format string is
+    screened for command metacharacters (backtick, quote, dollar, control
+    bytes), which a legitimate format never contains and which also blocks
+    injection through the apply. An unscreenable/rejected format is skipped
+    with a note; the load and all other metadata survive. Non-goal: parqit
+    does not attempt to repair a bad format, only to not die on it.
+66. **Response parsing and value-label restore are O(n) (2026-07-03,
+    META-D).** `_parqit_resp_lines` uses select(); `_parqit_resp_decorate`
+    preallocates the value-label vectors to the line-count bound and
+    index-assigns. The prior `x = x \ row` per line/entry was O(n^2) and hung
+    on a large-but-legitimate label. The upper-bound preallocation
+    (line count) is trimmed to the accepted-entry count before st_vlmodify.
+67. **Precision notes and the sub-ms note ride SF_error at fetch, not the ado
+    printf (2026-07-03, NUM2 + T1).** The per-column ColumnPlan.note and a new
+    data-driven sub-millisecond-truncation counter are emitted by
+    cmd_use_fetch via SF_error, alongside the inf/NUL/range notes, so they
+    survive `quietly` (the ado's warn printf did not). write_var_records no
+    longer emits the per-column note as a 'warn' response record; general
+    structural warnings (ctx.warnings) keep the record/printf path. The sub-ms
+    note is data-driven (counts real truncations) and gated by
+    ColumnPlan.note_subms so it fires only for us-resolution TIMESTAMP/TIME
+    that lack a static NS/precision note — never a blanket note on a ms-exact
+    microsecond column, and never a double note on the NS path.

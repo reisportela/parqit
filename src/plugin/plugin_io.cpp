@@ -676,8 +676,10 @@ void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
         w.rec("var", {std::to_string(i + 1)},
               {p.stata_name, original, parqit::sttype_code(p.stata_type, p.str_bytes),
                p.stata_format, p.varlab, p.vallab});
-        if (!p.note.empty())
-            w.rec("warn", {}, {p.stata_name + ": " + p.note});
+        /* NUM2: the per-column note is now emitted by cmd_use_fetch via
+         * SF_error (survives `quietly`), not as a suppressible ado printf, so
+         * it is no longer written as a response 'warn' record here. General
+         * structural warnings (ctx.warnings, below) keep the record path. */
     }
     if (ctx.meta.present && ctx.meta.vallabs.is_object()) {
         /* stringify a JSON scalar without throwing on a foreign file that
@@ -1052,8 +1054,8 @@ namespace {
  * starting at observation base+1. strL cells go to the binary sidecar
  * (the SPI has no strL write call); Mata pours them in afterwards. */
 bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *col,
-                 std::FILE *strl_spill, long long *inf_seen,
-                 long long *nul_seen, long long *rng_seen, std::string *err) {
+                 std::FILE *strl_spill, long long *inf_seen, long long *nul_seen,
+                 long long *rng_seen, long long *subms_seen, std::string *err) {
     const uint8_t *validity = static_cast<const uint8_t *>(col->buffers[0]);
     const int64_t off = col->offset;
     auto valid = [&](int64_t r) -> bool {
@@ -1187,6 +1189,12 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         const int64_t *v = static_cast<const int64_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
             if (valid(r)) {
+                /* T1: a plain us TIMESTAMP silently dropped sub-ms precision
+                 * with no note (unlike the NS/TZ paths). Count a real drop so
+                 * the load says so — only when it actually happens, never a
+                 * blanket note on every ms-exact us column. */
+                if (p.note_subms && v[off + r] % 1000 != 0 && subms_seen)
+                    (*subms_seen)++;
                 long long ms = parqit::floordiv(v[off + r], 1000);
                 if (!store_num(r, static_cast<double>(ms + parqit::kEpochShiftMs)))
                     return false;
@@ -1197,6 +1205,8 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         const int64_t *v = static_cast<const int64_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
             if (valid(r)) {
+                if (p.note_subms && v[off + r] % 1000 != 0 && subms_seen)
+                    (*subms_seen)++;
                 long long ms = parqit::floordiv(v[off + r], 1000);
                 if (!store_num(r, static_cast<double>(ms))) return false;
             }
@@ -1343,7 +1353,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                  const std::vector<int> &strl_cols, std::FILE *strl_spill,
                  std::vector<long long> &inf_local,
                  std::vector<long long> &nul_local,
-                 std::vector<long long> &rng_local) {
+                 std::vector<long long> &rng_local,
+                 std::vector<long long> &subms_local) {
     /* This runs on a worker thread, so NO exception may escape it — an exception
      * crossing a std::thread boundary calls std::terminate and would take the
      * whole Stata process down (the charter rule the SPI catch-all enforces on
@@ -1376,8 +1387,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
             for (int col : regular_cols)
                 if (!fill_column(plans[col], col + 1, slot.base,
                                  slot.arr.children[col], /*strl_spill=*/nullptr,
-                                 &inf_local[col], &nul_local[col],
-                                 &rng_local[col], &lerr)) {
+                                 &inf_local[col], &nul_local[col], &rng_local[col],
+                                 &subms_local[col], &lerr)) {
                     ok = false;
                     break;
                 }
@@ -1387,7 +1398,7 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                     if (!fill_column(plans[col], col + 1, slot.base,
                                      slot.arr.children[col], strl_spill,
                                      &inf_local[col], &nul_local[col],
-                                     &rng_local[col], &lerr)) {
+                                     &rng_local[col], &subms_local[col], &lerr)) {
                         ok = false;
                         break;
                     }
@@ -1487,7 +1498,8 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
     duckdb_arrow_options aopts;
     duckdb_connection_get_arrow_options(s.con(), &aopts);
 
-    std::vector<long long> inf_counts(k, 0), nul_counts(k, 0), rng_counts(k, 0);
+    std::vector<long long> inf_counts(k, 0), nul_counts(k, 0), rng_counts(k, 0),
+        subms_counts(k, 0);
     long long base = 0;
     ST_retcode rc = 0;
     const int nthreads = fill_thread_count(prep.nrows);
@@ -1515,7 +1527,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 for (int i = 0; i < k && rc == 0; i++) {
                     if (!fill_column(prep.plans[i], i + 1, base, arr.children[i],
                                      strl_spill, &inf_counts[i], &nul_counts[i],
-                                     &rng_counts[i], &err))
+                                     &rng_counts[i], &subms_counts[i], &err))
                         rc = kRcEngine;
                 }
             }
@@ -1554,13 +1566,16 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             nthreads, std::vector<long long>(k, 0));
         std::vector<std::vector<long long>> rng_locals(
             nthreads, std::vector<long long>(k, 0));
+        std::vector<std::vector<long long>> subms_locals(
+            nthreads, std::vector<long long>(k, 0));
         std::vector<std::thread> workers;
         workers.reserve(nthreads);
         for (int t = 0; t < nthreads; t++)
             workers.emplace_back(fill_worker, std::ref(fq), std::cref(prep.plans),
                                  std::cref(regular_cols), std::cref(strl_cols),
                                  strl_spill, std::ref(inf_locals[t]),
-                                 std::ref(nul_locals[t]), std::ref(rng_locals[t]));
+                                 std::ref(nul_locals[t]), std::ref(rng_locals[t]),
+                                 std::ref(subms_locals[t]));
 
         /* The producer runs under try/catch too: a throw here (e.g. a deque
          * push_back std::bad_alloc under memory pressure) must not unwind past the
@@ -1664,6 +1679,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 inf_counts[c] += inf_locals[t][c];
                 nul_counts[c] += nul_locals[t][c];
                 rng_counts[c] += rng_locals[t][c];
+                subms_counts[c] += subms_locals[t][c];
             }
     }
     duckdb_destroy_arrow_options(&aopts);
@@ -1714,6 +1730,13 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
         }
     }
     for (int i = 0; i < k; i++) {
+        /* NUM2: the per-column plan note ('decimal converted to double',
+         * 'values beyond 2^53 rounded', 'nanosecond timestamp truncated', an
+         * all-missing byte, …) is emitted here via SF_error, like the inf/nul
+         * notes — so it survives `quietly parqit use`/`collect` instead of
+         * being swallowed by the ado's suppressible printf. */
+        if (!prep.plans[i].note.empty())
+            cry("note: " + prep.plans[i].stata_name + ": " + prep.plans[i].note);
         if (inf_counts[i] > 0)
             cry("note: " + prep.plans[i].stata_name + ": " +
                 std::to_string(inf_counts[i]) +
@@ -1724,6 +1747,11 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 std::to_string(nul_counts[i]) +
                 " string value(s) truncated at an embedded NUL byte "
                 "(Stata strings cannot hold NUL)");
+        if (subms_counts[i] > 0)
+            cry("note: " + prep.plans[i].stata_name + ": " +
+                std::to_string(subms_counts[i]) +
+                " value(s) truncated to Stata's millisecond resolution "
+                "(sub-millisecond precision is not representable)");
     }
     save_local("_parqit_fetched_n", std::to_string(base));
     return 0;

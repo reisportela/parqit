@@ -10,6 +10,31 @@ Fixes from two independent adversarial audits (Claude fleet + Codex), each
 finding empirically reproduced against the plugin before acting.
 
 ### Fixed
+- **A malformed display format in a foreign file no longer aborts the whole
+  load (META-A).** The `fmt` field of `parqit.*` metadata was the one
+  metadatum applied without a guard: a corrupt/foreign file carrying a format
+  Stata rejects (a string `%fmt` on a numeric, an absurd width) aborted
+  `parqit use` with rc 3300, discarding the good data and every other valid
+  label. It is now applied through a capture — warned and skipped, matching
+  the value-label/characteristic guards — with the format string checked for
+  command metacharacters first (blocking injection through the apply). Pinned
+  by `tests/verify_suite/v51`.
+- **Value-label restoration is O(n), not O(n²) (META-D).** The response reader
+  and the value-label decorator both grew a Mata vector one element per line
+  (`x = x \ row`), reallocating the whole vector each time, so a large-but-
+  legitimate label (a 30k-entry geographic crosswalk) took ~75 s and a hostile
+  1M-entry label hung. Both now preallocate and index-assign; a 30k-entry
+  label restores in seconds. Pinned by `tests/verify_suite/v51`.
+- **Per-column precision notes survive `quietly` (NUM2).** The advisory notes
+  (`values beyond 2^53 rounded`, `decimal converted to double`, …) were
+  emitted as a suppressible ado `printf`, invisible under `quietly parqit use`
+  — unlike the inf/NUL notes, which go through `SF_error`. They now take the
+  same `SF_error` path at fetch, so a quiet load still reports precision loss.
+- **A microsecond `TIMESTAMP` now notes dropped sub-millisecond precision
+  (T1).** The `NS`/`TZ` temporal paths announced their truncation to Stata's
+  millisecond resolution, but a plain `timestamp[us]` (the pandas/database
+  default) dropped sub-ms silently. A data-driven note now fires — only when a
+  value actually carries sub-ms, never a blanket note on ms-exact columns.
 - **A file whose Parquet statistics understate the data can no longer
   silently store real values as missing (NUM1/IO1).** The metadata fast path
   sizes `byte`/`int`/`long`/`float` columns from the footer's

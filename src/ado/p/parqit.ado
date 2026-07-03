@@ -2564,9 +2564,9 @@ string rowvector _parqit_fields(string scalar line, real scalar n)
  * a hex/ASCII record never contains a newline, so the split is exact. */
 string colvector _parqit_resp_lines(string scalar resp)
 {
-    real scalar      fh, i
+    real scalar      fh
     string scalar    buf, chunk
-    string colvector all, out
+    string colvector all
 
     fh = fopen(resp, "r")
     buf = ""
@@ -2574,10 +2574,10 @@ string colvector _parqit_resp_lines(string scalar resp)
     fclose(fh)
     if (buf == "") return(J(0, 1, ""))
     all = ustrsplit(buf, char(10))'
-    out = J(0, 1, "")
-    for (i = 1; i <= rows(all); i++)
-        if (all[i] != "") out = out \ all[i]
-    return(out)
+    /* META-D: select() is O(n). The prior `out = out \ all[i]` grew the whole
+     * vector per line — O(n^2), so a large parqit.vallabs (a legitimate 30k+
+     * geographic crosswalk, or a hostile 1M-entry label) hung the load. */
+    return(select(all, all :!= ""))
 }
 
 void _parqit_resp_create(string scalar resp, real scalar n)
@@ -2599,7 +2599,23 @@ void _parqit_resp_create(string scalar resp, real scalar n)
         code = _parqit_unhex(f[5])
         idx = st_addvar(code, name)
         fmt = _parqit_unhex(f[6])
-        if (fmt != "") st_varformat(idx, fmt)
+        /* META-A: a corrupt/foreign parqit.schema can carry a display format
+         * Stata rejects (a string %fmt on a numeric, an absurd width). Bare
+         * st_varformat aborts rc 3300 and would throw away the good DATA and
+         * every other valid metadatum; apply through a capture so a bad format
+         * is warned-and-skipped, matching the value-label/char/dtalabel guards.
+         * A legitimate format carries no command metacharacters, so reject any
+         * that does — which also blocks injection through the _stata call. */
+        if (fmt != "") {
+            if (strpos(fmt, char(96)) | strpos(fmt, char(39)) |
+                strpos(fmt, char(34)) | strpos(fmt, char(36)) |
+                strpos(fmt, char(0)) | strpos(fmt, char(10)) |
+                strpos(fmt, char(13)))
+                printf("note: %s: skipping malformed display format\n", name)
+            else if (_stata("format " + name + " " + fmt, 1))
+                printf("note: %s: skipping display format %s (not accepted by Stata)\n",
+                       name, fmt)
+        }
     }
     if (n > 0) st_addobs(n)
 }
@@ -2652,7 +2668,7 @@ void _parqit_apply_strl(string scalar path)
 
 void _parqit_resp_decorate(string scalar resp)
 {
-    real scalar      nv, i, v, _li, _nl
+    real scalar      nv, i, v, _li, _nl, vlk
     string scalar    line, name, varlab, vallab, labname, txt, tgt, cname, vraw
     string rowvector f
     string colvector vl_names, vl_texts_all, vl_owner, _lines
@@ -2660,9 +2676,12 @@ void _parqit_resp_decorate(string scalar resp)
 
     _lines = _parqit_resp_lines(resp)
     _nl = rows(_lines)
-    vl_owner = J(0, 1, "")
-    vl_vals_all = J(0, 1, .)
-    vl_texts_all = J(0, 1, "")
+    /* META-D: preallocate to the line-count upper bound and index-assign; the
+     * prior `vl_owner = vl_owner \ labname` per accepted entry was O(n^2). */
+    vl_owner = J(_nl, 1, "")
+    vl_vals_all = J(_nl, 1, .)
+    vl_texts_all = J(_nl, 1, "")
+    vlk = 0
     for (_li = 1; _li <= _nl; _li++) {
         line = _lines[_li]
         f = _parqit_fields(line, 8)
@@ -2706,9 +2725,10 @@ void _parqit_resp_decorate(string scalar resp)
                            labname, vraw)
                     txt = substr(txt, 1, 32000)
                 }
-                vl_owner = vl_owner \ labname
-                vl_vals_all = vl_vals_all \ v
-                vl_texts_all = vl_texts_all \ txt
+                vlk++
+                vl_owner[vlk] = labname
+                vl_vals_all[vlk] = v
+                vl_texts_all[vlk] = txt
             }
         }
         else if (f[1] == "char") {
@@ -2748,11 +2768,16 @@ void _parqit_resp_decorate(string scalar resp)
             printf("note: %s\n", _parqit_unhex(f[2]))
         }
     }
-    vl_names = uniqrows(vl_owner)
-    nv = rows(vl_names)
-    for (i = 1; i <= nv; i++) {
-        sel = selectindex(vl_owner :== vl_names[i])
-        st_vlmodify(vl_names[i], vl_vals_all[sel], vl_texts_all[sel])
+    if (vlk > 0) {
+        vl_owner = vl_owner[|1 \ vlk|]
+        vl_vals_all = vl_vals_all[|1 \ vlk|]
+        vl_texts_all = vl_texts_all[|1 \ vlk|]
+        vl_names = uniqrows(vl_owner)
+        nv = rows(vl_names)
+        for (i = 1; i <= nv; i++) {
+            sel = selectindex(vl_owner :== vl_names[i])
+            st_vlmodify(vl_names[i], vl_vals_all[sel], vl_texts_all[sel])
+        }
     }
 }
 

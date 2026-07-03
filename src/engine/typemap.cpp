@@ -175,6 +175,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.transfer = Transfer::TimestampUs;
         p.stata_type = StType::Double;
         p.stata_format = "%tc";
+        p.note_subms = true; /* us -> ms: note only if sub-ms is really lost */
         break;
     case DUCKDB_TYPE_TIMESTAMP_S:
     case DUCKDB_TYPE_TIMESTAMP_MS:
@@ -196,6 +197,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_type = StType::Double;
         p.stata_format = "%tc";
         p.note = "timezone-aware timestamp stored as the UTC instant";
+        p.note_subms = true; /* the TZ note is about the instant, not precision */
         break;
     case DUCKDB_TYPE_TIME:
         /* charter §6.5: a time-of-day column must never arrive all-null.
@@ -206,6 +208,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_type = StType::Double;
         p.stata_format = "%tcHH:MM:SS";
         p.note = "time-of-day stored as milliseconds since midnight";
+        p.note_subms = true; /* encoding note above is not about sub-ms loss */
         break;
     case DUCKDB_TYPE_TIME_NS:
         p.cast_sql = "CAST(DATE '1970-01-01' + CAST(" + ref + " AS TIME) AS TIMESTAMP)";
@@ -223,6 +226,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_type = StType::Double;
         p.stata_format = "%tcHH:MM:SS";
         p.note = "time-of-day stored as milliseconds since midnight (offset discarded)";
+        p.note_subms = true;
         break;
     case DUCKDB_TYPE_VARCHAR:
         /* JSON-logical columns report their type-id as VARCHAR but reject
