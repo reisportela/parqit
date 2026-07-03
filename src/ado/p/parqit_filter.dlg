@@ -11,7 +11,7 @@
 VERSION 16.0
 
 INCLUDE _std_medium
-DEFINE _dlght 300
+DEFINE _dlght 325
 INCLUDE header
 HELP hlp1, view("help parqit")
 RESET res1
@@ -46,9 +46,12 @@ BEGIN
   RADIO rb_dropif		@	+22	@	.,		///
 	label("Drop observations satisfying a condition")		///
 	onclickon(script if_on)
-  TEXT tx_if			@	+25	@	.,		///
+  TEXT tx_if			@	+25	330	.,		///
 	label("Condition (dates via td(), tm(), year(), ...; see Create...)")
-  EXP ex_if			@	_ss	_ibwd	.,		///
+  BUTTON bu_vars		+340	@	120	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
+  EXP ex_if			_ilft	+25	_ibwd	.,		///
 	error("Condition") label("Create...")
 
   RADIO rb_keepin		@	+35	@	.,		///
@@ -65,6 +68,12 @@ BEGIN
 
   TEXT tx_note			_lft	+45	_iwd	.,		///
 	label("Nothing runs until parqit collect/save; missing-value mode: parqit set statamissing")
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
 END
 
 PROGRAM command

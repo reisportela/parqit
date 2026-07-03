@@ -12,7 +12,7 @@
 VERSION 16.0
 
 INCLUDE _std_medium
-DEFINE _dlght 330
+DEFINE _dlght 355
 INCLUDE header
 HELP hlp1, view("help parqit")
 RESET res1
@@ -52,9 +52,12 @@ BEGIN
   EDIT ed_name			@	_ss	_vnwd	.,		///
 	error("Variable name") label("name")
 
-  TEXT tx_exp			_lft	+35	_iwd	.,		///
+  TEXT tx_exp			_lft	+35	330	.,		///
 	label("= expression (dates: td(01jan2015), year(x), ...)")
-  EXP ex_exp			@	_ss	_iwd	.,		///
+  BUTTON bu_vars		+340	@	120	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
+  EXP ex_exp			_lft	+25	_iwd	.,		///
 	error("Expression") label("Create...")
 
   TEXT tx_if			_lft	+35	_iwd	.,		///
@@ -72,6 +75,12 @@ BEGIN
 	float
 	double
 	strL
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
 END
 
 PROGRAM command

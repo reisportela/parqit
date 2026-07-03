@@ -16,7 +16,7 @@ program define parqit, rclass
         contract duplicates sample collect count head list show explain    ///
         set merge append joinby reshape pivot sql query summarize tabulate ///
         path view views misstable levelsof ds lookfor codebook distinct    ///
-        tabstat correlate pwcorr histogram mergein appendin menu
+        tabstat correlate pwcorr histogram mergein appendin menu _dlgvars
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -138,6 +138,7 @@ program define _parqit_menu
         window menu append item "&parqit" "Co&mbine (merge/append/joinby)..." "db parqit_combine"
         window menu append separator "&parqit"
         window menu append item "&parqit" "&Collect / save (run pipeline)..." "db parqit_write"
+        window menu append item "&parqit" "Vie&ws and settings..." "db parqit_views"
         window menu append separator "&parqit"
         window menu append item "&parqit" "&Help on parqit" "help parqit"
         window menu refresh
@@ -163,6 +164,32 @@ end
 *                      master prefer `use file.dta` + `parqit open _data`.
 * The raw path travels through the global PARQIT_RS_IN to survive spaces/quotes.
 * ----------------------------------------------------------------------------
+
+* Dialog support: fill a dialog's LIST member with the open view's variable
+* names so COMBOBOX pickers are view-aware (the official spreg/sts dialogs'
+* `.dlgname.listname[i] = ...` + .repopulate idiom — dialog LISTs are class
+* members writable from ado). Called from a dialog PREINIT via
+*   parqit _dlgvars <dlgname> <listname>
+* and must NEVER break the dialog: any failure (no view open, no plugin,
+* no such dialog) leaves the list empty and exits 0. Interactive-only glue —
+* intentionally undocumented in the help.
+program define _parqit__dlgvars
+    version 16.0
+    args dlgname listname
+    if ("`dlgname'" == "" | "`listname'" == "") exit
+    capture {
+        quietly _parqit_ds
+        local vars `"`r(varlist)'"'
+    }
+    if (_rc) exit
+    local i 1
+    foreach v of local vars {
+        capture .`dlgname'.`listname'[`i'] = "`v'"
+        if (_rc) continue, break
+        local ++i
+        if (`i' > 500) continue, break    /* an editable dropdown; cap the fill */
+    }
+end
 
 * One-line, truthful performance hint shown when parqit spots a faster path for a
 * large operation (e.g. a big native mergein DuckDB could join out of core).

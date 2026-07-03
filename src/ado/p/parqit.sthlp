@@ -143,10 +143,18 @@ expression and optional if via the builder{p_end}
 columns variable and one or two aggregated values (a lazy
 {cmd:parqit pivot}){p_end}
 {p 8 12 2}{cmd:db parqit_combine}{space 3}merge (kind, keys, keep(), keepusing,
-nogenerate), append (generate()), joinby — the using side may be a file or
-{cmd:view:}{it:name}{p_end}
-{p 8 12 2}{cmd:db parqit_write}{space 5}run the pipeline: collect into memory,
-or save to Parquet (replace, compression, partition_by, chunk, data){p_end}
+generate()/nogenerate), append (generate()), joinby — the using side may be a
+file, glob, folder or {cmd:view:}{it:name}{p_end}
+{p 8 12 2}{cmd:db parqit_write}{space 5}run the pipeline: collect into memory
+(with an explicit replace-in-memory tick), or save to Parquet (replace,
+compression, partition_by, chunk, data){p_end}
+{p 8 12 2}{cmd:db parqit_views}{space 5}views and settings: list/switch/close
+views, show the generated SQL, explain the plan, and set statamissing,
+threads, memory_limit or tempdir{p_end}
+
+{pstd}The manipulation dialogs carry a {bf:View variables} button ({cmd:parqit ds}
+of the open view, printed to Results), and the pivot dialog's variable pickers
+list the open view's columns directly.{p_end}
 
 
 {marker description}{...}

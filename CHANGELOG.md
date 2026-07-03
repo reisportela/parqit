@@ -6,6 +6,28 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Added
+- **The dialogs are view-aware.** Every manipulation dialog (filter, vars,
+  gen, stats, combine, pivot) gains a **View variables** button that prints
+  the open view's variable names (`parqit ds`) with the dialog still open,
+  and the pivot dialog's three variable fields are now editable dropdowns
+  filled with the view's columns when the dialog opens — via a new internal
+  `parqit _dlgvars` helper using the official dialog-LIST/repopulate idiom
+  (defensive: any failure leaves the pickers empty, never breaks a dialog).
+- **`parqit_views` dialog** (User > parqit > Views and settings...): inspect
+  buttons that run immediately with the dialog open (list views, show the
+  generated SQL, explain the plan, describe, variable names) and OK-actions
+  for switching/closing views (one or `_all`) and the engine settings
+  (`statamissing`, `threads`, `memory_limit`, `tempdir`) — every click an
+  ordinary, Review-window-reproducible `parqit` command.
+- **The combine dialog covers the full merge surface**: a "Merge result
+  variable" field emits `generate(name)` (mutually exclusive with the
+  existing nogenerate tick), so menu users can name the `_merge` variable.
+- **The read dialog gains a Describe button** — previews the file/glob/Hive
+  folder's schema (`parqit describe`) before opening it, and its path box is
+  labelled as accepting a typed glob or folder, not only a browsed file
+  (the using box of combine likewise).
+
 ## [0.1.17] — 2026-07-03
 
 Adversarial-audit hardening: two independent audits (a nine-agent empirical

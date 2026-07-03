@@ -36,6 +36,7 @@ f parqit_gen.dlg
 f parqit_pivot.dlg
 f parqit_combine.dlg
 f parqit_write.dlg
+f parqit_views.dlg
 g LINUX64 parqit_linux64.plugin parqit.plugin
 g MACARM64 parqit_macarm64.plugin parqit.plugin
 g WIN64 parqit_win64.plugin parqit.plugin

@@ -115,6 +115,9 @@ BEGIN
 	label("variables (blank = all numeric)")
   CHECKBOX ck_detail		+290	@	90	.,		///
 	option(detail) label("Detail")
+  BUTTON bu_vars		+100	@	110	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
 
   RADIO rb_tab			_lft	+30	_iwd	.,		///
 	label("Tabulate: frequencies of one or two variables")		///
@@ -173,6 +176,12 @@ BEGIN
 	label("Bins:")
   EDIT ed_bins			+55	@	70	.,		///
 	numonly option(bins) label("bins")
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
 END
 
 PROGRAM command

@@ -39,9 +39,12 @@ END
 
 DIALOG main, label("parqit — read Parquet data") tabtitle("Main")
 BEGIN
-  TEXT tx_using			_lft	_top	_iwd	.,		///
-	label("File to read: Parquet, glob (data_*.parquet), Hive directory, CSV/TSV, dta or Excel")
-  FILE fi_using			@	_ss	@	.,		///
+  TEXT tx_using			_lft	_top	330	.,		///
+	label("Type a file, glob (data_*.parquet) or Hive folder — or Browse")
+  BUTTON bu_desc		+340	@	120	.,		///
+	label("Describe")						///
+	onpush(program pq_describe)
+  FILE fi_using			_lft	_ss	_iwd	.,		///
 	error("File to read")						///
 	defext(parquet)							///
 	label("Browse...")
@@ -69,6 +72,14 @@ BEGIN
   CHECKBOX ck_relaxed		_lft	+35	_iwd	.,		///
 	option(relaxed)							///
 	label("Union a glob whose files have different schemas (relaxed)")
+END
+
+PROGRAM pq_describe
+BEGIN
+	require main.fi_using
+	put "parqit describe "
+	put `"""' main.fi_using `"""'
+	stata hidden immediate
 END
 
 PROGRAM command

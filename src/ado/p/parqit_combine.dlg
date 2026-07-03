@@ -11,7 +11,7 @@
 VERSION 16.0
 
 INCLUDE _std_medium
-DEFINE _dlght 400
+DEFINE _dlght 425
 INCLUDE header
 HELP hlp1, view("help parqit")
 RESET res1
@@ -36,6 +36,7 @@ BEGIN
 	main.ck_master.enable
 	main.ck_musing.enable
 	main.ck_nogen.enable
+	main.ed_mgen.enable
 	main.ed_gen.disable
 END
 
@@ -48,6 +49,7 @@ BEGIN
 	main.ck_master.disable
 	main.ck_musing.disable
 	main.ck_nogen.disable
+	main.ed_mgen.disable
 	main.ed_gen.enable
 END
 
@@ -70,9 +72,12 @@ BEGIN
 	last label("Joinby")						///
 	onclickon(script joinby_on)
 
-  TEXT tx_using			_lft	+30	_iwd	.,		///
-	label("Using side: file, glob, directory — or type  view:name")
-  FILE fi_using			@	_ss	@	.,		///
+  TEXT tx_using			_lft	+30	330	.,		///
+	label("Using side: type a file, glob, folder or  view:name")
+  BUTTON bu_vars		+340	@	120	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
+  FILE fi_using			_lft	_ss	_iwd	.,		///
 	error("Using file or view:name")				///
 	defext(parquet)							///
 	label("Browse...")
@@ -109,6 +114,11 @@ BEGIN
 	label("Source marker variable (append, optional)")
   EDIT ed_gen			@	_ss	_vnwd	.,		///
 	option(generate) label("generate")
+
+  TEXT tx_mgen			_lft	+35	_cwd1	.,		///
+	label("Merge result variable (blank = _merge)")
+  EDIT ed_mgen			@	_ss	_vnwd	.,		///
+	option(generate) label("merge result variable")
 END
 
 LIST kind_list
@@ -117,6 +127,12 @@ BEGIN
 	"m:1"
 	"1:m"
 	"m:m"
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
 END
 
 PROGRAM command
@@ -144,6 +160,9 @@ BEGIN
 			}
 			optionarg main.ed_keepus
 			option main.ck_nogen
+			if !main.ck_nogen {
+				optionarg main.ed_mgen
+			}
 		endoptions
 	}
 	if main.rb_append {

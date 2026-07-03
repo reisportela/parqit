@@ -174,7 +174,7 @@ set(_parqit_ado_synced)
 foreach(f parqit.ado parqit.sthlp parqit.pkg parqit_read.dlg
           parqit_explore.dlg parqit_stats.dlg parqit_filter.dlg
           parqit_vars.dlg parqit_gen.dlg parqit_pivot.dlg
-          parqit_combine.dlg parqit_write.dlg stata.toc)
+          parqit_combine.dlg parqit_write.dlg parqit_views.dlg stata.toc)
     add_custom_command(
         OUTPUT "${PARQIT_LOCAL_ADO_DIR}/${f}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

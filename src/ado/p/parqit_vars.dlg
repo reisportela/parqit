@@ -9,7 +9,7 @@
 VERSION 16.0
 
 INCLUDE _std_medium
-DEFINE _dlght 360
+DEFINE _dlght 385
 INCLUDE header
 HELP hlp1, view("help parqit")
 RESET res1
@@ -53,12 +53,15 @@ BEGIN
   RADIO rb_gsort		@	+22	@	.,		///
 	label("Sort with +/- prefixes, e.g. -wage id (gsort)")		///
 	onclickon(script vars_on)
-  TEXT tx_vars			@	+25	@	.,		///
+  TEXT tx_vars			@	+25	330	.,		///
 	label("Variable list (names as shown by parqit describe/ds)")
-  EDIT ed_vars			@	_ss	_ibwd	.,		///
+  BUTTON bu_vars		+340	@	120	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
+  EDIT ed_vars			_ilft	_ss	_ibwd	.,		///
 	error("Variable list") label("variables")
 
-  RADIO rb_rename		@	+35	@	.,		///
+  RADIO rb_rename		@	+35	_ibwd	.,		///
 	last label("Rename one variable")				///
 	onclickon(script ren_on)
   TEXT tx_old			@	+25	120	.,		///
@@ -69,6 +72,12 @@ BEGIN
 	label("New:")
   EDIT ed_new			+65	@	140	.,		///
 	label("new name")
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
 END
 
 PROGRAM command

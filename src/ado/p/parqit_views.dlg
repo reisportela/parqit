@@ -1,0 +1,201 @@
+/*
+  parqit — views and engine settings
+
+*!  VERSION 0.1.17  03jul2026
+
+  Launch with:  db parqit_views     (installed on the menu by: parqit menu)
+  The Inspect buttons run immediately (the dialog stays open): list the open
+  views, print the current view's generated SQL (show), its engine plan
+  (explain), its schema (describe), or its variable names (ds). OK runs the
+  selected action: switch the current view, close a view (or every view),
+  or change an engine setting — each an ordinary, Review-window-reproducible
+  parqit command.
+*/
+
+VERSION 16.0
+
+INCLUDE _std_medium
+DEFINE _dlght 420
+INCLUDE header
+HELP hlp1, view("help parqit")
+RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	script sw_on
+END
+
+SCRIPT all_off
+BEGIN
+	main.ed_name.disable
+	main.cb_sm.disable
+	main.ed_threads.disable
+	main.ed_mem.disable
+	main.ed_tmp.disable
+END
+
+SCRIPT sw_on
+BEGIN
+	script all_off
+	main.ed_name.enable
+END
+
+SCRIPT closeall_on
+BEGIN
+	script all_off
+END
+
+SCRIPT sm_on
+BEGIN
+	script all_off
+	main.cb_sm.enable
+END
+
+SCRIPT th_on
+BEGIN
+	script all_off
+	main.ed_threads.enable
+END
+
+SCRIPT mem_on
+BEGIN
+	script all_off
+	main.ed_mem.enable
+END
+
+SCRIPT tmp_on
+BEGIN
+	script all_off
+	main.ed_tmp.enable
+END
+
+DIALOG main, label("parqit — views and settings") tabtitle("Main")
+BEGIN
+  GROUPBOX gb_insp		_lft	_top	_iwd	80,		///
+	label("Inspect (runs now; the dialog stays open)")
+  BUTTON bu_views		_ilft	_ss	90	.,		///
+	label("List views")						///
+	onpush(program pq_views)
+  BUTTON bu_show		+100	@	90	.,		///
+	label("Show SQL")						///
+	onpush(program pq_show)
+  BUTTON bu_explain		+100	@	90	.,		///
+	label("Explain")						///
+	onpush(program pq_explain)
+  BUTTON bu_desc		+100	@	90	.,		///
+	label("Describe")						///
+	onpush(program pq_desc)
+  BUTTON bu_ds			+100	@	110	.,		///
+	label("View variables")						///
+	onpush(program pq_ds)
+
+  GROUPBOX gb_act		_lft	+90	_iwd	230,		///
+	label("Action on OK")
+  RADIO rb_switch		_ilft	_ss	_ibwd	.,		///
+	first label("Switch the current view (the name of an open view)") ///
+	onclickon(script sw_on)
+  RADIO rb_close		@	+22	@	.,		///
+	label("Close a view (blank = the current one)")			///
+	onclickon(script sw_on)
+  TEXT tx_name			_indent	+25	160	.,		///
+	label("View name:")
+  EDIT ed_name			+165	@	160	.,		///
+	label("view name")
+  RADIO rb_closeall		_ilft	+28	_ibwd	.,		///
+	label("Close every view (parqit close _all)")			///
+	onclickon(script closeall_on)
+  RADIO rb_sm			@	+22	@	.,		///
+	label("Missing-value mode (statamissing: missing sorts largest)") ///
+	onclickon(script sm_on)
+  COMBOBOX cb_sm		_indent	+22	100	.,		///
+	dropdownlist contents(sm_list) default("on")			///
+	label("statamissing")
+  RADIO rb_threads		_ilft	+28	200	.,		///
+	label("Engine threads")						///
+	onclickon(script th_on)
+  EDIT ed_threads		+210	@	80	.,		///
+	numonly label("threads")
+  RADIO rb_mem			_ilft	+25	200	.,		///
+	label("Memory limit (e.g. 4GB)")				///
+	onclickon(script mem_on)
+  EDIT ed_mem			+210	@	120	.,		///
+	label("memory limit")
+  RADIO rb_tmp			_ilft	+25	200	.,		///
+	last label("Spill directory (tempdir)")				///
+	onclickon(script tmp_on)
+  EDIT ed_tmp			+210	@	230	.,		///
+	label("temp directory")
+END
+
+LIST sm_list
+BEGIN
+	on
+	off
+END
+
+PROGRAM pq_views
+BEGIN
+	put "parqit views"
+	stata hidden immediate
+END
+
+PROGRAM pq_show
+BEGIN
+	put "parqit show"
+	stata hidden immediate
+END
+
+PROGRAM pq_explain
+BEGIN
+	put "parqit explain"
+	stata hidden immediate
+END
+
+PROGRAM pq_desc
+BEGIN
+	put "parqit describe"
+	stata hidden immediate
+END
+
+PROGRAM pq_ds
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
+END
+
+PROGRAM command
+BEGIN
+	if main.rb_switch {
+		put "parqit view "
+		require main.ed_name
+		put main.ed_name
+	}
+	if main.rb_close {
+		put "parqit close"
+		if main.ed_name {
+			put " " main.ed_name
+		}
+	}
+	if main.rb_closeall {
+		put "parqit close _all"
+	}
+	if main.rb_sm {
+		put "parqit set statamissing "
+		put main.cb_sm
+	}
+	if main.rb_threads {
+		put "parqit set threads "
+		require main.ed_threads
+		put main.ed_threads
+	}
+	if main.rb_mem {
+		put "parqit set memory_limit "
+		require main.ed_mem
+		put main.ed_mem
+	}
+	if main.rb_tmp {
+		put "parqit set tempdir "
+		require main.ed_tmp
+		put `"""' main.ed_tmp `"""'
+	}
+END

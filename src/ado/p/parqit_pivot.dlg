@@ -9,6 +9,8 @@
   aggregated cells (a second measure is optional). Builds
   parqit pivot (stat) [name=]var ..., rows() cols() — lazy like every verb;
   materialise with the Collect / save dialog (db parqit_write).
+  The variable pickers list the OPEN VIEW's columns (filled when the dialog
+  opens; the View variables button prints them for the rows field).
 */
 
 VERSION 16.0
@@ -19,17 +21,45 @@ INCLUDE header
 HELP hlp1, view("help parqit")
 RESET res1
 
+SCRIPT PREINIT
+BEGIN
+	create STRING dlgname
+	dlgname.storeDialogClassName
+	program pq_load_vars
+END
+
+PROGRAM pq_load_vars
+BEGIN
+	put "parqit _dlgvars "
+	put dlgname
+	put " vv_list"
+	stata hidden immediate
+	call main.cb_col.repopulate
+	call main.cb_val.repopulate
+	call main.cb_val2.repopulate
+END
+
+PROGRAM pq_show_vars
+BEGIN
+	put "parqit ds"
+	stata hidden immediate
+END
+
 DIALOG main, label("parqit — pivot table (lazy)") tabtitle("Main")
 BEGIN
   GROUPBOX gb_layout		_lft	_top	_iwd	120,		///
 	label("Layout (as in an Excel pivot table)")
-  TEXT tx_rows			_ilft	_ss	_ibwd	.,		///
-	label("Rows: one output row per value combination (names as in parqit ds)")
-  EDIT ed_rows			@	_ss	_ibwd	.,		///
+  TEXT tx_rows			_ilft	_ss	330	.,		///
+	label("Rows: one output row per value combination")
+  BUTTON bu_vars		+340	@	120	.,		///
+	label("View variables")						///
+	onpush(program pq_show_vars)
+  EDIT ed_rows			_ilft	_ss	_ibwd	.,		///
 	error("Row variables") label("rows")
   TEXT tx_col			@	+30	_ibwd	.,		///
 	label("Columns: one output column per distinct value (one variable)")
-  EDIT ed_col			@	_ss	_ibwd	.,		///
+  COMBOBOX cb_col		@	_ss	_vnwd	.,		///
+	dropdown contents(vv_list)					///
 	error("Columns variable") label("columns")
 
   GROUPBOX gb_vals		_lft	+45	_iwd	120,		///
@@ -43,7 +73,8 @@ BEGIN
   COMBOBOX cb_stat		_ilft	_ss	120	.,		///
 	dropdownlist contents(stat_list) default("sum")			///
 	label("statistic")
-  EDIT ed_val			+130	@	160	.,		///
+  COMBOBOX cb_val		+130	@	160	.,		///
+	dropdown contents(vv_list)					///
 	error("Values variable") label("values variable")
   EDIT ed_tgt			+170	@	170	.,		///
 	label("result name")
@@ -53,13 +84,18 @@ BEGIN
   COMBOBOX cb_stat2		_ilft	_ss	120	.,		///
 	dropdownlist contents(stat_list) default("count")		///
 	label("second statistic")
-  EDIT ed_val2			+130	@	160	.,		///
+  COMBOBOX cb_val2		+130	@	160	.,		///
+	dropdown contents(vv_list)					///
 	label("second values variable")
   EDIT ed_tgt2			+170	@	170	.,		///
 	label("second result name")
 
   TEXT tx_note			_lft	+40	_iwd	.,		///
 	label("Lazy: materialise the table with Collect / save (db parqit_write).")
+END
+
+LIST vv_list
+BEGIN
 END
 
 LIST stat_list
@@ -84,20 +120,20 @@ BEGIN
 	if main.ed_tgt {
 		put main.ed_tgt "="
 	}
-	require main.ed_val
-	put main.ed_val
-	if main.ed_val2 {
+	require main.cb_val
+	put main.cb_val
+	if main.cb_val2 {
 		put " (" main.cb_stat2 ") "
 		if main.ed_tgt2 {
 			put main.ed_tgt2 "="
 		}
-		put main.ed_val2
+		put main.cb_val2
 	}
 	put ", rows("
 	require main.ed_rows
 	put main.ed_rows
 	put ") cols("
-	require main.ed_col
-	put main.ed_col
+	require main.cb_col
+	put main.cb_col
 	put ")"
 END
