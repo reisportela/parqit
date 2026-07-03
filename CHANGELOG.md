@@ -6,6 +6,22 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Fixed
+- **A result beyond 2,147,483,647 rows refuses with a real message, not
+  `option n() invalid` (N-2G31).** Live find: `parqit collect` over a
+  2,672,287,500-row trades glob died with the bare parser error — the
+  internal loader declared `n(integer)`, and Stata's option parser rejects
+  any value above 2^31−1 before code runs. The ceiling itself is
+  architectural (the plugin interface's observation index, `ST_int`, is a
+  32-bit int), so both prepare paths now refuse loudly *before* any fetch
+  machinery spins up — naming the row count and the out-of-core remedies
+  (`parqit collapse` / `keep if` / `keep in`, or `parqit save`) — with
+  rc 901 ("no room to add more observations"), and the loader re-checks as
+  defence in depth with `n()` parsed as a string. Verified live against the
+  real glob on both `collect` and `use, clear`; the remedy path (a lazy
+  collapse of the same 2.67B rows) reproduced the exact total. Pinned by
+  `tests/verify_suite/v53`.
+
 ## [0.1.18] — 2026-07-03
 
 The point-and-click environment matures: the dialogs see the open view.

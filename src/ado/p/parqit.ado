@@ -359,7 +359,22 @@ end
 * shared staging: create vars in a tempframe, fetch, decorate, atomic swap
 program define _parqit_load_core
     version 16.0
-    syntax, resp(string) strl(string) tag(string) n(integer) [names(string)]
+    * N-2G31: n() is a string, not n(integer) — syntax's integer parser
+    * rejects any VALUE above 2,147,483,647 with a bare "option n() invalid"
+    * before code runs, which is exactly how a 2.67B-row trades glob died
+    * (live find). The plugin guards the SPI's 2^31-1 observation ceiling
+    * with a real message before we get here; this parse-and-check is the
+    * defence in depth that keeps the failure loud if a future path skips it.
+    syntax, resp(string) strl(string) tag(string) n(string) [names(string)]
+    confirm number `n'
+    if (`n' > 2147483647) {
+        local nfmt = strtrim("`: di %21.0fc `n''")
+        di as err "parqit: the result has `nfmt' rows — more than the" ///
+            " 2,147,483,647 observations the Stata plugin interface can" ///
+            " address; aggregate or filter the lazy view first (parqit" ///
+            " collapse, parqit keep if/in), or write it with parqit save"
+        exit 901
+    }
 
     tempname stage
     local curframe = c(frame)

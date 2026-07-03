@@ -52,6 +52,10 @@ using parqit::Transfer;
 namespace {
 
 constexpr ST_retcode kRcUsage = 198;
+/* Stata's "no room to add more observations" — the SPI obs index (ST_int)
+ * is a 32-bit int, so one dataset can address at most 2^31-1 rows */
+constexpr ST_retcode kRcNoRoomObs = 901;
+constexpr long long kSpiMaxObs = 2147483647LL;
 constexpr ST_retcode kRcVarNotFound = 111;
 constexpr ST_retcode kRcMismatch = 459;
 constexpr ST_retcode kRcFileExists = 602;
@@ -1047,6 +1051,19 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
         return kRcEngine;
     }
 
+    /* N-2G31: the SPI's observation index (ST_int in SF_vstore/SF_sstore) is
+     * a 32-bit int, so a file beyond 2,147,483,647 rows cannot be read into
+     * one Stata dataset (live find: a 2.67B-row trades glob died as the
+     * ado's bare `option n() invalid`). Refuse loudly with the out-of-core
+     * remedies instead of failing in the arg parser. */
+    if (ctx.nrows > kSpiMaxObs) {
+        cry("parqit use: the file(s) hold " + std::to_string(ctx.nrows) +
+            " rows — more than the 2,147,483,647 observations the Stata "
+            "plugin interface can address; open them lazily (parqit use "
+            "using ...) and aggregate or filter (parqit collapse, parqit "
+            "keep if/in) before collecting, or process them with parqit save");
+        return kRcNoRoomObs;
+    }
     std::string tag;
     std::string names;
     for (size_t i = 0; i < ctx.active.size(); i++) {

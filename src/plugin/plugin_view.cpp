@@ -41,6 +41,10 @@ namespace {
 constexpr ST_retcode kRcUsage = 198;
 constexpr ST_retcode kRcVarNotFound = 111;
 constexpr ST_retcode kRcEngine = 920;
+/* Stata's "no room to add more observations" — the SPI obs index (ST_int)
+ * is a 32-bit int, so one dataset can address at most 2^31-1 rows */
+constexpr ST_retcode kRcNoRoomObs = 901;
+constexpr long long kSpiMaxObs = 2147483647LL;
 
 void cry(const std::string &s) {
     std::string line = s;
@@ -986,6 +990,19 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         return kRcEngine;
     }
 
+    /* N-2G31: ST_int — the SPI's observation index (SF_vstore/SF_sstore) —
+     * is a 32-bit int, so a result beyond 2,147,483,647 rows cannot be
+     * addressed in one Stata dataset (live find: a 2.67B-row trades glob
+     * died as the ado's bare `option n() invalid`). Refuse loudly before
+     * any fetch machinery spins up; every out-of-core remedy stays open. */
+    if (ctx.nrows > kSpiMaxObs) {
+        cry("parqit collect: the result has " + std::to_string(ctx.nrows) +
+            " rows — more than the 2,147,483,647 observations the Stata "
+            "plugin interface can address; aggregate or filter the lazy view "
+            "first (parqit collapse, parqit keep if/in), or write it to "
+            "Parquet with parqit save");
+        return kRcNoRoomObs;
+    }
     std::string tag, names;
     for (size_t i = 0; i < ctx.active.size(); i++) {
         if (i) names += " ";
