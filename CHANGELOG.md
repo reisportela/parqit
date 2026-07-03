@@ -6,6 +6,10 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-07-03
+
+The point-and-click environment matures: the dialogs see the open view.
+
 ### Added
 - **The dialogs are view-aware.** Every manipulation dialog (filter, vars,
   gen, stats, combine, pivot) gains a **View variables** button that prints

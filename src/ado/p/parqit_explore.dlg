@@ -1,7 +1,7 @@
 /*
   parqit — explore structure and data quality (nothing is materialised)
 
-*!  VERSION 0.1.17  03jul2026
+*!  VERSION 0.1.18  03jul2026
 
   Launch with:  db parqit_explore     (installed on the menu by: parqit menu)
   Descriptive statistics (summarize, tabulate, tabstat, correlations,

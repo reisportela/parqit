@@ -1,7 +1,7 @@
 /*
   parqit — views and engine settings
 
-*!  VERSION 0.1.17  03jul2026
+*!  VERSION 0.1.18  03jul2026
 
   Launch with:  db parqit_views     (installed on the menu by: parqit menu)
   The Inspect buttons run immediately (the dialog stays open): list the open
