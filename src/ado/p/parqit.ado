@@ -1,4 +1,4 @@
-*! version 0.1.16 02jul2026
+*! version 0.1.17 03jul2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -2712,6 +2712,16 @@ void _parqit_resp_decorate(string scalar resp)
              * key or abort the load. */
             if (!st_isname(labname))
                 printf("note: skipping value label with invalid name %s\n", labname)
+            else if (v == . & strtrim(vraw) != ".")
+                /* META-C: a non-numeric key ("abc", "") strtoreal's to plain
+                 * missing and used to fall through the finite-only guard
+                 * below, adding a spurious `.`-keyed entry to the label
+                 * (colliding last-wins across several bad keys). Reject only
+                 * a FAILED parse: a literal "." and the extended missings
+                 * ".a"-".z" are legitimate label keys whose labels survive
+                 * the round-trip (v07/t01 pin exactly that) and stay accepted. */
+                printf("note: value label %s: skipping non-numeric key %s\n",
+                       labname, vraw)
             else if (v < . & (v != trunc(v) | abs(v) >= 2147483648))
                 printf("note: value label %s: skipping non-integer/out-of-range key %s\n", labname, vraw)
             else {

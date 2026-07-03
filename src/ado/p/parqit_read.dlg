@@ -1,7 +1,7 @@
 /*
   parqit — read Parquet (or CSV/dta/Excel) data
 
-*!  VERSION 0.1.16  02jul2026
+*!  VERSION 0.1.17  03jul2026
 
   Launch with:  db parqit_read
   Install a User-menu entry with:  parqit menu
@@ -23,8 +23,6 @@ BEGIN
 		"Stata data (*.dta)|*.dta|"				///
 		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
 		"All files (*.*)|*.*"
-	main.tx_name.disable
-	main.ed_name.disable
 END
 
 SCRIPT clear_on
@@ -54,13 +52,13 @@ BEGIN
 	label("variables to read")
 
   CHECKBOX ck_clear		_lft	+35	_iwd	.,		///
-	option(clear) default(1)					///
+	option(clear) default(0)					///
 	label("Read into memory now (replaces the data in memory)")	///
 	onclickon(script clear_on)					///
 	onclickoff(script clear_off)
 
   TEXT tx_lazy			_lft	+25	_iwd	.,		///
-	label("Unticked: open a lazy view — nothing is read until parqit collect/save")
+	label("Default: open a lazy view — nothing is read until parqit collect/save")
 
   TEXT tx_name			_lft	+25	_vnwd	.,		///
 	label("View name (optional)")

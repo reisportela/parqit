@@ -326,9 +326,16 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
     if (paths_sql == "[]" || paths_sql.empty()) return m; /* view results */
     duckdb_result res;
     std::string err;
-    if (!s.query("SELECT file_name, decode(key) AS k, decode(value) AS v FROM "
+    /* META-B: try(decode()) — a strict decode() THROWS on any invalid-UTF8
+     * key/value anywhere in the file's KV metadata, and the whole query
+     * failure was swallowed as "no metadata channel", silently dropping every
+     * label/format because a third-party writer added one binary sidecar key.
+     * try() nulls just the undecodable entry; the parqit.* keys (valid UTF-8
+     * by construction) survive. */
+    if (!s.query("SELECT file_name, try(decode(key)) AS k, "
+                 "try(decode(value)) AS v FROM "
                  "parquet_kv_metadata(" + paths_sql + ") "
-                 "WHERE decode(key) LIKE 'parqit.%'",
+                 "WHERE try(decode(key)) LIKE 'parqit.%'",
                  &res, &err))
         return m; /* no metadata channel — fine */
     std::map<std::string, std::map<std::string, std::string>> per_file;
@@ -394,8 +401,22 @@ ST_retcode plan_columns(Session &s, const Source &src,
 
     /* duplicate column names: read_parquet has already renamed them (dup,
      * dup_1, …). Recover the true parquet names positionally from
-     * parquet_schema so the rename is loud and reversible (charter §6.10). */
+     * parquet_schema so the rename is loud and reversible (charter §6.10).
+     * N2/SCH5: the positional leaf-vs-scan alignment misfires when nested
+     * columns expose child leaves ("element", struct fields) or a Hive glob's
+     * per-file leaf rows coincide with the scan width — stamping bogus
+     * warnings and src_name onto unrelated columns. A genuine DuckDB dedup
+     * rename is always `<leaf>` -> `<leaf>_<digits>`, so recover ONLY pairs
+     * matching that shape and skip any other positional mismatch. */
     if (src.paths_sql != "[]" && !src.paths_sql.empty()) {
+        auto is_dedup_of = [](const std::string &scan, const std::string &leaf) {
+            if (scan.size() <= leaf.size() + 1) return false;
+            if (scan.compare(0, leaf.size(), leaf) != 0) return false;
+            if (scan[leaf.size()] != '_') return false;
+            for (size_t i = leaf.size() + 1; i < scan.size(); i++)
+                if (scan[i] < '0' || scan[i] > '9') return false;
+            return true;
+        };
         duckdb_result sres;
         std::string serr;
         if (s.query("SELECT name FROM parquet_schema(" + src.paths_sql +
@@ -405,7 +426,8 @@ ST_retcode plan_columns(Session &s, const Source &src,
             if (n == ncol) {
                 for (idx_t c = 0; c < ncol; c++) {
                     char *nm = duckdb_value_varchar(&sres, 0, c);
-                    if (nm && plans[c].source_name != nm) {
+                    if (nm && plans[c].source_name != nm &&
+                        is_dedup_of(plans[c].source_name, nm)) {
                         ctx->warnings.push_back(
                             "duplicate column name \"" + std::string(nm) +
                             "\" in the file; loaded as " + plans[c].source_name);
@@ -856,7 +878,14 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         const std::string tmpdest = dest + ".parqit_tmp";
         std::error_code ec2;
         fs::remove(tmpdest, ec2);
-        if (!run_copy(tmpdest, "")) return kRcEngine;
+        if (!run_copy(tmpdest, "")) {
+            /* STR2: drop the partial staging file — the partition branch
+             * already cleans up on a failed COPY; this one stranded a 0-byte
+             * <dest>.parqit_tmp orphan (the real target stays untouched). */
+            std::error_code ecf;
+            fs::remove(tmpdest, ecf);
+            return kRcEngine;
+        }
         /* GLOB-1a: read_parquet globs its argument; escape so the verify reads
          * exactly the staged file, never a glob-matching sibling. */
         if (!verify(quote_literal(glob_escape(tmpdest)))) {

@@ -6,8 +6,25 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
-Fixes from two independent adversarial audits (Claude fleet + Codex), each
-finding empirically reproduced against the plugin before acting.
+## [0.1.17] — 2026-07-03
+
+Adversarial-audit hardening: two independent audits (a nine-agent empirical
+fleet and the Codex static pass) swept the Parquet↔Stata boundary with
+hostile fixtures — forged statistics, NUL-bearing names, mixed-schema globs,
+malformed metadata, invalid UTF-8, exotic types, epoch and precision edges.
+Every finding was reproduced against the live plugin before fixing, and each
+fix is pinned by a new verify test (v46–v52). The read-side dialogs also move
+to the lazy-first flow the product thesis documents.
+
+### Changed
+- **The Read dialog opens a lazy view by default** (the "Read into memory
+  now" checkbox starts unticked), matching the documented contract that
+  `parqit use` is lazy and materialisation is explicit — the dialog no longer
+  turns the entry point into an eager reader.
+- **The Collect/save dialog no longer hard-codes `collect, clear`.** Collect
+  emits `parqit collect` unless the new "Replace the dataset in memory"
+  checkbox is ticked, so the CLI's protection against clobbering unsaved
+  in-memory changes applies to menu users too.
 
 ### Fixed
 - **A malformed display format in a foreign file no longer aborts the whole
@@ -114,6 +131,33 @@ finding empirically reproduced against the plugin before acting.
   every `f`-listed package file must exist; every `g`-listed platform binary
   must be one the release workflow actually builds; and the README
   `net install` example version must equal the project version.
+- **One binary sidecar KV key no longer silently drops every label
+  (META-B).** The `parqit.*` metadata read used a strict `decode()`, which
+  throws on any invalid-UTF-8 key/value anywhere in the file's key-value
+  metadata; the query failure read as "no metadata channel", so a benign
+  third-party writer adding one binary key silently cost the whole label
+  set. `try(decode())` skips just the undecodable entry. Pinned by
+  `tests/verify_suite/v52`.
+- **A non-numeric value-label key no longer pollutes the label with a
+  `.`-keyed entry (META-C)** — it is skipped with the same note the other
+  malformed keys get. Pinned by v52.
+- **No more bogus "duplicate column name" warnings on nested or
+  Hive-partitioned files (N2/SCH5).** The dup-name recovery aligned
+  `parquet_schema` leaves positionally against the scan columns, stamping
+  spurious warnings and `src_name` characteristics when nested leaves
+  ("element", struct fields) or per-file Hive layouts shifted positions;
+  only a genuine DuckDB dedup shape (`leaf` → `leaf_<digits>`) is recovered
+  now, and real duplicate-name recovery (v10) is unchanged. Pinned by v52.
+- **A failed disk-save `COPY` no longer strands a 0-byte
+  `<dest>.parqit_tmp` orphan (STR2)** — the non-partition branch now cleans
+  its staging file on failure, as the partition branch already did. Pinned
+  by v52.
+- **Invalid UTF-8 on READ is pinned as a loud refusal (ENC1).** The read
+  path relies on DuckDB's decoder rejecting malformed UTF-8 (parqit's fill
+  never re-validates); `tests/verify_suite/v52` now pins that external line
+  of defense for both a parquet payload and a Latin-1 CSV, so a future
+  engine relaxation cannot silently let raw bytes into Stata (v32 covered
+  only the save side).
 
 ## [0.1.16] — 2026-07-02
 
