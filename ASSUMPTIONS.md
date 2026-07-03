@@ -263,9 +263,15 @@ entry notes the conservative fallback if the assumption proves wrong.
     Parquet stats, so strings always scan. This removes the second full
     pass over the file in the common all-numeric case without changing any
     chosen storage type (verified against the prior scan-based result and
-    the v06/v15/v18 verify tests). Conservative fallback if a writer emits
-    wrong stats: the only risk is over-/under-sizing, caught by the
-    round-trip oracle tests; revert to an unconditional scan if it occurs.
+    the v06/v15/v18 verify tests). A writer that emits WRONG statistics
+    (spec-violating; also misleads DuckDB's own predicate pushdown) can
+    under-size the Stata type — and under-sizing is NOT benign: SF_vstore
+    silently maps the out-of-range value to missing (this was mis-assessed as
+    "caught by the round-trip oracle tests" — those all use honest stats, so
+    they never exercised it). The fill now bounds every value against its
+    planned type's window and refuses the load loudly on any overflow (v49,
+    NUM1/IO1 [[63]]), so a lying-stats file fails cleanly instead of silently
+    corrupting; the metadata fast path itself is unchanged.
 37. **Reads of ≥50k rows fill Stata in parallel (producer/consumer
     pipeline).** The Parquet→Stata materialise (`parqit use …, clear`,
     `parqit collect`) writes every result cell through the per-cell SPI
@@ -797,3 +803,28 @@ entry notes the conservative fallback if the assumption proves wrong.
     everywhere. One asymmetry accepted: a view save writes the *sanitised*
     name as the physical parquet column (unchanged behaviour); the original
     is recoverable from `parqit.chars`, not from the column name itself.
+63. **The numeric fill bounds every value against its planned Stata type
+    (2026-07-03, NUM1/IO1 + T2).** `fill_column` computes the storable window
+    of the planned byte/int/long/float type and counts any value outside it;
+    a nonzero count refuses the whole load with a loud rc (the staged swap
+    keeps memory intact). This is the mirror of the pre-existing float
+    inf/sentinel guard, extended to integers and dates. It fires only when a
+    plan is wrong: honest integer/float stats always size a type that fits
+    (never triggers), so the live triggers are (a) a spec-violating file
+    whose footer stats understate the data — the same file also defeats
+    DuckDB's predicate pushdown, so there is no lazy-filter escape, only a
+    stats rewrite — and (b) a DATE beyond Stata's %td long window (dates never
+    range-refine). %tc/%tw/… periods and timestamps store as double and are
+    not windowed (no false positives). Cost: one comparison per stored cell.
+64. **A NUL byte in a parquet column name is refused, not carried
+    (2026-07-03, NM1).** The SPI's column-name path is C-string throughout
+    (`duckdb_column_name`, `duckdb_value_varchar` over `parquet_schema`), so
+    `"col\0hidden"` truncated to `"col"`, collided with a real sibling, and
+    the fetch SELECT bound one physical column twice — silent data loss +
+    duplication at rc 0. The name cannot survive downstream, so the source
+    gate refuses it on every surface (relaxed included), naming the column
+    with the NUL rendered `<NUL>`. DuckDB VARCHARs are length-counted, so the
+    footer probe (`contains(name, chr(0))`) sees it even though the C API
+    would not. Documented non-goal: parqit will not invent a surrogate name
+    for a NUL-bearing column (that is the eager path's src_name role, and the
+    collision makes even that ambiguous).

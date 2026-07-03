@@ -184,8 +184,38 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
 ST_retcode strict_schema_gate(Session &s, const Source &src,
                               const std::vector<std::string> &files,
                               bool relaxed, bool csv, std::string *err) {
-    if (csv || relaxed || src.paths_sql == "[]" || src.paths_sql.empty())
-        return 0;
+    if (csv || src.paths_sql == "[]" || src.paths_sql.empty()) return 0;
+
+    /* NM1: a NUL byte inside a parquet column name is invisible to the SPI's
+     * C-string name APIs — duckdb_column_name truncates "col\0hidden" to
+     * "col", it collides with a real sibling "col", and the rebuilt fetch
+     * SELECT binds the same physical column twice: one column's data was
+     * silently LOST and another's duplicated, rc 0. The name cannot be
+     * carried faithfully anywhere downstream, so refuse the file loudly
+     * (relaxed included; a single file bites exactly the same way). DuckDB's
+     * own VARCHARs are length-counted, so the footer query sees the NUL. */
+    {
+        duckdb_result nres;
+        if (!s.query("SELECT replace(name, chr(0), '<NUL>') FROM "
+                     "parquet_schema(" + src.paths_sql +
+                         ") WHERE contains(name, chr(0)) LIMIT 1",
+                     &nres, err))
+            return kRcEngine;
+        if (duckdb_row_count(&nres) > 0) {
+            char *nm = duckdb_value_varchar(&nres, 0, 0);
+            std::string shown = nm ? nm : "";
+            if (nm) duckdb_free(nm);
+            duckdb_destroy_result(&nres);
+            *err = "column name \"" + shown +
+                   "\" contains a NUL byte, which Stata's plugin interface "
+                   "cannot carry (it would silently collide with a sibling "
+                   "column and lose data); rename the column upstream";
+            return kRcUsage;
+        }
+        duckdb_destroy_result(&nres);
+    }
+
+    if (relaxed) return 0;
     if (files.size() == 1 && files[0].find('*') == std::string::npos &&
         files[0].find('?') == std::string::npos) {
         /* one literal file has no second schema to disagree with */
@@ -1023,13 +1053,35 @@ namespace {
  * (the SPI has no strL write call); Mata pours them in afterwards. */
 bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *col,
                  std::FILE *strl_spill, long long *inf_seen,
-                 long long *nul_seen, std::string *err) {
+                 long long *nul_seen, long long *rng_seen, std::string *err) {
     const uint8_t *validity = static_cast<const uint8_t *>(col->buffers[0]);
     const int64_t off = col->offset;
     auto valid = [&](int64_t r) -> bool {
         if (!validity) return true;
         int64_t pos = off + r;
         return (validity[pos >> 3] >> (pos & 7)) & 1;
+    };
+    /* NUM1/IO1 (+T2): the storable window of the PLANNED Stata type. A value
+     * outside it is silently converted to missing by SF_vstore — which is how
+     * a file whose footer statistics understate the true range (the F2 fast
+     * path trusts them; honest writers' stats are exact) or a date beyond
+     * Stata's %td long turned real values into `.` with rc 0 and no message.
+     * Count every such cell; the caller refuses the whole load afterwards
+     * (loud, never a silently-missing real value). Double/strings have no
+     * narrower window and skip the check. */
+    double rlo = 0, rhi = 0;
+    bool ranged = true;
+    switch (p.stata_type) {
+    case StType::Byte: rlo = parqit::kStataByteMin; rhi = parqit::kStataByteMax; break;
+    case StType::Int: rlo = parqit::kStataIntMin; rhi = parqit::kStataIntMax; break;
+    case StType::Long: rlo = parqit::kStataLongMin; rhi = parqit::kStataLongMax; break;
+    case StType::Float: rlo = -parqit::kStataFloatMax; rhi = parqit::kStataFloatMax; break;
+    default: ranged = false; break;
+    }
+    auto in_range = [&](double d) -> bool {
+        if (!ranged || (d >= rlo && d <= rhi)) return true;
+        if (rng_seen) (*rng_seen)++;
+        return false;
     };
     auto store_num = [&](int64_t r, double value) -> bool {
         ST_retcode rc = SF_vstore(i, base + r + 1, value);
@@ -1055,29 +1107,37 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
     case Transfer::Int8: {
         const int8_t *v = static_cast<const int8_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
-            if (valid(r) && !store_num(r, static_cast<double>(v[off + r])))
-                return false;
+            if (valid(r)) {
+                double d = static_cast<double>(v[off + r]);
+                if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
+            }
         return true;
     }
     case Transfer::Int16: {
         const int16_t *v = static_cast<const int16_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
-            if (valid(r) && !store_num(r, static_cast<double>(v[off + r])))
-                return false;
+            if (valid(r)) {
+                double d = static_cast<double>(v[off + r]);
+                if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
+            }
         return true;
     }
     case Transfer::Int32: {
         const int32_t *v = static_cast<const int32_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
-            if (valid(r) && !store_num(r, static_cast<double>(v[off + r])))
-                return false;
+            if (valid(r)) {
+                double d = static_cast<double>(v[off + r]);
+                if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
+            }
         return true;
     }
     case Transfer::Int64: {
         const int64_t *v = static_cast<const int64_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
-            if (valid(r) && !store_num(r, static_cast<double>(v[off + r])))
-                return false;
+            if (valid(r)) {
+                double d = static_cast<double>(v[off + r]);
+                if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
+            }
         return true;
     }
     case Transfer::Float32: {
@@ -1089,10 +1149,13 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                  * hold — ±Inf, or a finite magnitude >= Stata's missing
                  * sentinel (|d| >= SV_missval ~8.99e307, which Stata would read
                  * back as a MISSING value) — is stored as missing and counted
-                 * so the load says so, never a silent wrong number. */
+                 * so the load says so, never a silent wrong number. A finite
+                 * value beyond the planned float window (lying stats sized the
+                 * column float; the data says double) counts as out-of-range. */
                 bool unstorable = std::isnan(d) || std::isinf(d) ||
                                   std::fabs(d) >= SV_missval;
                 if (!std::isnan(d) && unstorable && inf_seen) (*inf_seen)++;
+                if (!unstorable && !in_range(d)) unstorable = true;
                 if (!store_num(r, unstorable ? SV_missval : d)) return false;
             }
         return true;
@@ -1105,6 +1168,7 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                 bool unstorable = std::isnan(d) || std::isinf(d) ||
                                   std::fabs(d) >= SV_missval;
                 if (!std::isnan(d) && unstorable && inf_seen) (*inf_seen)++;
+                if (!unstorable && !in_range(d)) unstorable = true;
                 if (!store_num(r, unstorable ? SV_missval : d)) return false;
             }
         return true;
@@ -1112,10 +1176,11 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
     case Transfer::Date32: {
         const int32_t *v = static_cast<const int32_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
-            if (valid(r) &&
-                !store_num(r, static_cast<double>(v[off + r]) +
-                                  parqit::kEpochShiftDays))
-                return false;
+            if (valid(r)) {
+                double d = static_cast<double>(v[off + r]) +
+                           parqit::kEpochShiftDays;
+                if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
+            }
         return true;
     }
     case Transfer::TimestampUs: {
@@ -1277,7 +1342,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                  const std::vector<int> &regular_cols,
                  const std::vector<int> &strl_cols, std::FILE *strl_spill,
                  std::vector<long long> &inf_local,
-                 std::vector<long long> &nul_local) {
+                 std::vector<long long> &nul_local,
+                 std::vector<long long> &rng_local) {
     /* This runs on a worker thread, so NO exception may escape it — an exception
      * crossing a std::thread boundary calls std::terminate and would take the
      * whole Stata process down (the charter rule the SPI catch-all enforces on
@@ -1310,7 +1376,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
             for (int col : regular_cols)
                 if (!fill_column(plans[col], col + 1, slot.base,
                                  slot.arr.children[col], /*strl_spill=*/nullptr,
-                                 &inf_local[col], &nul_local[col], &lerr)) {
+                                 &inf_local[col], &nul_local[col],
+                                 &rng_local[col], &lerr)) {
                     ok = false;
                     break;
                 }
@@ -1319,7 +1386,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                 for (int col : strl_cols)
                     if (!fill_column(plans[col], col + 1, slot.base,
                                      slot.arr.children[col], strl_spill,
-                                     &inf_local[col], &nul_local[col], &lerr)) {
+                                     &inf_local[col], &nul_local[col],
+                                     &rng_local[col], &lerr)) {
                         ok = false;
                         break;
                     }
@@ -1419,7 +1487,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
     duckdb_arrow_options aopts;
     duckdb_connection_get_arrow_options(s.con(), &aopts);
 
-    std::vector<long long> inf_counts(k, 0), nul_counts(k, 0);
+    std::vector<long long> inf_counts(k, 0), nul_counts(k, 0), rng_counts(k, 0);
     long long base = 0;
     ST_retcode rc = 0;
     const int nthreads = fill_thread_count(prep.nrows);
@@ -1447,7 +1515,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 for (int i = 0; i < k && rc == 0; i++) {
                     if (!fill_column(prep.plans[i], i + 1, base, arr.children[i],
                                      strl_spill, &inf_counts[i], &nul_counts[i],
-                                     &err))
+                                     &rng_counts[i], &err))
                         rc = kRcEngine;
                 }
             }
@@ -1484,13 +1552,15 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             nthreads, std::vector<long long>(k, 0));
         std::vector<std::vector<long long>> nul_locals(
             nthreads, std::vector<long long>(k, 0));
+        std::vector<std::vector<long long>> rng_locals(
+            nthreads, std::vector<long long>(k, 0));
         std::vector<std::thread> workers;
         workers.reserve(nthreads);
         for (int t = 0; t < nthreads; t++)
             workers.emplace_back(fill_worker, std::ref(fq), std::cref(prep.plans),
                                  std::cref(regular_cols), std::cref(strl_cols),
                                  strl_spill, std::ref(inf_locals[t]),
-                                 std::ref(nul_locals[t]));
+                                 std::ref(nul_locals[t]), std::ref(rng_locals[t]));
 
         /* The producer runs under try/catch too: a throw here (e.g. a deque
          * push_back std::bad_alloc under memory pressure) must not unwind past the
@@ -1593,6 +1663,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             for (int c = 0; c < k; c++) {
                 inf_counts[c] += inf_locals[t][c];
                 nul_counts[c] += nul_locals[t][c];
+                rng_counts[c] += rng_locals[t][c];
             }
     }
     duckdb_destroy_arrow_options(&aopts);
@@ -1619,6 +1690,28 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             std::to_string(prep.nrows) + " → " + std::to_string(base) +
             "); files modified concurrently?");
         return kRcEngine;
+    }
+    /* NUM1/IO1 (+T2): a narrowing fill that had to convert real values to
+     * missing means the plan's range was wrong — footer statistics that
+     * understate the data (a spec-violating file; honest writers' stats are
+     * exact) or a date beyond Stata's %td window. Storing `.` where the file
+     * holds a real value is silent corruption, so the whole load is refused
+     * loudly; the ado's staged swap keeps the in-memory dataset intact. */
+    for (int i = 0; i < k; i++) {
+        if (rng_counts[i] > 0) {
+            cry("parqit use: column " + prep.plans[i].stata_name + " has " +
+                std::to_string(rng_counts[i]) +
+                " value(s) outside the storable range of its planned " +
+                parqit::sttype_code(prep.plans[i].stata_type,
+                                    prep.plans[i].str_bytes) +
+                " type — the file's Parquet statistics understate the data "
+                "(a spec-violating file, whose stats also mislead DuckDB's "
+                "own predicate pushdown), or a value genuinely exceeds Stata's "
+                "range (e.g. a date far outside the %td window). Refusing to "
+                "load real values as missing; rewrite the file with correct "
+                "statistics, or correct the offending values at the source.");
+            return kRcEngine;
+        }
     }
     for (int i = 0; i < k; i++) {
         if (inf_counts[i] > 0)

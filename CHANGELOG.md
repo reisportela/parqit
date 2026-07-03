@@ -10,6 +10,29 @@ Fixes from two independent adversarial audits (Claude fleet + Codex), each
 finding empirically reproduced against the plugin before acting.
 
 ### Fixed
+- **A file whose Parquet statistics understate the data can no longer
+  silently store real values as missing (NUM1/IO1).** The metadata fast path
+  sizes `byte`/`int`/`long`/`float` columns from the footer's
+  `stats_min/max_value` (exact for conforming writers). A spec-violating file
+  whose stats *understate* the range made parqit pick a too-narrow Stata
+  type, and `SF_vstore` then silently mapped the real value to `.` — rc 0, no
+  note, on both the eager `use` and the lazy passthrough `collect` — the
+  exact silent-corruption class the charter forbids, and `ASSUMPTIONS.md` #36
+  had mis-assessed it as benign. The numeric fill now bounds every value
+  against its planned type's storable window (the mirror of the existing
+  float inf/sentinel guard, extended to integers and dates) and refuses the
+  whole load loudly, memory intact. This also closes the read-side gap where
+  a DATE beyond Stata's `%td` `long` window became a silent `.` while the
+  save side already guarded it. Honest files are unaffected (their stats
+  always size a type that fits). Pinned by `tests/verify_suite/v49`.
+- **A NUL byte in a Parquet column name is refused, not silently collided
+  (NM1).** The plugin-interface name path is C-string throughout, so
+  `"col\0hidden"` truncated to `"col"`, collided with a real sibling column,
+  and the fetch bound one physical column twice — one column's data lost, the
+  other's duplicated, rc 0. The source gate now detects the NUL through
+  DuckDB's length-counted footer (`contains(name, chr(0))`) and refuses on
+  every read surface, naming the offending column. Hostile-but-NUL-free names
+  (spaces, accents, quotes) are unaffected. Pinned by `tests/verify_suite/v50`.
 - **Strict mode never guesses across a mixed-schema glob (SCH1/SCH2).**
   DuckDB's plain `read_parquet` takes the *first* file's schema and casts
   every later file to it, so without `relaxed` a column that widened in a

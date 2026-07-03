@@ -33,14 +33,17 @@ struct Source {
 Source source_for(const std::vector<std::string> &files, bool relaxed = false,
                   bool csv = false);
 
-/* Strict-mode multi-file schema gate (SCH1/SCH2): without `relaxed` the
- * matched parquet files must agree on the resolved schema — DuckDB's plain
- * read_parquet otherwise takes the first file's schema and silently casts
- * (or drops columns of) every later file. One footer-only fingerprint query;
- * a physical-only difference (INT96 vs TIMESTAMP, annotation style) is
- * rescued by resolving one representative per fingerprint; a real column-set
- * or type difference returns a loud rc with the column and both files named.
- * No-op for csv/relaxed sources and a single literal file. */
+/* Parquet source gates. NM1 (all modes): a column name containing a NUL
+ * byte is refused loudly — the SPI's C-string name APIs would truncate it
+ * into a silent collision with a sibling column (data lost/duplicated).
+ * SCH1/SCH2 (strict only): without `relaxed` the matched files must agree
+ * on the resolved schema — DuckDB's plain read_parquet otherwise takes the
+ * first file's schema and silently casts (or drops columns of) every later
+ * file. One footer-only fingerprint query; a physical-only difference
+ * (INT96 vs TIMESTAMP, annotation style) is rescued by resolving one
+ * representative per fingerprint; a real column-set or type difference
+ * returns a loud rc with the column and both files named. No-op for csv
+ * sources; the schema part also skips relaxed and a single literal file. */
 ST_retcode strict_schema_gate(parqit::Session &s, const Source &src,
                               const std::vector<std::string> &files,
                               bool relaxed, bool csv, std::string *err);
