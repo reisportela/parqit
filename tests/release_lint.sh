@@ -74,6 +74,45 @@ if [ -n "$ado_d" ]; then
     [ "$iso" = "$pkg_d" ] || err "banner date $ado_d ($iso) != parqit.pkg Distribution-Date $pkg_d"
 fi
 
+# --- dialogs carry the same version/date as the ado banner -------------------
+# (the .dlg banners are a fifth synchronised surface; they drifted to a stale
+# 0.1.15 while the package shipped 0.1.16, and nothing caught it — now gated.)
+for dlg in "$REPO"/src/ado/p/parqit_*.dlg; do
+    [ -e "$dlg" ] || continue
+    base=$(basename "$dlg")
+    dl=$(grep -m1 -E '^\*!  *VERSION ' "$dlg")
+    dv=$(printf '%s' "$dl" | grep -oE "$semver")
+    dd=$(printf '%s' "$dl" | grep -oE "$banner_date")
+    [ -n "$dv" ] || err "$base has no '*! VERSION X.Y.Z DDmonYYYY' banner"
+    [ -n "$dv" ] && [ "$dv" != "$cmake_v" ] && err "$base version $dv != project version $cmake_v"
+    [ -n "$dd" ] && [ -n "$ado_d" ] && [ "$dd" != "$ado_d" ] && \
+        err "$base date $dd != ado banner date $ado_d"
+done
+
+# --- parqit.pkg manifest is coherent (a net install reads it line by line) ----
+# every 'f <file>' the package ships must exist in the source ado dir (a missing
+# one aborts net install on the target — the historical .dlg-not-shipped bug).
+while read -r _ fn _; do
+    [ -n "$fn" ] || continue
+    [ -f "$REPO/src/ado/p/$fn" ] || \
+        err "parqit.pkg ships '$fn' but src/ado/p/$fn does not exist"
+done < <(grep -E '^f ' "$REPO/src/ado/p/parqit.pkg")
+
+# every 'g <PLAT> <binary> ...' must name a per-OS binary the release workflow
+# actually builds — the manifest promised MACINTEL64 that CI never produced.
+built=$(grep -oE 'parqit_[A-Za-z0-9]+\.plugin' "$REPO/.github/workflows/build.yml" | sort -u)
+while read -r _ _ gbin _; do
+    [ -n "$gbin" ] || continue
+    printf '%s\n' "$built" | grep -qx "$gbin" || \
+        err "parqit.pkg declares platform binary '$gbin' the release workflow never builds"
+done < <(grep -E '^g ' "$REPO/src/ado/p/parqit.pkg")
+
+# --- README net-install example pins the current version ---------------------
+rd_v=$(grep -oE 'releases/download/v'"$semver" "$REPO/README.md" | grep -oE "$semver" | head -1)
+[ -n "$rd_v" ] || err "README.md has no 'net install ... releases/download/vX.Y.Z' example"
+[ -n "$rd_v" ] && [ "$rd_v" != "$cmake_v" ] && \
+    err "README net install example v$rd_v != project version $cmake_v"
+
 # --- CHANGELOG sectioning ----------------------------------------------------
 unrel=$(grep -cE '^## \[Unreleased\]' "$REPO/CHANGELOG.md")
 [ "$unrel" = "1" ] || err "CHANGELOG.md must have exactly one '## [Unreleased]' (found $unrel)"

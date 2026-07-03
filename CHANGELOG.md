@@ -6,6 +6,40 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+Fixes from two independent adversarial audits (Claude fleet + Codex), each
+finding empirically reproduced against the plugin before acting.
+
+### Fixed
+- **`parqit save` disk→disk of a `%tc` datetime no longer overflows (STR1).**
+  The `%tc` branch of the view/disk save built the instant with
+  `<ms> * INTERVAL 1 MILLISECOND`, whose multiplier DuckDB silently down-casts
+  to INT32; any datetime outside ~`[1969-12-07, 1970-01-25]` (i.e. essentially
+  every real one) failed with rc 920 — including parqit's own saved files. Now
+  `epoch_ms`-based, so the flagship out-of-core `use … ; save` path round-trips
+  datetimes exactly. `%td`/`%tC`/`%tm…` were always on other branches and are
+  unaffected. Pinned by `tests/verify_suite/v46`.
+- **A JSON-logical Parquet column no longer makes the whole file unloadable
+  (N1).** DuckDB reports a JSON column's type-id as `VARCHAR`, but `strlen()`
+  and direct projection reject the native JSON type (a binder error), so the
+  sizing scan failed and poisoned every sibling column (rc 920), while
+  `parqit describe` advertised the column as loadable. The VARCHAR plan now
+  carries the same `CAST(… AS VARCHAR)` that ENUM/UUID already used (a no-op
+  for true VARCHAR), so JSON loads as its text form and the file is usable.
+  Pinned by `tests/verify_suite/v46`.
+- **Package/release coherence.** `parqit.pkg` no longer declares the
+  `MACINTEL64` binary the release workflow never builds (an Intel-macOS
+  `net install` would have aborted on the missing file; README already
+  documents no Intel binary). The eight dialog banners that had drifted to a
+  stale `0.1.15` are back in sync at `0.1.16`. The recommended README
+  `net install` example points at the current release, not `v0.1.13`. The
+  stale `benchmarks/profile_collect.do` call to the removed
+  `_parqit_write_collect_request` is corrected to `_parqit_wr_collect_request`.
+- **`release_lint.sh` now gates four surfaces that previously drifted
+  unchecked**: every `parqit_*.dlg` banner must match the ado version/date;
+  every `f`-listed package file must exist; every `g`-listed platform binary
+  must be one the release workflow actually builds; and the README
+  `net install` example version must equal the project version.
+
 ## [0.1.16] — 2026-07-02
 
 An Excel-style pivot table as one lazy verb, on the menu.

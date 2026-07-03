@@ -82,7 +82,7 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.13") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.16") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```

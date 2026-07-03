@@ -242,9 +242,13 @@ std::string compile_for_save(const View &v) {
             expr = "(DATE '1960-01-01' + CAST(round(" + ref + ") AS INTEGER))";
             break;
         case parqit::FmtClass::Tc:
-            expr = "(TIMESTAMP '1970-01-01 00:00:00' + (CAST(round(" + ref +
-                   ") AS BIGINT) - " + std::to_string(parqit::kEpochShiftMs) +
-                   ") * INTERVAL 1 MILLISECOND)";
+            /* epoch_ms(bigint) builds the instant from ms-since-1970 with no
+             * overflow. The old `<ms> * INTERVAL 1 MILLISECOND` form silently
+             * down-cast the multiplier to INT32, so the disk/view save of any
+             * %tc datetime outside ~[1969-12-07, 1970-01-25] failed with
+             * rc 920 — including parqit's own files (STR1). */
+            expr = "epoch_ms(CAST(round(" + ref + ") AS BIGINT) - " +
+                   std::to_string(parqit::kEpochShiftMs) + ")";
             break;
         case parqit::FmtClass::TC:
             expr = "CAST(round(" + ref + ") AS BIGINT)";

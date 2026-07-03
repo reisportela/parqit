@@ -94,7 +94,7 @@ timer on 2
 * Manually recreate parqit collect but using our profile_load_core
 tempfile req resp strl
 local _sq_limit -1
-mata: _parqit_write_collect_request("`req'", "`resp'", "`strl'")
+mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
 
 timer clear 3
 timer on 3

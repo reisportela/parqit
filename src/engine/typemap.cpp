@@ -225,6 +225,13 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.note = "time-of-day stored as milliseconds since midnight (offset discarded)";
         break;
     case DUCKDB_TYPE_VARCHAR:
+        /* JSON-logical columns report their type-id as VARCHAR but reject
+         * strlen()/direct projection on the native JSON type (a binder error),
+         * exactly like ENUM/UUID below. Cast to VARCHAR so the sizing scan and
+         * the fetch/save SELECT both bind, and a JSON column loads as its text
+         * form instead of failing the whole file (N1). A no-op for a true
+         * VARCHAR; DuckDB folds CAST(varchar AS VARCHAR) away. */
+        p.cast_sql = "CAST(" + ref + " AS VARCHAR)";
         p.transfer = Transfer::Utf8;
         p.stata_type = StType::Str;
         p.needs_strlen = true;
