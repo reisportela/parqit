@@ -168,6 +168,122 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
     return s;
 }
 
+/* SCH1/SCH2: without `relaxed`, DuckDB's plain read_parquet takes the FIRST
+ * file's schema and casts every later file to it — a same-named column that
+ * widened in a later file (int → double, date → timestamp: the canonical
+ * schema-evolution layout) was silently down-cast, destroying data with rc 0
+ * and glob-order-dependent results, while the help promised a loud error;
+ * a column extra in a later file silently vanished the same way. The gate:
+ * one footer-only fingerprint query over parquet_schema; when fingerprints
+ * differ, physically-different-but-identically-resolving files (INT96 vs
+ * TIMESTAMP timestamps, converted- vs logical-type annotations) are rescued
+ * by DESCRIBE-ing one representative file per fingerprint — only a real
+ * difference in the resolved schema (column set or type, compared
+ * case-insensitively, order-insensitively, exactly as read_parquet binds)
+ * refuses, naming the column, both types and both files. */
+ST_retcode strict_schema_gate(Session &s, const Source &src,
+                              const std::vector<std::string> &files,
+                              bool relaxed, bool csv, std::string *err) {
+    if (csv || relaxed || src.paths_sql == "[]" || src.paths_sql.empty())
+        return 0;
+    if (files.size() == 1 && files[0].find('*') == std::string::npos &&
+        files[0].find('?') == std::string::npos) {
+        /* one literal file has no second schema to disagree with */
+        std::error_code ec;
+        if (!std::filesystem::is_directory(files[0], ec)) return 0;
+    }
+
+    duckdb_result res;
+    if (!s.query("SELECT file_name, string_agg(lower(name) || ':' || type || "
+                 "':' || coalesce(converted_type, '') || ':' || "
+                 "coalesce(logical_type, '') || ':' || coalesce(precision, -1) "
+                 "|| ':' || coalesce(scale, -1), '|' ORDER BY lower(name), "
+                 "name) FROM parquet_schema(" + src.paths_sql +
+                     ") WHERE num_children IS NULL OR num_children = 0 "
+                     "GROUP BY file_name",
+                 &res, err))
+        return kRcEngine;
+    std::map<std::string, std::string> rep_of; /* fingerprint -> first file */
+    idx_t n = duckdb_row_count(&res);
+    for (idx_t r = 0; r < n; r++) {
+        char *f = duckdb_value_varchar(&res, 0, r);
+        char *fp = duckdb_value_varchar(&res, 1, r);
+        if (f && fp && !rep_of.count(fp)) rep_of[fp] = f;
+        if (f) duckdb_free(f);
+        if (fp) duckdb_free(fp);
+    }
+    duckdb_destroy_result(&res);
+    if (rep_of.size() <= 1) return 0;
+
+    struct Rep {
+        std::string file;
+        std::vector<std::pair<std::string, std::string>> cols; /* lower, type */
+        std::map<std::string, std::string> by_name;
+        std::map<std::string, std::string> display; /* lower -> as written */
+    };
+    std::vector<Rep> reps;
+    for (const auto &g : rep_of) {
+        Rep rep;
+        rep.file = g.second;
+        duckdb_result d;
+        if (!s.query("DESCRIBE SELECT * FROM read_parquet(" +
+                         quote_literal(rep.file) + ")",
+                     &d, err))
+            return kRcEngine;
+        idx_t dn = duckdb_row_count(&d);
+        for (idx_t r = 0; r < dn; r++) {
+            char *nm = duckdb_value_varchar(&d, 0, r);
+            char *ty = duckdb_value_varchar(&d, 1, r);
+            if (nm && ty) {
+                std::string low = nm;
+                std::transform(low.begin(), low.end(), low.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                rep.cols.emplace_back(low, ty);
+                rep.by_name[low] = ty;
+                rep.display[low] = nm;
+            }
+            if (nm) duckdb_free(nm);
+            if (ty) duckdb_free(ty);
+        }
+        duckdb_destroy_result(&d);
+        reps.push_back(std::move(rep));
+    }
+    const Rep &a = reps[0];
+    for (size_t i = 1; i < reps.size(); i++) {
+        const Rep &b = reps[i];
+        for (const auto &ca : a.cols) {
+            auto it = b.by_name.find(ca.first);
+            if (it == b.by_name.end()) {
+                *err = "the matched files do not share one schema: column \"" +
+                       a.display.at(ca.first) + "\" (" + a.file +
+                       ") is missing from " + b.file +
+                       "; pass relaxed to union by name (an absent column "
+                       "null-fills)";
+                return kRcUsage;
+            }
+            if (it->second != ca.second) {
+                *err = "the matched files do not share one schema: column \"" +
+                       a.display.at(ca.first) + "\" is " + ca.second + " in " +
+                       a.file + " but " + it->second + " in " + b.file +
+                       "; strict mode refuses to guess — pass relaxed to "
+                       "union by name with safe recasts";
+                return kRcUsage;
+            }
+        }
+        for (const auto &cb : b.cols) {
+            if (!a.by_name.count(cb.first)) {
+                *err = "the matched files do not share one schema: column \"" +
+                       b.display.at(cb.first) + "\" (" + b.file +
+                       ") is missing from " + a.file +
+                       "; pass relaxed to union by name (an absent column "
+                       "null-fills)";
+                return kRcUsage;
+            }
+        }
+    }
+    return 0; /* resolved schemas agree — the difference was physical only */
+}
+
 /* ------------------------------------------------------- parqit KV metadata */
 
 namespace {
@@ -846,6 +962,12 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
 
     const Source src = source_for(files, req.value("relaxed", false),
                                   req.value("csv", false));
+    ST_retcode grc = strict_schema_gate(s, src, files, req.value("relaxed", false),
+                                        req.value("csv", false), &err);
+    if (grc != 0) {
+        cry("parqit use: " + err);
+        return grc;
+    }
     PlanContext ctx;
     ST_retcode rc = plan_columns(s, src, varlist, /*with_stats=*/true, &ctx, &err);
     if (rc != 0) {
@@ -1539,6 +1661,14 @@ ST_retcode cmd_describe(const std::vector<std::string> &args) {
     s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
     const Source src = source_for(files);
+    ST_retcode grc = strict_schema_gate(s, src, files, /*relaxed=*/false,
+                                        /*csv=*/false, &err);
+    if (grc != 0) {
+        /* a describe of a mixed-schema glob must not print the first file's
+         * schema as if it were THE schema (the plausible-but-fake preview) */
+        cry("parqit describe: " + err);
+        return grc;
+    }
     PlanContext ctx;
     ST_retcode rc = plan_columns(s, src, {}, /*with_stats=*/false, &ctx, &err);
     if (rc != 0) {

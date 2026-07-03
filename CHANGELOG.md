@@ -10,6 +10,33 @@ Fixes from two independent adversarial audits (Claude fleet + Codex), each
 finding empirically reproduced against the plugin before acting.
 
 ### Fixed
+- **Strict mode never guesses across a mixed-schema glob (SCH1/SCH2).**
+  DuckDB's plain `read_parquet` takes the *first* file's schema and casts
+  every later file to it, so without `relaxed` a column that widened in a
+  later file (the canonical schema-evolution panel: `x` was `int` in old
+  years, `double` in new ones) was silently down-cast — `[1,2]`+`[3.5,4.5]`
+  loaded as byte `[1,2,4,4]`, rc 0, glob-order-dependent, and the corruption
+  persisted through `parqit save`; a column extra in a later file silently
+  vanished the same way. The help always promised "a schema mismatch across
+  the matched files is a loud error"; a new `strict_schema_gate` now makes
+  that true on every read surface (eager `use`, lazy `use`, `describe`, and
+  the using side of `merge`/`append`/`joinby`): one footer-only fingerprint
+  query over `parquet_schema`, with physically-different but identically-
+  resolving files (INT96 vs TIMESTAMP timestamps, annotation styles) rescued
+  by resolving one representative per fingerprint — zero false positives on
+  permuted-column, INT96-mixed, Hive-partitioned and ordinary homogeneous
+  globs. A real conflict refuses loudly, naming the column, both types and
+  both files, and pointing at `relaxed` (which still unions correctly).
+  Pinned by `tests/verify_suite/v48`.
+- **The lazy path now carries original-name provenance (F8, Codex).** The
+  eager loader records a sanitised foreign column's original file name in
+  `char var[src_name]`, but the lazy path lost it twice over: `use` +
+  `collect` set no char, and `use` + `save` wrote a `parqit.chars` without
+  it, so `"unit cost"` came back as `unit_cost` with no recoverable origin.
+  `view_open` now records the provenance into the view's chars — the channel
+  that already round-trips to collect and into a view save's `parqit.chars` —
+  so lazy behaves exactly like eager; renames re-key it (META-2), derived
+  columns stay clean. Pinned by `tests/verify_suite/v47`.
 - **`parqit save` disk→disk of a `%tc` datetime no longer overflows (STR1).**
   The `%tc` branch of the view/disk save built the instant with
   `<ms> * INTERVAL 1 MILLISECOND`, whose multiplier DuckDB silently down-casts

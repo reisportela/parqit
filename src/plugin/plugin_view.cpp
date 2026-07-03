@@ -461,6 +461,12 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
 
     const Source src = source_for(files, req.value("relaxed", false),
                                   req.value("csv", false));
+    ST_retcode grc = strict_schema_gate(s, src, files, req.value("relaxed", false),
+                                        req.value("csv", false), &err);
+    if (grc != 0) {
+        cry("parqit use: " + err);
+        return grc;
+    }
     duckdb_result res;
     if (!s.query("SELECT * FROM " + src.scan_sql + " LIMIT 0", &res, &err)) {
         cry("parqit use: " + err);
@@ -507,6 +513,13 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     std::string sel;
     std::vector<ViewCol> cols;
     std::vector<std::string> warns, drops;
+    /* F8: the eager loader records a sanitised column's original file name in
+     * `char var[src_name]`; carry the same provenance on the lazy path through
+     * the view's chars, which already round-trip to collect and into the
+     * parqit.chars of a view save. */
+    json vchars = meta_ctx.meta.present && meta_ctx.meta.chars.is_object()
+                      ? meta_ctx.meta.chars
+                      : json::object();
     for (idx_t c = 0; c < ncol; c++) {
         if (bounds[c].dropped) {
             drops.push_back("column \"" + src_names[c] + "\" dropped: " +
@@ -529,9 +542,11 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         vc.varlab = sget(jm, "varlab");
         vc.vallab = sget(jm, "vallab");
         vc.meta_type = sget(jm, "type");
-        if (renamed[c])
+        if (renamed[c]) {
             warns.push_back("column \"" + src_names[c] + "\" is " + vc.name +
                             " in the view");
+            vchars[vc.name]["src_name"] = src_names[c];
+        }
         if (!sel.empty()) sel += ", ";
         sel += bounds[c].sql + " AS " + quote_ident(vc.name);
         cols.push_back(vc);
@@ -556,7 +571,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         g_owned_files[g_current] = files[0];
     g_view_ref().open("SELECT " + sel + " FROM " + src.scan_sql, cols,
                 meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
-                meta_ctx.meta.present ? meta_ctx.meta.chars : json::object(),
+                vchars,
                 meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc);
     /* remember the backing Parquet paths: a later pure-passthrough collect
      * can size its columns from row-group statistics (the F2 metadata path
@@ -1328,6 +1343,9 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
                          View::UsingSide *out, std::vector<std::string> *drops,
                          std::string *err) {
     const Source src = source_for(files);
+    ST_retcode grc =
+        strict_schema_gate(s, src, files, /*relaxed=*/false, /*csv=*/false, err);
+    if (grc != 0) return grc;
     duckdb_result res;
     if (!s.query("SELECT * FROM " + src.scan_sql + " LIMIT 0", &res, err))
         return kRcEngine;

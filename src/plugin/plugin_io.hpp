@@ -33,6 +33,18 @@ struct Source {
 Source source_for(const std::vector<std::string> &files, bool relaxed = false,
                   bool csv = false);
 
+/* Strict-mode multi-file schema gate (SCH1/SCH2): without `relaxed` the
+ * matched parquet files must agree on the resolved schema — DuckDB's plain
+ * read_parquet otherwise takes the first file's schema and silently casts
+ * (or drops columns of) every later file. One footer-only fingerprint query;
+ * a physical-only difference (INT96 vs TIMESTAMP, annotation style) is
+ * rescued by resolving one representative per fingerprint; a real column-set
+ * or type difference returns a loud rc with the column and both files named.
+ * No-op for csv/relaxed sources and a single literal file. */
+ST_retcode strict_schema_gate(parqit::Session &s, const Source &src,
+                              const std::vector<std::string> &files,
+                              bool relaxed, bool csv, std::string *err);
+
 struct ParqitMeta {
     bool present = false;
     parqit::json schema;

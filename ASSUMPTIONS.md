@@ -767,3 +767,33 @@ entry notes the conservative fallback if the assumption proves wrong.
     v34 pinning covers both verbs. The plugin snapshots the View (a value
     type) and restores it on any failure: a refused spread can never leave
     the collapse stage half-applied.
+61. **Strict-mode glob schema gate refines physical differences via resolved
+    schemas (2026-07-03, SCH1/SCH2).** The `.sthlp` has always promised that
+    without `relaxed` a schema mismatch across matched files is a loud error;
+    the implementation inherited DuckDB's first-file-schema-wins cast instead
+    (silent down-cast of a widened column; silent drop of an extra one). The
+    gate fingerprints leaf schemas from `parquet_schema` (footer-only, one
+    query, order- and case-insensitive) and, only when fingerprints differ,
+    DESCRIBEs one representative file per fingerprint: files that resolve to
+    the same DuckDB schema (INT96 vs TIMESTAMP_US legacy mixes, converted- vs
+    logical-type annotation styles) proceed; a real resolved difference
+    refuses with the column, both types and both files named. Case-only name
+    differences continue to merge (DuckDB matches parquet names
+    case-insensitively; erroring would newly break previously-working reads —
+    documented as SCH6, LOW). Cost: nothing for a single literal file; one
+    footer query per multi-file read; k tiny DESCRIBEs only in the rare
+    mixed-fingerprint case. Fallback if a legitimate mixed layout must load:
+    `relaxed` (unchanged, and its widening was verified correct).
+62. **Lazy original-name provenance travels via view chars, not a ViewCol
+    field (2026-07-03, F8).** The Codex audit proposed adding
+    `ViewCol.origin` and writing `parqit.schema src = origin`; rejected
+    because `src` must equal the *written file's* physical column name for
+    the reload to bind its metadata (the physical columns of a view save are
+    the sanitised names), so an origin-valued `src` would orphan every
+    label/format on reload. Instead `view_open` records
+    `chars[name]["src_name"] = original` — the same characteristic the eager
+    loader sets — and the existing chars plumbing (collect decoration,
+    view-save `parqit.chars`, META-2 re-keying on rename) carries it
+    everywhere. One asymmetry accepted: a view save writes the *sanitised*
+    name as the physical parquet column (unchanged behaviour); the original
+    is recoverable from `parqit.chars`, not from the column name itself.
