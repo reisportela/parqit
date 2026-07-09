@@ -27,6 +27,7 @@ cd "$RUNDIR"
 echo "running in $RUNDIR"
 
 declare -a logs=()
+selected=0
 for suite in integration verify_suite roundtrip; do
     for f in "$REPO/tests/$suite"/*.do; do
         [ -e "$f" ] || continue
@@ -35,6 +36,7 @@ for suite in integration verify_suite roundtrip; do
             _*) continue ;; # helper do-files, not standalone tests
         esac
         if [ -n "$FILTER" ] && [[ "$base" != *"$FILTER"* ]]; then continue; fi
+        selected=$((selected + 1))
         echo "running $suite/$base ..."
         # Batch Stata names its log after the last token on the command line
         # and exits 0 regardless of errors: run through a same-named wrapper
@@ -44,6 +46,12 @@ for suite in integration verify_suite roundtrip; do
         logs+=("$RUNDIR/$base.log")
     done
 done
+
+if [ "$selected" -eq 0 ]; then
+    echo "error: no Stata tests matched filter '$FILTER'" >&2
+    echo "logs in $RUNDIR"
+    exit 2
+fi
 
 echo
 echo "================ VERDICT SUMMARY ================" | tee VERDICTS_SUMMARY.txt
@@ -57,7 +65,15 @@ for log in "${logs[@]}"; do
             # A log passes only with >=1 PASS verdict AND zero FAIL verdicts.
             # (Multi-invariant do-files can print several VERDICT lines; a later
             # PASS must never mask an earlier FAIL.)
-            if grep -qE "^VERDICT\(.*\): *FAIL" "$log"; then
+            # Nor may an early/stale PASS mask an uncaptured Stata abort later
+            # in the log. Expected captured errors can print r(#), but their
+            # test continues and its final verdict comes afterwards.
+            last_verdict_line="$(grep -n "^VERDICT" "$log" | tail -n 1 | cut -d: -f1)"
+            last_abort_line="$(grep -nE '^[[:space:]]*r\([0-9]+\);[[:space:]]*$' "$log" | tail -n 1 | cut -d: -f1 || true)"
+            if [ -n "$last_abort_line" ] && [ "$last_abort_line" -gt "$last_verdict_line" ]; then
+                echo "VERDICT($name): *** SCRIPT ABORTED AFTER VERDICT - inspect $log ***" | tee -a VERDICTS_SUMMARY.txt
+                fail=1
+            elif grep -qE "^VERDICT\(.*\): *FAIL" "$log"; then
                 fail=1
             elif ! grep -qE "^VERDICT\(.*\): *PASS" "$log"; then
                 fail=1
