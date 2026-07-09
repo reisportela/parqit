@@ -89,6 +89,17 @@ if (_N != scalar(oN)) {
 assert idx[1]   == 0
 assert idx[scalar(oN)]    == scalar(o_idx_last)
 assert idx[750001]        == scalar(o_idx_mid)
+* Exhaustive cell identities, not only samples/aggregates: these formulas bind
+* every observation to its exact source row and column, so a cross-worker base
+* offset or column swap cannot cancel out in a sum.
+assert idx == _n - 1
+assert val == mod(idx, 997) * 0.5 - 3
+assert grp == mod(idx, 100) if mod(idx, 250000) != 5
+assert missing(grp) if mod(idx, 250000) == 5
+assert sp == mod(idx, 13) if mod(idx, 500000) != 7 & ///
+    mod(idx, 700000) != 9 & mod(idx, 300000) != 11
+assert missing(sp) if mod(idx, 500000) == 7 | ///
+    mod(idx, 700000) == 9 | mod(idx, 300000) == 11
 
 * aggregates: exact for the integer witness, tolerant for the float sums
 summarize idx, meanonly

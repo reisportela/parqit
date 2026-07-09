@@ -238,4 +238,8 @@ if(PARQIT_BUILD_TESTS)
     )
     target_link_libraries(parqit_tests PRIVATE parqit_engine Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME unit COMMAND parqit_tests)
+    if(UNIX)
+        add_test(NAME runner_no_match
+            COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run_stata_no_match.sh")
+    endif()
 endif()
