@@ -331,6 +331,20 @@ qui parqit tabstat tfp, statistics(sum)
 parqit summarize tfp
 assert reldif(r(N) * r(mean), `o_tfpsum') < 1e-9
 
+* native-path convenience verbs: keep the master in Stata and stream only the
+* disk-side lookup/append file through parqit
+use `"`twin'"', clear
+parqit mergein m:1 firm_id using firms.parquet, keep(match) nogen
+assert _N == `o_matched'
+qui summ tfp
+assert reldif(r(sum), `o_tfpsum') < 1e-12
+
+use `"`twin'"', clear
+keep if year <= 2020
+local n_before_appendin = _N
+parqit appendin using tour_workers.parquet, keep(id year wage)
+assert _N == `n_before_appendin' + 600
+
 * joinby patents (cartesian within firm)
 use `"`twin'"', clear
 qui joinby firm_id using `"`patsdta'"'
@@ -489,9 +503,23 @@ parqit describe tour_chunked.parquet
 assert r(n_row_groups) == 5 & r(n_rows) == 10000
 capture erase tour_chunked.parquet
 
+* compression()/compression_level(): verify the physical codec independently
+parqit save tour_zstd.parquet, replace compression(zstd) compression_level(3)
+python:
+from sfi import Scalar
+import pyarrow.parquet as pq
+codec = pq.ParquetFile("tour_zstd.parquet").metadata.row_group(0).column(0).compression
+Scalar.setValue("tour_codec_ok", 1 if codec == "ZSTD" else 0)
+end
+assert scalar(tour_codec_ok) == 1
+capture erase tour_zstd.parquet
+
 * statamissing mode
 clear
 parqit use using tour_workers.parquet, name(w)
+parqit set threads 4
+parqit set memory_limit 1GB
+parqit set tempdir `"`c(tmpdir)'"'
 parqit set statamissing on
 qui parqit count if wage > 1
 local n_stm = r(N)

@@ -102,7 +102,7 @@ without materialising either side.
 {p 8 16 2}{cmd:parqit tabstat} {it:varlist} [{cmd:,} {opt s:tatistics(stats)} {opt by(varname)}]{p_end}
 {p 8 16 2}{cmd:parqit correlate} {it:varlist} | {cmd:parqit pwcorr} {it:varlist} [{cmd:,} {opt obs} {opt sig}]{p_end}
 {p 8 16 2}{cmd:parqit histogram} {it:varname} [{cmd:,} {opt b:ins(#)} {opt nodraw}]{p_end}
-{p 8 16 2}{cmd:parqit describe} [{it:filename}] | {cmd:parqit glimpse} {it:filename}{p_end}
+{p 8 16 2}{cmd:parqit describe} [{it:filename}] | {cmd:parqit glimpse} [{it:filename}]{p_end}
 
 {pstd}Escape hatches and introspection:
 
@@ -312,9 +312,12 @@ apply to view sources too (a view may even be merged with itself).
 ({cmd:m:1} requires unique keys in using, etc.) and produces a
 Stata-compatible {cmd:_merge}; missing keys match missing keys, as in
 Stata. Options: {opt keep(match master using)}, {opt keepus:ing(varlist)},
-{opt gen:erate(name)}, {opt nogen:erate}. {cmd:m:m} follows Stata's
-sequential pairing — and, as in Stata, is almost never what you want;
-prefer {cmd:parqit joinby} for pairwise combinations.
+{opt gen:erate(name)}, {opt nogen:erate}. {cmd:m:m} uses Stata's sequential
+reuse rule (row {it:i} paired with row min({it:i}, {it:n}) on each side), but
+a lazy plan does not retain either file's physical within-key row order.
+parqit uses a deterministic value order instead, so paired payloads can differ
+from a native {cmd:merge m:m} on unsorted rows. As in Stata, {cmd:m:m} is almost
+never what you want; prefer {cmd:parqit joinby} for pairwise combinations.
 
 {pstd}{cmd:duplicates drop} with a {it:varlist} requires a previous
 {cmd:parqit sort} so that "first occurrence" is well-defined on an engine
@@ -483,7 +486,10 @@ Each call re-executes the (lazy) pipeline; on Parquet this is fast because
 filters and column selections are pushed into the scan. {cmd:parqit tabulate}
 excludes missing values unless {opt missing} is given, like native
 {helpb tabulate}; {opt row}/{opt col} add percentage panels to the two-way
-form. Stata transforms that have no special command translate directly:
+form. {cmd:codebook}'s unique count and {cmd:distinct} exclude missing values;
+{cmd:tabstat, by()} omits a missing by-group, matching native Stata. SQL NULL,
+empty-string and NaN encodings of the same Stata missing value are folded before
+grouping. Stata transforms that have no special command translate directly:
 {cmd:destring} ≡ {cmd:parqit gen y = real(x)} (with
 {cmd:subinstr(x, ",", "", .)} for thousands separators), string length ≡
 {cmd:parqit gen n = strlen(s)}, {cmd:bysort g: gen n = _N} ≡
@@ -568,13 +574,17 @@ original storage type wins (a {cmd:byte} comes back {cmd:byte}, a
 types round-trip exactly: a plain display format ({cmd:%9.2f}, {cmd:%8.0g})
 never widens the storage type; only a genuine date/period format keeps its
 integer storage at {cmd:int} or wider so the period count always fits.
-DECIMAL loads as {cmd:double}; UINT32 can carry
-values above 2^31 (never silent missings); LIST/STRUCT and friends are
-dropped with a message. {cmd:%td} variables are DATE on disk, {cmd:%tc}
+DECIMAL loads as {cmd:double} with a precision note (binary64 may round the
+decimal); UINT32 can carry values above 2^31, and UINT64 values beyond 2^53
+load as rounded {cmd:double} values with a precision note (never silent
+missings). LIST/STRUCT and friends are dropped with a message. {cmd:%td}
+variables are DATE on disk, {cmd:%tc}
 TIMESTAMP, and {cmd:%tm %tq %th %tw %ty %tb} stay integer period counts —
 never mis-scaled calendar dates. Inside a pipeline every date is its Stata
 number (day or millisecond count), so date arithmetic is ordinary
-arithmetic.
+arithmetic. Saving a fractional day, millisecond or period count rounds to the
+nearest integer using native Stata's exact-half rule (toward +infinity), on
+both the in-memory and lazy paths, and prints a note naming the column.
 
 {pstd}IEEE specials: NaN loads as missing (it is how parquet encodes a
 float NA); {cmd:±Inf} loads as missing {it:with a per-column note}.
@@ -596,8 +606,8 @@ with a per-column note (Stata strings are C strings).
 {marker examples}{...}
 {title:Examples}
 
-{pstd}{bf:First contact with an unknown file.} {cmd:describe} reads only the
-footer (instant on any size); nothing below materialises data:{p_end}
+{pstd}{bf:First contact with an unknown file.} {cmd:describe} reads only Parquet
+footer metadata, not column values; nothing below materialises data:{p_end}
 {phang2}{cmd:. parqit describe /data/unknown.parquet}{space 4}({it:rows, columns, types, row groups}){p_end}
 {phang2}{cmd:. parqit use using /data/unknown.parquet}{space 2}({it:lazy view; nothing read}){p_end}
 {phang2}{cmd:. parqit head 10}{p_end}
@@ -649,8 +659,9 @@ Stata-compatible:{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
 
 {pstd}{bf:Pairwise combinations} use {cmd:joinby}, as in native Stata
-({cmd:merge m:m} exists and reproduces Stata's sequential pairing — and is
-almost never what you want):{p_end}
+({cmd:merge m:m} exists and uses the sequential reuse rule, with the
+within-key ordering limitation documented above — and is almost never what
+you want):{p_end}
 {phang2}{cmd:. parqit use using workers.parquet}{p_end}
 {phang2}{cmd:. parqit joinby firmid using patents.parquet}{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
@@ -744,11 +755,10 @@ materialising either side ({cmd:view:}{it:name} as a {cmd:using} source):{p_end}
 {phang2}{cmd:. parqit version}{p_end}
 {phang2}{cmd:. parqit selftest}{space 17}({it:end-to-end engine/codec check on a new machine}){p_end}
 
-{pstd}Two complete, runnable programs ship with the source repository: a
-{bf:self-verifying tour} ({cmd:examples/parqit_tour.do}: every feature above,
-asserted cell-by-cell against a native Stata twin) and a {bf:clean demo}
-({cmd:parqit_clean_demo.do}: a section-by-section showcase on synthetic data,
-re-runnable one section at a time).{p_end}
+{pstd}A complete, runnable {bf:self-verifying tour} ships with the source
+repository ({cmd:examples/parqit_tour.do}): the command-line data workflow is
+asserted against native Stata twins and ends in
+{cmd:VERDICT(PARQIT_TOUR): PASS}.{p_end}
 
 
 {marker limitations}{...}
@@ -761,6 +771,9 @@ Parquet (the format has one missing concept); parqit warns when they are
 written.{p_end}
 {pstd}{cmd:•} Binary strLs are refused on save (text strLs round-trip
 fine).{p_end}
+{pstd}{cmd:•} {cmd:merge m:m} uses the same sequential reuse rule as Stata,
+but deterministic value order rather than native physical within-key order;
+paired payloads may differ. Prefer {cmd:joinby}.{p_end}
 {pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
 their format in metadata; third-party readers see the raw counts.{p_end}
 {pstd}{cmd:•} {cmd:discard} unloads the plugin and forgets an un-collected
