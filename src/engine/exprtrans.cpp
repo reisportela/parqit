@@ -1134,8 +1134,8 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(2, 2)) return false;
         if (args[0].kind != 's' || args[1].kind != 's')
             return fail("regexm() needs strings");
-        out->sql = "regexp_matches(coalesce(" + args[0].sql + ", ''), " +
-                   args[1].sql + ")";
+        out->sql = "regexp_matches(coalesce(" + args[0].sql + ", ''), coalesce(" +
+                   args[1].sql + ", ''))";
         out->kind = 'b';
         return true;
     }

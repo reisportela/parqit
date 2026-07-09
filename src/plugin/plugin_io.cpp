@@ -2032,17 +2032,24 @@ WKind wkind_for(const SaveVar &v) {
     }
 }
 
+/* Native Stata's round(x) resolves exact half ties toward +infinity. C/C++
+ * nearbyint() instead uses the process rounding mode (normally ties-to-even),
+ * while DuckDB round() uses half-away-from-zero. Temporal values are integer
+ * day/ms/period counts, so use one explicit rule in both physical writers and
+ * in compile_for_save(): floor(x + .5). */
+inline double stata_round_unit(double d) { return std::floor(d + 0.5); }
+
 /* Convert one NON-missing Stata value `d` for column kind `wk` and write the
- * physical value into dest[idx]. Sets *frac for a rounded %td/%tC/period value.
- * Returns 0, or kRcUsage with *err on a value outside the on-disk range. Same
- * maths as the staged path's inline switch — the two stay byte-identical. */
+ * physical value into dest[idx]. Sets *frac for any rounded temporal value.
+ * Returns 0, or kRcUsage with *err on a value outside the on-disk range. Both
+ * the Arrow and staged writers call this helper, so they stay byte-identical. */
 int convert_save_numeric(WKind wk, double d, void *dest, idx_t idx, bool *frac,
                          const std::string &vname, long long j,
                          std::string *err) {
     (void)j;
     switch (wk) {
     case WDate: {
-        double r = std::nearbyint(d);
+        double r = stata_round_unit(d);
         if (r != d) *frac = true;
         double disk = r - static_cast<double>(parqit::kEpochShiftDays);
         if (disk < -2147483648.0 || disk > 2147483647.0) {
@@ -2056,7 +2063,9 @@ int convert_save_numeric(WKind wk, double d, void *dest, idx_t idx, bool *frac,
         return 0;
     }
     case WTs: {
-        double ms = d - static_cast<double>(parqit::kEpochShiftMs);
+        double r = stata_round_unit(d);
+        if (r != d) *frac = true;
+        double ms = r - static_cast<double>(parqit::kEpochShiftMs);
         /* DT-001: bound the microsecond product directly against +-2^63 (which
          * is exactly representable as a double, 0x1p63). The older
          * `ms > 9.22..e15` ms-literal rounds UP one ulp, leaving a one-ulp hole
@@ -2075,7 +2084,7 @@ int convert_save_numeric(WKind wk, double d, void *dest, idx_t idx, bool *frac,
         return 0;
     }
     case WTC: {
-        double r = std::nearbyint(d);
+        double r = stata_round_unit(d);
         if (r != d) *frac = true;
         if (r < -9.007199254740992e15 || r > 9.007199254740992e15) {
             *err = "parqit save: " + vname +
@@ -2087,7 +2096,7 @@ int convert_save_numeric(WKind wk, double d, void *dest, idx_t idx, bool *frac,
         return 0;
     }
     case WPeriod: {
-        double r = std::nearbyint(d);
+        double r = stata_round_unit(d);
         if (r != d) *frac = true;
         if (r < -2147483648.0 || r > 2147483647.0) {
             *err = "parqit save: " + vname +
@@ -2621,104 +2630,16 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
                     duckdb_validity_set_row_invalid(duckdb_vector_get_validity(vec),
                                                     filln);
                 } else {
-                    switch (wk[i]) {
-                    case WDate: {
-                        double r = std::nearbyint(d);
-                        if (r != d && !warned_frac[i]) {
-                            warned_frac[i] = true;
-                            frac_warned.push_back(v.name);
-                        }
-                        /* bound-check before narrowing — never wrap silently to
-                         * garbage on disk (e.g. a huge value carrying a date
-                         * format). Stata's true date range is far inside int32. */
-                        double disk = r - static_cast<double>(parqit::kEpochShiftDays);
-                        if (disk < -2147483648.0 || disk > 2147483647.0) {
-                            cry("parqit save: " + v.name +
-                                " has a %td date value out of range for the "
-                                "on-disk 32-bit day count");
-                            rc = kRcUsage;
-                            break;
-                        }
-                        static_cast<int32_t *>(vdata[i])[filln] =
-                            static_cast<int32_t>(static_cast<long long>(r) -
-                                                 parqit::kEpochShiftDays);
-                        break;
+                    bool fd = false;
+                    int crc = convert_save_numeric(wk[i], d, vdata[i], filln,
+                                                   &fd, v.name, j, &err);
+                    if (fd && !warned_frac[i]) {
+                        warned_frac[i] = true;
+                        frac_warned.push_back(v.name);
                     }
-                    case WTs: {
-                        /* bound-check before narrowing: (d - epoch) * 1000 must
-                         * fit the on-disk 64-bit microsecond count, else the
-                         * float→int64 cast overflows to garbage with rc 0
-                         * (TYPE-SAVE-1). This is the WTs sibling of the
-                         * WDate/WTC/WPeriod range guards. */
-                        double ms = d - static_cast<double>(parqit::kEpochShiftMs);
-                        /* DT-001: bound the microsecond product against +-2^63
-                         * (0x1p63, exactly representable); the older ms-literal
-                         * rounded up one ulp, leaving an int64-ceiling hole that
-                         * wrote INT64_MIN with rc 0. */
-                        double us = ms * 1000.0;
-                        if (!(us > -0x1p63 && us < 0x1p63)) {
-                            cry("parqit save: " + v.name +
-                                " has a %tc datetime value out of range for the "
-                                "on-disk 64-bit microsecond count");
-                            rc = kRcUsage;
-                            break;
-                        }
-                        static_cast<int64_t *>(vdata[i])[filln] =
-                            static_cast<int64_t>(std::llround(us));
-                        break;
-                    }
-                    case WTC: {
-                        double r = std::nearbyint(d);
-                        if (r != d && !warned_frac[i]) {
-                            warned_frac[i] = true;
-                            frac_warned.push_back(v.name);
-                        }
-                        if (r < -9.007199254740992e15 || r > 9.007199254740992e15) {
-                            cry("parqit save: " + v.name +
-                                " has a %tC value out of the exactly-representable "
-                                "range for the on-disk 64-bit count");
-                            rc = kRcUsage;
-                            break;
-                        }
-                        static_cast<int64_t *>(vdata[i])[filln] =
-                            static_cast<int64_t>(r);
-                        break;
-                    }
-                    case WPeriod: {
-                        double r = std::nearbyint(d);
-                        if (r != d && !warned_frac[i]) {
-                            warned_frac[i] = true;
-                            frac_warned.push_back(v.name);
-                        }
-                        if (r < -2147483648.0 || r > 2147483647.0) {
-                            cry("parqit save: " + v.name +
-                                " has a period (%tm/%tq/…) value out of range "
-                                "for the on-disk 32-bit period count");
-                            rc = kRcUsage;
-                            break;
-                        }
-                        static_cast<int32_t *>(vdata[i])[filln] =
-                            static_cast<int32_t>(r);
-                        break;
-                    }
-                    case WI8:
-                        static_cast<int8_t *>(vdata[i])[filln] =
-                            static_cast<int8_t>(d);
-                        break;
-                    case WI16:
-                        static_cast<int16_t *>(vdata[i])[filln] =
-                            static_cast<int16_t>(d);
-                        break;
-                    case WI32:
-                        static_cast<int32_t *>(vdata[i])[filln] =
-                            static_cast<int32_t>(d);
-                        break;
-                    case WFloat:
-                        static_cast<float *>(vdata[i])[filln] =
-                            static_cast<float>(d);
-                        break;
-                    default:
-                        static_cast<double *>(vdata[i])[filln] = d;
+                    if (crc != 0) {
+                        cry(err);
+                        rc = static_cast<ST_retcode>(crc);
                         break;
                     }
                 }

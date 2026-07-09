@@ -1004,9 +1004,11 @@ std::string View::merge_with(const std::string &kind,
                keypart + " " + m_order + ") AS " + quote_ident(rnm) +
                ", count(*) OVER (PARTITION BY " + keypart + ") AS " + quote_ident(nmx) +
                " FROM " + prev + ")";
-        /* deterministic using-side pairing: order the row_number window by all
+        /* Deterministic using-side pairing: order the row_number window by all
          * using columns so m:m pairing is reproducible (not engine-defined).
-         * Pre-sort both sides to reproduce a specific native-Stata m:m run. */
+         * A lazy file/view does not carry physical within-key row identity, so
+         * this preserves Stata's clamped sequential rule but cannot promise the
+         * same payload pairing as a particular native input order (MM-ORDER-1). */
         std::string u_order;
         for (size_t i = 0; i < u.cols.size(); i++)
             u_order += (i ? ", " : " ORDER BY ") + quote_ident(u.cols[i].name);
@@ -1521,7 +1523,8 @@ std::string View::reshape_wide(const std::vector<std::string> &stubs,
     std::vector<ViewCol> ncols;
     for (const auto &iv : ivars) {
         if (!sel.empty()) sel += ", ";
-        sel += quote_ident(iv);
+        sel += norm_group_key(quote_ident(iv), cols_[col_index(iv)].kind) +
+               " AS " + quote_ident(iv);
         ncols.push_back(cols_[col_index(iv)]);
     }
     for (const auto &jv : jvalues) {
@@ -1540,7 +1543,8 @@ std::string View::reshape_wide(const std::vector<std::string> &stubs,
     std::string gb;
     for (size_t i = 0; i < ivars.size(); i++) {
         if (i) gb += ", ";
-        gb += quote_ident(ivars[i]);
+        gb += norm_group_key(quote_ident(ivars[i]),
+                             cols_[col_index(ivars[i])].kind);
     }
     /* MISS-1 sibling: an unbalanced (i,j) cell's max() FILTER emits SQL NULL
      * into a pivoted string column — clear the flag so save coalesces it */

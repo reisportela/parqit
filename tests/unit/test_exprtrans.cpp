@@ -103,6 +103,7 @@ TEST_CASE("string semantics: NULL behaves as empty string") {
     CHECK(eval_at("substr(s, -1, 1)", 2) == "b"); /* negative from end */
     CHECK(eval_at("strpos(s, \"b\")", 2) == "1");
     CHECK(eval_at("strpos(s, \"\")", 2) == "0");  /* Stata: empty needle -> 0 (STRPOS-EMPTY-1) */
+    CHECK(eval_at("regexm(\"xyz\", s)", 4) == "1"); /* NULL pattern is Stata "" */
     CHECK(eval_at("string(x)", 2) == "2");   /* Stata %9.0g: "2", not "2.0" */
     CHECK(eval_at("real(\"3.5\")", 1) == "3.5");
 }

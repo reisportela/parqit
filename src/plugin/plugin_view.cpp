@@ -132,6 +132,23 @@ std::string float_missing_guard(const std::string &ref, const std::string &inner
            dref + ") >= " + missbuf + " THEN NULL ELSE " + inner + " END";
 }
 
+/* A grouping key inside a live view can have two physical encodings for the
+ * same Stata missing value after append/merge/reshape: string '' vs SQL NULL,
+ * or numeric NaN vs SQL NULL. Fold them before every GROUP BY/PARTITION BY.
+ * This is the plugin-side twin of View::norm_group_key. */
+std::string norm_view_key(const std::string &name) {
+    const std::string ref = quote_ident(name);
+    char kind = 'n';
+    for (const auto &c : g_view_ref().cols())
+        if (c.name == name) {
+            kind = c.kind;
+            break;
+        }
+    if (kind == 's') return "nullif(" + ref + ", '')";
+    return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " +
+           ref + " END)";
+}
+
 BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
     BoundaryCol b;
     const std::string ref = quote_ident(name);
@@ -243,7 +260,7 @@ std::string compile_for_save(const View &v) {
         std::string expr = ref;
         switch (parqit::classify_format(c.fmt)) {
         case parqit::FmtClass::Td:
-            expr = "(DATE '1960-01-01' + CAST(round(" + ref + ") AS INTEGER))";
+            expr = "(DATE '1960-01-01' + CAST(floor((" + ref + ") + 0.5) AS INTEGER))";
             break;
         case parqit::FmtClass::Tc:
             /* epoch_ms(bigint) builds the instant from ms-since-1970 with no
@@ -251,11 +268,11 @@ std::string compile_for_save(const View &v) {
              * down-cast the multiplier to INT32, so the disk/view save of any
              * %tc datetime outside ~[1969-12-07, 1970-01-25] failed with
              * rc 920 — including parqit's own files (STR1). */
-            expr = "epoch_ms(CAST(round(" + ref + ") AS BIGINT) - " +
+            expr = "epoch_ms(CAST(floor((" + ref + ") + 0.5) AS BIGINT) - " +
                    std::to_string(parqit::kEpochShiftMs) + ")";
             break;
         case parqit::FmtClass::TC:
-            expr = "CAST(round(" + ref + ") AS BIGINT)";
+            expr = "CAST(floor((" + ref + ") + 0.5) AS BIGINT)";
             break;
         case parqit::FmtClass::Tm:
         case parqit::FmtClass::Tq:
@@ -263,7 +280,7 @@ std::string compile_for_save(const View &v) {
         case parqit::FmtClass::Tw:
         case parqit::FmtClass::Ty:
         case parqit::FmtClass::Tb:
-            expr = "CAST(round(" + ref + ") AS INTEGER)";
+            expr = "CAST(floor((" + ref + ") + 0.5) AS INTEGER)";
             break;
         default:
             /* PQ-AUD-001/002 defensive final guard for non-date columns. A
@@ -420,8 +437,9 @@ std::vector<std::string> detect_frac_rounding(Session &s, const View &v) {
     std::string sel;
     for (size_t i = 0; i < cand.size(); i++) {
         const std::string r = quote_ident(cand[i]);
-        sel += (i ? ", " : "") + std::string("CAST(coalesce(bool_or(round(") +
-               r + ") <> " + r + "), false) AS INTEGER)";
+        sel += (i ? ", " : "") +
+               std::string("CAST(coalesce(bool_or(floor((") + r + ") + 0.5) <> " +
+               r + "), false) AS INTEGER)";
     }
     duckdb_result agg;
     if (!s.query("SELECT " + sel + " FROM " + inner, &agg, &err)) return out;
@@ -1679,7 +1697,7 @@ static ST_retcode wide_j_scan(const std::string &jname,
     if (check_dup) {
         std::string ipart;
         for (size_t i = 0; i < ivars.size(); i++)
-            ipart += (i ? ", " : "") + quote_ident(ivars[i]);
+            ipart += (i ? ", " : "") + norm_view_key(ivars[i]);
         std::string dup;
         if (!s.query_scalar("SELECT count(*) FROM (SELECT 1 FROM " + base +
                                 " GROUP BY " + ipart + ", " + jq +
@@ -1760,7 +1778,7 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
             Session &si = Session::instance();
             std::string ipart;
             for (size_t i = 0; i < ivars.size(); i++)
-                ipart += (i ? ", " : "") + quote_ident(ivars[i]);
+                ipart += (i ? ", " : "") + norm_view_key(ivars[i]);
             std::string dup;
             if (!si.query_scalar(
                     "SELECT count(*) FROM (SELECT 1 FROM (" +
@@ -2424,7 +2442,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 return kRcVarNotFound;
             }
         }
-        const std::string r1 = quote_ident(vars[0]), r2 = quote_ident(vars[1]);
+        const std::string g1 = norm_view_key(vars[0]);
+        const std::string g2 = norm_view_key(vars[1]);
         bool incmiss = req.value("missing", false);
         char k1 = 'n', k2 = 'n';
         for (const auto &c : g_view_ref().cols()) {
@@ -2433,20 +2452,18 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         }
         std::string base2 = base;
         if (!incmiss) {
-            auto nn = [&](const std::string &rr, char kk) {
-                return (kk == 's') ? rr + " IS NOT NULL AND " + rr + " <> ''"
-                                   : rr + " IS NOT NULL";
-            };
-            base2 = "(SELECT * FROM " + base + " WHERE " + nn(r1, k1) + " AND " +
-                    nn(r2, k2) + ")";
+            base2 = "(SELECT * FROM " + base + " WHERE " + g1 +
+                    " IS NOT NULL AND " + g2 + " IS NOT NULL)";
         }
         /* TAB-FLOAT-1: integer-valued numeric labels print without a .0 */
-        const std::string v1 = (k1 == 's') ? r1 : stata_num_varchar(r1);
-        const std::string v2 = (k2 == 's') ? r2 : stata_num_varchar(r2);
+        const std::string v1 =
+            (k1 == 's') ? "coalesce(" + g1 + ", '')" : stata_num_varchar(g1);
+        const std::string v2 =
+            (k2 == 's') ? "coalesce(" + g2 + ", '')" : stata_num_varchar(g2);
         duckdb_result res;
         if (!s.query("SELECT " + v1 + ", " + v2 +
-                         ", count(*) FROM " + base2 + " GROUP BY " + r1 +
-                         ", " + r2 + " ORDER BY " + r1 + " NULLS LAST, " + r2 +
+                         ", count(*) FROM " + base2 + " GROUP BY " + g1 +
+                         ", " + g2 + " ORDER BY " + g1 + " NULLS LAST, " + g2 +
                          " NULLS LAST",
                      &res, &err)) {
             cry("parqit tabulate: " + err);
@@ -2499,21 +2516,20 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit tabulate: variable " + vars[0] + " not found in the view");
             return kRcVarNotFound;
         }
-        const std::string r = quote_ident(vars[0]);
+        const std::string g = norm_view_key(vars[0]);
         bool incmiss = req.value("missing", false);
         char k1 = 'n';
         for (const auto &c : g_view_ref().cols())
             if (c.name == vars[0]) k1 = c.kind;
         std::string where = incmiss ? std::string(" ")
-                            : (k1 == 's' ? " WHERE " + r + " IS NOT NULL AND " + r +
-                                               " <> '' "
-                                         : " WHERE " + r + " IS NOT NULL ");
+                                    : " WHERE " + g + " IS NOT NULL ";
         /* TAB-FLOAT-1: render integer-valued numeric levels without a trailing
          * .0 (11, not 11.0), matching native tabulate and parqit levelsof. */
-        const std::string vexpr = (k1 == 's') ? r : stata_num_varchar(r);
+        const std::string vexpr =
+            (k1 == 's') ? "coalesce(" + g + ", '')" : stata_num_varchar(g);
         duckdb_result res;
         if (!s.query("SELECT " + vexpr + " AS v, count(*) AS n FROM " +
-                         base + where + " GROUP BY " + r + " ORDER BY " + r +
+                         base + where + " GROUP BY " + g + " ORDER BY " + g +
                          " NULLS LAST",
                      &res, &err)) {
             cry("parqit tabulate: " + err);
@@ -2573,12 +2589,13 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         std::string sel = "count(*)";
         for (const auto &t : targets) {
             const std::string r = quote_ident(t.first);
+            const std::string v = norm_view_key(t.first);
             std::string miss = (t.second == 's')
                                    ? "count(*) FILTER (WHERE " + r +
                                          " IS NULL OR " + r + " = '')"
-                                   : "count(*) - count(" + r + ")";
-            sel += ", " + miss + ", count(DISTINCT " + r + "), CAST(min(" + r +
-                   ") AS VARCHAR), CAST(max(" + r + ") AS VARCHAR)";
+                                   : "count(*) - count(" + v + ")";
+            sel += ", " + miss + ", count(DISTINCT " + v + "), CAST(min(" + v +
+                   ") AS VARCHAR), CAST(max(" + v + ") AS VARCHAR)";
         }
         duckdb_result res;
         if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
@@ -2619,14 +2636,18 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit distinct: variable " + t + " not found in the view");
                 return kRcVarNotFound;
             }
-            sel += ", count(DISTINCT " + quote_ident(t) + ")";
+            sel += ", count(DISTINCT " + norm_view_key(t) + ")";
         }
         bool joint = req.value("joint", false) && targets.size() > 1;
         if (joint) {
-            std::string tup;
-            for (size_t i = 0; i < targets.size(); i++)
-                tup += (i ? ", " : "") + quote_ident(targets[i]);
-            sel += ", count(DISTINCT (" + tup + "))";
+            std::string tup, complete;
+            for (size_t i = 0; i < targets.size(); i++) {
+                const std::string k = norm_view_key(targets[i]);
+                tup += (i ? ", " : "") + k;
+                complete += (i ? " AND " : "") + k + " IS NOT NULL";
+            }
+            sel += ", count(DISTINCT (" + tup + ")) FILTER (WHERE " + complete +
+                   ")";
         }
         duckdb_result res;
         if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
@@ -2651,7 +2672,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit duplicates: a key varlist is required");
             return kRcUsage;
         }
-        std::string keys;
+        std::string keys, order_keys;
         for (size_t i = 0; i < vars.size(); i++) {
             bool found = false;
             for (const auto &c : g_view_ref().cols()) found = found || c.name == vars[i];
@@ -2659,7 +2680,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit duplicates: variable " + vars[i] + " not found in the view");
                 return kRcVarNotFound;
             }
-            keys += (i ? ", " : "") + quote_ident(vars[i]);
+            keys += (i ? ", " : "") + norm_view_key(vars[i]);
+            order_keys += (i ? ", " : "") + quote_ident(vars[i]);
         }
         if (what == "dupreport") {
             duckdb_result res;
@@ -2681,13 +2703,17 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             long long limit = req.value("limit", 20LL);
             std::string sel;
             const auto &cols = g_view_ref().cols();
-            for (size_t i = 0; i < cols.size(); i++)
-                sel += (i ? ", " : "") + std::string("CAST(") +
-                       quote_ident(cols[i].name) + " AS VARCHAR)";
+            for (size_t i = 0; i < cols.size(); i++) {
+                const std::string casted = "CAST(" + quote_ident(cols[i].name) +
+                                           " AS VARCHAR)";
+                sel += (i ? ", " : "") +
+                       (cols[i].kind == 's' ? "coalesce(" + casted + ", '')"
+                                            : casted);
+            }
             duckdb_result res;
             if (!s.query("SELECT " + sel + " FROM " + base +
                              " QUALIFY count(*) OVER (PARTITION BY " + keys +
-                             ") > 1 ORDER BY " + keys + " LIMIT " +
+                             ") > 1 ORDER BY " + order_keys + " LIMIT " +
                              std::to_string(limit),
                          &res, &err)) {
                 cry("parqit duplicates list: " + err);
@@ -2790,7 +2816,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 return kRcVarNotFound;
             }
             std::string ng;
-            if (!s.query_scalar("SELECT count(DISTINCT " + quote_ident(by) +
+            if (!s.query_scalar("SELECT count(DISTINCT " + norm_view_key(by) +
                                     ") FROM " + base,
                                 &ng, &err) ||
                 std::strtoll(ng.c_str(), nullptr, 10) > 200) {
@@ -2826,11 +2852,12 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 }
                 sel += (sel.empty() ? "" : ", ") + a;
             }
-        std::string gsel = by.empty() ? "" : "CAST(" + quote_ident(by) +
+        const std::string g = by.empty() ? "" : norm_view_key(by);
+        std::string gsel = by.empty() ? "" : "CAST(" + g +
                                                  " AS VARCHAR) AS __g, ";
-        std::string tail = by.empty() ? "" : " GROUP BY " + quote_ident(by) +
-                                                 " ORDER BY " + quote_ident(by) +
-                                                 " NULLS LAST";
+        std::string tail = by.empty() ? "" : " WHERE " + g +
+                                                 " IS NOT NULL GROUP BY " + g +
+                                                 " ORDER BY " + g + " NULLS LAST";
         duckdb_result res;
         if (!s.query("SELECT " + gsel + sel + " FROM " + base + tail, &res, &err)) {
             cry("parqit tabstat: " + err);
