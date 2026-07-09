@@ -855,3 +855,44 @@ entry notes the conservative fallback if the assumption proves wrong.
     ColumnPlan.note_subms so it fires only for us-resolution TIMESTAMP/TIME
     that lack a static NS/precision note — never a blanket note on a ms-exact
     microsecond column, and never a double note on the NS path.
+68. **Fractional temporal saves use native Stata's integer-unit rule on every
+    path (2026-07-09, TEMPORAL-ROUND-1).** A Stata date, datetime or period is
+    an integer count even when stored in a double. If a fractional value reaches
+    `parqit save`, both the Arrow writer, its staged fallback and lazy
+    `compile_for_save` apply `floor(x + 0.5)` — native `round(x)`, including
+    exact negative half ties toward +infinity — and issue the existing
+    fractional-value note. `%tc` is rounded to an integer millisecond before it
+    is encoded as a microsecond timestamp; it no longer preserves a fractional
+    millisecond on one path while the other path rounds it.
+69. **Every user-visible group key applies Stata missing equivalence after a
+    two-table verb (2026-07-09, RESHAPE-MISSKEY-1 / STATS-MISSKEY-1).** Append,
+    merge and reshape can introduce SQL NULL beside an empty string (or NaN)
+    that represents the same Stata missing value. Reshape uniqueness/grouping,
+    tabulate, duplicates report/list and tabstat now use the same
+    `nullif(k,'')` / NaN-to-NULL key as collapse, contract, egen and joins.
+    `codebook`/`distinct` exclude that canonical missing from unique counts;
+    `tabstat, by()` excludes a missing by-group, as native Stata does. This
+    closes the reshape deferral recorded in #51.
+70. **All string operands of translated functions obey NULL == empty-string
+    semantics (2026-07-09, REGEXM-NULL-1).** In particular, `regexm(subject,
+    pattern)` coalesces both operands. A missing column introduced by append is
+    the Stata string `""`; an empty regular expression matches, rather than
+    returning SQL NULL because only the subject was normalised.
+71. **A filtered Stata test run that selects zero tests is an error, and PASS
+    is not final if Stata aborts afterwards (2026-07-09,
+    HARNESS-NOMATCH-1 / HARNESS-ABORT-1).** `tests/run_stata.sh <fragment>`
+    returns rc 2 with a clear message if no test basename matches. For every
+    selected log it also rejects an uncaptured terminal `r(#);` occurring after
+    the last verdict; captured negative-path errors remain valid because the
+    test continues to a later verdict. An empty summary or stale early PASS can
+    never be mistaken for a green gate; a CTest shell case pins both attacks.
+72. **`merge m:m` preserves the clamped sequential reuse rule, not native
+    physical within-key order (2026-07-09, MM-ORDER-1; supersedes the exactness
+    wording in #22/#51).** A lazy plan does not retain a stable physical row id
+    for both input relations. parqit therefore applies a deterministic total
+    value order before the sequential spine. Row counts and repeated-last-row
+    mechanics match Stata, but paired non-key payloads can differ from a native
+    `merge m:m` on unsorted inputs. The help/README state this limitation and
+    recommend `joinby`. Preserving native physical order would require a new
+    source-row-identity contract across every plan stage; that architectural,
+    correctness-sensitive change is deferred rather than guessed.

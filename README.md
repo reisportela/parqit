@@ -88,7 +88,7 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.13` to the tag you want; for the newest, use
+- For a different version, change `v0.1.19` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
@@ -253,9 +253,9 @@ lazy Parquet master can join a `.dta` lookup and only the result is collected.
 **In-memory + disk, fast.** When your data is already in Stata's memory and you
 want to join a disk file (a small lookup), `parqit mergein`/`parqit appendin` keep
 the in-memory data put and run a *native* `merge`/`append`, reading only the
-needed columns of the disk side — no DuckDB round-trip. On 10M ⋈ 500k this is
-~3.4 s vs ~9.6 s for the `parqit open _data` bridge. For big-on-big, prefer the
-out-of-core `parqit use … ; parqit merge` path.
+needed columns of the disk side — no DuckDB round-trip. It avoids the temporary
+`parqit open _data` bridge and is therefore the preferred route for a small disk
+lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` path.
 
 | Command | Effect |
 |---|---|
@@ -267,11 +267,11 @@ out-of-core `parqit use … ; parqit merge` path.
 | Command | Effect |
 |---|---|
 | `parqit collect [, clear]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). |
-| `parqit save <dest> [, replace partition_by() compression() chunk()]` | Execute; write Parquet **without loading into Stata**. |
+| `parqit save <dest> [, replace data partition_by() compression() compression_level() chunk()]` | Execute; write Parquet **without loading into Stata**; `data` explicitly exports the in-memory dataset when a view is open. |
 | `parqit count` | Row count → `r(N)` (no rows materialised). |
-| `parqit head [n]` / `parqit list [n]` | Preview a small slice. |
+| `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`. |
-| `parqit describe` / `parqit glimpse` | Schema, types, rows, row groups → **scalars** in `r()`. |
+| `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. |
 
 ### Escape hatches
 
@@ -322,7 +322,8 @@ parqit collect, clear
 
 ## Tour & examples
 
-`examples/` ships a complete, self-verifying tour of every feature over
+`examples/` ships a self-verifying tour of the complete command-line data
+workflow over
 small artificial datasets (workers panel, firms, patents, wide incomes and
 a deliberately hostile file with reserved/duplicate/space column names,
 uint32 overflow values and decimals):
@@ -350,13 +351,13 @@ rescales a date.
 | `byte` `int` `long` | `TINYINT` `SMALLINT` `INTEGER`/`BIGINT` | sized by range |
 | `float` `double` | `FLOAT` `DOUBLE` | precision preserved; float32 beyond Stata's ±1.70e38 float ceiling widens to `double` (noted, never silently missing); NaN loads as missing, ±Inf loads as missing **with a note** |
 | `str#` | `VARCHAR` | auto-sized on read |
-| `strL` | `VARCHAR` (large) | >2045 chars |
+| `strL` | `VARCHAR` (large) | values wider than 2045 UTF-8 bytes |
 | `%td` | `DATE` | days since epoch (correct conversion) |
 | `%tc` | `TIMESTAMP` | milliseconds; tz instant preserved |
 | `%tm %tq %th %ty %tw` | `INTEGER` (period count) | **kept as integers with the period code**, never mis-scaled to calendar dates |
 | boolean | `BOOLEAN` → `byte` 0/1 | |
-| `DECIMAL(p,s)` | → `double` on read | warehouse money types load as numbers, not missing |
-| `UINT32` `UINT64` | → `double`/`long` (bound-checked) | values above the signed range never become missing |
+| `DECIMAL(p,s)` | → `double` on read | warehouse money types load as numbers, with a note because binary64 may round the decimal |
+| `UINT32` `UINT64` | → `long`/`double` (bound-checked) | values above the signed range never become missing; UINT64 values beyond 2^53 are rounded to binary64 with a note |
 | `LIST` `STRUCT` | error or drop-with-message | unrepresentable types are loud, never silent all-missing |
 
 Unsigned integers, decimals and out-of-range values are bound-checked; unsupported
@@ -387,8 +388,11 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   format has one missing concept); `parqit save` warns when this loses
   information. Labels attached to extended missings do survive (they live in
   `parqit.*` metadata).
-- **`merge m:m`** reproduces Stata's sequential pairing exactly — and, as in
-  Stata, is almost never what you want; use `parqit joinby`.
+- **`merge m:m`** implements Stata's sequential reuse rule, but a lazy plan does
+  not retain each input's physical within-key row order. parqit therefore uses a
+  deterministic value order; paired payloads can differ from a native `merge m:m`
+  on the same unsorted rows. As in Stata, `m:m` is almost never what you want;
+  use `parqit joinby` for pairwise combinations.
 - **Binary strLs** are refused on save (text strLs round-trip).
 
 ## Acknowledgements

@@ -6,6 +6,37 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Fixed
+- **Temporal saves no longer depend on the materialisation path
+  (TEMPORAL-ROUND-1).** The direct Arrow writer used C/C++ ties-to-even for
+  `%td`/`%tC`/periods and preserved fractional `%tc` milliseconds, while lazy
+  save used DuckDB's half-away-from-zero `round()`. All writers now use native
+  Stata's `floor(x + 0.5)` integer-unit rule, including negative half ties, and
+  share one conversion helper. Pinned by `v54` and a pyarrow payload oracle.
+- **Reshape and exploration commands now fold every physical encoding of a
+  Stata missing key (RESHAPE-MISSKEY-1 / STATS-MISSKEY-1).** After append/merge,
+  SQL NULL and `""` (or NaN) no longer form separate reshape rows, duplicate
+  groups or tabulation cells. `codebook`/`distinct` exclude missing from unique
+  counts and `tabstat, by()` omits missing groups like native Stata. Pinned by
+  `v55` and `v57` against native oracles.
+- **`regexm()` normalises its pattern as well as its subject
+  (REGEXM-NULL-1).** A string column absent from one appended file is Stata
+  `""`, so its empty regular expression now matches instead of propagating SQL
+  NULL. Pinned by a C++ execution test and `v56`.
+- **The Stata runner no longer accepts an empty suite or a stale early PASS
+  (HARNESS-NOMATCH-1 / HARNESS-ABORT-1).** `run_stata.sh` exits 2 when zero
+  basenames match and rejects a log whose last verdict precedes an uncaptured
+  terminal `r(#);`, with its own CTest regression case.
+
+### Changed
+- The README/help now state the real `merge m:m` contract: parqit implements
+  Stata's sequential reuse rule in a deterministic value order, but lazy inputs
+  do not retain native physical within-key order and paired payloads may differ.
+  The feature tour now exercises `mergein`, `appendin` and all four `set`
+  settings and is itself run by the integration suite. The `glimpse` syntax now
+  correctly shows that its filename is optional, just like `describe`; the help
+  describes footer-only inspection without making an unbounded timing promise.
+
 ## [0.1.19] — 2026-07-03
 
 A field bug, root-caused on the real 2.67-billion-row dataset that hit it.
