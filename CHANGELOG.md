@@ -6,6 +6,12 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-07-10
+
+A holistic correctness audit aligned temporal, missing-value and test-harness
+semantics with native Stata and documented the remaining `merge m:m` ordering
+limit explicitly.
+
 ### Fixed
 - **Temporal saves no longer depend on the materialisation path
   (TEMPORAL-ROUND-1).** The direct Arrow writer used C/C++ ties-to-even for

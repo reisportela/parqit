@@ -95,4 +95,3 @@ parqit close _all
 
 di as txt "VERDICT(REPRO_RESHAPE_MISSING_KEYS): " ///
     cond(`fails' == 0, "PASS", "FAIL - NULL/empty i() semantics diverge")
-
