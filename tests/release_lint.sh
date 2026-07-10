@@ -7,8 +7,8 @@
 #   bash tests/release_lint.sh
 #
 # Checks, all of which must hold before tagging a release:
-#   * project(parqit VERSION) == ado banner == sthlp banner == README Status
-#   * ado banner date == sthlp banner date, and both == parqit.pkg Distribution-Date
+#   * project version == ado/help/dialog banners == README Status == CITATION.cff
+#   * release dates agree across banners, package manifest and CITATION.cff
 #   * CHANGELOG has exactly one "## [Unreleased]" heading
 #   * the newest dated CHANGELOG section matches the project version
 #   * no CHANGELOG section repeats the same "### <Type>" heading
@@ -38,6 +38,11 @@ readme_v=$(grep -oE "Status:\*\* v$semver" "$REPO/README.md" | grep -oE "$semver
 pkg_d=$(grep -oE 'Distribution-Date: [0-9]{8}' "$REPO/src/ado/p/parqit.pkg" \
           | grep -oE '[0-9]{8}' | head -1)
 
+cff_v=$(grep -m1 -oE '^version: "[0-9]+\.[0-9]+\.[0-9]+"' "$REPO/CITATION.cff" \
+          | grep -oE "$semver")
+cff_d=$(grep -m1 -oE '^date-released: [0-9]{4}-[0-9]{2}-[0-9]{2}' "$REPO/CITATION.cff" \
+          | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+
 # DDmonYYYY -> YYYYMMDD so the banner date can be compared to the pkg date.
 banner_to_iso() {
     local d="$1" dd mon yyyy num
@@ -59,7 +64,7 @@ banner_to_iso() {
 [ -n "$sthlp_v" ]  || err "could not read version from parqit.sthlp banner"
 [ -n "$readme_v" ] || err "could not read **Status:** vX.Y.Z from README.md"
 
-for pair in "ado=$ado_v" "sthlp=$sthlp_v" "readme=$readme_v"; do
+for pair in "ado=$ado_v" "sthlp=$sthlp_v" "readme=$readme_v" "citation=$cff_v"; do
     name=${pair%%=*}; val=${pair#*=}
     [ "$val" = "$cmake_v" ] || err "$name version $val != project version $cmake_v"
 done
@@ -68,10 +73,13 @@ done
 [ -n "$ado_d" ]   || err "could not read date from parqit.ado banner"
 [ -n "$sthlp_d" ] || err "could not read date from parqit.sthlp banner"
 [ -n "$pkg_d" ]   || err "could not read Distribution-Date from parqit.pkg"
+[ -n "$cff_d" ]   || err "could not read date-released from CITATION.cff"
 [ "$ado_d" = "$sthlp_d" ] || err "ado banner date $ado_d != sthlp banner date $sthlp_d"
 if [ -n "$ado_d" ]; then
     iso=$(banner_to_iso "$ado_d")
     [ "$iso" = "$pkg_d" ] || err "banner date $ado_d ($iso) != parqit.pkg Distribution-Date $pkg_d"
+    cff_iso=$(printf '%s' "$cff_d" | tr -d '-')
+    [ "$iso" = "$cff_iso" ] || err "banner date $ado_d ($iso) != CITATION.cff date-released $cff_d"
 fi
 
 # --- dialogs carry the same version/date as the ado banner -------------------

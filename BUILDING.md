@@ -85,9 +85,11 @@ CLI) — never with parqit alone.
 
 ## Release packaging
 
-Pushing a `v*` tag runs `.github/workflows/build.yml`, which builds all four
+Pushing a `v*` tag runs `.github/workflows/build.yml`, which builds three
 binaries (Linux x86_64 against glibc 2.28 in an AlmaLinux 8 container, macOS
-x86_64 + arm64 with deployment target 11.0, Windows x64 MSVC), renames each
-to `parqit.plugin` inside per-platform zips, and assembles the SSC zip
-(`parqit_ssc.zip`) containing the Stata files plus every platform binary as
-described by `parqit.pkg`.
+arm64 with deployment target 11.0, and Windows x86_64 with MSVC). The workflow
+publishes one net-installable zip per platform plus
+`parqit_all_platforms.zip`, and uploads the loose Stata files and per-platform
+plugins needed for direct `net install` from the GitHub release URL. macOS
+Intel is intentionally omitted until a reliable hosted runner is available,
+as documented in the README and the workflow matrix.
