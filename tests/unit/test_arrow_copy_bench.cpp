@@ -25,6 +25,7 @@
 #include "abi.h"
 #include "duckdb.h"
 #include "engine/session.hpp"
+#include "test_tmp.hpp"
 
 using parqit::Session;
 
@@ -32,17 +33,6 @@ namespace {
 void noop_release_schema(ArrowSchema *s) { s->release = nullptr; }
 void noop_release_array(ArrowArray *a) { a->release = nullptr; }
 
-/* Portable scratch path — /tmp is Unix-only; on Windows use %TEMP% (mirrors
- * test_session.cpp). DuckDB accepts the native separators in SQL literals. */
-std::string tmp_path(const char *name) {
-#ifdef _WIN32
-    const char *base = getenv("TEMP");
-    std::string dir = base ? base : ".";
-    return dir + "\\" + name;
-#else
-    return std::string("/tmp/") + name;
-#endif
-}
 } // namespace
 
 /* Pins duckdb_arrow_array_scan: a zero-copy Arrow struct array (one nullable
@@ -51,10 +41,11 @@ std::string tmp_path(const char *name) {
  * breaks the deprecated API or changes its semantics, this fails loudly. */
 TEST_CASE("arrow ingestion capability (save path)") {
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmp_path("_parqit_arrowcap_spill"));
+    s.set_default_temp_dir(parqit_test::tmp_path("_parqit_arrowcap_spill"));
     REQUIRE(s.ensure_open());
     duckdb_connection con = s.con();
-    const std::string outf = tmp_path("parqit_arrowcap.parquet");
+    const std::string outf = parqit_test::tmp_path("parqit_arrowcap.parquet");
+    std::remove(outf.c_str());
     const std::string rp = "read_parquet('" + outf + "')";
 
     const int64_t N = 3;
@@ -127,6 +118,7 @@ TEST_CASE("arrow ingestion capability (save path)") {
     REQUIRE(s.query_scalar("SELECT string_agg(s, '|' ORDER BY s) FROM " + rp, &v,
                            &e));
     CHECK(v == "a|bb|ccc");
+    std::remove(outf.c_str());
 }
 
 /* ------------------------------------------------------------------ bench -- */
@@ -151,9 +143,11 @@ TEST_CASE("arrow-copy write-side microbenchmark" * doctest::skip(true)) {
     }
 
     Session &s = Session::instance();
-    s.set_default_temp_dir(tmp_path("_parqit_arrowbench_spill"));
-    const std::string fa = tmp_path("bench_a.parquet");
-    const std::string fb = tmp_path("bench_b.parquet");
+    s.set_default_temp_dir(parqit_test::tmp_path("_parqit_arrowbench_spill"));
+    const std::string fa = parqit_test::tmp_path("bench_a.parquet");
+    const std::string fb = parqit_test::tmp_path("bench_b.parquet");
+    std::remove(fa.c_str());
+    std::remove(fb.c_str());
     REQUIRE(s.ensure_open());
     duckdb_connection con = s.con();
 
@@ -240,4 +234,6 @@ TEST_CASE("arrow-copy write-side microbenchmark" * doctest::skip(true)) {
     std::printf("\n[ARROW-BENCH] strings=%lld  A(temp-table)=%.3fs  "
                 "B(arrow-scan)=%.3fs  B/A=%.2f\n",
                 static_cast<long long>(N), tA, tB, tB / tA);
+    std::remove(fa.c_str());
+    std::remove(fb.c_str());
 }

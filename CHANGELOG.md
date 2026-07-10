@@ -27,6 +27,12 @@ semantic versioning once `v0.1.0` is tagged.
   (HARNESS-NOMATCH-1 / HARNESS-ABORT-1).** `run_stata.sh` exits 2 when zero
   basenames match and rejects a log whose last verdict precedes an uncaptured
   terminal `r(#);`, with its own CTest regression case.
+- **Test scratch state is safe across concurrent and repeated runs
+  (TEST-TMP-OWNERSHIP-1).** Arrow, session and request tests no longer share
+  fixed `/tmp`/`%TEMP%` names; the Stata runner gives every test a disposable
+  private TMPDIR; and `t02` removes its directory fixture. PID-scoped unit paths,
+  an eight-process CTest stress gate, and a direct fixture-leak repro prevent one
+  run from corrupting or blocking another.
 
 ### Changed
 - The README/help now state the real `merge m:m` contract: parqit implements

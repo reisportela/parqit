@@ -241,5 +241,8 @@ if(PARQIT_BUILD_TESTS)
     if(UNIX)
         add_test(NAME runner_no_match
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run_stata_no_match.sh")
+        add_test(NAME unit_concurrent
+            COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_unit_concurrent.sh"
+                         "$<TARGET_FILE:parqit_tests>")
     endif()
 endif()

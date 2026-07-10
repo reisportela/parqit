@@ -12,18 +12,9 @@
 #include "abi.h" /* Arrow C Data Interface */
 #include "duckdb.h"
 #include "engine/session.hpp"
+#include "test_tmp.hpp"
 
 using parqit::Session;
-
-static std::string tmp_parquet_path() {
-#ifdef _WIN32
-    const char *base = getenv("TEMP");
-    std::string dir = base ? base : ".";
-    return dir + "\\parqit_test_session.parquet";
-#else
-    return "/tmp/parqit_test_session.parquet";
-#endif
-}
 
 TEST_CASE("session opens and core_functions is statically present") {
     Session &s = Session::instance();
@@ -41,7 +32,8 @@ TEST_CASE("session opens and core_functions is statically present") {
 TEST_CASE("parquet write/read and parqit KV metadata") {
     Session &s = Session::instance();
     std::string err, v;
-    const std::string file = tmp_parquet_path();
+    const std::string file = parqit_test::tmp_path("parqit_test_session.parquet");
+    std::remove(file.c_str());
 
     REQUIRE_MESSAGE(
         s.exec("COPY (SELECT range AS i, 'r' || range::VARCHAR AS sv, "

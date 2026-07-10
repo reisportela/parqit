@@ -9,16 +9,16 @@
 - **REGEXM-NULL-1 — fixed:** a NULL regex pattern now behaves as Stata's empty string; pinned by a C++ execution test and `v56`.
 - **STATS-MISSKEY-1 — fixed:** tabulate, duplicates, codebook, distinct and tabstat now share native missing-key semantics; pinned by `v57`.
 - **MM-ORDER-1 — still open:** lazy `merge m:m` cannot reproduce native physical within-key order; the limitation is now explicit and `joinby` is recommended.
-- **HARNESS-NOMATCH-1 / HARNESS-ABORT-1 — fixed:** the runner rejects zero selected tests and a stale PASS followed by a Stata abort.
+- **HARNESS-NOMATCH-1 / HARNESS-ABORT-1 / TEST-TMP-OWNERSHIP-1 — fixed:** empty/stale-green runs and cross-run scratch collisions are rejected.
 - **Performance:** no optimization landed; measured gaps were structural, correctness costs, inside noise, or unsafe to change in this pass.
 - **Docs:** stale syntax, version examples, absolute timing claims, type precision caveats, the `m:m` contract and the executable tour were corrected.
-- **Final gate:** release lint and build passed; CTest 2/2; doctest 63 cases and 973 assertions; Stata 69 files and 70/70 PASS verdicts.
+- **Final gate:** release lint and build passed; CTest 3/3; doctest 63 cases and 973 assertions; Stata 69 files and 70/70 PASS verdicts.
 
 ## Scope, baseline and evidence discipline
 
 The audit followed `parqit_build_prompt.md` as the fixed contract and read the
 current code rather than accepting prior reports as evidence. The current README,
-help, `CLAUDE.md`, all 72 assumptions after this pass, the prior holistic,
+help, `CLAUDE.md`, all 73 assumptions after this pass, the prior holistic,
 performance and adversarial reports, the external `pq` charter, and the relevant
 `xhdfe` house-style surfaces were reviewed. Previous `v27`–`v53` findings were
 treated as regression targets.
@@ -29,11 +29,12 @@ before the implementation was changed, then pinned with an independent native
 Stata or pyarrow oracle. The intentionally red `MM-ORDER-1` reproducer records the
 remaining limitation.
 
-The first two logical local commits are
+The first three logical local commits are
 `164cce1b90e86f0f1f9e62e4b23245240cffe112` (fidelity fixes and pins) and
-`1f68846f98f0b5939c632e843305d2cccbc7076d` (runner/parallel-fill hardening).
-The documentation, tour, assumptions, changelog and this report form the final
-audit commit. No remote state was touched.
+`1f68846f98f0b5939c632e843305d2cccbc7076d` (runner/parallel-fill hardening),
+followed by `aad830ea766c32d56a2cb2a5e9e570a2ba0183dc` (documentation, tour and
+initial report). The final test-scratch-hardening commit also updates this report.
+No remote state was touched.
 
 ## Reliability findings
 
@@ -46,6 +47,7 @@ audit commit. No remote state was touched.
 | MM-ORDER-1 | S0 | certain | C/D, two-table verbs | Lazy `merge m:m` can pair different payload rows than native Stata | yes | Reported only; docs fixed |
 | HARNESS-NOMATCH-1 | S3 | certain | K, test integrity | A misspelled filter returned a green empty test run | yes | Fixed |
 | HARNESS-ABORT-1 | S3 | certain | K, test integrity | An early PASS masked a later uncaptured Stata abort | yes | Fixed |
+| TEST-TMP-OWNERSHIP-1 | S3 | certain | K, test integrity | Concurrent/repeated test runs shared or leaked scratch state | yes, two focused repros | Fixed |
 
 ### TEMPORAL-ROUND-1
 
@@ -182,6 +184,37 @@ audit commit. No remote state was touched.
   the last verdict and rejects an abort that follows it. Expected captured errors
   remain valid because a later final verdict supersedes them. The same CTest shell
   pins both harness defects.
+
+### TEST-TMP-OWNERSHIP-1
+
+- **Severity / confidence:** S3 / certain.
+- **Where:** `tests/unit/test_tmp.hpp`, `tests/unit/test_arrow_copy_bench.cpp`,
+  `tests/unit/test_session.cpp`, `tests/unit/test_request.cpp`,
+  `tests/run_stata.sh`, `tests/integration/t02_use_options.do`, and the
+  `unit_concurrent` registration in `CMakeLists.txt`.
+- **Evidence:** running CTest and `./build/dev/parqit_tests` concurrently made the
+  Arrow capability test fail at its COPY. An eight-process focused run then
+  failed seven processes: each used the same `/tmp/parqit_arrowcap.parquet`.
+  Session/request tests had the same fixed-name hazard even when identical payloads
+  made their races less visible. A subsequent full Stata rerun exposed the sibling
+  problem: passing `t02` left its `tempfile`-derived directory behind, and later
+  OS temp-prefix reuse aborted at `mkdir` with r(693).
+- **Repros:** `audit_repro/repro_unit_temp_collision.sh` delegates to the focused
+  eight-process stress gate in `tests/test_unit_concurrent.sh`;
+  `audit_repro/repro_t02_fixture_leak.sh` runs passing `t02` under a dedicated
+  TMPDIR and detects any persistent directory.
+- **Impact:** parallel CTest jobs or simultaneous local agents could report a
+  product regression or read another process's oracle; a repeated Stata suite
+  could abort before testing anything. This is a reproducibility and CI-integrity
+  failure, not a plugin data-path bug.
+- **Resolution — Fixed:** all writable unit scratch paths now use the platform
+  temp directory plus PID and clean their own artifacts. The Stata runner creates
+  and removes a private TMPDIR per selected test; `t02` also owns and removes its
+  working-directory fixture. CTest registers the eight-process gate and its runner
+  contract verifies temp-root disposal. The unit repro changed from seven
+  failures/FAIL to PASS, the t02 leak repro changed from FAIL to PASS, consecutive
+  targeted t02 runs pass, and `ctest --preset dev -j 3` passes 3/3 while `unit`
+  and `unit_concurrent` run together.
 
 ## Promise audit
 
@@ -414,7 +447,7 @@ scenario unavailable in batch.
 | H. Atomicity/errors | Deep, destructive endpoints partial | Audited every ado plugin call/rc check, frame swap, save staging/rename and stale response paths; attacked missing files, schema mismatch, range errors and >2^31 ceiling through existing pins; full disk and kill-9 not run |
 | I. C++ boundary safety | Deep static + live boundary tests | Read extern-C catch-all, worker exception capture and 1-based SPI indices; exercised 2,500 variables, parallel fill and >2^31 refusal (`v18`, `v20`, `v53`); no sanitizer run |
 | J. Protocol/injection | Deep | Traced user strings through UTF-8 hex, sanitizer and SQL quoting; hostile quotes/pipes/newlines/NUL via `v16` and `v50`; raw `sql/query` remains explicitly raw |
-| K. Test integrity | Deep | Audited runner, every verdict and the independent-oracle direction; found/fixed both harness defects; built the 54-token command coverage map; full suite produced 70/70 PASS verdicts |
+| K. Test integrity | Deep | Audited runner, every verdict, scratch ownership and independent-oracle direction; fixed two Stata-runner defects plus cross-process/unit and repeated-Stata scratch ownership; built the 54-token command coverage map; full suite produced 70/70 PASS verdicts |
 
 ## Not verified
 
@@ -465,7 +498,7 @@ gaps are environments/failure modes, not missing dispatcher tokens.
 
 ## Verification gate
 
-The final working tree (before local commits) passed:
+The final working tree passed:
 
 ```text
 bash tests/release_lint.sh
@@ -475,8 +508,8 @@ cmake --preset dev
 cmake --build build/dev -j
   PASS
 
-ctest --preset dev --output-on-failure
-  2/2 tests passed (unit + runner contract)
+ctest --preset dev -j 3 --output-on-failure
+  3/3 tests passed (unit + runner contract + eight-process unit concurrency)
 
 ./build/dev/parqit_tests
   63/63 test cases passed; 973/973 assertions passed; 1 skipped

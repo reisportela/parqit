@@ -896,3 +896,14 @@ entry notes the conservative fallback if the assumption proves wrong.
     recommend `joinby`. Preserving native physical order would require a new
     source-row-identity contract across every plan stage; that architectural,
     correctness-sensitive change is deferred rather than guessed.
+73. **Every test scratch artifact is run-owned (2026-07-09,
+    TEST-TMP-OWNERSHIP-1).** Independent CTest jobs, local agents, repeated Stata
+    suites, or explicit stress runs may execute concurrently and may reuse an OS
+    process/temp-name prefix. Fixed unit filenames under `/tmp`/`%TEMP%` let one
+    process truncate another's oracle; a directory made beside Stata `tempfile`
+    is not auto-removed and can break a later run. Writable C++ unit paths use the
+    platform temp directory plus process id. The Stata runner supplies and removes
+    a private TMPDIR for every selected test, while `t02` also cleans its directory
+    fixture for safe direct runs. Concurrent-unit and direct-fixture repros plus
+    the runner CTest shell case pin these invariants. Literal temp paths embedded
+    only as request payload examples remain literal by design.
