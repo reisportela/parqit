@@ -5,16 +5,12 @@
 
 #include "engine/hexcodec.hpp"
 #include "engine/request.hpp"
+#include "test_tmp.hpp"
 
 using namespace parqit;
 
 static std::string tmpfile_with(const std::string &content) {
-#ifdef _WIN32
-    std::string path = std::string(getenv("TEMP") ? getenv("TEMP") : ".") +
-                       "\\parqit_test_req.json";
-#else
-    std::string path = "/tmp/parqit_test_req.json";
-#endif
+    std::string path = parqit_test::tmp_path("parqit_test_req.json");
     std::ofstream f(path, std::ios::binary);
     f << content;
     return path;
@@ -57,12 +53,7 @@ TEST_CASE("request parsing: hex fields decode; malformed input is loud") {
 }
 
 TEST_CASE("response writer emits pipe records with hex text fields") {
-#ifdef _WIN32
-    std::string path = std::string(getenv("TEMP") ? getenv("TEMP") : ".") +
-                       "\\parqit_test_resp.txt";
-#else
-    std::string path = "/tmp/parqit_test_resp.txt";
-#endif
+    std::string path = parqit_test::tmp_path("parqit_test_resp.txt");
     {
         ResponseWriter w;
         std::string err;

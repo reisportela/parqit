@@ -42,7 +42,17 @@ for suite in integration verify_suite roundtrip; do
         # and exits 0 regardless of errors: run through a same-named wrapper
         # so the log is <test>.log, and judge by VERDICT lines only.
         printf 'do "%s" "%s" "%s"\n' "$f" "$REPO" "$PLUGIN" > "$RUNDIR/$base.do"
-        "$STATA" -b do "$RUNDIR/$base.do"
+        # Test do-files legitimately use tempfile and some create directories
+        # beside it. Give every invocation a runner-owned temp root, then remove
+        # it even if batch Stata returns 0 after an internal abort. This prevents
+        # PID reuse or concurrent suites from inheriting another run's fixture.
+        test_tmp="$RUNDIR/.tmp_$base"
+        if ! mkdir "$test_tmp"; then
+            echo "error: could not create private temp root for $suite/$base" >&2
+            exit 2
+        fi
+        TMPDIR="$test_tmp" "$STATA" -b do "$RUNDIR/$base.do"
+        rm -rf -- "$test_tmp"
         logs+=("$RUNDIR/$base.log")
     done
 done

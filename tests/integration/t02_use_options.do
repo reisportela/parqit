@@ -8,8 +8,14 @@ adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
 
 * ---------- fixture: two files for a glob + one wide + one empty ----------
-tempfile base
-local dir `"`base'_d"'
+* Keep directory fixtures in the runner's unique working directory and clean
+* them explicitly. A tempfile-derived directory is not removed by Stata and can
+* collide when the OS later reuses a process/temp-name prefix.
+local dir `"`c(pwd)'/_t02_use_options_fixture"'
+foreach f in part1.parquet part2.parquet empty.parquet one.parquet wide.parquet {
+    capture erase `"`dir'/`f'"'
+}
+capture rmdir `"`dir'"'
 mkdir `"`dir'"'
 
 clear
@@ -90,5 +96,12 @@ parqit save `"`dir'/wide.parquet"', replace
 parqit use using `"`dir'/wide.parquet"', clear
 assert c(k) == 500 & _N == 2
 assert v1[1] == 11 & v500[2] == 5002
+
+foreach f in part1.parquet part2.parquet empty.parquet one.parquet wide.parquet {
+    capture erase `"`dir'/`f'"'
+}
+capture rmdir `"`dir'"'
+local cleanup_rc = _rc
+assert `cleanup_rc' == 0
 
 di "VERDICT(T02_USE_OPTIONS): PASS - varlist order, describe scalars, globs, shape edges"

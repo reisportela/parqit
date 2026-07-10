@@ -42,3 +42,31 @@ if [ "$rc" -eq 0 ]; then
     exit 1
 fi
 grep -q "SCRIPT ABORTED AFTER VERDICT" "$TMP/aborted.txt"
+
+# Each selected Stata invocation receives a private runner-owned TMPDIR, which
+# must be removed afterwards even when tests create persistent fixture state.
+printf '%s\n' '#!/usr/bin/env bash' \
+    'wrapper="${3}"' \
+    'log="${wrapper%.do}.log"' \
+    'printf "%s\n" "$TMPDIR" > "$PARQIT_TMP_RECORD"' \
+    'printf "%s\n" fixture > "$TMPDIR/persistent-fixture"' \
+    'printf "%s\n" "VERDICT(FAKE): PASS" > "$log"' \
+    'exit 0' > "$FAKE"
+chmod +x "$FAKE"
+
+set +e
+PARQIT_TMP_RECORD="$TMP/tmp_record.txt" STATA="$FAKE" BUILD_DIR="$TMP" \
+    bash "$REPO/tests/run_stata.sh" m0_smoke > "$TMP/isolated.txt" 2>&1
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+    sed -n '1,160p' "$TMP/isolated.txt"
+    echo "runner temp-isolation probe did not finish successfully" >&2
+    exit 1
+fi
+test_tmp="$(sed -n '1p' "$TMP/tmp_record.txt")"
+if [ -z "$test_tmp" ] || [ -e "$test_tmp" ]; then
+    echo "runner did not remove its per-test TMPDIR: $test_tmp" >&2
+    exit 1
+fi
