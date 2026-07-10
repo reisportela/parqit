@@ -5,9 +5,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/parqit_runner_test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/parqit.plugin"
+TRUE_BIN="$(command -v true)"
 
 set +e
-STATA=/bin/true BUILD_DIR="$TMP" \
+STATA="$TRUE_BIN" BUILD_DIR="$TMP" \
     bash "$REPO/tests/run_stata.sh" __parqit_test_name_that_cannot_exist__ \
     > "$TMP/output.txt" 2>&1
 rc=$?
