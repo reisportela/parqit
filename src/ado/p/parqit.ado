@@ -2078,6 +2078,7 @@ program define _parqit_sql, rclass
     mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
     di as txt "(view " as res "`vname'" as txt " opened over the SQL result: " ///
         as res "`parqit_view_k'" as txt " columns)"
+    return scalar k = `parqit_view_k'
     return local view "`vname'"
 end
 
