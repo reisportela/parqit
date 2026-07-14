@@ -1,10 +1,10 @@
 /* parqit — source-column-name → Stata-variable-name sanitiser.
  *
  * The documented, reversible scheme of charter §6.2/§6.10/§6.14:
- *   1. every byte outside [A-Za-z0-9_] and outside UTF-8 continuation
- *      territory becomes "_" (Unicode letters pass through untouched);
- *   2. a leading digit or an exact reserved word gains a "_" prefix;
- *   3. names are truncated to 32 bytes on a UTF-8 character boundary;
+ *   1. Unicode letters (plus digits/marks after the first character) and "_"
+ *      pass; every other code point becomes "_";
+ *   2. a leading digit or exact reserved word gains a "_" prefix;
+ *   3. names are truncated to 32 Unicode code points;
  *   4. collisions (including with names already taken) get a numbered
  *      suffix, deterministically, case-sensitively;
  *   5. an empty result becomes v<position>.

@@ -145,10 +145,10 @@ TEST_CASE("arithmetic and functions match Stata definitions") {
                    123.46) < 1e-9);
     CHECK(eval_at("min(x, 3)", 5) == "3.0");
     CHECK(eval_at("max(x, y, 100)", 1) == "100.0");
-    CHECK(eval_at("cond(x > 1, 7, 8)", 1) == "8");
-    CHECK(eval_at("cond(x > 1, 7, 8)", 2) == "7");
-    CHECK(eval_at("cond(x, 7, 8, 9)", 3) == "9"); /* numeric missing → 4th branch */
-    CHECK(eval_at("cond(x, 7, 8)", 3) == "7");    /* 3-arg: missing → TRUE branch */
+    CHECK(std::strtod(eval_at("cond(x > 1, 7, 8)", 1).c_str(), nullptr) == 8.0);
+    CHECK(std::strtod(eval_at("cond(x > 1, 7, 8)", 2).c_str(), nullptr) == 7.0);
+    CHECK(std::strtod(eval_at("cond(x, 7, 8, 9)", 3).c_str(), nullptr) == 9.0); /* missing → 4th */
+    CHECK(std::strtod(eval_at("cond(x, 7, 8)", 3).c_str(), nullptr) == 7.0);    /* missing → TRUE */
     CHECK(eval_at("inrange(x, 2, 4)", 2) == "1");
     CHECK(eval_at("inrange(x, 2, 4)", 3) == "0");     /* missing → 0 */
     CHECK(eval_at("inlist(x, 1, 5)", 5) == "1");
@@ -188,6 +188,12 @@ TEST_CASE("loud rejections match native Stata r(198)/r(109)") {
     CHECK_FALSE(translate_expression("ln(s)", sch, false).ok);
     CHECK_FALSE(translate_expression("sqrt(s)", sch, false).ok);
     CHECK_FALSE(translate_expression("exp(s)", sch, false).ok);
+    CHECK_FALSE(translate_expression("trim(x)", sch, false).ok);
+    CHECK_FALSE(translate_expression("ltrim(x)", sch, false).ok);
+    CHECK_FALSE(translate_expression("rtrim(x)", sch, false).ok);
+    CHECK_FALSE(translate_expression("subinstr(x, \"a\", \"b\", .)", sch,
+                                     false)
+                    .ok);
     CHECK_FALSE(translate_expression("cond(x, \"a\", \"b\", 9)", sch, false).ok);
     CHECK_FALSE(translate_expression("cond(x, 7, 8, \"z\")", sch, false).ok);
 }
@@ -256,6 +262,20 @@ TEST_CASE("DATE-LIT-1: impossible calendar dates / 60s times are loud, not rolle
     CHECK(translate_expression("tc(01jan2020 00:00:59.5)", sch, false).ok);
     /* an impossible date inside a tc() literal is rejected via the same path */
     CHECK_FALSE(translate_expression("tc(31feb2020 00:00:00)", sch, false).ok);
+    CHECK_FALSE(translate_expression("td(01jan0099)", sch, false).ok);
+    CHECK(translate_expression("td(01jan0100)", sch, false).ok);
+    CHECK_FALSE(
+        translate_expression("tc(01jan2020 00:00:59.9999)", sch, false).ok);
+    CHECK(translate_expression("tc(01jan2020 00:00:59.999)", sch, false).ok);
+}
+
+TEST_CASE("DATA-003: numeric literals are canonical Stata binary64") {
+    const double got =
+        std::strtod(eval_at("9007199254740993", 1).c_str(), nullptr);
+    CHECK(got == 9007199254740992.0);
+    ExprResult r = translate_expression("42", test_schema(), false);
+    REQUIRE(r.ok);
+    CHECK(r.sql == "42"); /* preserve native replace's range-based promotion */
 }
 
 TEST_CASE("MISS-1: missing() reports generated IEEE specials as Stata missing") {
@@ -369,8 +389,8 @@ TEST_CASE("audit fixes: Stata-faithful semantics (verified vs Stata 19.5)") {
     CHECK(eval_at("x > 2", 3, true) == "1");    /* missing is large */
 
     /* cond() (XLAT-4): 3-arg missing condition -> TRUE branch; 4-arg -> 4th */
-    CHECK(eval_at("cond(x, 7, 8)", 3) == "7");
-    CHECK(eval_at("cond(x, 7, 8, 9)", 3) == "9");
+    CHECK(std::strtod(eval_at("cond(x, 7, 8)", 3).c_str(), nullptr) == 7.0);
+    CHECK(std::strtod(eval_at("cond(x, 7, 8, 9)", 3).c_str(), nullptr) == 9.0);
 
     /* mod with a nonpositive modulus is missing (XLAT-6) */
     CHECK(eval_at("mod(7, -3)", 1) == "");

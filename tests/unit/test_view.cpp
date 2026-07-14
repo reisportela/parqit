@@ -105,13 +105,72 @@ TEST_CASE("sort + _n/_N compile to windows over the declared order") {
     CHECK(v.gen("total", "", "_N", "", false).empty());
     /* highest wage (30) must get rank 1; NULL sorts last under DESC? DuckDB
      * default NULLS LAST for DESC — fine for the check below */
-    CHECK(run_scalar("SELECT rank FROM (" + v.compile(false) +
-                     ") WHERE wage = 33") == "1");
-    CHECK(run_scalar("SELECT max(total) FROM (" + v.compile(false) + ")") == "6");
+    CHECK(std::strtod(run_scalar("SELECT rank FROM (" + v.compile(false) +
+                                 ") WHERE wage = 33")
+                          .c_str(),
+                      nullptr) == 1.0);
+    CHECK(std::strtod(run_scalar("SELECT max(total) FROM (" + v.compile(false) +
+                                 ")")
+                          .c_str(),
+                      nullptr) == 6.0);
 
     /* keep if _n <= 2 over the order */
     CHECK(v.filter("_n <= 2", false, false).empty());
     CHECK(run_count(v) == 2);
+}
+
+TEST_CASE("untyped numeric gen is a physical double") {
+    View v = make_view();
+    REQUIRE(v.gen("z", "", "42", "", false).empty());
+    CHECK(v.cols().back().meta_type == "double");
+    CHECK(run_scalar("SELECT typeof(z) FROM (" + v.compile(false) + ") LIMIT 1") ==
+          "DOUBLE");
+}
+
+TEST_CASE("replace storage is committed before later lazy expressions") {
+    View d = make_view();
+    REQUIRE(d.replace("wage", "4000000000", "", false).empty());
+    REQUIRE(d.coerce_numeric_column("wage", "double").empty());
+    REQUIRE(d.gen("square", "double", "wage*wage", "", false).empty());
+    CHECK(run_scalar("SELECT typeof(wage) FROM (" + d.compile(false) +
+                     ") LIMIT 1") == "DOUBLE");
+    CHECK(run_scalar("SELECT square FROM (" + d.compile(false) +
+                     ") LIMIT 1") == "1.6e+19");
+
+    View f = make_view();
+    REQUIRE(f.replace("wage", "16777217", "", false).empty());
+    REQUIRE(f.coerce_numeric_column("wage", "float").empty());
+    REQUIRE(f.gen("after", "double", "wage", "", false).empty());
+    CHECK(run_scalar("SELECT typeof(wage) FROM (" + f.compile(false) +
+                     ") LIMIT 1") == "FLOAT");
+    CHECK(run_scalar("SELECT after FROM (" + f.compile(false) +
+                     ") LIMIT 1") == "16777216.0");
+}
+
+TEST_CASE("replace of a pending sort key bakes old order and truncates marker") {
+    View v = make_view();
+    REQUIRE(v.sort({"wage"}, {false}).empty());
+    REQUIRE(v.replace("wage", "-wage", "", false).empty());
+    CHECK(v.sort_keys().empty());
+    REQUIRE(v.gen("seq", "", "_n", "", false).empty());
+    CHECK(std::strtod(run_scalar("SELECT seq FROM (" + v.compile(false) +
+                                 ") WHERE wage = -33")
+                          .c_str(),
+                      nullptr) == 5.0);
+}
+
+TEST_CASE("group rename validates then commits and supports cycles") {
+    View bad = make_view();
+    CHECK_FALSE(bad.rename_many({"id", "year"}, {"x", "x"}).empty());
+    CHECK(bad.cols()[0].name == "id");
+    CHECK(bad.cols()[1].name == "year");
+
+    View cyc = make_view();
+    REQUIRE(cyc.rename_many({"id", "year"}, {"year", "id"}).empty());
+    CHECK(cyc.cols()[0].name == "year");
+    CHECK(cyc.cols()[1].name == "id");
+    CHECK(run_scalar("SELECT year FROM (" + cyc.compile(false) +
+                     ") WHERE id = 2019 LIMIT 1") == "1");
 }
 
 TEST_CASE("PERF-1: row-context windows are emitted only when referenced") {
@@ -342,6 +401,23 @@ TEST_CASE("append: union by name, missing columns null, gen marker") {
     bad.push_back(make_using("SELECT * FROM (VALUES ('oops')) t(wage)",
                              {{"wage", 's'}}));
     CHECK_FALSE(v2.append_with(bad, "", &warns).empty());
+}
+
+TEST_CASE("append bakes the master's pending order and clears sortedby") {
+    View v;
+    ViewCol x;
+    x.name = "x";
+    v.open("SELECT * FROM (VALUES (2), (1)) t(x)", {x},
+           nlohmann::json::object(), nlohmann::json::object(), "", "append order");
+    REQUIRE(v.sort({"x"}, {false}).empty());
+    std::vector<View::UsingSide> srcs;
+    srcs.push_back(make_using("SELECT * FROM (VALUES (0), (3)) t(x)", {{"x", 'n'}}));
+    std::vector<std::string> warns;
+    REQUIRE(v.append_with(std::move(srcs), "", &warns).empty());
+    CHECK(v.sort_keys().empty());
+    CHECK(run_scalar("SELECT string_agg(CAST(x AS VARCHAR), ',' ORDER BY rowid) "
+                     "FROM (SELECT *, row_number() OVER () AS rowid FROM (" +
+                     v.compile(false) + "))") == "1,2,0,3");
 }
 
 TEST_CASE("joinby: within-key cartesian product") {

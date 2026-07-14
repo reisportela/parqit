@@ -15,6 +15,7 @@ namespace parqit {
 using json = nlohmann::json;
 
 static void denormalize_strings(std::vector<ViewCol> *cols); /* defined below */
+static std::string prev_name(size_t k); /* defined below */
 
 /* Stata's gen/egen with an explicit narrow storage type coerces the value the
  * way native Stata does at assignment time: integers TRUNCATE toward zero and
@@ -45,7 +46,8 @@ static std::string coerce_storage(const std::string &v,
     case StType::Int:  lo = kStataIntMin;  hi = kStataIntMax;  duckint = "SMALLINT"; break;
     case StType::Long: lo = kStataLongMin; hi = kStataLongMax; duckint = "INTEGER"; break;
     case StType::Float: return "CAST(" + v + " AS FLOAT)";
-    default: return v; /* double / str# on a numeric value: keep full precision */
+    case StType::Double: return "CAST(" + v + " AS DOUBLE)";
+    default: return v; /* string-typed numeric targets are rejected by caller */
     }
     return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN trunc(" + v + ") < " +
            dtoa(lo) + " OR trunc(" + v + ") > " + dtoa(hi) +
@@ -65,6 +67,30 @@ static std::string norm_group_key(const std::string &ref, char kind) {
 }
 
 void View::close() { *this = View(); }
+
+std::string View::coerce_numeric_column(const std::string &name,
+                                        const std::string &type) {
+    const int idx = col_index(name);
+    if (idx < 0) return "variable " + name + " not found in the view";
+    if (cols_[static_cast<size_t>(idx)].kind != 'n')
+        return "variable " + name + " is not numeric";
+    if (type != "float" && type != "double")
+        return "internal numeric storage must be float or double";
+
+    std::string sel;
+    for (size_t i = 0; i < cols_.size(); i++) {
+        if (i) sel += ", ";
+        const std::string ref = quote_ident(cols_[i].name);
+        if (static_cast<int>(i) == idx)
+            sel += coerce_storage(ref, type, 'n') + " AS " + ref;
+        else
+            sel += ref;
+    }
+    cols_[static_cast<size_t>(idx)].meta_type = type;
+    push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
+               "commit " + name + " as " + type + " storage");
+    return "";
+}
 
 void View::open(const std::string &scan_select, std::vector<ViewCol> cols,
                 json vallabs, json chars, std::string dtalabel,
@@ -115,6 +141,18 @@ std::string View::order_by_sql() const {
         o += sort_[i] + " NULLS LAST";
     }
     return o;
+}
+
+std::vector<std::string> View::sortedby_names() const {
+    std::vector<std::string> out;
+    for (const auto &key : sort_) {
+        if (key.size() >= 5 && key.compare(key.size() - 5, 5, " DESC") == 0)
+            return {}; /* gsort is ordered, but not Stata sortedby metadata */
+        if (key.size() < 2 || key.front() != '"' || key.back() != '"')
+            return {};
+        out.push_back(key.substr(1, key.size() - 2));
+    }
+    return out;
 }
 
 void View::push_stage(const std::string &select_body, const std::string &desc) {
@@ -349,7 +387,9 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     /* honour an explicit narrow storage type the way native Stata gen does
      * (numeric: truncate toward zero / out-of-range -> missing / float32 rounding,
      * EXPR-1; string: truncate to the declared str# byte width, STR-GENWIDTH-1) */
-    std::string vexpr = coerce_storage(r.sql, type_req, r.kind);
+    const std::string effective_type =
+        (type_req.empty() && r.kind != 's') ? "double" : type_req;
+    std::string vexpr = coerce_storage(r.sql, effective_type, r.kind);
     std::string value = vexpr;
     if (!if_expr.empty()) {
         ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
@@ -372,7 +412,7 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     ViewCol nc;
     nc.name = name;
     nc.kind = (r.kind == 's' ? 's' : 'n');
-    nc.meta_type = type_req; /* requested storage type wins at collect */
+    nc.meta_type = effective_type; /* untyped numeric gen is contractual double */
     cols_.push_back(nc);
     push_stage(body, "gen " + name + " = " + expr +
                          (if_expr.empty() ? "" : " if " + if_expr));
@@ -391,17 +431,41 @@ std::string View::replace(const std::string &name, const std::string &expr,
                std::string(cols_[idx].kind == 's' ? "string" : "numeric") + " " +
                name + " with a " + (newkind == 's' ? "string" : "numeric") +
                " expression";
-    std::string value = r.sql;
+    /* Native replace widens storage when the new value no longer fits (for
+     * example byte -> int or str3 -> str6).  Keep the expression untruncated
+     * in the lazy plan; collect-time type planning and lazy-save meta_type
+     * casting preserve the old type when it still fits and promote when it
+     * does not. */
+    const std::string assigned = r.sql;
+    std::string value = assigned;
     if (!if_expr.empty()) {
         ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
         if (!c.ok) return c.error;
         if (uses_rowctx(c.sql) || uses_rowctx(r.sql))
             return "_n/_N are not supported in replace (yet)";
-        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + r.sql +
+        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + assigned +
                 " ELSE " + quote_ident(name) + " END)";
     } else if (uses_rowctx(value)) {
         return "_n/_N are not supported in replace (yet)";
     }
+    /* SEM-006: sort_ describes the values at the moment sort ran.  Replacing a
+     * key must first bake that old order into the input, then truncate Stata's
+     * sortedby marker before the changed key.  Applying the stale key only at
+     * final materialisation associated subsequent _n/keep-in with wrong rows. */
+    std::string source = prev_name(stages_.size());
+    size_t changed_sort = sort_.size();
+    const std::string qname = quote_ident(name);
+    for (size_t i = 0; i < sort_.size(); i++) {
+        if (sort_[i] == qname || sort_[i] == qname + " DESC") {
+            changed_sort = i;
+            break;
+        }
+    }
+    if (changed_sort < sort_.size()) {
+        source = "(SELECT * FROM " + source + order_by_sql() + ")";
+        sort_.resize(changed_sort);
+    }
+
     std::string sel;
     for (size_t i = 0; i < cols_.size(); i++) {
         if (i) sel += ", ";
@@ -410,12 +474,19 @@ std::string View::replace(const std::string &name, const std::string &expr,
         else
             sel += quote_ident(cols_[i].name);
     }
-    /* replacing changes content, not storage intent — but a wider value may
-     * no longer fit a saved narrow type; collect re-sizes anyway. MISS-1: the
-     * new expression may introduce an IEEE special (e.g. replace f = f*f), so
-     * the column is no longer guaranteed clean — drop its normalized flag. */
+    /* replacing changes content, and a wider value may no longer fit the
+     * saved narrow type. MISS-1: the new expression may also introduce an IEEE
+     * special (e.g. replace f = f*f), so drop its normalized flag. */
     cols_[idx].normalized = false;
-    push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
+    /* Never serialize a stale narrow integer/string type into parqit.schema;
+     * those results are re-sized at materialisation. FLOAT is retained here
+     * provisionally: the plugin's bind probe keeps it only when the resulting
+     * physical family is range-safe, otherwise it promotes the intent to
+     * DOUBLE. An existing double stays contractual double. */
+    if (!cols_[idx].meta_type.empty() && cols_[idx].meta_type != "float" &&
+             cols_[idx].meta_type != "double")
+        cols_[idx].meta_type.clear();
+    push_stage("SELECT " + sel + " FROM " + source,
                "replace " + name + " = " + expr +
                    (if_expr.empty() ? "" : " if " + if_expr));
     return "";
@@ -449,6 +520,68 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
     }
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
                "rename " + oldn + " " + newn);
+    return "";
+}
+
+std::string View::rename_many(const std::vector<std::string> &old_names,
+                              const std::vector<std::string> &new_names) {
+    if (old_names.empty() || old_names.size() != new_names.size())
+        return "rename: old and new lists must have the same nonzero length";
+    std::set<std::string> oldset, newset;
+    std::map<std::string, std::string> mapping;
+    for (size_t i = 0; i < old_names.size(); i++) {
+        if (!oldset.insert(old_names[i]).second)
+            return "rename: variable " + old_names[i] +
+                   " appears more than once in the old list";
+        if (col_index(old_names[i]) < 0)
+            return "variable " + old_names[i] + " not found in the view";
+        if (!newset.insert(new_names[i]).second)
+            return "rename: target variable " + new_names[i] +
+                   " appears more than once";
+        mapping[old_names[i]] = new_names[i];
+    }
+    for (const auto &nn : new_names)
+        if (col_index(nn) >= 0 && !oldset.count(nn))
+            return "variable " + nn + " already defined";
+
+    /* Build every replacement off to the side.  This single projection also
+     * supports cycles (a b)->(b a); no intermediate public name exists. */
+    std::vector<ViewCol> ncols = cols_;
+    std::string sel;
+    for (size_t i = 0; i < cols_.size(); i++) {
+        if (i) sel += ", ";
+        auto it = mapping.find(cols_[i].name);
+        if (it == mapping.end()) {
+            sel += quote_ident(cols_[i].name);
+        } else {
+            sel += quote_ident(cols_[i].name) + " AS " + quote_ident(it->second);
+            ncols[i].name = it->second;
+        }
+    }
+
+    json nchars = chars_;
+    std::map<std::string, json> moved_chars;
+    if (nchars.is_object()) {
+        for (const auto &oldn : old_names)
+            if (nchars.contains(oldn)) moved_chars[oldn] = nchars[oldn];
+        for (const auto &oldn : old_names) nchars.erase(oldn);
+        for (const auto &m : moved_chars) nchars[mapping[m.first]] = m.second;
+    }
+    std::vector<std::string> nsort = sort_;
+    for (auto &key : nsort) {
+        for (const auto &m : mapping) {
+            const std::string qold = quote_ident(m.first);
+            if (key == qold) key = quote_ident(m.second);
+            else if (key == qold + " DESC")
+                key = quote_ident(m.second) + " DESC";
+        }
+    }
+
+    cols_ = std::move(ncols);
+    chars_ = std::move(nchars);
+    sort_ = std::move(nsort);
+    push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
+               "rename group (" + std::to_string(old_names.size()) + " variables)");
     return "";
 }
 
@@ -1181,7 +1314,9 @@ std::string View::append_with(std::vector<UsingSide> sources,
     for (size_t s = 0; s < sources.size(); s++)
         merge_using_meta(this, &vallabs_, sources[s].vallabs, warnings);
 
-    const std::string prev = prev_name(stages_.size());
+    std::string prev = prev_name(stages_.size());
+    if (!sort_.empty())
+        prev = "(SELECT * FROM " + prev + order_by_sql() + ")";
     std::string body = "SELECT *" +
                        (gen_name.empty() ? std::string()
                                          : ", 0 AS " + quote_ident(gen_name)) +
@@ -1211,6 +1346,10 @@ std::string View::append_with(std::vector<UsingSide> sources,
     denormalize_strings(&ncols); /* MISS-1: absent columns fill with NULL */
     cols_ = std::move(ncols);
     push_stage(body, "append (" + std::to_string(sources.size()) + " using file(s))");
+    /* Native append concatenates the already-sorted master with each using
+     * dataset and clears sortedby; it never re-sorts the union by the master's
+     * stale key. */
+    sort_.clear();
     return "";
 }
 

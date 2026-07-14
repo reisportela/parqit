@@ -1,0 +1,4 @@
+LIBRARY parqit
+EXPORTS
+    pginit
+    stata_call

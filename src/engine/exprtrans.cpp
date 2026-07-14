@@ -243,7 +243,7 @@ bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
         y = y * 10 + (t[p++] - '0');
         yd++;
     }
-    if (p != t.size() || yd != 4) return false;
+    if (p != t.size() || yd != 4 || y < 100) return false;
     /* DATE-LIT-1: reject impossible day-of-month (m is already 1..12 from the
      * month-name lookup), matching native Stata's r(198) rather than rolling
      * the date forward. */
@@ -308,7 +308,17 @@ bool parse_hms(const std::string &raw, long long *ms_out) {
                (std::isdigit(static_cast<unsigned char>(t[p])) || t[p] == '.'))
             p++;
         if (p == start) return false;
-        if (!atod(t.substr(start, p - start), &sec)) return false;
+        const std::string stok = t.substr(start, p - start);
+        const size_t dot = stok.find('.');
+        if (dot != std::string::npos) {
+            if (stok.find('.', dot + 1) != std::string::npos || dot == 0 ||
+                dot + 1 == stok.size() || stok.size() - dot - 1 > 3)
+                return false;
+            for (size_t i = dot + 1; i < stok.size(); i++)
+                if (!std::isdigit(static_cast<unsigned char>(stok[i])))
+                    return false;
+        }
+        if (!atod(stok, &sec)) return false;
     }
     /* DATE-LIT-1: a clock second is 0..59 (fractional ok); 60 is not a valid
      * tc() second (native rejects with r(198)). %tC leap seconds (a real :60 on
@@ -468,11 +478,21 @@ struct Parser {
             /* a literal beyond Stata's double range is a missing VALUE in
              * native Stata (`di 1e309` prints `.`, rc 0), while DuckDB parses
              * it to +Inf — which would then leak past comparisons (INF-1) */
-            double lv = std::strtod(cur.text.c_str(), nullptr);
-            if (!std::isfinite(lv) || std::fabs(lv) >= kStataMissThreshold)
+            double lv = 0.0;
+            const bool parsed = atod(cur.text, &lv);
+            if (!parsed || !std::isfinite(lv) ||
+                std::fabs(lv) >= kStataMissThreshold)
                 out->sql = "NULL";
             else
-                out->sql = cur.text;
+                /* DATA-003: a Stata numeric literal is binary64 before any
+                 * assignment. Sending the original decimal token to DuckDB
+                 * let 9007199254740993 survive as an exact INTEGER although
+                 * native Stata holds 9007199254740992.  Emit the canonical
+                 * binary64 value.  Do not force every small integral token to
+                 * DOUBLE here: native replace uses its integral range to
+                 * retain/promote byte/int/long storage; View metadata forces
+                 * double only where that is the declared result contract. */
+                out->sql = dtoa(lv);
             out->kind = 'n';
             advance();
             return true;
@@ -1053,12 +1073,14 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "trim" || fname == "strtrim") {
         if (!need(1, 1)) return false;
+        if (args[0].kind != 's') return fail(fname + "() needs a string");
         out->sql = "trim(coalesce(" + args[0].sql + ", ''))";
         out->kind = 's';
         return true;
     }
     if (fname == "ltrim" || fname == "rtrim") {
         if (!need(1, 1)) return false;
+        if (args[0].kind != 's') return fail(fname + "() needs a string");
         out->sql = fname.substr(0, 5) + "(coalesce(" + args[0].sql + ", ''))";
         out->kind = 's';
         return true;
@@ -1095,6 +1117,9 @@ bool Parser::call(const std::string &fname, Val *out) {
     }
     if (fname == "subinstr") {
         if (!need(4, 4)) return false;
+        if (args[0].kind != 's' || args[1].kind != 's' ||
+            args[2].kind != 's')
+            return fail("subinstr() needs strings in its first three arguments");
         if (args[3].sql != "NULL")
             return fail("subinstr(): only the replace-all form (last argument .) "
                         "is supported");

@@ -35,13 +35,19 @@ TEST_CASE("leading digits and punctuation (charter findings 2 and 14)") {
     CHECK(sanitize_stata_name("!!!", 2) == "___");
 }
 
-TEST_CASE("unicode passes through; truncation respects utf-8 boundaries") {
+TEST_CASE("unicode names use Stata's 32-character grammar and ceiling") {
     CHECK(sanitize_stata_name("ano_decisão", 1) == "ano_decis\xc3\xa3o");
-    /* 31 ascii bytes + 2-byte char: must cut before the multibyte char */
+    /* 31 ASCII characters plus one multibyte letter is exactly 32 chars. */
     std::string long31(31, 'a');
-    CHECK(sanitize_stata_name(long31 + "\xc3\xa3x", 1) == long31);
+    CHECK(sanitize_stata_name(long31 + "\xc3\xa3x", 1) ==
+          long31 + "\xc3\xa3");
     std::string long40(40, 'b');
     CHECK(sanitize_stata_name(long40, 1) == std::string(32, 'b'));
+    const std::string cjk20 = "資料資料資料資料資料資料資料資料資料資料";
+    CHECK(sanitize_stata_name(cjk20, 1) == cjk20);
+    CHECK(sanitize_stata_name("🦆id", 1) == "_id");
+    CHECK(sanitize_stata_name("\xcc\x81name", 1) == "_name");
+    CHECK(sanitize_stata_name("a\xcc\x81", 1) == "a\xcc\x81");
 }
 
 TEST_CASE("duplicates are disambiguated deterministically (charter finding 10)") {
@@ -59,7 +65,7 @@ TEST_CASE("duplicates are disambiguated deterministically (charter finding 10)")
     CHECK(out[0] == "a_b");
     CHECK(out[1] == "a_b_2");
 
-    /* truncation-induced collisions stay within 32 bytes */
+    /* truncation-induced collisions stay within 32 characters */
     std::string base(32, 'z');
     out = sanitize_unique({base + "1", base + "2"});
     CHECK(out[0] == std::string(32, 'z'));

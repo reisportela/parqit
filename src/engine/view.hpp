@@ -64,10 +64,13 @@ class View {
               const std::string &source_desc);
 
     const std::vector<ViewCol> &cols() const { return cols_; }
+    std::string coerce_numeric_column(const std::string &name,
+                                      const std::string &type);
     const nlohmann::json &vallabs() const { return vallabs_; }
     const nlohmann::json &chars() const { return chars_; }
     const std::string &dtalabel() const { return dtalabel_; }
     const std::vector<std::string> &sort_keys() const { return sort_; }
+    std::vector<std::string> sortedby_names() const;
     const std::vector<PendingRange> &pending_ranges() const { return ranges_; }
     const std::string &source_desc() const { return source_desc_; }
     size_t n_stages() const { return stages_.size(); }
@@ -100,6 +103,8 @@ class View {
     std::string replace(const std::string &name, const std::string &expr,
                         const std::string &if_expr, bool statamissing);
     std::string rename(const std::string &oldn, const std::string &newn);
+    std::string rename_many(const std::vector<std::string> &old_names,
+                            const std::vector<std::string> &new_names);
     std::string reorder(const std::vector<std::string> &front);
     std::string sort(const std::vector<std::string> &keys,
                      const std::vector<bool> &desc);

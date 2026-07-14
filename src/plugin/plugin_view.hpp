@@ -22,6 +22,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args);
 ST_retcode cmd_view_save(const std::vector<std::string> &args);
 ST_retcode cmd_view_close(const std::vector<std::string> &args);
 ST_retcode cmd_view_switch(const std::vector<std::string> &args);
+ST_retcode cmd_view_commit(const std::vector<std::string> &args);
 ST_retcode cmd_view_list(const std::vector<std::string> &args);
 /* Internal persistent-bridge lifecycle.  bridge_new reserves a process- and
  * operation-unique package-owned path; bridge_discard can erase only a path

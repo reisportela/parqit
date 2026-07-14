@@ -7,7 +7,7 @@ authors:
     affiliation: "NIPE / Universidade do Minho and BPLIM / Banco de Portugal"
     email: "miguel.portela@eeg.uminho.pt"
     website: "https://reisportela.github.io"
-version: "0.1.21"
+version: "0.1.22"
 date-released: 2026-07-14
 url: "https://github.com/reisportela/parqit"
 license: MIT

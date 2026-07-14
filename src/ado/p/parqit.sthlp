@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.21 14jul2026}{...}
+{* *! version 0.1.22 14jul2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -334,12 +334,13 @@ never a silent empty result.
 {marker materialisers}{...}
 {title:Materialisers}
 
-{pstd}{cmd:parqit save} writes a single Parquet file (atomically: temp file,
-payload verified by a fresh scan, then renamed into place) or a
+{pstd}{cmd:parqit save} writes a single Parquet file (atomically: an exclusively
+owned same-filesystem staging file, payload verified by a fresh scan, then
+renamed into place) or a
 Hive-partitioned tree with {opt partition_by()} (also staged and renamed
 atomically). A partitioned target that already exists is overwritten only
 with {opt replace} (the new tree is built and verified first, then the old
-one is removed and the new one renamed into place); without {opt replace},
+one is set aside until the new tree is in place); without {opt replace},
 or when the path exists as a plain file, the save is refused. Codecs:
 {cmd:snappy} (default) {cmd:zstd gzip lz4 lz4_raw brotli uncompressed};
 unknown codecs are rejected, never silently substituted. {opt chunk(#)}
@@ -347,6 +348,14 @@ sets the target rows per Parquet row group (smaller groups = finer
 pushdown granularity for later reads; larger = better compression); the
 engine rounds it to its internal 2048-row vector multiples, so the
 effective minimum is 2048.
+
+{pstd}
+Writers for the same destination are serialized by
+{it:filename}{cmd:.parqit_lock}. parqit removes that lock only when the current
+process created it. A pre-existing or crash-stale lock therefore causes a loud,
+fail-closed refusal; after confirming that no writer is alive, the user may
+remove that stale lock explicitly. Historical sibling names such as
+{cmd:.parqit_tmp}/{cmd:.parqit_old} are never treated as package-owned.
 
 {pstd}With no view open, {cmd:parqit save} writes the {it:in-memory} dataset
 to Parquet, and {cmd:parqit use} {it:file}{cmd:, clear} reads whole files —
@@ -359,7 +368,10 @@ administrative data) is a {bf:loud per-cell error} at the offending
 {it:var}{cmd:[}{it:obs}{cmd:]} — never a silently corrupted or unreadable file.
 Run {helpb unicode:unicode translate} on the dataset first to convert it to
 UTF-8, then save. Valid UTF-8 (ASCII, accented text, emoji, {cmd:strL}) is
-unaffected.
+unaffected. A binary {cmd:strL} containing an embedded NUL cannot be represented
+through the Stata plugin's text interface, so a direct memory-to-Parquet save
+refuses the offending cell before publishing any output. A lazy
+Parquet-to-Parquet save does not cross that interface and preserves the bytes.
 
 
 {marker perf}{...}
@@ -510,7 +522,7 @@ after a {cmd:collect} of the variables involved.
 expressions to SQL. Supported: arithmetic with Stata precedence ({cmd:^}
 is power, {cmd:/} never integer-divides), comparisons, {cmd:& | !},
 missing literals ({cmd:.} and {cmd:.a}-{cmd:.z}, which collapse to SQL
-NULL), {cmd:_n}/{cmd:_N} (windows over the declared sort), string
+NULL), string
 literals, and functions including:
 
 {p 8 8 2}{cmd:abs exp ln log log10 sqrt floor ceil int round mod min max}
@@ -520,6 +532,14 @@ literals, and functions including:
 {p 8 8 2}{cmd:year month day quarter dow doy mdy dofm mofd yofd} and the
 date literals {cmd:td() tc() tC() tm() tq() th() tw() ty()} (impossible dates
 like {cmd:td(31feb2020)} and a 60th second are rejected loudly){p_end}
+
+{pstd}
+{cmd:_n}/{cmd:_N} are supported in {cmd:keep if}/{cmd:drop if} and in the
+main expression of {cmd:parqit gen}; they are windows over the declared
+{cmd:parqit sort} order (or source order when no sort was declared).
+They are not yet supported by {cmd:replace} or by a {cmd:gen ... if}
+qualifier; those forms fail at the originating command without changing the
+view.
 
 {pstd}
 {cmd:string()} and {cmd:strofreal()} use Stata's default {cmd:%9.0g}

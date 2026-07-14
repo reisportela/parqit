@@ -17,6 +17,7 @@
 #include "plugin/plugin_io.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <condition_variable>
@@ -26,10 +27,20 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <iomanip>
 #include <mutex>
+#include <random>
 #include <set>
+#include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "abi.h"
 #include "duckdb.h"
@@ -89,6 +100,138 @@ bool regular_file_fingerprint(const std::string &path, std::string *abs,
     *mtime = std::to_string(
         static_cast<long long>(ft.time_since_epoch().count()));
     return true;
+}
+
+/* Every output transaction owns two filesystem objects and only those two:
+ *
+ *   - <dest>.parqit_lock is created atomically and never removed unless this
+ *     process created it.  A pre-existing file/directory therefore blocks the
+ *     save loudly instead of being mistaken for package-owned scratch state.
+ *   - a 128-bit-random sibling directory contains the staged output and, when
+ *     replace is requested, the old target while the swap is in progress.
+ *
+ * Keeping both objects beside the destination guarantees same-filesystem
+ * renames.  The unique directory is the ownership proof: cleanup never touches
+ * the historical predictable .parqit_tmp/.parqit_old names (REL-001). */
+struct OutputTransaction {
+    std::filesystem::path root;
+    std::filesystem::path lock;
+    bool owns_lock = false;
+    bool retain_root = false;
+
+    OutputTransaction() = default;
+    OutputTransaction(const OutputTransaction &) = delete;
+    OutputTransaction &operator=(const OutputTransaction &) = delete;
+    ~OutputTransaction() {
+        std::error_code ec;
+        /* If publication and rollback both fail, the old payload may live only
+         * under root/old.  That root becomes a recovery object whose exact
+         * path is reported to the caller; deleting it here would convert a
+         * loud publication failure into loss of the previously valid data. */
+        if (!retain_root && !root.empty()) std::filesystem::remove_all(root, ec);
+        if (owns_lock && !lock.empty()) {
+            ec.clear();
+            /* remove(), deliberately not remove_all(): an unexpected entrant
+             * cannot make us recursively delete bytes we did not create. */
+            std::filesystem::remove(lock, ec);
+        }
+    }
+};
+
+std::atomic<unsigned long long> g_output_counter{0};
+
+long long output_process_id() {
+#ifdef _WIN32
+    return static_cast<long long>(_getpid());
+#else
+    return static_cast<long long>(getpid());
+#endif
+}
+
+std::string output_nonce() {
+    std::random_device rd;
+    std::ostringstream os;
+    os << std::hex << std::setfill('0');
+    for (int i = 0; i < 4; i++) os << std::setw(8) << rd();
+    return os.str();
+}
+
+bool output_test_hook(const char *name) {
+    const char *value = std::getenv(name);
+    return value && std::strcmp(value, "1") == 0;
+}
+
+bool reserve_output_transaction(const std::string &dest, OutputTransaction *tx,
+                                std::string *err) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path target = fs::absolute(fs::u8path(dest), ec);
+    if (ec) {
+        *err = "could not resolve output path " + dest + ": " + ec.message();
+        return false;
+    }
+    fs::path parent = target.parent_path();
+    if (!fs::is_directory(parent, ec) || ec) {
+        *err = "output directory does not exist or is not a directory: " +
+               parent.u8string();
+        return false;
+    }
+
+    tx->lock = fs::u8path(target.u8string() + ".parqit_lock");
+    ec.clear();
+    if (!fs::create_directory(tx->lock, ec)) {
+        if (ec) {
+            *err = "could not reserve output lock " + tx->lock.u8string() +
+                   ": " + ec.message();
+        } else {
+            *err = "output " + dest +
+                   " is already being written, or its package lock path " +
+                   tx->lock.u8string() + " already exists; parqit will not "
+                   "remove an object it did not create";
+        }
+        return false;
+    }
+    tx->owns_lock = true;
+
+    try {
+        for (int attempt = 0; attempt < 128; attempt++) {
+            const unsigned long long seq = ++g_output_counter;
+            const std::string leaf = target.filename().u8string() +
+                                     ".parqit_txn_" +
+                                     std::to_string(output_process_id()) + "_" +
+                                     std::to_string(seq) + "_" + output_nonce();
+            tx->root = parent / fs::u8path(leaf);
+            ec.clear();
+            if (fs::create_directory(tx->root, ec)) {
+                /* Deterministic test-only contention hook.  It is inert unless
+                 * explicitly set, bounded to 30 seconds, and holds the real
+                 * exclusive lock so the two-process regression exercises the
+                 * production ownership path rather than a mock. */
+                if (const char *hold =
+                        std::getenv("PARQIT_TEST_HOLD_OUTPUT_LOCK_MS")) {
+                    char *end = nullptr;
+                    long ms = std::strtol(hold, &end, 10);
+                    if (end != hold && *end == '\0' && ms > 0 && ms <= 30000)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                }
+                return true;
+            }
+            if (ec) {
+                *err = "could not reserve package-owned output staging: " +
+                       ec.message();
+                tx->root.clear();
+                return false;
+            }
+        }
+    } catch (const std::exception &e) {
+        *err = std::string("could not reserve package-owned output staging: ") +
+               e.what();
+        tx->root.clear();
+        return false;
+    }
+    *err = "could not reserve unique output staging after 128 attempts";
+    tx->root.clear();
+    return false;
 }
 
 } // namespace
@@ -330,6 +473,21 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
     if (paths_sql == "[]" || paths_sql.empty()) return m; /* view results */
     duckdb_result res;
     std::string err;
+    /* META-010: establish the complete matched-file universe independently of
+     * the keys being validated.  A file with no parqit.* rows must participate
+     * in the equality check instead of disappearing from it. */
+    std::set<std::string> all_files;
+    if (!s.query("SELECT DISTINCT file_name FROM parquet_file_metadata(" +
+                     paths_sql + ") ORDER BY file_name",
+                 &res, &err))
+        return m;
+    for (idx_t r = 0; r < duckdb_row_count(&res); r++) {
+        char *f = duckdb_value_varchar(&res, 0, r);
+        if (f) all_files.insert(f);
+        if (f) duckdb_free(f);
+    }
+    duckdb_destroy_result(&res);
+    if (all_files.empty()) return m;
     /* META-B: try(decode()) — a strict decode() THROWS on any invalid-UTF8
      * key/value anywhere in the file's KV metadata, and the whole query
      * failure was swallowed as "no metadata channel", silently dropping every
@@ -343,6 +501,7 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
                  &res, &err))
         return m; /* no metadata channel — fine */
     std::map<std::string, std::map<std::string, std::string>> per_file;
+    for (const auto &f : all_files) per_file[f] = {};
     idx_t nrow = duckdb_row_count(&res);
     for (idx_t r = 0; r < nrow; r++) {
         char *f = duckdb_value_varchar(&res, 0, r);
@@ -354,8 +513,6 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
         if (v) duckdb_free(v);
     }
     duckdb_destroy_result(&res);
-    if (per_file.empty()) return m;
-
     const auto &first = per_file.begin()->second;
     for (const auto &pf : per_file) {
         if (pf.second != first) {
@@ -364,17 +521,63 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
             return m;
         }
     }
+    bool malformed = false;
     auto get = [&](const char *key) -> json {
         auto it = first.find(key);
         if (it == first.end()) return json();
         json j = json::parse(it->second, nullptr, false);
-        return j.is_discarded() ? json() : j;
+        if (j.is_discarded()) {
+            warnings->push_back(std::string("malformed JSON in ") + key +
+                                "; all parqit metadata skipped");
+            malformed = true;
+            return json();
+        }
+        return j;
     };
-    m.schema = get("parqit.schema");
-    m.vallabs = get("parqit.vallabs");
-    m.chars = get("parqit.chars");
+    json schema = get("parqit.schema");
+    json vallabs = get("parqit.vallabs");
+    json chars = get("parqit.chars");
     json dl = get("parqit.dtalabel");
+    if (malformed) return ParqitMeta();
+    if (!schema.is_null() && !schema.is_object()) {
+        warnings->push_back("parqit.schema is not a JSON object; all parqit "
+                            "metadata skipped");
+        return ParqitMeta();
+    }
+    if (!vallabs.is_null() && !vallabs.is_object()) {
+        warnings->push_back("parqit.vallabs is not a JSON object; all parqit "
+                            "metadata skipped");
+        return ParqitMeta();
+    }
+    if (!chars.is_null() && !chars.is_object()) {
+        warnings->push_back("parqit.chars is not a JSON object; all parqit "
+                            "metadata skipped");
+        return ParqitMeta();
+    }
+    if (!dl.is_null() && !dl.is_string()) {
+        warnings->push_back("parqit.dtalabel is not a JSON string; all parqit "
+                            "metadata skipped");
+        return ParqitMeta();
+    }
+    m.schema = std::move(schema);
+    m.vallabs = vallabs.is_null() ? json::object() : std::move(vallabs);
+    m.chars = chars.is_null() ? json::object() : std::move(chars);
     if (dl.is_string()) m.dtalabel = dl.get<std::string>();
+    if (m.schema.contains("sortedby")) {
+        if (!m.schema["sortedby"].is_array()) {
+            warnings->push_back("parqit.schema sortedby is not an array; all "
+                                "parqit metadata skipped");
+            return ParqitMeta();
+        }
+        for (const auto &v : m.schema["sortedby"]) {
+            if (!v.is_string()) {
+                warnings->push_back("parqit.schema sortedby contains a non-string; "
+                                    "all parqit metadata skipped");
+                return ParqitMeta();
+            }
+            m.sortedby.push_back(v.get<std::string>());
+        }
+    }
     m.present = !m.schema.is_null();
     return m;
 }
@@ -471,7 +674,10 @@ ST_retcode plan_columns(Session &s, const Source &src,
                                                        : std::string();
         };
         for (auto &p : plans) {
-            auto it = by_src.find(p.source_name);
+            std::string meta_name = p.source_name;
+            auto pn = ctx->parquet_names.find(p.source_name);
+            if (pn != ctx->parquet_names.end()) meta_name = pn->second;
+            auto it = by_src.find(meta_name);
             if (it == by_src.end()) continue;
             const json &jv = *it->second;
             std::string f = sget(jv, "fmt");
@@ -745,6 +951,24 @@ void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
         }
     }
     if (!ctx.meta.dtalabel.empty()) w.rec("dlabel", {}, {ctx.meta.dtalabel});
+    if (!ctx.meta.sortedby.empty()) {
+        std::string keys;
+        for (const auto &saved : ctx.meta.sortedby) {
+            bool found = false;
+            for (const auto &p : ctx.active) {
+                if (p.source_name == saved || p.stata_name == saved) {
+                    if (!keys.empty()) keys += " ";
+                    keys += p.stata_name;
+                    found = true;
+                    break;
+                }
+            }
+            /* A subset that removes a later sorted key retains only the valid
+             * prefix, exactly like Stata's sortedby marker. */
+            if (!found) break;
+        }
+        if (!keys.empty()) w.rec("sortedby", {}, {keys});
+    }
     for (const auto &d : ctx.drops)
         w.rec("drop", {}, {d.first, d.second});
     for (const auto &wmsg : ctx.warnings)
@@ -878,16 +1102,14 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         return true;
     };
 
+    OutputTransaction tx;
+    if (!reserve_output_transaction(dest, &tx, err)) return kRcEngine;
+
     if (partition_by.empty()) {
-        const std::string tmpdest = dest + ".parqit_tmp";
+        const std::string tmpdest = (tx.root / "new.parquet").u8string();
+        const std::string oldaside = (tx.root / "old.parquet").u8string();
         std::error_code ec2;
-        fs::remove(tmpdest, ec2);
         if (!run_copy(tmpdest, "")) {
-            /* STR2: drop the partial staging file — the partition branch
-             * already cleans up on a failed COPY; this one stranded a 0-byte
-             * <dest>.parqit_tmp orphan (the real target stays untouched). */
-            std::error_code ecf;
-            fs::remove(tmpdest, ecf);
             return kRcEngine;
         }
         /* GLOB-1a: read_parquet globs its argument; escape so the verify reads
@@ -901,9 +1123,7 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         /* IO-2: Windows rename() fails if the target exists, so we must clear it
          * first — but rename the old file ASIDE rather than deleting it, so a
          * crash or rename failure in the window never leaves no file at all. */
-        std::string oldaside = dest + ".parqit_old";
         if (exists) {
-            fs::remove(oldaside, ec2);
             std::error_code ecm;
             fs::rename(dest, oldaside, ecm);
             if (ecm) {
@@ -913,20 +1133,49 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             }
         }
         std::error_code ec4;
-        fs::rename(tmpdest, dest, ec4);
+        if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH"))
+            ec4 = std::make_error_code(std::errc::io_error);
+        else
+            fs::rename(tmpdest, dest, ec4);
         if (ec4) {
-            if (exists) { std::error_code ecb; fs::rename(oldaside, dest, ecb); }
+            std::error_code ecb;
+            if (exists) {
+                if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_ROLLBACK"))
+                    ecb = std::make_error_code(std::errc::io_error);
+                else
+                    fs::rename(oldaside, dest, ecb);
+            }
             fs::remove(tmpdest, ec2);
-            *err = "could not move temporary file onto " + dest + ": " + ec4.message();
+            *err = "could not move temporary file onto " + dest + ": " +
+                   ec4.message();
+            if (ecb) {
+                tx.retain_root = true;
+                *err += "; rollback also failed: the previous file was NOT "
+                        "deleted and is retained for recovery at " +
+                        oldaside + " (" + ecb.message() + ")";
+            }
             return kRcEngine;
         }
         if (exists) fs::remove(oldaside, ec2);
 #else
         std::error_code ec4;
-        fs::rename(tmpdest, dest, ec4); /* POSIX rename atomically replaces dest */
+        if (!replace) {
+            /* An atomic hard link is the portable no-clobber commit for a
+             * regular file: if another process created dest after the initial
+             * existence check, this fails instead of replacing it. */
+            fs::create_hard_link(tmpdest, dest, ec4);
+            if (!ec4) fs::remove(tmpdest, ec2);
+        } else {
+            fs::rename(tmpdest, dest, ec4); /* atomic replace on POSIX */
+        }
         if (ec4) {
-            *err = "could not move temporary file onto " + dest + ": " + ec4.message();
-            return kRcEngine;
+            *err = (!replace && fs::exists(dest)
+                        ? "file " + dest +
+                              " appeared while it was being written; refusing "
+                              "to replace it without replace"
+                        : "could not move temporary file onto " + dest + ": " +
+                              ec4.message());
+            return !replace && fs::exists(dest) ? kRcFileExists : kRcEngine;
         }
 #endif
     } else {
@@ -935,9 +1184,9 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             if (i) pby += ", ";
             pby += quote_ident(partition_by[i]);
         }
-        const std::string tmpdest = dest + ".parqit_tmp";
+        const std::string tmpdest = (tx.root / "new").u8string();
+        const std::string oldaside = (tx.root / "old").u8string();
         std::error_code ec2;
-        fs::remove_all(tmpdest, ec2);
         auto cleanup_tmp = [&]() {
             std::error_code ec3;
             fs::remove_all(tmpdest, ec3);
@@ -962,11 +1211,8 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
          * remove and the rename would otherwise leave NEITHER tree (ATOM-PART-1).
          * The aside copy is removed only after the swap succeeds, and restored
          * if the swap fails. */
-        std::string oldaside = dest + ".parqit_old";
         bool saved_aside = false;
         if (exists && replace) {
-            std::error_code ecc;
-            fs::remove_all(oldaside, ecc); /* clear any stale aside */
             std::error_code ecr;
             fs::rename(dest, oldaside, ecr);
             if (ecr) {
@@ -978,12 +1224,27 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             saved_aside = true;
         }
         std::error_code ec4;
-        fs::rename(tmpdest, dest, ec4);
+        if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH"))
+            ec4 = std::make_error_code(std::errc::io_error);
+        else
+            fs::rename(tmpdest, dest, ec4);
         if (ec4) {
-            if (saved_aside) { std::error_code ecb; fs::rename(oldaside, dest, ecb); }
+            std::error_code ecb;
+            if (saved_aside) {
+                if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_ROLLBACK"))
+                    ecb = std::make_error_code(std::errc::io_error);
+                else
+                    fs::rename(oldaside, dest, ecb);
+            }
             cleanup_tmp();
             *err = "could not move temporary partition tree onto " + dest +
                    ": " + ec4.message();
+            if (ecb) {
+                tx.retain_root = true;
+                *err += "; rollback also failed: the previous partition tree "
+                        "was NOT deleted and is retained for recovery at " +
+                        oldaside + " (" + ecb.message() + ")";
+            }
             return kRcEngine;
         }
         if (saved_aside) {
@@ -1242,7 +1503,17 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                 if (p.note_subms && v[off + r] % 1000 != 0 && subms_seen)
                     (*subms_seen)++;
                 long long ms = parqit::floordiv(v[off + r], 1000);
-                if (!store_num(r, static_cast<double>(ms + parqit::kEpochShiftMs)))
+                const long long stata_ms = ms + parqit::kEpochShiftMs;
+                const double stored = static_cast<double>(stata_ms);
+                if (static_cast<long long>(stored) != stata_ms) {
+                    *err = "column " + p.stata_name + " observation " +
+                           std::to_string(base + r + 1) +
+                           " has a timestamp millisecond count that is not "
+                           "exactly representable in Stata binary64; refusing "
+                           "to move the instant silently";
+                    return false;
+                }
+                if (!store_num(r, stored))
                     return false;
             }
         return true;
@@ -1616,12 +1887,46 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             nthreads, std::vector<long long>(k, 0));
         std::vector<std::thread> workers;
         workers.reserve(nthreads);
-        for (int t = 0; t < nthreads; t++)
-            workers.emplace_back(fill_worker, std::ref(fq), std::cref(prep.plans),
-                                 std::cref(regular_cols), std::cref(strl_cols),
-                                 strl_spill, std::ref(inf_locals[t]),
-                                 std::ref(nul_locals[t]), std::ref(rng_locals[t]),
-                                 std::ref(subms_locals[t]));
+        /* LIFE-018: std::thread's destructor terminates the process while it is
+         * joinable.  If creating worker N throws after workers 0..N-1 exist,
+         * signal those workers, join them, and return a normal loud error. */
+        try {
+            int fail_at = -1;
+            if (const char *inject =
+                    std::getenv("PARQIT_TEST_FAIL_THREAD_AT")) {
+                char *end = nullptr;
+                long v = std::strtol(inject, &end, 10);
+                if (end != inject && *end == '\0' && v >= 0 && v < nthreads)
+                    fail_at = static_cast<int>(v);
+            }
+            for (int t = 0; t < nthreads; t++) {
+                if (t == fail_at)
+                    throw std::runtime_error(
+                        "deterministic test injection at worker " +
+                        std::to_string(t));
+                workers.emplace_back(
+                    fill_worker, std::ref(fq), std::cref(prep.plans),
+                    std::cref(regular_cols), std::cref(strl_cols), strl_spill,
+                    std::ref(inf_locals[t]), std::ref(nul_locals[t]),
+                    std::ref(rng_locals[t]), std::ref(subms_locals[t]));
+            }
+        } catch (const std::exception &e) {
+            std::lock_guard<std::mutex> lk(fq.m);
+            fq.aborted = true;
+            fq.producer_done = true;
+            fq.err = std::string("could not create fill worker: ") + e.what();
+            rc = kRcEngine;
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(fq.m);
+            fq.aborted = true;
+            fq.producer_done = true;
+            fq.err = "could not create fill worker: unknown error";
+            rc = kRcEngine;
+        }
+        if (rc != 0) {
+            fq.cv_not_empty.notify_all();
+            fq.cv_not_full.notify_all();
+        }
 
         /* The producer runs under try/catch too: a throw here (e.g. a deque
          * push_back std::bad_alloc under memory pressure) must not unwind past the
@@ -1629,8 +1934,9 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
          * the same abort path the soft producer errors use, so the uniform join +
          * reconcile below turns it into a loud nonzero rc (the ado then drops the
          * staged frame, preserving the live data — parity with the serial path). */
-        try {
-            for (;;) {
+        if (rc == 0) {
+            try {
+                for (;;) {
                 {
                     std::lock_guard<std::mutex> lk(fq.m);
                     if (fq.aborted) break;
@@ -1686,15 +1992,17 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 }
                 fq.q.push_back(slot);
                 fq.cv_not_empty.notify_one();
+                }
+            } catch (const std::exception &e) {
+                std::lock_guard<std::mutex> lk(fq.m);
+                fq.aborted = true;
+                if (fq.err.empty())
+                    fq.err = std::string("read failed: ") + e.what();
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(fq.m);
+                fq.aborted = true;
+                if (fq.err.empty()) fq.err = "read failed: unknown error";
             }
-        } catch (const std::exception &e) {
-            std::lock_guard<std::mutex> lk(fq.m);
-            fq.aborted = true;
-            if (fq.err.empty()) fq.err = std::string("read failed: ") + e.what();
-        } catch (...) {
-            std::lock_guard<std::mutex> lk(fq.m);
-            fq.aborted = true;
-            if (fq.err.empty()) fq.err = "read failed: unknown error";
         }
 
         {
@@ -1913,6 +2221,19 @@ bool build_save_kv_metadata(const std::vector<SaveVar> &vars, const json &req,
         jvars.push_back(jv);
     }
     schema["vars"] = jvars;
+    schema["sortedby"] = json::array();
+    std::vector<std::string> sortedby;
+    if (!parqit::req_text_list(req, "sortedby", &sortedby, err, false))
+        return false;
+    if (!sortedby.empty()) {
+        std::set<std::string> live;
+        for (const auto &v : vars) live.insert(v.name);
+        for (const auto &key : sortedby)
+            if (live.count(key))
+                schema["sortedby"].push_back(key);
+            else
+                break;
+    }
 
     json vallabs = json::object();
     if (req.contains("vallabs") && req["vallabs"].is_array()) {
@@ -2800,6 +3121,22 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
          * those on the fully general path until they have a dedicated proof. */
         if (vars[i].source != vars[i].name) return 0;
         if (!direct_fmt_supported(vars[i].fcls)) return 0;
+    }
+    /* DATA-004: the fast unchanged-source path used a C-string expression and
+     * silently cut a binary strL at its first NUL, while both general writers
+     * reject the same cell.  Apply the identical fail-loud policy before any
+     * output transaction is started. */
+    for (int i = 0; i < k; i++) {
+        if (vars[i].st != StType::StrL) continue;
+        for (ST_int j = 1; j <= SF_nobs(); j++) {
+            if (SF_var_is_binary(i + 1, j)) {
+                cry("parqit save: " + vars[i].name + "[" +
+                    std::to_string(j) +
+                    "] contains binary data (binary strLs are not supported; "
+                    "the fast and general save paths both refuse it)");
+                return kRcUsage;
+            }
+        }
     }
     for (const auto &pv : partition_by) {
         bool found = false;

@@ -932,6 +932,58 @@ entry notes the conservative fallback if the assumption proves wrong.
     raw build-tree target. The exact collected file is then checked per platform:
     Linux is ELF64, stripped of ordinary symbol/debug sections, exports the two
     Stata entry points and has no runtime `libstdc++`/`libgcc_s`; macOS verifies
-    Mach-O plus exports after `strip -x`; Windows verifies PE/COFF plus exports.
-    These are packaging checks, not claims of cross-platform Stata runtime
-    coverage.
+    Mach-O plus exports after `strip -x`; Windows compiles the embedded DuckDB
+    with DLL export annotations disabled, applies the two-entry module-definition
+    file, and verifies PE/COFF plus the exact export set. These are packaging
+    checks, not claims of cross-platform Stata runtime coverage.
+77. **Every final output transaction proves ownership before cleanup
+    (2026-07-14, REL-001 / OUTPUT-XPROC-1).** A save atomically reserves the
+    sibling directory `<dest>.parqit_lock` and creates a same-filesystem staging
+    directory from the real PID, a process counter and 128 random bits. It may
+    recursively clean only that random directory; a pre-existing lock or any
+    historical `.parqit_tmp`/`.parqit_old` object blocks or survives the save.
+    A crash can intentionally leave a stale lock that requires explicit human
+    removal: fail-closed is preferable to guessing ownership and deleting a
+    live writer's state. `x02_output_xproc` pins exclusive publication with two
+    real Stata processes and equal-sized competing payloads.
+78. **Exact foreign numerics remain exact until the Stata boundary
+    (2026-07-14, DATA-002 / DATA-003 / TYPE-007).** `UBIGINT`, 128-bit integer
+    and DECIMAL keys stay in their physical DuckDB type through lazy verbs and
+    Parquet-to-Parquet save. Collect is the only operation that must enter
+    Stata's binary64 universe and retains the existing precision note. Numeric
+    expression tokens are first canonicalized through one locale-independent
+    binary64 parse, so `2^53+1` cannot acquire a precision that Stata never had;
+    explicit and untyped-double results are physically `DOUBLE` on every save
+    path.
+79. **A declared `parqit.*` metadata channel is restored as one validated unit
+    (2026-07-14, META-010/011/012/013).** Every file matched by a Parquet input
+    participates in equality, including files without any parqit keys. A
+    difference, malformed JSON or invalid top-level shape produces a warning
+    and skips the full channel, never a mixture of trustworthy and untrustworthy
+    fields. Duplicate physical-name provenance is positional. `sortedby` is a
+    valid ascending prefix only: direct/lazy saves persist it, projection may
+    truncate it, `gsort` does not claim it, and loads stably sort before marking
+    the data so native `by:` can trust the restored state.
+80. **Replace metadata never forces a value back into stale narrow storage
+    (2026-07-14, TYPE-007 and the PQ-AUD-003 non-regression).** Replaced integer
+    and string columns clear their old width/type intent and are re-sized from
+    the materialized result, preserving native byte→int, int→long and str#
+    promotion. A replaced FLOAT retains physical FLOAT only when the bind-probed
+    result family (integer or FLOAT) is range-safe; a DOUBLE/DECIMAL/wider result
+    is conservatively promoted to DOUBLE before save. Existing DOUBLE remains
+    DOUBLE. The selected FLOAT/DOUBLE cast is inserted into the lazy plan at the
+    `replace` commit boundary, so subsequent expressions see the stored value,
+    not a transient inferred integer/decimal. This keeps values lossless and
+    prevents Parquet physical type from contradicting `parqit.schema`.
+81. **Deterministic fault hooks are inert, bounded and fail-only
+    (2026-07-14, LIFE-018 / OUTPUT-XPROC-1).** The release binary recognises
+    `PARQIT_TEST_FAIL_THREAD_AT`, `PARQIT_TEST_HOLD_OUTPUT_LOCK_MS`,
+    `PARQIT_TEST_FAIL_OUTPUT_PUBLISH` and
+    `PARQIT_TEST_FAIL_OUTPUT_ROLLBACK` solely to drive otherwise unreachable
+    lifecycle and recovery regressions. They do not publish unverified data or
+    bypass validation: the first injects a normal worker-construction error,
+    the second only delays while the real lock is held (capped at 30 seconds),
+    and the final pair force loud publication/rollback failures. A double
+    failure deliberately retains the prior target under the recovery path named
+    in the error. With the variables absent (the production default), none of
+    these paths executes.

@@ -1,4 +1,4 @@
-*! version 0.1.21 14jul2026
+*! version 0.1.22 14jul2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -446,6 +446,13 @@ program define _parqit_load_core
                     capture label data `"`=substr(`"`dl'"', 1, 80)'"'
                 }
             }
+            if (`"`parqit_sortedby'"' != "") {
+                mata: st_local("sq_sortedby", _parqit_unhex(st_local("parqit_sortedby")))
+                capture sort `sq_sortedby', stable
+                if (_rc) {
+                    di as txt "note: saved sortedby metadata was not accepted by Stata; marker skipped"
+                }
+            }
         }
         local loadrc = _rc
     }
@@ -717,14 +724,16 @@ program define _parqit_rename
             di as err "parqit rename: oldlist and newlist must have the same (nonzero) length"
             exit 198
         }
-        * Renamed pairwise in order; the plugin refuses a new name that already
-        * exists, so an overlapping/cyclic rename fails loudly rather than
-        * corrupting (rename through an intermediate name for those).
-        forvalues k = 1/`nold' {
-            local o : word `k' of `oldlist'
-            local nn : word `k' of `newlist'
-            _parqit_rename_one `"`o'"' `"`nn'"'
+        foreach nn of local newlist {
+            confirm name `nn'
         }
+        _parqit_ensure_plugin
+        tempfile req
+        local _sq_oldlist `"`oldlist'"'
+        local _sq_newlist `"`newlist'"'
+        mata: _parqit_wr_rename_many("`req'")
+        capture noisily plugin call parqit_plugin, view_op `reqhex'
+        if (_rc) exit _rc
         exit
     }
     gettoken oldn 0 : 0, parse(" ")
@@ -1467,6 +1476,7 @@ program define _parqit_save, rclass
     local _sq_partition `"`partition_by'"'
     local _sq_chunk = `chunk'
     local _sq_dtalabel `: data label'
+    local _sq_sortedby `: sortedby'
     local _sq_direct = 0
     local _fast_nonce : char _dta[_parqit_fast_source_nonce]
     local _fast_global `"${PARQIT_FAST_SOURCE_NONCE}"'
@@ -2032,20 +2042,43 @@ program define _parqit_sql, rclass
     }
     if ("`name'" == "") local name "default"
     _parqit_ensure_plugin
+    plugin call parqit_plugin, view_alive
+    mata: st_local("sql_prev", _parqit_unhex(st_local("parqit_view_current")))
+    local sql_target "`name'"
+    if ("`clear'" != "") {
+        tempname sql_candidate
+        local name "`sql_candidate'"
+    }
     tempfile req
     local _sq_sql `"`q'"'
     local _sq_vname "`name'"
     mata: _parqit_wr_sql_request("`req'")
     capture noisily plugin call parqit_plugin, view_sql `reqhex'
     if (_rc) exit _rc
+    if ("`clear'" != "") {
+        capture noisily _parqit_collect, clear
+        local collect_rc = _rc
+        if (`collect_rc') {
+            mata: st_local("candhex", _parqit_hex(st_local("name")))
+            capture plugin call parqit_plugin, view_close `candhex'
+            if ("`sql_prev'" != "") {
+                mata: st_local("prevhex", _parqit_hex(st_local("sql_prev")))
+                capture plugin call parqit_plugin, view_switch `prevhex'
+            }
+            exit `collect_rc'
+        }
+        mata: st_local("candhex", _parqit_hex(st_local("name")))
+        mata: st_local("targethex", _parqit_hex(st_local("sql_target")))
+        capture noisily plugin call parqit_plugin, view_commit `candhex' `targethex'
+        if (_rc) exit _rc
+        return local view "`sql_target'"
+        return add
+        exit
+    }
     mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
     di as txt "(view " as res "`vname'" as txt " opened over the SQL result: " ///
         as res "`parqit_view_k'" as txt " columns)"
     return local view "`vname'"
-    if ("`clear'" != "") {
-        _parqit_collect, clear
-        return add
-    }
 end
 
 program define _parqit_query
@@ -2422,6 +2455,15 @@ void _parqit_wr_op_rename_request(string scalar req)
         _parqit_jtext("new", st_local("_sq_new")))))
 }
 
+void _parqit_wr_rename_many(string scalar req)
+{
+    _parqit_emit(req, _parqit_jobj((
+        _parqit_jtext("cmd", "view_op"),
+        _parqit_jtext("op", "rename_many"),
+        _parqit_jpair("old_names", _parqit_jlist(tokens(st_local("_sq_oldlist")))),
+        _parqit_jpair("new_names", _parqit_jlist(tokens(st_local("_sq_newlist")))))))
+}
+
 void _parqit_wr_op_sample_request(string scalar req)
 {
     _parqit_emit(req, _parqit_jobj((
@@ -2568,6 +2610,8 @@ void _parqit_wr_save_request(string scalar req)
     j = j + "," + _parqit_jtext("dest", st_local("_sq_dest"))
     j = j + "," + _parqit_jtext("tmpdir", st_global("c(tmpdir)"))
     j = j + "," + _parqit_jtext("dtalabel", st_local("_sq_dtalabel"))
+    j = j + "," + _parqit_jpair("sortedby",
+                              _parqit_jlist(tokens(st_local("_sq_sortedby"))))
     j = j + "," + _parqit_jpair("replace",
                               st_local("_sq_replace") == "1" ? "true" : "false")
     j = j + "," + _parqit_jtext("compression",
@@ -2900,6 +2944,9 @@ void _parqit_resp_decorate(string scalar resp)
         }
         else if (f[1] == "dlabel") {
             st_local("parqit_dtalabel", f[2])
+        }
+        else if (f[1] == "sortedby") {
+            st_local("parqit_sortedby", f[2])
         }
         else if (f[1] == "drop") {
             displayas("error")

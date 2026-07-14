@@ -212,8 +212,13 @@ bool load_req(const std::vector<std::string> &args, json *req, std::string *err)
  * floor to ms; DuckDB // truncates, so use the positive-modulus form) */
 std::string ts_ms_sql(const std::string &inner) {
     std::string us = "epoch_us(" + inner + ")";
-    return "((" + us + " - (((" + us + ") % 1000 + 1000) % 1000)) / 1000 + " +
-           std::to_string(parqit::kEpochShiftMs) + ")";
+    std::string ms = "((" + us + " - (((" + us + ") % 1000 + 1000) % 1000)) // "
+                     "1000 + " + std::to_string(parqit::kEpochShiftMs) + ")";
+    /* DATA-005: refuse an instant whose exact Stata millisecond count changes
+     * when represented as binary64.  The eager fill applies the same gate. */
+    return "(CASE WHEN CAST(CAST(" + ms + " AS DOUBLE) AS BIGINT) <> " + ms +
+           " THEN error('timestamp millisecond is not exactly representable "
+           "in Stata binary64') ELSE " + ms + " END)";
 }
 
 /* boundary cast for the lazy view: every column becomes a Stata-semantics
@@ -289,12 +294,14 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
     case DUCKDB_TYPE_UBIGINT:
     case DUCKDB_TYPE_HUGEINT:
     case DUCKDB_TYPE_UHUGEINT:
-        b.sql = "CAST(" + ref + " AS DOUBLE)";
-        b.note = "values beyond 2^53 round to the nearest double";
+        /* DATA-002: preserve foreign keys exactly throughout the lazy plan.
+         * Collect still passes through the eager type planner and emits its
+         * documented binary64 note; grouping and lazy save no longer lose low
+         * bits before analytical verbs. */
+        b.sql = ref;
         break;
     case DUCKDB_TYPE_DECIMAL:
-        b.sql = "CAST(" + ref + " AS DOUBLE)";
-        b.note = "decimal converted to double";
+        b.sql = ref;
         break;
     case DUCKDB_TYPE_DATE:
         b.sql = "(" + ref + " - DATE '1960-01-01')";
@@ -372,7 +379,8 @@ std::string compile_for_save(const View &v) {
         const ViewCol &c = cols[i];
         const std::string ref = quote_ident(c.name);
         std::string expr = ref;
-        switch (parqit::classify_format(c.fmt)) {
+        const parqit::FmtClass fcls = parqit::classify_format(c.fmt);
+        switch (fcls) {
         case parqit::FmtClass::Td:
             expr = "(DATE '1960-01-01' + CAST(floor((" + ref + ") + 0.5) AS INTEGER))";
             break;
@@ -407,7 +415,7 @@ std::string compile_for_save(const View &v) {
              * paths and never write a NaN/Inf or string NULL. Bounded integer
              * columns (coerce_storage already clamped them) cannot be special. */
             if (c.normalized) {
-                break; /* already boundary-normalized; keep raw ref */
+                expr = ref; /* already boundary-normalized */
             } else if (c.kind == 's') {
                 expr = "coalesce(" + ref + ", '')";
             } else {
@@ -420,6 +428,21 @@ std::string compile_for_save(const View &v) {
                 if (!bounded_int) expr = float_missing_guard(ref, ref);
             }
             break;
+        }
+        /* TYPE-007: FLOAT/DOUBLE storage intent is not recoverable from an
+         * integer-valued expression's inferred SQL type. Force those physical
+         * types so Parquet and KV agree. Replaced FLOAT survives only when the
+         * bind probe proved the result family is safely within float's range;
+         * otherwise cmd_view_op has already promoted its intent to DOUBLE.
+         * Narrow integer/string metadata is cleared by replace so native
+         * range/width promotion remains non-lossy. */
+        if (fcls == parqit::FmtClass::None && !c.meta_type.empty()) {
+            parqit::StType mt;
+            int mb = 0;
+            if (parqit::sttype_parse(c.meta_type, &mt, &mb) &&
+                (mt == parqit::StType::Float || mt == parqit::StType::Double))
+                expr = "CAST(" + expr + " AS " +
+                       parqit::duck_type_for(mt, parqit::FmtClass::None) + ")";
         }
         if (i) sel += ", ";
         sel += expr + " AS " + ref;
@@ -445,6 +468,7 @@ std::string view_kv_fragment(const View &v) {
         jvars.push_back(jv);
     }
     schema["vars"] = jvars;
+    schema["sortedby"] = v.sortedby_names();
     json vallabs = json::object();
     if (v.vallabs().is_object()) {
         for (const auto &l : v.vallabs().items())
@@ -724,6 +748,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     std::string sel;
     std::vector<ViewCol> cols;
     std::vector<std::string> warns, drops;
+    std::map<std::string, std::string> original_to_live;
     /* F8: the eager loader records a sanitised column's original file name in
      * `char var[src_name]`; carry the same provenance on the lazy path through
      * the view's chars, which already round-trip to collect and into the
@@ -745,19 +770,24 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         /* MISS-1: every boundary column is normalized — float/double specials
          * are nulled and string NULLs are folded to "" by boundary_for(). */
         vc.normalized = true;
+        const auto pn = meta_ctx.parquet_names.find(src_names[c]);
+        const std::string original_name =
+            pn == meta_ctx.parquet_names.end() ? src_names[c] : pn->second;
         const json *jm = nullptr;
-        auto it = meta_by_src.find(src_names[c]);
+        auto it = meta_by_src.find(original_name);
         if (it != meta_by_src.end()) jm = it->second;
         std::string mfmt = sget(jm, "fmt");
         if (!mfmt.empty()) vc.fmt = mfmt;
         vc.varlab = sget(jm, "varlab");
         vc.vallab = sget(jm, "vallab");
         vc.meta_type = sget(jm, "type");
-        if (renamed[c]) {
-            warns.push_back("column \"" + src_names[c] + "\" is " + vc.name +
+        if (renamed[c] || original_name != src_names[c]) {
+            warns.push_back("column \"" + original_name + "\" is " + vc.name +
                             " in the view");
-            vchars[vc.name]["src_name"] = src_names[c];
+            vchars[vc.name]["src_name"] = original_name;
         }
+        if (!original_to_live.count(original_name))
+            original_to_live[original_name] = vc.name;
         if (!sel.empty()) sel += ", ";
         sel += bounds[c].sql + " AS " + quote_ident(vc.name);
         cols.push_back(vc);
@@ -783,6 +813,16 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
                    meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
                    vchars,
                    meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc);
+    if (meta_ctx.meta.present && !meta_ctx.meta.sortedby.empty()) {
+        std::vector<std::string> restored;
+        for (const auto &key : meta_ctx.meta.sortedby) {
+            auto it = original_to_live.find(key);
+            if (it == original_to_live.end()) break;
+            restored.push_back(it->second);
+        }
+        if (!restored.empty())
+            candidate.sort(restored, std::vector<bool>(restored.size(), false));
+    }
     /* remember the backing Parquet paths: a later pure-passthrough collect
      * can size its columns from row-group statistics (the F2 metadata path
      * `parqit use` uses) instead of a redundant full scan. */
@@ -830,15 +870,74 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     std::string e;
-    if (op == "keep_vars") e = g_view_ref().keep_vars(req_list_or_empty(req, "names"));
-    else if (op == "drop_vars") e = g_view_ref().drop_vars(req_list_or_empty(req, "names"));
+    std::string replace_storage_name, replace_storage_type;
+    auto bind_and_commit = [&](View candidate) -> std::string {
+        duckdb_result probe;
+        std::string berr;
+        if (!Session::instance().query("SELECT * FROM (" +
+                                           candidate.compile(false) + ") LIMIT 0",
+                                       &probe, &berr))
+            return "view operation did not produce a valid typed plan: " + berr;
+        std::string committed_type = replace_storage_type;
+        if (!replace_storage_name.empty() && replace_storage_type == "float") {
+            bool range_safe = false;
+            const auto &cols = candidate.cols();
+            for (idx_t i = 0; i < duckdb_column_count(&probe) && i < cols.size(); i++) {
+                if (cols[i].name != replace_storage_name) continue;
+                duckdb_logical_type lt = duckdb_column_logical_type(&probe, i);
+                const duckdb_type id = duckdb_get_type_id(lt);
+                duckdb_destroy_logical_type(&lt);
+                switch (id) {
+                case DUCKDB_TYPE_TINYINT:
+                case DUCKDB_TYPE_SMALLINT:
+                case DUCKDB_TYPE_INTEGER:
+                case DUCKDB_TYPE_BIGINT:
+                case DUCKDB_TYPE_UTINYINT:
+                case DUCKDB_TYPE_USMALLINT:
+                case DUCKDB_TYPE_UINTEGER:
+                case DUCKDB_TYPE_UBIGINT:
+                case DUCKDB_TYPE_FLOAT:
+                    range_safe = true;
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+            if (!range_safe) committed_type = "double";
+        }
+        duckdb_destroy_result(&probe);
+        if (!replace_storage_name.empty()) {
+            std::string cerr = candidate.coerce_numeric_column(
+                replace_storage_name, committed_type);
+            if (!cerr.empty()) return cerr;
+            /* The cast is part of the operation, not merely save metadata:
+             * all later lazy verbs must see the same FLOAT/DOUBLE value Stata
+             * would already have stored at replace time (TYPE-007). */
+            if (!Session::instance().query("SELECT * FROM (" +
+                                               candidate.compile(false) +
+                                               ") LIMIT 0",
+                                           &probe, &berr))
+                return "view storage commit did not produce a valid typed plan: " +
+                       berr;
+            duckdb_destroy_result(&probe);
+        }
+        g_view_ref() = std::move(candidate);
+        return "";
+    };
+    /* Every public verb mutates an isolated copy.  Validation and a DuckDB
+     * bind probe must both succeed before the current view is replaced; this
+     * gives all operations the same strong rollback boundary as gen/replace. */
+    View candidate = g_view_ref();
+    if (op == "keep_vars") e = candidate.keep_vars(req_list_or_empty(req, "names"));
+    else if (op == "drop_vars") e = candidate.drop_vars(req_list_or_empty(req, "names"));
     else if (op == "keep_if" || op == "drop_if") {
         std::string ex;
         if (!parqit::req_text(req, "expr", &ex, &err)) {
             cry(err);
             return kRcUsage;
         }
-        e = g_view_ref().filter(ex, op == "drop_if", g_statamissing);
+        e = candidate.filter(ex, op == "drop_if", g_statamissing);
     } else if (op == "gen") {
         std::string name, type, ex, ifex;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -848,7 +947,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = g_view_ref().gen(name, type, ex, ifex, g_statamissing);
+        e = candidate.gen(name, type, ex, ifex, g_statamissing);
     } else if (op == "replace") {
         std::string name, ex, ifex;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -857,7 +956,17 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = g_view_ref().replace(name, ex, ifex, g_statamissing);
+        std::string old_meta;
+        for (const auto &c : g_view_ref().cols())
+            if (c.name == name) {
+                old_meta = c.meta_type;
+                break;
+            }
+        e = candidate.replace(name, ex, ifex, g_statamissing);
+        if (e.empty() && (old_meta == "float" || old_meta == "double")) {
+            replace_storage_name = name;
+            replace_storage_type = old_meta;
+        }
     } else if (op == "rename") {
         std::string a, b;
         if (!parqit::req_text(req, "old", &a, &err) ||
@@ -865,15 +974,21 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = g_view_ref().rename(a, b);
+        e = candidate.rename(a, b);
+    } else if (op == "rename_many") {
+        const std::vector<std::string> olds = req_list_or_empty(req, "old_names");
+        const std::vector<std::string> news = req_list_or_empty(req, "new_names");
+        /* Candidate assignment gives the public view a strong transaction
+         * boundary even if allocation fails while constructing the stage. */
+        e = candidate.rename_many(olds, news);
     } else if (op == "order") {
-        e = g_view_ref().reorder(req_list_or_empty(req, "names"));
+        e = candidate.reorder(req_list_or_empty(req, "names"));
     } else if (op == "sort") {
         std::vector<std::string> keys = req_list_or_empty(req, "keys");
         std::vector<bool> desc;
         if (req.contains("desc") && req["desc"].is_array())
             for (const auto &d : req["desc"]) desc.push_back(d.get<bool>());
-        e = g_view_ref().sort(keys, desc);
+        e = candidate.sort(keys, desc);
     } else if (op == "collapse") {
         std::vector<View::CollapseSpec> specs;
         if (req.contains("specs") && req["specs"].is_array()) {
@@ -889,19 +1004,19 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                 specs.push_back(sp);
             }
         }
-        e = g_view_ref().collapse(specs, req_list_or_empty(req, "by"));
+        e = candidate.collapse(specs, req_list_or_empty(req, "by"));
     } else if (op == "contract") {
         std::string freq;
         parqit::req_text(req, "freq", &freq, &err, false);
-        e = g_view_ref().contract(req_list_or_empty(req, "names"), freq);
+        e = candidate.contract(req_list_or_empty(req, "names"), freq);
     } else if (op == "dupdrop") {
-        e = g_view_ref().duplicates_drop(req_list_or_empty(req, "names"),
-                                   req.value("force", false));
+        e = candidate.duplicates_drop(req_list_or_empty(req, "names"),
+                                      req.value("force", false));
     } else if (op == "keep_in") {
-        e = g_view_ref().keep_in(req.value("f", 0LL), req.value("l", 0LL));
+        e = candidate.keep_in(req.value("f", 0LL), req.value("l", 0LL));
     } else if (op == "sample") {
-        e = g_view_ref().sample(req.value("amount", 0.0), req.value("count", false),
-                          req.value("seed", -1LL));
+        e = candidate.sample(req.value("amount", 0.0), req.value("count", false),
+                             req.value("seed", -1LL));
     } else if (op == "egen") {
         std::string name, fcn, ex, ty;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -911,12 +1026,13 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = g_view_ref().egen(name, fcn, ex, req_list_or_empty(req, "by"),
-                        g_statamissing, ty);
+        e = candidate.egen(name, fcn, ex, req_list_or_empty(req, "by"),
+                           g_statamissing, ty);
     } else {
         cry("parqit: unknown view operation '" + op + "'");
         return kRcUsage;
     }
+    if (e.empty()) e = bind_and_commit(std::move(candidate));
     if (!e.empty()) {
         cry("parqit: " + e);
         return kRcUsage;
@@ -1189,6 +1305,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     ctx.meta.vallabs = g_view_ref().vallabs();
     ctx.meta.chars = g_view_ref().chars();
     ctx.meta.dtalabel = g_view_ref().dtalabel();
+    ctx.meta.sortedby = g_view_ref().sortedby_names();
 
     parqit::ResponseWriter w;
     if (!w.open(respfile, &err)) {
@@ -1499,6 +1616,47 @@ ST_retcode cmd_view_switch(const std::vector<std::string> &args) {
     g_current = name;
     save_local("_parqit_view_k", std::to_string(it->second.cols().size()));
     save_local("_parqit_view_name", parqit::hex_encode(name));
+    return 0;
+}
+
+/* Atomically promote an already validated/materialised candidate view over a
+ * public target.  Used by `parqit sql ..., clear`: runtime execution errors are
+ * discovered while the candidate is isolated, so the previous view remains
+ * usable until collect has completed (ATOM-015). */
+ST_retcode cmd_view_commit(const std::vector<std::string> &args) {
+    std::string source, target;
+    if (args.size() < 3 || !parqit::hex_decode(args[1], source) ||
+        !parqit::hex_decode(args[2], target) || source.empty() || target.empty()) {
+        cry("parqit view commit: malformed candidate/target name");
+        return kRcUsage;
+    }
+    auto it = g_views.find(source);
+    if (it == g_views.end() || !it->second.live()) {
+        cry("parqit view commit: candidate view is no longer open");
+        return kRcUsage;
+    }
+    if (source == target) {
+        g_current = target;
+        return 0;
+    }
+
+    View candidate = std::move(it->second);
+    g_views.erase(it);
+    std::set<std::string> candidate_bridges;
+    auto bit = g_view_bridges.find(source);
+    if (bit != g_view_bridges.end()) {
+        candidate_bridges = std::move(bit->second);
+        g_view_bridges.erase(bit);
+    }
+    std::string cleanup_err;
+    if (!drop_owned(target, &cleanup_err))
+        cry("warning: parqit view commit: " + cleanup_err);
+    g_views[target] = std::move(candidate);
+    if (!candidate_bridges.empty())
+        g_view_bridges[target] = std::move(candidate_bridges);
+    g_current = target;
+    save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
+    save_local("_parqit_view_name", parqit::hex_encode(g_current));
     return 0;
 }
 

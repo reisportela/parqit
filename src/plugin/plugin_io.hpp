@@ -54,6 +54,7 @@ struct ParqitMeta {
     parqit::json vallabs;
     parqit::json chars;
     std::string dtalabel;
+    std::vector<std::string> sortedby;
 };
 
 struct PlanContext {

@@ -19,11 +19,11 @@ case "$PLATFORM" in
             die "ordinary .symtab is present (artifact was not stripped)"
         printf '%s\n' "$sections" | grep -Eq '[[:space:]]\.debug(_|[[:space:]])' && \
             die "debug sections are present (artifact was not stripped)"
-        symbols="$(readelf -Ws -W "$FILE_PATH")"
-        printf '%s\n' "$symbols" | grep -Eq '[[:space:]]stata_call$' || \
-            die "required exported symbol stata_call is missing"
-        printf '%s\n' "$symbols" | grep -Eq '[[:space:]]pginit$' || \
-            die "required exported symbol pginit is missing"
+        exports="$(readelf --dyn-syms -W "$FILE_PATH" | \
+            awk '$5 == "GLOBAL" && $7 != "UND" {sub(/@.*/, "", $8); print $8}' | \
+            sort -u)"
+        [ "$exports" = "$(printf '%s\n' pginit stata_call | sort)" ] || \
+            die "export table must contain exactly pginit and stata_call (got: $(printf '%s' "$exports" | tr '\n' ' '))"
         if readelf -d -W "$FILE_PATH" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s)'; then
             die "Linux artifact dynamically links libstdc++ or libgcc_s"
         fi
@@ -35,20 +35,19 @@ case "$PLATFORM" in
         # Stata needs remain.  Mach-O keeps an export symbol table by design, so
         # the Linux .symtab rule is intentionally not asserted here.
         symbols="$(nm -gj "$FILE_PATH")"
-        printf '%s\n' "$symbols" | grep -qx '_stata_call' || \
-            die "required exported symbol _stata_call is missing"
-        printf '%s\n' "$symbols" | grep -qx '_pginit' || \
-            die "required exported symbol _pginit is missing"
+        exports="$(printf '%s\n' "$symbols" | sort -u)"
+        [ "$exports" = "$(printf '%s\n' _pginit _stata_call | sort)" ] || \
+            die "export table must contain exactly _pginit and _stata_call"
         ;;
     windows)
         command -v objdump >/dev/null 2>&1 || die "objdump is required"
         objdump -f "$FILE_PATH" | grep -Eqi 'pei-x86-64|pe-x86-64' || \
             die "artifact is not a 64-bit PE/COFF plugin"
-        exports="$(objdump -p "$FILE_PATH")"
-        printf '%s\n' "$exports" | grep -Eq '[[:space:]]stata_call$' || \
-            die "required exported symbol stata_call is missing"
-        printf '%s\n' "$exports" | grep -Eq '[[:space:]]pginit$' || \
-            die "required exported symbol pginit is missing"
+        exports="$(LC_ALL=C objdump -p "$FILE_PATH" | \
+            awk '/\[Ordinal\/Name Pointer\] Table/{inside=1; next} \
+                 inside && $1 ~ /^\[/ {print $NF}' | sort -u)"
+        [ "$exports" = "$(printf '%s\n' pginit stata_call | sort)" ] || \
+            die "PE export table must contain exactly pginit and stata_call"
         # MSVC Release output is the distributable binary; there is no Unix
         # strip step or ELF section contract to apply on this platform.
         ;;

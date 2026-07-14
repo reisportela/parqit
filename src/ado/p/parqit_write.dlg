@@ -1,7 +1,7 @@
 /*
   parqit — run the pipeline: collect into memory, or save to Parquet
 
-*!  VERSION 0.1.21  14jul2026
+*!  VERSION 0.1.22  14jul2026
 
   Launch with:  db parqit_write     (installed on the menu by: parqit menu)
 */

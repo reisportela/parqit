@@ -7,7 +7,7 @@
 #   bash tests/release_lint.sh
 #
 # Checks, all of which must hold before tagging a release:
-#   * project version == ado/help/dialog banners == README Status == CITATION.cff
+#   * project version == ado/help/dialog banners == README/CLAUDE == CITATION.cff
 #   * release dates agree across banners, package manifest and CITATION.cff
 #   * CHANGELOG has exactly one "## [Unreleased]" heading
 #   * the newest dated CHANGELOG section matches the project version
@@ -34,6 +34,8 @@ sthlp_v=$(printf '%s' "$sthlp_line" | grep -oE "version $semver" | grep -oE "$se
 sthlp_d=$(printf '%s' "$sthlp_line" | grep -oE "$banner_date")
 
 readme_v=$(grep -oE "Status:\*\* v$semver" "$REPO/README.md" | grep -oE "$semver" | head -1)
+claude_v=$(grep -oE "Current state: \*\*v$semver" "$REPO/CLAUDE.md" \
+              | grep -oE "$semver" | head -1)
 
 pkg_d=$(grep -oE 'Distribution-Date: [0-9]{8}' "$REPO/src/ado/p/parqit.pkg" \
           | grep -oE '[0-9]{8}' | head -1)
@@ -63,8 +65,10 @@ banner_to_iso() {
 [ -n "$ado_v" ]    || err "could not read version from parqit.ado banner"
 [ -n "$sthlp_v" ]  || err "could not read version from parqit.sthlp banner"
 [ -n "$readme_v" ] || err "could not read **Status:** vX.Y.Z from README.md"
+[ -n "$claude_v" ] || err "could not read Current state: **vX.Y.Z from CLAUDE.md"
 
-for pair in "ado=$ado_v" "sthlp=$sthlp_v" "readme=$readme_v" "citation=$cff_v"; do
+for pair in "ado=$ado_v" "sthlp=$sthlp_v" "readme=$readme_v" \
+            "claude=$claude_v" "citation=$cff_v"; do
     name=${pair%%=*}; val=${pair#*=}
     [ "$val" = "$cmake_v" ] || err "$name version $val != project version $cmake_v"
 done

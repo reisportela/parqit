@@ -6,6 +6,92 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-07-14
+
+This release closes every S0/S1 blocker and every confirmed atomicity,
+lifecycle, Unicode and packaging defect from the 14 July adversarial
+data-reliability audit. It adds independent physical-payload oracles and a
+two-process output-publication gate before declaring the release GO-GO.
+
+### Fixed
+- **Output publication now has exclusive ownership (REL-001).** Saves reserve
+  an atomic per-destination lock and use a 128-bit-random, package-owned sibling
+  transaction directory on the same filesystem. Cleanup touches only objects
+  created by that transaction; pre-existing `.parqit_tmp`, `.parqit_old` or
+  lock sentinels are never deleted. Flat and partitioned replacement retain the
+  prior target until the verified new output can be committed. If publication
+  and rollback both fail, automatic cleanup retains the previous payload under
+  the exact recovery path reported in the error instead of deleting it.
+- **Foreign exact keys stay exact inside the lazy plan (DATA-002).** `UBIGINT`,
+  `HUGEINT`, `UHUGEINT` and `DECIMAL` are no longer cast to binary64 before
+  grouping, joins or saves. Adjacent keys above `2^53` remain distinct; only a
+  final collect applies Stata's unavoidable numeric boundary and existing loud
+  precision note.
+- **Numeric literals and materializers agree at the binary64 boundary
+  (DATA-003 / TYPE-007 / TYPE-008).** Decimal tokens are canonicalized through
+  Stata's double value, untyped numeric `gen` is consistently `double`, and an
+  explicit/carried double writes physical Parquet `DOUBLE` on both direct and
+  lazy paths. FLOAT/DOUBLE replacement storage is committed inside the lazy
+  plan before any later verb can observe a transient integer/decimal type;
+  replaced narrow columns may still promote losslessly instead of being cast
+  back into stale storage.
+- **Binary `strL` values can no longer be truncated by the unchanged-source
+  fast writer (DATA-004).** Fast and general direct saves both refuse a NUL-
+  bearing binary `strL` before creating an output; a Parquet-to-Parquet lazy
+  save remains byte-preserving.
+- **Unrepresentable timestamp milliseconds are refused atomically
+  (DATA-005).** Eager fill, lazy collect and lazy save all test the exact integer
+  millisecond after epoch conversion before any binary64 cast. Sub-millisecond
+  handling remains unchanged.
+- **Deferred sort state is consumed at the operation that invalidates it
+  (SEM-006).** Replacing a sort key first bakes the old physical order and
+  truncates `sortedby`; append concatenates the sorted master with using data
+  and clears the marker instead of globally re-sorting the union.
+- **Temporal literals now match Stata's accepted grammar (DATE-009).** Years
+  below 0100 and clock seconds with more than millisecond precision fail at the
+  originating command rather than rolling into another instant.
+- **Metadata restoration is all-or-nothing across a file set
+  (META-010/011).** The reader includes every matched file, including files with
+  no `parqit.*` keys, and warns then skips the full channel when keys differ,
+  JSON is malformed, or a top-level metadata type is invalid.
+- **Name provenance and sort metadata round-trip (META-012/013).** Lazy views
+  carry DuckDB's positional duplicate-name recovery into `char[src_name]`;
+  direct save, lazy save, eager load and collect persist and restore a valid
+  `sortedby` prefix, so native `by:` works without a redundant sort.
+- **View mutations use validate-then-commit boundaries (ATOM-014/015/016).** A
+  group rename validates all pairs and supports cycles in one projection;
+  `sql ..., clear` materializes an isolated candidate before replacing the
+  public view; generated/replaced expressions are bind-probed and string
+  functions reject numeric arguments immediately.
+- **Unicode names follow code points and Stata-valid categories (PORT-017).**
+  Sanitization no longer accepts arbitrary high bytes or truncates at 32 bytes:
+  it preserves valid Unicode letters up to 32 characters and replaces invalid
+  initials such as emoji/combining marks deterministically.
+- **Partial worker creation cannot terminate Stata (LIFE-018).** Thread
+  construction is covered by the same abort/join discipline as producer and
+  fill failures; a deterministic fault-injection regression proves the process
+  and in-memory dataset survive.
+
+### Packaging
+- **Windows exports exactly the Stata ABI (PKG-019).** The MSVC target consumes
+  a module-definition file exporting only `pginit` and `stata_call`, while the
+  embedded DuckDB is compiled in static mode with its DLL export annotations
+  disabled. The staged artifact verifier now requires exact export-set equality
+  on Linux, macOS and Windows rather than checking presence only.
+
+### Documentation
+- **The `_n`/`_N` surface is stated precisely (DOC-020).** They are supported
+  in keep/drop filters and the main `gen` expression, but not yet in `replace`
+  or a `gen ... if` qualifier; unsupported forms fail without changing the
+  view.
+
+### Tests
+- Added `v59_reliability_boundaries`, `v60_semantics_metadata_atomicity` and
+  `x02_output_xproc`. Together they pin all 20 audit findings with Stata twins,
+  PyArrow physical schema/value checks, malformed/partial metadata fixtures,
+  filesystem sentinels, deterministic publication/rollback and thread failures,
+  and two concurrent Stata writers contending for one destination.
+
 ## [0.1.21] — 2026-07-14
 
 This release hardens lazy bridge ownership and multi-process isolation, makes

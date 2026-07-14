@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.21 LANGUAGES C CXX)
+project(parqit VERSION 0.1.22 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,15 @@ set(BUILD_SHELL FALSE CACHE BOOL "" FORCE)
 set(BUILD_UNITTESTS FALSE CACHE BOOL "" FORCE)
 set(ENABLE_EXTENSION_AUTOLOADING FALSE CACHE BOOL "" FORCE)
 set(ENABLE_EXTENSION_AUTOINSTALL FALSE CACHE BOOL "" FORCE)
+if(WIN32)
+    # DuckDB defaults EXPORT_DLL_SYMBOLS=ON even when its static archives are
+    # embedded in another DLL.  That annotates its public API with dllexport;
+    # a module-definition file can add our ABI entries but cannot subtract
+    # those annotations.  Build the dependency in its documented static mode
+    # so plugin.def is the sole export surface (PKG-019).
+    set(EXPORT_DLL_SYMBOLS FALSE CACHE BOOL "" FORCE)
+    add_compile_definitions(DUCKDB_STATIC_BUILD)
+endif()
 # The release tarball has no .git: tell DuckDB its own version explicitly so
 # version()/duckdb_library_version() report the pinned release, not v0.0.1.
 set(OVERRIDE_GIT_DESCRIBE "v${PARQIT_DUCKDB_VERSION}-0-g0000000000" CACHE STRING "" FORCE)
@@ -59,6 +68,7 @@ FetchContent_Declare(duckdb
 )
 FetchContent_MakeAvailable(duckdb)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
+set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 
 # ---------------------------------------------------------------------------
 # Engine: DuckDB session, manifest, type map, SQL builder. No Stata API here,
@@ -77,6 +87,7 @@ add_library(parqit_engine STATIC ${PARQIT_ENGINE_SOURCES})
 target_include_directories(parqit_engine PUBLIC
     src
     "${PARQIT_DUCKDB_INCLUDE}"
+    "${PARQIT_UTF8PROC_INCLUDE}"
     "${PARQIT_VENDOR_DIR}/arrow"
     "${PARQIT_VENDOR_DIR}/json"
 )
@@ -114,6 +125,11 @@ add_library(parqit_plugin SHARED
     src/plugin/plugin_view.cpp
     "${PARQIT_VENDOR_DIR}/stata/stplugin.c"
 )
+if(WIN32)
+    # MSVC otherwise auto-exports thousands of statically linked DuckDB/C++
+    # symbols.  Stata's ABI needs exactly these two entry points.
+    target_sources(parqit_plugin PRIVATE src/plugin/plugin.def)
+endif()
 target_include_directories(parqit_plugin PRIVATE
     src
     "${PARQIT_VENDOR_DIR}/stata"

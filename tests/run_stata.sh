@@ -73,6 +73,20 @@ if [ -z "$FILTER" ] || [[ "$xproc_base" == *"$FILTER"* ]]; then
     logs+=("$xproc_log")
 fi
 
+# Output publication has a separate cross-process ownership contract: exactly
+# one writer may own a destination, and the loser must not touch the winner's
+# staging or payload. The purpose-built regression deterministically holds the
+# real production lock while the second licensed Stata process contends.
+xproc_base="x02_output_xproc"
+if [ -z "$FILTER" ] || [[ "$xproc_base" == *"$FILTER"* ]]; then
+    selected=$((selected + 1))
+    echo "running concurrent/$xproc_base ..."
+    xproc_log="$RUNDIR/$xproc_base.log"
+    TMPDIR="$RUNDIR" STATA="$STATA" BUILD_DIR="$BUILD_DIR" \
+        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1 || true
+    logs+=("$xproc_log")
+fi
+
 if [ "$selected" -eq 0 ]; then
     echo "error: no Stata tests matched filter '$FILTER'" >&2
     echo "logs in $RUNDIR"
