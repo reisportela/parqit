@@ -34,10 +34,14 @@ case "$PLATFORM" in
         # CMake uses `strip -x`: local symbols disappear, while the two globals
         # Stata needs remain.  Mach-O keeps an export symbol table by design, so
         # the Linux .symtab rule is intentionally not asserted here.
-        symbols="$(nm -gj "$FILE_PATH")"
+        # Apple nm's -g output includes undefined imports as well as symbols
+        # defined by the plugin.  -U suppresses those imports, so this checks
+        # the actual exported ABI surface rather than rejecting every normal
+        # dependency on libc/libc++.
+        symbols="$(nm -gjU "$FILE_PATH")"
         exports="$(printf '%s\n' "$symbols" | sort -u)"
         [ "$exports" = "$(printf '%s\n' _pginit _stata_call | sort)" ] || \
-            die "export table must contain exactly _pginit and _stata_call"
+            die "export table must contain exactly _pginit and _stata_call (got: $(printf '%s' "$exports" | tr '\n' ' '))"
         ;;
     windows)
         command -v objdump >/dev/null 2>&1 || die "objdump is required"
