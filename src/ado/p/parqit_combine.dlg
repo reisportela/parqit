@@ -1,7 +1,7 @@
 /*
   parqit — combine the open view with a disk file or another view (lazy)
 
-*!  VERSION 0.1.20  10jul2026
+*!  VERSION 0.1.21  14jul2026
 
   Launch with:  db parqit_combine     (installed on the menu by: parqit menu)
   The using side may be Parquet, a glob, a Hive directory, CSV, dta or Excel
@@ -126,7 +126,6 @@ BEGIN
 	"1:1"
 	"m:1"
 	"1:m"
-	"m:m"
 END
 
 PROGRAM pq_show_vars

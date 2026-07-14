@@ -1,7 +1,7 @@
 /*
   parqit — filter the open view's observations (lazy)
 
-*!  VERSION 0.1.20  10jul2026
+*!  VERSION 0.1.21  14jul2026
 
   Launch with:  db parqit_filter     (installed on the menu by: parqit menu)
   The Create... button opens Stata's expression builder, including the date

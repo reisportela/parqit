@@ -4,6 +4,7 @@
 #
 #   bash tests/run_stata.sh                 # all suites
 #   bash tests/run_stata.sh m0_smoke        # by name fragment
+#   bash tests/run_stata.sh x01_bridge_xproc # two concurrent Stata processes
 #   STATA=... BUILD_DIR=... bash tests/run_stata.sh
 set -u
 
@@ -56,6 +57,21 @@ for suite in integration verify_suite roundtrip; do
         logs+=("$RUNDIR/$base.log")
     done
 done
+
+# Product-level bridge names must also survive two Stata processes sharing one
+# TMPDIR.  This cannot be expressed as one .do-file: the purpose-built wrapper
+# coordinates two licensed batch sessions, inspects both logs and cleans its
+# runner-owned scratch.  GitHub-hosted CI never calls this Stata runner, so the
+# gate does not introduce a license requirement there.
+xproc_base="x01_bridge_xproc"
+if [ -z "$FILTER" ] || [[ "$xproc_base" == *"$FILTER"* ]]; then
+    selected=$((selected + 1))
+    echo "running concurrent/$xproc_base ..."
+    xproc_log="$RUNDIR/$xproc_base.log"
+    TMPDIR="$RUNDIR" STATA="$STATA" BUILD_DIR="$BUILD_DIR" \
+        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1 || true
+    logs+=("$xproc_log")
+fi
 
 if [ "$selected" -eq 0 ]; then
     echo "error: no Stata tests matched filter '$FILTER'" >&2

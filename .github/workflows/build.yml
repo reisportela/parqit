@@ -55,7 +55,7 @@ jobs:
           # without it the CMake probe falls through to a DYNAMIC libstdc++ link
           # and the shipped .so fails to dlopen on older HPC nodes.
           dnf -y install gcc-toolset-12 gcc-toolset-12-libstdc++-devel \
-                         binutils git cmake make python3 zip
+                         binutils file git cmake make python3 zip
           echo "/opt/rh/gcc-toolset-12/root/usr/bin" >> $GITHUB_PATH
 
       - uses: actions/checkout@v4
@@ -66,20 +66,6 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} -j 4
 
-      - name: Verify Linux plugin self-containment
-        if: matrix.label == 'linux-x86_64'
-        shell: bash
-        run: |
-          # The HPC promise: no libstdc++/libgcc_s runtime dependency. Fail the
-          # release build (not just warn) if the shipped binary needs either.
-          f=$(find build -name parqit.plugin | head -1)
-          echo "checking $f"; readelf -d "$f" | grep NEEDED || true
-          if readelf -d "$f" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s)'; then
-            echo "ERROR: shipped plugin dynamically links libstdc++/libgcc_s" >&2
-            exit 1
-          fi
-          echo "OK: no libstdc++/libgcc_s NEEDED entry"
-
       - name: Unit tests
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -C Release
 
@@ -87,8 +73,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp build/${{ matrix.preset }}/parqit.plugin out/parqit.plugin 2>/dev/null || \
-          cp build/${{ matrix.preset }}/Release/parqit.plugin out/parqit.plugin
+          # CMake's repo-local install surface is the distribution surface:
+          # Unix builds have already applied the platform strip command here;
+          # Windows has copied the proper MSVC Release target here.  Never
+          # bypass it by uploading the raw build-tree target.
+          cp ado/plus/p/parqit.plugin out/parqit.plugin
+
+      - name: Verify exact collected plugin
+        shell: bash
+        run: |
+          case "${{ matrix.label }}" in
+            linux-x86_64)   platform=linux ;;
+            macos-*)        platform=macos ;;
+            windows-x86_64) platform=windows ;;
+          esac
+          bash tests/verify_collected_plugin.sh out/parqit.plugin "$platform"
 
       - uses: actions/upload-artifact@v4
         with:

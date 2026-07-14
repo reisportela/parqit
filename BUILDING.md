@@ -76,12 +76,21 @@ suites run on a licensed machine:
 ```bash
 bash tests/run_stata.sh                # everything, prints a verdict summary
 STATA=/usr/local/stata/stata-mp bash tests/run_stata.sh m0_smoke
+STATA=stata-mp BUILD_DIR="$PWD/build/dev" \
+  bash tests/run_stata.sh x01_bridge_xproc  # two Stata processes, one TMPDIR
 ```
 
 Each `.do` test is self-contained, generates its own data, prints a final
 `VERDICT(...): PASS/FAIL` line, and where it checks on-disk payloads it does
 so with an independent oracle (pyarrow via Stata's Python, or the duckdb
 CLI) — never with parqit alone.
+
+The `x01_bridge_xproc` gate is a purpose-built wrapper rather than a single
+do-file. It starts two licensed Stata processes with the same temporary
+directory (including spaces and Unicode), coordinates them with marker files,
+checks both logs and bridge paths, and removes only its own scratch. The full
+local runner includes this gate; GitHub-hosted C++ CI does not provide Stata
+runtime coverage.
 
 ## Release packaging
 
@@ -93,3 +102,20 @@ publishes one net-installable zip per platform plus
 plugins needed for direct `net install` from the GitHub release URL. macOS
 Intel is intentionally omitted until a reliable hosted runner is available,
 as documented in the README and the workflow matrix.
+
+The upload workflow collects `ado/plus/p/parqit.plugin`, the repo-local
+distribution surface produced by CMake, rather than the raw
+`build/<preset>/parqit.plugin`. On Unix that staged copy has passed the
+platform strip command; on Windows it is the MSVC Release binary. Immediately
+after collection, the workflow verifies the exact `out/parqit.plugin` it will
+upload:
+
+```bash
+bash tests/verify_collected_plugin.sh out/parqit.plugin linux   # or macos/windows
+```
+
+The Linux check requires ELF64, exported `stata_call`/`pginit`, no ordinary
+`.symtab` or debug sections, and no runtime `libstdc++`/`libgcc_s` dependency.
+The macOS check recognises Mach-O and the required exports after `strip -x`;
+the Windows check recognises PE/COFF and the required exports. Those structural
+checks do not substitute for running Stata on each platform.

@@ -907,3 +907,31 @@ entry notes the conservative fallback if the assumption proves wrong.
     fixture for safe direct runs. Concurrent-unit and direct-fixture repros plus
     the runner CTest shell case pin these invariants. Literal temp paths embedded
     only as request payload examples remain literal by design.
+74. **Persistent adapter and `open _data` bridges are atomically reserved and
+    registry-owned (2026-07-14, BRIDGE-XPROC-1 / BRIDGE-LIFETIME-1;
+    supersedes the naming and global-sweep details in #31/#41).** StataNow may
+    expose empty `c(pid)` and `c(processid)`, so the plugin creates a private
+    directory using the real OS PID, an operation counter and 128 random bits;
+    atomic directory creation is the final collision arbiter. A path starts
+    pending, can be claimed only if it is an input of the successful operation,
+    and is reference-counted across every view whose compiled plan depends on
+    it. Failed operations discard their own pending paths, replacement/close
+    releases the old plan, and `close _all` sweeps only paths proven by the
+    plugin registry to be package-owned. Unknown user paths are never deletion
+    candidates. The `x01_bridge_xproc` licensed-Stata gate pins the cross-process
+    contract with one shared temp directory containing spaces and Unicode.
+75. **Public lazy `merge m:m` is refused before side effects (2026-07-14,
+    MM-ORDER-1; supersedes #22/#51/#72 for the public lazy command).** Native
+    sequential pairing depends on each input's physical within-key order, which
+    the lazy plan does not preserve. The stable rc is 198, and refusal occurs
+    before resolving/importing the using side or mutating the current view.
+    `parqit joinby` is the Cartesian alternative; `parqit mergein m:m` remains
+    the deliberate native-order escape hatch and is tested against Stata.
+76. **The release upload source is the CMake-maintained distribution surface
+    (2026-07-14, DIST-STRIP-1).** CI collects `ado/plus/p/parqit.plugin`, not the
+    raw build-tree target. The exact collected file is then checked per platform:
+    Linux is ELF64, stripped of ordinary symbol/debug sections, exports the two
+    Stata entry points and has no runtime `libstdc++`/`libgcc_s`; macOS verifies
+    Mach-O plus exports after `strip -x`; Windows verifies PE/COFF plus exports.
+    These are packaging checks, not claims of cross-platform Stata runtime
+    coverage.

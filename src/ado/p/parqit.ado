@@ -1,4 +1,4 @@
-*! version 0.1.20 10jul2026
+*! version 0.1.21 14jul2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -202,17 +202,41 @@ program define _parqit_tip
         as txt `"{bf:global PARQIT_NOTIPS 1} mutes these)"'
 end
 
+* Persistent bridges must outlive Stata's tempfile lifecycle while a lazy view
+* references them.  The plugin atomically reserves a private directory using
+* the real OS PID, an operation counter and a strong nonce; it also keeps the
+* ownership token, so only package-created paths can ever be erased here.
+program define _parqit_bridge_new, rclass
+    version 16.0
+    args kind
+    _parqit_ensure_plugin
+    mata: st_local("_bridge_tmphex", _parqit_hex(st_global("c(tmpdir)")))
+    mata: st_local("_bridge_kindhex", _parqit_hex(st_local("kind")))
+    capture noisily plugin call parqit_plugin, bridge_new `_bridge_tmphex' `_bridge_kindhex'
+    if (_rc) exit _rc
+    mata: st_local("bridge", _parqit_unhex(st_local("parqit_bridge")))
+    return local bridge `"`bridge'"'
+end
+
+program define _parqit_bridge_discard
+    version 16.0
+    args bridge
+    if (`"`bridge'"' == "") exit
+    _parqit_ensure_plugin
+    mata: st_local("_bridge_hex", _parqit_hex(st_local("bridge")))
+    plugin call parqit_plugin, bridge_discard `_bridge_hex'
+end
+
 program define _parqit_import_to_bridge, rclass
     version 16.0
     args kind                                /* dta | excel | csv */
     local src `"${PARQIT_RS_IN}"'
-    _parqit_ensure_plugin
-    if ("${PARQIT_IMPORT_SEQ}" == "") global PARQIT_IMPORT_SEQ = 0
-    global PARQIT_IMPORT_SEQ = ${PARQIT_IMPORT_SEQ} + 1
-    local bridge `"`c(tmpdir)'/_parqit_imp_`c(pid)'_${PARQIT_IMPORT_SEQ}.parquet"'
+    _parqit_bridge_new import
+    local bridge `"`r(bridge)'"'
     tempname fr
-    frame create `fr'
-    frame `fr' {
+    capture noisily frame create `fr'
+    local rc = _rc
+    if (!`rc') capture noisily frame `fr' {
         if ("`kind'" == "dta")        use `"`src'"', clear
         else if ("`kind'" == "excel") import excel `"`src'"', firstrow clear
         else                          import delimited `"`src'"', clear
@@ -222,9 +246,16 @@ program define _parqit_import_to_bridge, rclass
         }
         parqit save `"`bridge'"', replace data
     }
-    frame drop `fr'
-    * track for cleanup at `parqit close _all`
-    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `"`bridge'"'"'
+    if (!`rc') local rc = _rc
+    capture frame drop `fr'
+    local drop_rc = _rc
+    if (!`rc' & `drop_rc') local rc = `drop_rc'
+    if (`rc') {
+        * The import/save error is authoritative; cleanup is best-effort and
+        * must never replace that original return code.
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
     return local bridge `"`bridge'"'
 end
 
@@ -280,6 +311,10 @@ program define _parqit_use, rclass
     }
     local _sq_relaxed = ("`relaxed'" != "")
     _parqit_ensure_plugin
+    if ("`clear'" != "" & "`name'" != "") {
+        di as err "parqit use: name() applies to lazy views; omit clear"
+        exit 198
+    }
 
     * resolve the input: parquet/csv scan in place; dta/xls/xlsx -> Parquet
     * bridge (the working dataset is left untouched)
@@ -296,23 +331,27 @@ program define _parqit_use, rclass
         local _sq_file `"`using'"'
         local _sq_namelist `"`namelist'"'
         local _sq_vname "`name'"
-        * a dta/xls/xlsx bridge is owned by this view: erased on close/replace
-        if (`"`_sq_bridge'"' != "") local owned "owned"
-        local _sq_owned = ("`owned'" != "")
+        * A dta/xls/xlsx bridge, or the reserved open-data path passed through
+        * the internal owned option, transfers its plugin-issued token to this
+        * view only after view_open succeeds.
+        local _sq_owned_file ""
+        if (`"`_sq_bridge'"' != "") local _sq_owned_file `"`_sq_bridge'"'
+        else if ("`owned'" != "")   local _sq_owned_file `"`using'"'
         mata: _parqit_wr_view_open_request("`req'")
         capture noisily plugin call parqit_plugin, view_open `reqhex'
-        if (_rc) exit _rc
+        local rc = _rc
+        if (`rc') {
+            capture _parqit_bridge_discard `"`_sq_owned_file'"'
+            exit `rc'
+        }
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
             as res `"`using'"' as txt ": " as res "`parqit_view_k'" ///
             as txt " columns; nothing read — use {bf:parqit collect} or {bf:parqit save})"
         return scalar k = `parqit_view_k'
         return local view "`vname'"
+        if (`"`_sq_owned_file'"' != "") return local bridge `"`_sq_owned_file'"'
         exit
-    }
-    if ("`name'" != "") {
-        di as err "parqit use: name() applies to lazy views; omit clear"
-        exit 198
     }
 
     * materialise now; open views are untouched (a plain read is just a read)
@@ -322,10 +361,19 @@ program define _parqit_use, rclass
     local _sq_namelist `"`namelist'"'
     mata: _parqit_wr_use_request("`req'", "`resp'", "`strl'")
     capture noisily plugin call parqit_plugin, use_prepare `reqhex'
-    if (_rc) exit _rc
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`_sq_bridge'"'
+        exit `rc'
+    }
 
-    _parqit_load_core, resp(`"`resp'"') strl(`"`strl'"') tag("`parqit_tag'") ///
+    capture noisily _parqit_load_core, resp(`"`resp'"') strl(`"`strl'"') tag("`parqit_tag'") ///
         n(`parqit_n') names("`parqit_names'")
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`_sq_bridge'"'
+        exit `rc'
+    }
 
     global PARQIT_FAST_SOURCE_NONCE
     global PARQIT_FAST_SOURCE_PATH
@@ -346,8 +394,8 @@ program define _parqit_use, rclass
 
     * a dta/xls/xlsx bridge has been consumed into memory — drop it now
     if (`"`_sq_bridge'"' != "") {
-        capture erase `"`_sq_bridge'"'
-        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`_sq_bridge'"' "', " ", .)'"'
+        capture noisily _parqit_bridge_discard `"`_sq_bridge'"'
+        if (_rc) exit _rc
     }
 
     di as txt "(" as res "`parqit_k'" as txt " vars, " as res "`parqit_n'" ///
@@ -1481,19 +1529,19 @@ program define _parqit_open, rclass
     }
     local nobs = _N
     _parqit_ensure_plugin
-    * bridge: snapshot the dataset to a parquet unique to THIS promotion —
-    * a shared path would let a later open _data silently rebind every
-    * earlier named view to the newest data. The view owns the file: the
-    * plugin erases it when the view is closed or replaced.
-    if ("${PARQIT_OPENDATA_SEQ}" == "") global PARQIT_OPENDATA_SEQ = 0
-    global PARQIT_OPENDATA_SEQ = ${PARQIT_OPENDATA_SEQ} + 1
-    local bridge "`c(tmpdir)'/_parqit_opendata_`c(pid)'_${PARQIT_OPENDATA_SEQ}.parquet"
-    capture erase `"`bridge'"'
-    * OPENDATA-BRIDGE-ORPHAN-1: the plugin only takes ownership (erase-on-close)
-    * once view_open succeeds. Track the bridge for the close _all sweep up front
-    * so a save/view_open failure below cannot orphan it under c(tmpdir).
-    global PARQIT_IMPORT_BRIDGES `"${PARQIT_IMPORT_BRIDGES} `"`bridge'"'"'
-    qui _parqit_save `"`bridge'"', replace data
+    * Reserve atomically in the plugin.  c(pid) and c(processid) are empty on
+    * some supported StataNow builds, so an ado-side per-session counter cannot
+    * distinguish concurrent sessions sharing TMPDIR (BRIDGE-XPROC-1).
+    _parqit_bridge_new opendata
+    local bridge `"`r(bridge)'"'
+    capture noisily {
+        quietly _parqit_save `"`bridge'"', replace data
+    }
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
     * The bridge snapshot applies the same lossy conversions as any in-memory
     * save (extended missings -> null, fractional dates rounded). _parqit_save's
     * own notes were suppressed by `qui'; surface them here so the loss is not
@@ -1504,20 +1552,19 @@ program define _parqit_open, rclass
         if ("`name'" == "") qui _parqit_use using `"`bridge'"', owned
         else                qui _parqit_use using `"`bridge'"', name(`name') owned
     }
-    if (_rc) {
-        capture erase `"`bridge'"'
-        global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`bridge'"' "', " ", .)'"'
-        exit _rc
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
     }
-    * view now owns the bridge (plugin erases on close/replace): drop our tracker
-    global PARQIT_IMPORT_BRIDGES `"`=subinstr(`" ${PARQIT_IMPORT_BRIDGES} "', `" `"`bridge'"' "', " ", .)'"'
     di as txt "(in-memory dataset promoted to a lazy view; " ///
         as txt "manipulate with parqit verbs, then parqit collect or parqit save)"
     _parqit_lossy_notes, ext(`"`_parqit_open_ext'"') frac(`"`_parqit_open_frac'"')
     if (`nobs' >= 1000000) {
         local nstr : di %15.0fc `nobs'
-        _parqit_tip `"promoting `=trim("`nstr'")' obs writes a temporary bridge; if you only need to merge/append a small disk lookup, {bf:parqit mergein}/{bf:parqit appendin} keeps the data in Stata and skips it"'
+            _parqit_tip `"promoting `=trim("`nstr'")' obs writes a temporary bridge; if you only need to merge/append a small disk lookup, {bf:parqit mergein}/{bf:parqit appendin} keeps the data in Stata and skips it"'
     }
+    return local bridge `"`bridge'"'
 end
 
 program define _parqit_close
@@ -1538,17 +1585,6 @@ program define _parqit_close
     }
     capture noisily plugin call parqit_plugin, view_close `whex'
     if (_rc) exit _rc
-    * sweep up any Parquet bridges made for dta/xls/xlsx/csv using sides
-    if (`"`which'"' == "_all" & `"${PARQIT_IMPORT_BRIDGES}"' != "") {
-        * entries are compound-quoted (a tmpdir path may contain spaces):
-        * copy into a local so foreach binds on the quotes rather than
-        * whitespace-tokenising the paths
-        local _bridges `"${PARQIT_IMPORT_BRIDGES}"'
-        foreach b of local _bridges {
-            capture erase `"`b'"'
-        }
-        global PARQIT_IMPORT_BRIDGES ""
-    }
     di as txt "(view`=cond("`which'"=="_all","s","")' closed)"
 end
 
@@ -1659,12 +1695,17 @@ end
 * two-table verbs: merge / append / joinby (using side stays on disk)
 * ----------------------------------------------------------------------------
 
-program define _parqit_merge
+program define _parqit_merge, rclass
     version 16.0
-    * parqit merge 1:1|m:1|1:m|m:m keys using <file> [, keep() keepusing() gen() nogen]
+    * lazy kinds: 1:1|m:1|1:m; recognise m:m only to refuse it precisely
     gettoken kind 0 : 0, parse(" ")
     if !inlist("`kind'", "1:1", "m:1", "1:m", "m:m") {
         di as err "parqit merge: kind must be 1:1, m:1, 1:m or m:m"
+        exit 198
+    }
+    if ("`kind'" == "m:m") {
+        di as err "parqit merge: lazy m:m is refused because a lazy plan cannot preserve native Stata's physical within-key row order"
+        di as err "use {bf:parqit joinby} for Cartesian matches or {bf:parqit mergein m:m} for native sequential behavior"
         exit 198
     }
     local keys
@@ -1704,8 +1745,11 @@ program define _parqit_merge
     _parqit_ensure_plugin
     * a dta/xls/xlsx/csv using side is imported to a small Parquet bridge
     global PARQIT_RS_IN `"`using'"'
-    _parqit_resolve_source using
+    capture noisily _parqit_resolve_source using
+    local rc = _rc
+    if (`rc') exit `rc'
     local using `"`r(path)'"'
+    local bridge `"`r(bridge)'"'
     tempfile req
     local _sq_op "merge"
     local _sq_kind "`kind'"
@@ -1715,12 +1759,19 @@ program define _parqit_merge
     local _sq_gen "`generate'"
     local _sq_nogen = ("`nogenerate'" != "")
     local _sq_mask `mask'
+    local _sq_owned_n = (`"`bridge'"' != "")
+    if (`_sq_owned_n') local _sq_owned_1 `"`bridge'"'
     mata: _parqit_wr_twotable_request("`req'")
     capture noisily plugin call parqit_plugin, view_twotable `reqhex'
-    if (_rc) exit _rc
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
+    if (`"`bridge'"' != "") return local bridge `"`bridge'"'
 end
 
-program define _parqit_append
+program define _parqit_append, rclass
     version 16.0
     * parqit append using <file> [<file> ...] [, generate(name)]
     gettoken usingtok 0 : 0, parse(" ")
@@ -1747,10 +1798,25 @@ program define _parqit_append
     syntax [, GENerate(name)]
     _parqit_ensure_plugin
     * import any dta/xls/xlsx/csv source to a Parquet bridge
+    local _sq_owned_n 0
     forvalues i = 1/`nf' {
         global PARQIT_RS_IN `"`_sq_file_`i''"'
-        _parqit_resolve_source using
+        capture noisily _parqit_resolve_source using
+        local rc = _rc
+        if (`rc') {
+            if (`_sq_owned_n' > 0) {
+                forvalues j = 1/`_sq_owned_n' {
+                    capture _parqit_bridge_discard `"`_sq_owned_`j''"'
+                }
+            }
+            exit `rc'
+        }
         local _sq_file_`i' `"`r(path)'"'
+        local bridge `"`r(bridge)'"'
+        if (`"`bridge'"' != "") {
+            local ++_sq_owned_n
+            local _sq_owned_`_sq_owned_n' `"`bridge'"'
+        }
     }
     tempfile req
     local _sq_op "append"
@@ -1758,10 +1824,24 @@ program define _parqit_append
     local _sq_gen "`generate'"
     mata: _parqit_wr_append_request("`req'")
     capture noisily plugin call parqit_plugin, view_twotable `reqhex'
-    if (_rc) exit _rc
+    local rc = _rc
+    if (`rc') {
+        if (`_sq_owned_n' > 0) {
+            forvalues j = 1/`_sq_owned_n' {
+                capture _parqit_bridge_discard `"`_sq_owned_`j''"'
+            }
+        }
+        exit `rc'
+    }
+    return scalar n_bridges = `_sq_owned_n'
+    if (`_sq_owned_n' > 0) {
+        forvalues j = 1/`_sq_owned_n' {
+            return local bridge_`j' `"`_sq_owned_`j''"'
+        }
+    }
 end
 
-program define _parqit_joinby
+program define _parqit_joinby, rclass
     version 16.0
     * parqit joinby keys using <file>
     local keys
@@ -1778,15 +1858,25 @@ program define _parqit_joinby
     syntax using/
     _parqit_ensure_plugin
     global PARQIT_RS_IN `"`using'"'
-    _parqit_resolve_source using
+    capture noisily _parqit_resolve_source using
+    local rc = _rc
+    if (`rc') exit `rc'
     local using `"`r(path)'"'
+    local bridge `"`r(bridge)'"'
     tempfile req
     local _sq_op "joinby"
     local _sq_keys "`keys'"
     local _sq_file `"`using'"'
+    local _sq_owned_n = (`"`bridge'"' != "")
+    if (`_sq_owned_n') local _sq_owned_1 `"`bridge'"'
     mata: _parqit_wr_twotable_request("`req'")
     capture noisily plugin call parqit_plugin, view_twotable `reqhex'
-    if (_rc) exit _rc
+    local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
+    if (`"`bridge'"' != "") return local bridge `"`bridge'"'
 end
 
 * ----------------------------------------------------------------------------
@@ -2252,8 +2342,9 @@ void _parqit_wr_view_open_request(string scalar req)
     if (strtrim(vl) != "") {
         p = (p, _parqit_jpair("varlist", _parqit_jlist(tokens(vl))))
     }
-    if (st_local("_sq_owned") == "1") {
-        p = (p, _parqit_jpair("owned", "true"))
+    if (st_local("_sq_owned_file") != "") {
+        p = (p, _parqit_jpair("owned_files",
+                "[" + _parqit_jstr(st_local("_sq_owned_file")) + "]"))
     }
     if (st_local("_sq_relaxed") == "1") {
         p = (p, _parqit_jpair("relaxed", "true"))
@@ -2930,6 +3021,8 @@ mata:
 
 void _parqit_wr_twotable_request(string scalar req)
 {
+    real scalar      i, nf
+    string scalar    owned
     string rowvector p
 
     p = (_parqit_jtext("cmd", "view_twotable"),
@@ -2937,6 +3030,16 @@ void _parqit_wr_twotable_request(string scalar req)
          _parqit_jpair("files", "[" + _parqit_jstr(st_local("_sq_file")) + "]"),
          _parqit_jpair("keys", _parqit_jlist(tokens(st_local("_sq_keys")))),
          _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
+    nf = strtoreal(st_local("_sq_owned_n"))
+    if (missing(nf)) nf = 0
+    if (nf > 0) {
+        owned = "["
+        for (i = 1; i <= nf; i++) {
+            if (i > 1) owned = owned + ","
+            owned = owned + _parqit_jstr(st_local("_sq_owned_" + strofreal(i)))
+        }
+        p = (p, _parqit_jpair("owned_files", owned + "]"))
+    }
     if (st_local("_sq_op") == "merge") {
         p = (p, _parqit_jtext("kind", st_local("_sq_kind")),
                 _parqit_jpair("keepusing",
@@ -2951,8 +3054,9 @@ void _parqit_wr_twotable_request(string scalar req)
 
 void _parqit_wr_append_request(string scalar req)
 {
-    real scalar      i, nf
-    string scalar    flist
+    real scalar      i, nf, no
+    string scalar    flist, owned
+    string rowvector p
 
     nf = strtoreal(st_local("_sq_nfiles"))
     flist = "["
@@ -2961,13 +3065,24 @@ void _parqit_wr_append_request(string scalar req)
         flist = flist + _parqit_jstr(st_local("_sq_file_" + strofreal(i)))
     }
     flist = flist + "]"
-    _parqit_emit(req, _parqit_jobj((
+    p = (
         _parqit_jtext("cmd", "view_twotable"),
         _parqit_jtext("op", "append"),
         _parqit_jpair("files", flist),
         _parqit_jpair("keys", "[]"),
         _parqit_jtext("gen", st_local("_sq_gen")),
-        _parqit_jtext("tmpdir", st_global("c(tmpdir)")))))
+        _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
+    no = strtoreal(st_local("_sq_owned_n"))
+    if (missing(no)) no = 0
+    if (no > 0) {
+        owned = "["
+        for (i = 1; i <= no; i++) {
+            if (i > 1) owned = owned + ","
+            owned = owned + _parqit_jstr(st_local("_sq_owned_" + strofreal(i)))
+        }
+        p = (p, _parqit_jpair("owned_files", owned + "]"))
+    }
+    _parqit_emit(req, _parqit_jobj(p))
 }
 end
 

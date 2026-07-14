@@ -85,7 +85,11 @@ gen double y = _n
 parqit save "`f'.parquet", replace data
 parqit use using "`f'.parquet"
 quietly parqit summarize x y, detail
-capture assert r(N) != .
+capture assert r(N) == 5
+if (_rc) {
+    di as err "DIFF all-missing-first multi-variable summarize: r(N)=" r(N) " expected 5"
+    global DFAILS = $DFAILS + 1
+}
 parqit close
 
 if ($DFAILS == 0) di as res "VERDICT(V44_SUMMARIZE_DETAIL_NATIVE): PASS"

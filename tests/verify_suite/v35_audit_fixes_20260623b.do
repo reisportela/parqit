@@ -36,7 +36,7 @@ capture assert a[1]=="hel" & a[2]=="hi" & b[1]=="wor" & "`ta'"=="str3"
 if (_rc) di as err "FAIL STR-GENWIDTH-1: a=[`=a[1]'] b=[`=b[1]'] type=`ta'"
 local fails = `fails' + (_rc!=0)
 
-* ---- TT-MM-MISSING-1 : m:m folds NULL/NaN keys into one missing group -------
+* ---- TT-MM-MISSING-1 / MM-ORDER-1 : lazy m:m refuses before mutation --------
 python:
 import pyarrow as pa, pyarrow.parquet as pq
 from sfi import Macro
@@ -44,29 +44,15 @@ b = Macro.getLocal("t")
 pq.write_table(pa.table({"k": pa.array([1.0, None],          type=pa.float64()), "mv":[10,20]}), b+"_mm_m.parquet")
 pq.write_table(pa.table({"k": pa.array([1.0, float("nan")], type=pa.float64()), "uv":[100,200]}), b+"_mm_u.parquet")
 end
-* oracle: load both as Stata (NaN and NULL both become missing .), native m:m
-parqit use using `"`t'_mm_m.parquet"', clear
-tempfile mas
-save `"`mas'"', replace
-parqit use using `"`t'_mm_u.parquet"', clear
-tempfile usi
-save `"`usi'"', replace
-use `"`mas'"', clear
-merge m:m k using `"`usi'"', keepusing(uv) nogen
-sort k mv
-keep k mv uv
-tempfile mmoracle
-save `"`mmoracle'"', replace
-local oracle_n = _N
-* parqit out-of-core m:m
 parqit use using `"`t'_mm_m.parquet"'
-parqit merge m:m k using `"`t'_mm_u.parquet"', keepusing(uv) nogen
-parqit collect, clear
-sort k mv
-keep k mv uv
-capture assert _N == `oracle_n'
-if (_rc) di as err "FAIL TT-MM-MISSING-1: parqit _N=`=_N' vs native `oracle_n'"
-local fails = `fails' + (_rc!=0)
+capture noisily parqit merge m:m k using `"`t'_mm_u.parquet"', keepusing(uv) nogen
+local mmrc = _rc
+if (`mmrc' != 198) di as err "FAIL TT-MM-MISSING-1: lazy m:m rc=`mmrc'"
+local fails = `fails' + (`mmrc' != 198)
+quietly parqit count
+if (r(N) != 2) di as err "FAIL TT-MM-MISSING-1: refused command changed view"
+local fails = `fails' + (r(N) != 2)
+parqit close
 
 * ---- GROUPKEY-1 : collapse folds ''/NULL (string) and NaN/NULL (numeric) ----
 python:

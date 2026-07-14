@@ -85,7 +85,7 @@ if (_rc==0) di as err "FAIL TT-A2: append generate(src) colliding with using col
 local fails = `fails' + (_rc==0)
 parqit close _all
 
-* ---- TT-A1 : m:m master pairing reproducible for fixed inputs --------------
+* ---- TT-A1 / MM-ORDER-1 : public lazy m:m is correctness-safe (refused) -----
 python:
 import pyarrow as pa, pyarrow.parquet as pq
 from sfi import Macro
@@ -94,18 +94,14 @@ pq.write_table(pa.table({"k":[1,1,1], "mv":[10,20,30]}), b+"_mm.parquet")
 pq.write_table(pa.table({"k":[1,1],    "uv":[100,200]}), b+"_mu.parquet")
 end
 parqit use using `"`t'_mm.parquet"'
-parqit merge m:m k using `"`t'_mu.parquet"', keepusing(uv)
-parqit collect, clear
-sort mv
-tempfile firstrun
-save `"`firstrun'"', replace
-parqit use using `"`t'_mm.parquet"'
-parqit merge m:m k using `"`t'_mu.parquet"', keepusing(uv)
-parqit collect, clear
-sort mv
-capture cf _all using `"`firstrun'"'
-if (_rc) di as err "FAIL TT-A1: m:m pairing not reproducible across runs"
-local fails = `fails' + (_rc!=0)
+capture noisily parqit merge m:m k using `"`t'_mu.parquet"', keepusing(uv)
+local mmrc = _rc
+if (`mmrc' != 198) di as err "FAIL TT-A1: lazy m:m rc=`mmrc' (expected 198)"
+local fails = `fails' + (`mmrc' != 198)
+quietly parqit count
+if (r(N) != 3) di as err "FAIL TT-A1: refused m:m changed the live view"
+local fails = `fails' + (r(N) != 3)
+parqit close
 
 * ---- COLLAPSE-WEIGHTS : weights are a clear, loud error --------------------
 clear

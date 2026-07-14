@@ -169,6 +169,8 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "view_close") return parqit_plugin::cmd_view_close(args);
     if (cmd == "view_switch") return parqit_plugin::cmd_view_switch(args);
     if (cmd == "view_list") return parqit_plugin::cmd_view_list(args);
+    if (cmd == "bridge_new") return parqit_plugin::cmd_bridge_new(args);
+    if (cmd == "bridge_discard") return parqit_plugin::cmd_bridge_discard(args);
     if (cmd == "view_alive") {
         save_local("_parqit_view_alive", parqit_plugin::view_is_live() ? "1" : "0");
         save_local("_parqit_view_current",

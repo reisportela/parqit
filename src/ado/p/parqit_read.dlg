@@ -1,7 +1,7 @@
 /*
   parqit — read Parquet (or CSV/dta/Excel) data
 
-*!  VERSION 0.1.20  10jul2026
+*!  VERSION 0.1.21  14jul2026
 
   Launch with:  db parqit_read
   Install a User-menu entry with:  parqit menu

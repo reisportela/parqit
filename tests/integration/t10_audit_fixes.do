@@ -18,10 +18,12 @@ clear
 set obs 1
 gen double x = 1
 parqit open _data, name(first)
+local first_bridge `"`r(bridge)'"'
 clear
 set obs 1
 gen double x = 2
 parqit open _data, name(second)
+local second_bridge `"`r(bridge)'"'
 parqit view first
 parqit collect, clear
 if (_N != 1 | x[1] != 1) {
@@ -34,12 +36,14 @@ if (_N != 1 | x[1] != 1) {
     di as err "FAIL 01b: re-collect of first view broke"
     local ++fails
 }
-* closing must erase the owned bridge files
-local tdir "`c(tmpdir)'"
+* closing must erase both atomically-reserved, view-owned bridge files
 parqit close _all
-local leftover : dir "`tdir'" files "_parqit_opendata_`c(pid)'_*.parquet"
-if (`"`leftover'"' != "") {
-    di as err `"FAIL 01c: bridge files not cleaned on close: `leftover'"'
+capture confirm file `"`first_bridge'"'
+local first_left = (_rc == 0)
+capture confirm file `"`second_bridge'"'
+local second_left = (_rc == 0)
+if (`first_left' | `second_left') {
+    di as err `"FAIL 01c: bridge files not cleaned on close"'
     local ++fails
 }
 

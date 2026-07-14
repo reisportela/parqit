@@ -6,6 +6,42 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-07-14
+
+This release hardens lazy bridge ownership and multi-process isolation, makes
+the lazy `merge m:m` contract explicit, closes a false-green verification gap,
+and ensures release assets come from the staged, stripped plugin surface.
+
+### Fixed
+- **Persistent bridges are collision-proof across Stata processes
+  (BRIDGE-XPROC-1).** The plugin now atomically reserves a package-owned path
+  from the real OS PID, an operation counter and a strong nonce, preserving
+  spaces/Unicode in the temp directory. A deterministic two-process Stata gate
+  covers both `open _data` and lazy `.dta` adapter bridges in one shared TMPDIR.
+- **Adapter bridge ownership follows the lazy plans that reference it
+  (BRIDGE-LIFETIME-1).** Eager and failed operations clean every bridge they
+  created without masking the original rc; successful merge/append/joinby and
+  view-source plans transfer explicit, registry-validated references; replace,
+  close and `close _all` release only package-owned paths when their last view
+  reference ends.
+- **The all-missing `summarize, detail` oracle can no longer pass falsely
+  (TEST-V44-CAPTURE-1).** Its captured assertion now increments the suite's
+  failure counter, and all other `capture assert` sites were checked for an
+  immediate `_rc` consumer.
+- **Release collection uploads the staged/stripped plugin
+  (DIST-STRIP-1).** The workflow no longer bypasses CMake's repo-local install
+  surface with the raw build target, and verifies the exact collected binary's
+  format and required exports; Linux additionally gates strip sections and the
+  absence of runtime `libstdc++`/`libgcc_s` dependencies.
+
+### Changed
+- **Lazy `parqit merge m:m` now refuses with rc 198 before adapter import or
+  plan mutation (MM-ORDER-1).** A lazy plan cannot preserve native Stata's
+  physical within-key order. Use `parqit joinby` for Cartesian matches or
+  `parqit mergein m:m` for deliberately order-dependent native sequential
+  behaviour; `mergein m:m` remains available and is pinned against a native
+  oracle.
+
 ## [0.1.20] — 2026-07-10
 
 A holistic correctness audit aligned temporal, missing-value and test-harness

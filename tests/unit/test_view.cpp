@@ -288,7 +288,10 @@ TEST_CASE("merge keep(match) + keepusing + gen") {
     CHECK_FALSE(has_extra);
 }
 
-TEST_CASE("merge m:m follows Stata's sequential pairing") {
+TEST_CASE("legacy engine m:m helper follows the clamped sequential rule") {
+    /* The public lazy command is refused because a plan cannot retain native
+     * physical within-key row order.  Keep the lower-level helper pinned while
+     * older serialized plans/tests may still exercise its deterministic rule. */
     /* master: key a ×3 rows (v=1,2,3); using: key a ×2 rows (w=10,20).
      * Stata m:m → 3 rows: (1,10) (2,20) (3,20 clamped). */
     View v;

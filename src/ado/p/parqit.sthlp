@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.20 10jul2026}{...}
+{* *! version 0.1.21 14jul2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -64,7 +64,7 @@ mismatch across the matched files is a loud error.
 {p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:,} {opt c:ount} {opt seed(#)}]{p_end}
 {p 8 16 2}{cmd:parqit reshape} {cmd:long}|{cmd:wide} {it:stubs}{cmd:,} {opt i(varlist)} {opt j(name)}{p_end}
 {p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
-{p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:source} [{cmd:,} {it:merge_options}]{p_end}
+{p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source} [{cmd:,} {it:merge_options}]{p_end}
 {p 8 16 2}{cmd:parqit append using} {it:source} [{it:source} ...] [{cmd:,} {opt gen:erate(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source}{p_end}
 
@@ -261,8 +261,11 @@ the file is a {cmd:parqit use} source or the {cmd:using} side of
 A {it:large} {cmd:.dta} master gains nothing from it (you would have read the
 whole file into Stata either way), so for that prefer Stata's {cmd:use} followed
 by {cmd:parqit open _data}, which promotes the in-memory dataset to a view without
-a second copy. Bridges live in the temp directory and are swept up by
-{cmd:parqit close _all}.
+a second copy. The plugin atomically reserves every bridge, so concurrent Stata
+processes sharing a temp directory cannot choose the same path. A failed
+operation removes its package-owned bridge; after success, the bridge lives
+until the last view whose plan references it is closed or replaced.
+{cmd:parqit close _all} remains the final package-owned cleanup sweep.
 
 {pstd}
 This is exactly the shape that keeps a large master {it:out of} Stata while a
@@ -312,12 +315,12 @@ apply to view sources too (a view may even be merged with itself).
 ({cmd:m:1} requires unique keys in using, etc.) and produces a
 Stata-compatible {cmd:_merge}; missing keys match missing keys, as in
 Stata. Options: {opt keep(match master using)}, {opt keepus:ing(varlist)},
-{opt gen:erate(name)}, {opt nogen:erate}. {cmd:m:m} uses Stata's sequential
-reuse rule (row {it:i} paired with row min({it:i}, {it:n}) on each side), but
-a lazy plan does not retain either file's physical within-key row order.
-parqit uses a deterministic value order instead, so paired payloads can differ
-from a native {cmd:merge m:m} on unsorted rows. As in Stata, {cmd:m:m} is almost
-never what you want; prefer {cmd:parqit joinby} for pairwise combinations.
+{opt gen:erate(name)}, {opt nogen:erate}. Lazy {cmd:parqit merge m:m} is
+refused before importing a using-side adapter or changing the current view: a
+lazy plan does not retain the physical within-key row order required by native
+Stata's sequential reuse rule. Use {cmd:parqit joinby} for Cartesian
+many-to-many matches, or {cmd:parqit mergein m:m} when native Stata's
+order-dependent sequential behaviour is deliberately required.
 
 {pstd}{cmd:duplicates drop} with a {it:varlist} requires a previous
 {cmd:parqit sort} so that "first occurrence" is well-defined on an engine
@@ -658,10 +661,10 @@ Stata-compatible:{p_end}
 {phang2}{cmd:. parqit merge m:1 firmid year using /data/scie.parquet, keep(match) keepusing(tfp)}{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
 
-{pstd}{bf:Pairwise combinations} use {cmd:joinby}, as in native Stata
-({cmd:merge m:m} exists and uses the sequential reuse rule, with the
-within-key ordering limitation documented above — and is almost never what
-you want):{p_end}
+{pstd}{bf:Pairwise combinations} use {cmd:joinby}, as in native Stata.
+Lazy {cmd:merge m:m} is refused because its order-dependent sequential pairing
+cannot be reproduced from a lazy plan; native {cmd:mergein m:m} remains
+available when that behaviour is intentional:{p_end}
 {phang2}{cmd:. parqit use using workers.parquet}{p_end}
 {phang2}{cmd:. parqit joinby firmid using patents.parquet}{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
@@ -771,9 +774,10 @@ Parquet (the format has one missing concept); parqit warns when they are
 written.{p_end}
 {pstd}{cmd:•} Binary strLs are refused on save (text strLs round-trip
 fine).{p_end}
-{pstd}{cmd:•} {cmd:merge m:m} uses the same sequential reuse rule as Stata,
-but deterministic value order rather than native physical within-key order;
-paired payloads may differ. Prefer {cmd:joinby}.{p_end}
+{pstd}{cmd:•} Lazy {cmd:parqit merge m:m} is refused before adapter import or
+view mutation because a lazy plan lacks native physical within-key order. Use
+{cmd:joinby} for Cartesian matches or native {cmd:mergein m:m} for Stata's
+sequential behaviour.{p_end}
 {pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
 their format in metadata; third-party readers see the raw counts.{p_end}
 {pstd}{cmd:•} {cmd:discard} unloads the plugin and forgets an un-collected

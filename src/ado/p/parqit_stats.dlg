@@ -1,7 +1,7 @@
 /*
   parqit — descriptive statistics over the open view (engine-side)
 
-*!  VERSION 0.1.20  10jul2026
+*!  VERSION 0.1.21  14jul2026
 
   Launch with:  db parqit_stats     (installed on the menu by: parqit menu)
   Everything is computed by the engine as a push-down query; only the

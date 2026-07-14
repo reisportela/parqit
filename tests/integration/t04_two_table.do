@@ -150,14 +150,15 @@ assert _N == `o_jn'
 qui count if id == 1
 assert r(N) == `o_j1'
 
-* ---------- m:m sequential pairing (Stata-faithful) ----------
+* ---------- lazy m:m refuses; native mergein m:m remains available ----------
 clear
 input long k double u
 1 10
 1 20
 end
 tempfile mmu mmu_b
-qui save `"`mmu'"'
+local mmudta `"`mmu'.dta"'
+qui save `"`mmudta'"'
 local mmuf `"`mmu_b'.parquet"'
 parqit open _data
 parqit save `"`mmuf'"', replace
@@ -173,17 +174,22 @@ end
 tempfile mmm
 qui save `"`mmm'"'
 
-qui merge m:m k using `"`mmu'"'
+qui merge m:m k using `"`mmudta'"'
 sort k v
 tempfile mm_oracle
 qui save `"`mm_oracle'"'
 
 use `"`mmm'"', clear
 parqit open _data
-parqit sort v
-parqit merge m:m k using `"`mmuf'"'
+capture noisily parqit merge m:m k using `"`mmuf'"'
+assert _rc == 198
 parqit collect, clear
+cf _all using `"`mmm'"'
+parqit close
+
+use `"`mmm'"', clear
+parqit mergein m:m k using `"`mmudta'"'
 sort k v
 cf _all using `"`mm_oracle'"'
 
-di "VERDICT(T04_TWO_TABLE): PASS - merge kinds/_merge/options, append by-name, joinby, m:m all match native Stata"
+di "VERDICT(T04_TWO_TABLE): PASS - lazy merge kinds/_merge/options, append, joinby; m:m refusal + native mergein control"

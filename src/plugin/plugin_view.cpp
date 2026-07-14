@@ -5,6 +5,7 @@
 #include "plugin/plugin_view.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cmath>
@@ -12,9 +13,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <iomanip>
 #include <map>
+#include <random>
 #include <set>
+#include <sstream>
 #include <utility>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "duckdb.h"
 
@@ -60,19 +70,123 @@ std::string g_current = "default";
 bool g_statamissing = false;
 long long g_collect_counter = 0;
 
-/* bridge files written by `parqit open _data` belong to their view: drop the
- * file when the view is closed or replaced so promotions never accumulate
- * in the temp dir (and never alias another view's backing data) */
-std::map<std::string, std::string> g_owned_files;
+/* Persistent adapter/open-data bridges are reserved by the plugin, then move
+ * through two explicit states: pending (the ado is still importing/writing)
+ * and view-owned (one or more compiled plans reference the file).  A bridge
+ * can only be claimed or discarded if it is in this registry, so a malformed
+ * internal request can never mark an arbitrary user file for deletion.
+ *
+ * Each bridge lives in its own atomically-created directory.  Directory
+ * creation is the cross-platform O_EXCL operation: even two Stata processes
+ * sharing one TMPDIR cannot reserve the same path.  PID + operation counter +
+ * 128 random bits make collisions vanishingly unlikely; create_directory is
+ * still the final atomic arbiter rather than trusting the nonce alone. */
+struct BridgeState {
+    std::filesystem::path root;
+    size_t refs = 0;
+    bool pending = true;
+};
 
-void drop_owned(const std::string &view_name, const std::string &keep = "") {
-    auto it = g_owned_files.find(view_name);
-    if (it == g_owned_files.end()) return;
-    if (it->second != keep) {
-        std::error_code ec;
-        std::filesystem::remove(it->second, ec); /* best effort */
+std::map<std::string, BridgeState> g_bridges;
+std::map<std::string, std::set<std::string>> g_view_bridges;
+std::atomic<unsigned long long> g_bridge_counter{0};
+
+long long process_id() {
+#ifdef _WIN32
+    return static_cast<long long>(_getpid());
+#else
+    return static_cast<long long>(getpid());
+#endif
+}
+
+std::string bridge_nonce() {
+    std::random_device rd;
+    std::ostringstream os;
+    os << std::hex << std::setfill('0');
+    for (int i = 0; i < 4; i++) os << std::setw(8) << rd();
+    return os.str();
+}
+
+bool erase_bridge_record(const std::string &path, std::string *err) {
+    auto it = g_bridges.find(path);
+    if (it == g_bridges.end()) return true;
+    std::error_code ec;
+    std::filesystem::remove_all(it->second.root, ec);
+    if (ec) {
+        if (err) *err = "could not erase package-owned bridge " + path +
+                        ": " + ec.message();
+        return false;
     }
-    g_owned_files.erase(it);
+    g_bridges.erase(it);
+    return true;
+}
+
+void add_bridge_refs(const std::string &view_name,
+                     const std::set<std::string> &paths) {
+    auto &owned = g_view_bridges[view_name];
+    for (const auto &path : paths) {
+        if (!owned.insert(path).second) continue;
+        auto it = g_bridges.find(path);
+        if (it != g_bridges.end()) it->second.refs++;
+    }
+    if (owned.empty()) g_view_bridges.erase(view_name);
+}
+
+void claim_pending(const std::string &view_name,
+                   const std::vector<std::string> &paths) {
+    std::set<std::string> claimed;
+    for (const auto &path : paths) {
+        auto it = g_bridges.find(path);
+        if (it == g_bridges.end()) continue; /* validated before mutation */
+        it->second.pending = false;
+        claimed.insert(path);
+    }
+    add_bridge_refs(view_name, claimed);
+}
+
+bool drop_owned(const std::string &view_name, std::string *err = nullptr) {
+    auto vit = g_view_bridges.find(view_name);
+    if (vit == g_view_bridges.end()) return true;
+    const std::set<std::string> paths = vit->second;
+    g_view_bridges.erase(vit);
+    bool ok = true;
+    std::string first;
+    for (const auto &path : paths) {
+        auto it = g_bridges.find(path);
+        if (it == g_bridges.end()) continue;
+        if (it->second.refs > 0) it->second.refs--;
+        if (it->second.refs == 0) {
+            std::string one;
+            if (!erase_bridge_record(path, &one)) {
+                ok = false;
+                if (first.empty()) first = one;
+            }
+        }
+    }
+    if (!ok && err) *err = first;
+    return ok;
+}
+
+bool validate_pending_claim(const std::vector<std::string> &files,
+                            const std::vector<std::string> &paths,
+                            std::string *err) {
+    std::set<std::string> seen;
+    for (const auto &path : paths) {
+        if (!seen.insert(path).second) {
+            *err = "duplicate package-owned bridge in request";
+            return false;
+        }
+        if (std::find(files.begin(), files.end(), path) == files.end()) {
+            *err = "package-owned bridge is not an input of this operation";
+            return false;
+        }
+        auto it = g_bridges.find(path);
+        if (it == g_bridges.end() || !it->second.pending || it->second.refs != 0) {
+            *err = "bridge ownership token is unknown or already claimed";
+            return false;
+        }
+    }
+    return true;
 }
 
 /* current view (creates a dead placeholder if absent; require_view guards
@@ -80,9 +194,9 @@ void drop_owned(const std::string &view_name, const std::string &keep = "") {
 View &g_view_ref() {
     return g_views[g_current];
 }
-void close_current_view() {
-    drop_owned(g_current);
+bool close_current_view(std::string *err = nullptr) {
     g_views.erase(g_current);
+    return drop_owned(g_current, err);
 }
 
 bool load_req(const std::vector<std::string> &args, json *req, std::string *err) {
@@ -457,6 +571,76 @@ bool view_is_live() {
     return it != g_views.end() && it->second.live();
 }
 
+/* =========================================== internal bridge lifecycle ===== */
+
+ST_retcode cmd_bridge_new(const std::vector<std::string> &args) {
+    std::string tmpdir, kind;
+    if (args.size() < 3 || !parqit::hex_decode(args[1], tmpdir) ||
+        !parqit::hex_decode(args[2], kind) || tmpdir.empty() || kind.empty()) {
+        cry("parqit bridge: malformed reservation request");
+        return kRcUsage;
+    }
+    for (unsigned char c : kind) {
+        if (!(std::isalnum(c) || c == '_')) {
+            cry("parqit bridge: invalid bridge kind");
+            return kRcUsage;
+        }
+    }
+
+    const std::filesystem::path parent = std::filesystem::u8path(tmpdir);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(parent, ec) || ec) {
+        cry("parqit bridge: temporary directory does not exist or is not a directory: " +
+            tmpdir);
+        return kRcEngine;
+    }
+
+    for (int attempt = 0; attempt < 128; attempt++) {
+        const unsigned long long seq = ++g_bridge_counter;
+        const std::string leaf = "_parqit_bridge_" + kind + "_" +
+                                 std::to_string(process_id()) + "_" +
+                                 std::to_string(seq) + "_" + bridge_nonce();
+        const std::filesystem::path root = parent / std::filesystem::u8path(leaf);
+        ec.clear();
+        if (std::filesystem::create_directory(root, ec)) {
+            const std::filesystem::path file = root / "bridge.parquet";
+            const std::string path = file.u8string();
+            g_bridges.emplace(path, BridgeState{root, 0, true});
+            save_local("_parqit_bridge", parqit::hex_encode(path));
+            return 0;
+        }
+        if (ec) {
+            cry("parqit bridge: could not reserve a unique temporary path: " +
+                ec.message());
+            return kRcEngine;
+        }
+        /* No error means the candidate already exists: draw another nonce and
+         * let atomic create_directory arbitrate again. */
+    }
+    cry("parqit bridge: could not reserve a unique temporary path after 128 attempts");
+    return kRcEngine;
+}
+
+ST_retcode cmd_bridge_discard(const std::vector<std::string> &args) {
+    std::string path;
+    if (args.size() < 2 || !parqit::hex_decode(args[1], path) || path.empty()) {
+        cry("parqit bridge: malformed discard request");
+        return kRcUsage;
+    }
+    auto it = g_bridges.find(path);
+    if (it == g_bridges.end()) return 0; /* idempotent; never erase unknown paths */
+    if (!it->second.pending || it->second.refs != 0) {
+        cry("parqit bridge: cannot discard a bridge still owned by a live view");
+        return kRcUsage;
+    }
+    std::string err;
+    if (!erase_bridge_record(path, &err)) {
+        cry("parqit bridge: " + err);
+        return kRcEngine;
+    }
+    return 0;
+}
+
 /* ======================================================== view_open ===== */
 
 ST_retcode cmd_view_open(const std::vector<std::string> &args) {
@@ -466,7 +650,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
-    std::vector<std::string> files, varlist;
+    std::vector<std::string> files, varlist, owned_files;
     std::string tmpdir;
     if (!parqit::req_text_list(req, "files", &files, &err) ||
         !parqit::req_text(req, "tmpdir", &tmpdir, &err)) {
@@ -476,6 +660,11 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     varlist = req_list_or_empty(req, "varlist");
     if (files.empty()) {
         cry("parqit use: no input files");
+        return kRcUsage;
+    }
+    if (!parqit::req_text_list(req, "owned_files", &owned_files, &err, false) ||
+        !validate_pending_claim(files, owned_files, &err)) {
+        cry("parqit use: " + err);
         return kRcUsage;
     }
     Session &s = Session::instance();
@@ -583,32 +772,36 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
-    if (!vname.empty()) g_current = vname;
+    const std::string target = vname.empty() ? g_current : vname;
     std::string desc;
     for (size_t i = 0; i < files.size(); i++) desc += (i ? " " : "") + files[i];
-    /* replacing a view orphans any bridge file it owned (keep the new
-     * backing if it happens to be the same path) */
-    drop_owned(g_current, files.size() == 1 ? files[0] : "");
-    if (req.value("owned", false) && files.size() == 1)
-        g_owned_files[g_current] = files[0];
-    g_view_ref().open("SELECT " + sel + " FROM " + src.scan_sql, cols,
-                meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
-                vchars,
-                meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc);
+    /* Build the replacement off to the side.  The old view and its bridge
+     * references remain valid until every requested projection has passed;
+     * only then do we swap and transfer the newly reserved bridge. */
+    View candidate;
+    candidate.open("SELECT " + sel + " FROM " + src.scan_sql, cols,
+                   meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
+                   vchars,
+                   meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc);
     /* remember the backing Parquet paths: a later pure-passthrough collect
      * can size its columns from row-group statistics (the F2 metadata path
      * `parqit use` uses) instead of a redundant full scan. */
-    g_view_ref().set_source_paths(src.paths_sql);
+    candidate.set_source_paths(src.paths_sql);
 
     /* optional initial projection (named columns, named order) */
     if (!varlist.empty()) {
-        std::string verr = g_view_ref().keep_vars(varlist);
+        std::string verr = candidate.keep_vars(varlist);
         if (!verr.empty()) {
-            g_view_ref().close();
             cry("parqit use: " + verr);
             return kRcUsage;
         }
     }
+    std::string cleanup_err;
+    if (!drop_owned(target, &cleanup_err))
+        cry("warning: parqit use: " + cleanup_err);
+    g_views[target] = std::move(candidate);
+    claim_pending(target, owned_files);
+    g_current = target;
     for (const auto &w : warns) cry("note: " + w);
     for (const auto &d : drops) cry("warning: " + d);
 
@@ -1235,19 +1428,59 @@ ST_retcode cmd_view_close(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     if (which == "_all") {
-        while (!g_owned_files.empty()) drop_owned(g_owned_files.begin()->first);
+        bool ok = true;
+        std::string first;
+        std::vector<std::string> owners;
+        for (const auto &entry : g_view_bridges) owners.push_back(entry.first);
+        for (const auto &owner : owners) {
+            std::string one;
+            if (!drop_owned(owner, &one)) {
+                ok = false;
+                if (first.empty()) first = one;
+            }
+        }
         g_views.clear();
+        /* Safety sweep: a pending bridge means an ado operation aborted before
+         * its normal discard.  It is still registry-proven package state. */
+        std::vector<std::string> remaining;
+        for (const auto &entry : g_bridges) remaining.push_back(entry.first);
+        for (const auto &path : remaining) {
+            auto it = g_bridges.find(path);
+            if (it == g_bridges.end()) continue;
+            if (it->second.refs != 0) {
+                ok = false;
+                if (first.empty()) first = "bridge reference count remained nonzero";
+                continue;
+            }
+            std::string one;
+            if (!erase_bridge_record(path, &one)) {
+                ok = false;
+                if (first.empty()) first = one;
+            }
+        }
+        if (!ok) {
+            cry("parqit close _all: " + first);
+            return kRcEngine;
+        }
         return 0;
     }
     if (which.empty()) {
-        close_current_view();
+        std::string cleanup_err;
+        if (!close_current_view(&cleanup_err)) {
+            cry("parqit close: " + cleanup_err);
+            return kRcEngine;
+        }
         return 0;
     }
     if (!g_views.erase(which)) {
         cry("parqit close: no view named " + which);
         return kRcUsage;
     }
-    drop_owned(which);
+    std::string cleanup_err;
+    if (!drop_owned(which, &cleanup_err)) {
+        cry("parqit close: " + cleanup_err);
+        return kRcEngine;
+    }
     return 0;
 }
 
@@ -1518,13 +1751,42 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
-    std::string op, tmpdir;
-    std::vector<std::string> files;
+    std::string op, tmpdir, merge_kind;
+    std::vector<std::string> files, owned_files;
     if (!parqit::req_text(req, "op", &op, &err) ||
         !parqit::req_text(req, "tmpdir", &tmpdir, &err) ||
         !parqit::req_text_list(req, "files", &files, &err)) {
         cry(err);
         return kRcUsage;
+    }
+    if (!parqit::req_text_list(req, "owned_files", &owned_files, &err, false) ||
+        !validate_pending_claim(files, owned_files, &err)) {
+        cry("parqit " + op + ": " + err);
+        return kRcUsage;
+    }
+    if (op == "merge") {
+        if (!parqit::req_text(req, "kind", &merge_kind, &err)) {
+            cry(err);
+            return kRcUsage;
+        }
+        if (merge_kind == "m:m") {
+            cry("parqit merge: lazy m:m is refused because a lazy plan cannot "
+                "preserve native Stata's physical within-key row order; use "
+                "parqit joinby for Cartesian matches or parqit mergein m:m "
+                "for native sequential behavior");
+            return kRcUsage;
+        }
+    }
+
+    /* Embedding view:name copies that view's compiled SQL into the current
+     * plan.  Share every bridge reference it depends on so closing the source
+     * view cannot invalidate the derived plan. */
+    std::set<std::string> inherited;
+    for (const auto &file : files) {
+        if (file.rfind("view:", 0) != 0) continue;
+        auto it = g_view_bridges.find(file.substr(5));
+        if (it != g_view_bridges.end())
+            inherited.insert(it->second.begin(), it->second.end());
     }
     Session &s = Session::instance();
     s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
@@ -1576,11 +1838,10 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                 return kRcUsage;
             }
         } else {
-            std::string kind, gen;
+            std::string gen;
             bool nogen = req.value("nogen", false);
             int keep_mask = static_cast<int>(req.value("keep_mask", 0LL));
-            if (!parqit::req_text(req, "kind", &kind, &err) ||
-                !parqit::req_text(req, "gen", &gen, &err, false) ||
+            if (!parqit::req_text(req, "gen", &gen, &err, false) ||
                 !parqit::req_text_list(req, "keepusing", &keepusing, &err, false)) {
                 cry(err);
                 return kRcUsage;
@@ -1604,21 +1865,21 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                 mkeys.push_back(norm_key(k, mit != mkind.end() && mit->second == 's'));
                 ukeys.push_back(norm_key(k, uit != ukind.end() && uit->second == 's'));
             }
-            if (kind == "1:1" || kind == "1:m") {
+            if (merge_kind == "1:1" || merge_kind == "1:m") {
                 rc = check_unique(s, g_view_ref().compile(false), mkeys, "master", &err);
                 if (rc != 0) {
                     cry("parqit merge: " + err);
                     return rc;
                 }
             }
-            if (kind == "1:1" || kind == "m:1") {
+            if (merge_kind == "1:1" || merge_kind == "m:1") {
                 rc = check_unique(s, u.select_sql, ukeys, "using", &err);
                 if (rc != 0) {
                     cry("parqit merge: " + err);
                     return rc;
                 }
             }
-            std::string e = g_view_ref().merge_with(kind, keys, std::move(u), keepusing,
+            std::string e = g_view_ref().merge_with(merge_kind, keys, std::move(u), keepusing,
                                               keep_mask, gen, nogen, &warns);
             if (!e.empty()) {
                 cry("parqit merge: " + e);
@@ -1632,6 +1893,8 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
 
     for (const auto &d : drops) cry("warning: " + d);
     for (const auto &w : warns) cry("note: " + w);
+    claim_pending(g_current, owned_files);
+    add_bridge_refs(g_current, inherited);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }
@@ -1940,7 +2203,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
-    if (!vname.empty()) g_current = vname;
+    const std::string target = vname.empty() ? g_current : vname;
     Session &s = Session::instance();
     s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
@@ -1986,8 +2249,14 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         cry("parqit sql: the query produced no loadable columns");
         return kRcUsage;
     }
-    g_view_ref().open("SELECT " + sel + " FROM (" + sql + ")", cols, json::object(),
-                json::object(), "", "parqit sql query");
+    View candidate;
+    candidate.open("SELECT " + sel + " FROM (" + sql + ")", cols, json::object(),
+                   json::object(), "", "parqit sql query");
+    std::string cleanup_err;
+    if (!drop_owned(target, &cleanup_err))
+        cry("warning: parqit sql: " + cleanup_err);
+    g_views[target] = std::move(candidate);
+    g_current = target;
     for (const auto &d : drops) cry("warning: " + d);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     save_local("_parqit_view_name", parqit::hex_encode(g_current));

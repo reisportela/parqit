@@ -17,7 +17,7 @@ it lazily on disk (datasets far larger than RAM), and only the final result is
 brought into Stata — or written straight back to Parquet without ever touching
 memory. SQL is available for power users, but no one has to learn it.
 
-> **Status:** v0.1.20 — the full surface below is implemented and covered by a
+> **Status:** v0.1.21 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -82,13 +82,13 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.20") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.21") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.20` to the tag you want; for the newest, use
+- For a different version, change `v0.1.21` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
@@ -221,6 +221,11 @@ untouched) and snapshots them to a small Parquet *bridge* — ideal for a small
 lookup, but for a large `.dta` master prefer `use` + `parqit open _data`. The same
 extension rule applies to a `using` side of `merge`/`joinby`/`append`, so a
 lazy Parquet master can join a `.dta` lookup and only the result is collected.
+Each bridge is atomically reserved by the plugin (including when two Stata
+processes share one temporary directory) and is package-owned: an operation
+failure removes it, while a successful lazy operation keeps it until the last
+view whose plan references it is closed or replaced. `parqit close _all` is the
+final package-owned cleanup sweep.
 
 ### Single-table verbs (lazy)
 
@@ -246,7 +251,7 @@ lazy Parquet master can join a `.dta` lookup and only the result is collected.
 
 | Command | Compiles to |
 |---|---|
-| `parqit merge 1:1\|m:1\|1:m\|m:m <keys> using <file\|view:name> [, keep() keepusing() gen()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view** |
+| `parqit merge 1:1\|m:1\|1:m <keys> using <file\|view:name> [, keep() keepusing() gen()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view**. Lazy `m:m` is refused; use `joinby` or native `mergein m:m`. |
 | `parqit append using <files\|view:name ...>` | `UNION BY NAME`, aligning columns by name with safe recasts; sources may be files or views |
 | `parqit joinby <keys> using <file\|view:name>` | many-to-many join |
 
@@ -388,11 +393,11 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   format has one missing concept); `parqit save` warns when this loses
   information. Labels attached to extended missings do survive (they live in
   `parqit.*` metadata).
-- **`merge m:m`** implements Stata's sequential reuse rule, but a lazy plan does
-  not retain each input's physical within-key row order. parqit therefore uses a
-  deterministic value order; paired payloads can differ from a native `merge m:m`
-  on the same unsorted rows. As in Stata, `m:m` is almost never what you want;
-  use `parqit joinby` for pairwise combinations.
+- **Lazy `parqit merge m:m` is refused before the plan or a using-side adapter
+  is changed.** A lazy plan does not retain the physical within-key row order
+  needed for Stata's sequential reuse rule. Use `parqit joinby` for the
+  Cartesian many-to-many join, or `parqit mergein m:m` when native Stata's
+  order-dependent sequential behaviour is deliberately required.
 - **Binary strLs** are refused on save (text strLs round-trip).
 
 ## Acknowledgements

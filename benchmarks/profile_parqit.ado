@@ -117,6 +117,28 @@ program define _parqit_selftest, rclass
     return local selftest "ok"
 end
 
+* Keep the profiling copy on the production bridge protocol: the plugin owns
+* the reservation token and uses the real OS PID + nonce, never c(pid).
+program define _parqit_bridge_new, rclass
+    version 16.0
+    args kind
+    _parqit_ensure_plugin
+    mata: st_local("_bridge_tmphex", _parqit_hex(st_global("c(tmpdir)")))
+    mata: st_local("_bridge_kindhex", _parqit_hex(st_local("kind")))
+    plugin call parqit_plugin, bridge_new `_bridge_tmphex' `_bridge_kindhex'
+    mata: st_local("bridge", _parqit_unhex(st_local("parqit_bridge")))
+    return local bridge `"`bridge'"'
+end
+
+program define _parqit_bridge_discard
+    version 16.0
+    args bridge
+    if (`"`bridge'"' == "") exit
+    _parqit_ensure_plugin
+    mata: st_local("_bridge_hex", _parqit_hex(st_local("bridge")))
+    plugin call parqit_plugin, bridge_discard `_bridge_hex'
+end
+
 * ----------------------------------------------------------------------------
 * parqit use — lazy view by default; , clear = read into memory now
 * ----------------------------------------------------------------------------
@@ -141,16 +163,22 @@ program define _parqit_use, rclass
         local _sq_file `"`using'"'
         local _sq_namelist `"`namelist'"'
         local _sq_vname "`name'"
-        local _sq_owned = ("`owned'" != "")
+        local _sq_owned_file ""
+        if ("`owned'" != "") local _sq_owned_file `"`using'"'
         mata: _parqit_wr_view_open_request("`req'")
         capture noisily plugin call parqit_plugin, view_open `reqhex'
-        if (_rc) exit _rc
+        local rc = _rc
+        if (`rc') {
+            capture _parqit_bridge_discard `"`_sq_owned_file'"'
+            exit `rc'
+        }
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
             as res `"`using'"' as txt ": " as res "`parqit_view_k'" ///
             as txt " columns; nothing read — use {bf:parqit collect} or {bf:parqit save})"
         return scalar k = `parqit_view_k'
         return local view "`vname'"
+        if (`"`_sq_owned_file'"' != "") return local bridge `"`_sq_owned_file'"'
         exit
     }
     if ("`name'" != "") {
@@ -1143,19 +1171,24 @@ program define _parqit_open, rclass
         exit 111
     }
     _parqit_ensure_plugin
-    * bridge: snapshot the dataset to a parquet unique to THIS promotion —
-    * a shared path would let a later open _data silently rebind every
-    * earlier named view to the newest data. The view owns the file: the
-    * plugin erases it when the view is closed or replaced.
-    if ("${PARQIT_OPENDATA_SEQ}" == "") global PARQIT_OPENDATA_SEQ = 0
-    global PARQIT_OPENDATA_SEQ = ${PARQIT_OPENDATA_SEQ} + 1
-    local bridge "`c(tmpdir)'/_parqit_opendata_`c(pid)'_${PARQIT_OPENDATA_SEQ}.parquet"
-    capture erase `"`bridge'"'
-    qui _parqit_save `"`bridge'"', replace data
-    if ("`name'" == "") qui _parqit_use using `"`bridge'"', owned
-    else                qui _parqit_use using `"`bridge'"', name(`name') owned
+    _parqit_bridge_new opendata
+    local bridge `"`r(bridge)'"'
+    capture noisily {
+        quietly _parqit_save `"`bridge'"', replace data
+    }
+    local rc = _rc
+    if (!`rc') capture noisily {
+        if ("`name'" == "") qui _parqit_use using `"`bridge'"', owned
+        else                qui _parqit_use using `"`bridge'"', name(`name') owned
+    }
+    if (!`rc') local rc = _rc
+    if (`rc') {
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
     di as txt "(in-memory dataset promoted to a lazy view; " ///
         as txt "manipulate with parqit verbs, then parqit collect or parqit save)"
+    return local bridge `"`bridge'"'
 end
 
 program define _parqit_close
@@ -1262,10 +1295,15 @@ end
 
 program define _parqit_merge
     version 16.0
-    * parqit merge 1:1|m:1|1:m|m:m keys using <file> [, keep() keepusing() gen() nogen]
+    * parqit merge 1:1|m:1|1:m keys using <file> [, keep() keepusing() gen() nogen]
     gettoken kind 0 : 0, parse(" ")
     if !inlist("`kind'", "1:1", "m:1", "1:m", "m:m") {
         di as err "parqit merge: kind must be 1:1, m:1, 1:m or m:m"
+        exit 198
+    }
+    if ("`kind'" == "m:m") {
+        di as err "parqit merge: lazy m:m is refused because a lazy plan cannot preserve native Stata's physical within-key row order"
+        di as err "use {bf:parqit joinby} for Cartesian matches or {bf:parqit mergein m:m} for native sequential behavior"
         exit 198
     }
     local keys
@@ -1731,8 +1769,9 @@ void _parqit_wr_view_open_request(string scalar req)
     if (strtrim(vl) != "") {
         p = (p, _parqit_jpair("varlist", _parqit_jlist(tokens(vl))))
     }
-    if (st_local("_sq_owned") == "1") {
-        p = (p, _parqit_jpair("owned", "true"))
+    if (st_local("_sq_owned_file") != "") {
+        p = (p, _parqit_jpair("owned_files",
+                "[" + _parqit_jstr(st_local("_sq_owned_file")) + "]"))
     }
     p = (p, _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
     _parqit_emit(req, _parqit_jobj(p))
