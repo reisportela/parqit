@@ -23,6 +23,10 @@ memory. SQL is available for power users, but no one has to learn it.
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
 
+The scoped evidence, closed findings, residual risks and institutional-use
+conditions for this release are recorded in the
+[v0.1.22 technical GO-GO reliability report](CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md).
+
 > **About.** The conceptual design of `parqit` is by **Miguel Portela** — taking
 > [`pq`](https://github.com/jrothbaum/stata_parquet_io) as the starting point and
 > re-basing the manipulation layer on an embedded **DuckDB** engine through a
