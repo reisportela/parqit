@@ -6,6 +6,15 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-07-15
+
+Documentation and onboarding release on top of the v0.1.22 reliability
+baseline: the lazy, explore-first identity is now explicit in the README and
+help file, a start-here guided example ships with the package, the help
+documents the full implemented surface, and the audit evidence chain moved
+to `docs/audits/`. One user-visible fix (lazy `parqit sql` now stores
+`r(k)`). No engine or data-path changes.
+
 ### Added
 - `examples/parqit_basics.do` — a start-here, self-verifying guide that walks
   `use`, `save`, `merge` and `append` twice each over the same small data:

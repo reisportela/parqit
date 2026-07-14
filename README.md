@@ -19,14 +19,14 @@ it lazily on disk (datasets far larger than RAM), and only the final result is
 brought into Stata — or written straight back to Parquet without ever touching
 memory. SQL is available for power users, but no one has to learn it.
 
-> **Status:** v0.1.22 — the full surface below is implemented and covered by a
+> **Status:** v0.1.23 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
 
 The scoped evidence, closed findings, residual risks and institutional-use
-conditions for this release are recorded in the
+conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
@@ -131,13 +131,13 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.22") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.23") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.22` to the tag you want; for the newest, use
+- For a different version, change `v0.1.23` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
