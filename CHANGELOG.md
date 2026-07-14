@@ -20,6 +20,16 @@ semantic versioning once `v0.1.0` is tagged.
   append), asserting identical results command by command. Requires the `pq`
   package; validated end to end against the installed `pq`.
 
+### Changed
+- Repository organization for public sharing: the audit, certification,
+  parity and audit-prompt documents (18 files) and the external verification
+  kit moved from the repository root to `docs/audits/`, now indexed by
+  `docs/audits/README.md` as the correctness evidence chain;
+  `parqit_clean_demo.do` moved to `examples/`. References updated in
+  README.md, CLAUDE.md, `.gitignore` and test comments; the historical
+  documents themselves are unchanged. A git-ignored `local/` folder now
+  holds per-machine drafts, prompts and logs.
+
 ### Fixed
 - Lazy `parqit sql` now stores `r(k)` alongside `r(view)`, as the help file
   has always documented.

@@ -1,4 +1,4 @@
-* Regressions for the 2026-06-12 independent audit (PARQIT_AUDIT_REPORT.md):
+* Regressions for the 2026-06-12 independent audit (docs/audits/PARQIT_AUDIT_REPORT.md):
 *  01 named _data views must keep independent backing data
 *  02 reshape long must reject duplicate i() (Stata's contract)
 *  03 misstable r(n_complete) is the complete-observation count

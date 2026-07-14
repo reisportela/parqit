@@ -27,7 +27,8 @@ memory. SQL is available for power users, but no one has to learn it.
 
 The scoped evidence, closed findings, residual risks and institutional-use
 conditions for this release are recorded in the
-[v0.1.22 technical GO-GO reliability report](CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md).
+[v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
+the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
 > **About.** The conceptual design of `parqit` is by **Miguel Portela** — taking
 > [`pq`](https://github.com/jrothbaum/stata_parquet_io) as the starting point and

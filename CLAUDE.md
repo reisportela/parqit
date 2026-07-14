@@ -13,7 +13,7 @@ Current state: **v0.1.22** (see [CMakeLists.txt](CMakeLists.txt) `project(... VE
 ## Required reading (external, read-only — do not modify)
 
 - **House style:** `/home/mangelo/Documents/GitHub/xhdfe` — the maintainer's own Stata+plugin package. Match its conventions exactly: `*! version X.Y.Z DDmonYYYY` ado banner, `version 16.0` baseline, SMCL `.sthlp` layout, CMake style, author/support block, MIT license text (adjust year/title). parqit should look like it came from the same hand.
-- **Correctness charter:** `/home/mangelo/Documents/BPLIM_GitHub/pq_audit_2026-06-11` — a 14-finding audit of `pq 3.0` (`PQ_AUDIT_REPORT.md`, `issues/`, `verify_suite/`). Every finding is an engine-independent hazard of any Stata↔columnar bridge: each must be impossible by design in parqit (brief §6) and covered by a ported verify test. The in-repo `PARQIT_*AUDIT*.md` reports are later adversarial passes over parqit itself; their fixes are pinned by `tests/verify_suite/v27`–`v32` and `audit_repro/`.
+- **Correctness charter:** `/home/mangelo/Documents/BPLIM_GitHub/pq_audit_2026-06-11` — a 14-finding audit of `pq 3.0` (`PQ_AUDIT_REPORT.md`, `issues/`, `verify_suite/`). Every finding is an engine-independent hazard of any Stata↔columnar bridge: each must be impossible by design in parqit (brief §6) and covered by a ported verify test. The in-repo audit reports under `docs/audits/` (see its index README) are later adversarial passes over parqit itself; their fixes are pinned by `tests/verify_suite/v27`–`v32` and `audit_repro/`.
 - Prior art for mechanics only: https://github.com/jrothbaum/stata_parquet_io — SSC `.pkg` format, per-OS release workflow (binary renamed to `*.plugin`, old-glibc Linux build), ado-pre-creates/plugin-fills pattern. Reimplement in C++/CMake/DuckDB; do not copy its Rust/Polars stack.
 
 ## Architecture (fixed decisions — brief §2)
@@ -114,6 +114,8 @@ tests/         unit/ (doctest), verify_suite/ (audit invariants), integration/, 
 examples/      parqit_tour.do + make_data.py (self-verifying feature tour)
 benchmarks/    parqit-vs-pq-vs-python harnesses (outputs git-ignored under benchmarks/_out)
 audit_repro/   minimal repros for fixed adversarial-audit findings
+docs/audits/   the audit evidence chain: reports, certification, prompts, verification kit (indexed by its README)
+local/         per-machine scratch — drafts, private notes, logs (git-ignored)
 ado/plus/p/    repo-local install tree, refreshed by every build (git-ignored)
 build/<preset>/  CMake build dir; build/dev/parqit.plugin is what run_stata.sh loads (git-ignored)
 ```

@@ -1012,3 +1012,19 @@ entry notes the conservative fallback if the assumption proves wrong.
     script; its comments were translated to English (2026-07-15, house rule:
     researcher-facing text is English — code unchanged) and it was re-run
     green against the installed `pq`.
+84. **Root reorganization is content-preserving (2026-07-15, maintainer
+    direction: tidy for online sharing).** The audit, certification, parity
+    and audit-prompt documents plus the external verification kit moved
+    verbatim (git renames, no content edits to historical reports) from the
+    repository root to `docs/audits/`, indexed by `docs/audits/README.md`;
+    `parqit_clean_demo.do` moved to `examples/`. References were updated in
+    `README.md`, `CLAUDE.md`, `tests/integration/t10_audit_fixes.do` and
+    `.gitignore` (the audit-kit scratch pattern now points at the new path).
+    Working material that was never tracked — the 2026-07-14 holistic-audit
+    draft, agent implementation prompts, `scratch_inj/`, stray root logs,
+    the audit bundle zip, and `examples/parqit_dlg.do` (which embeds a
+    private data path and must never be committed; the path-leak gate would
+    reject it) — now lives in the new git-ignored `local/` folder.
+    `release_lint.sh` remains green: the path-leak gate scans code files
+    only, so the relocated `.md` evidence stays exempt, and no version/date
+    surface moved.

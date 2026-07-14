@@ -95,6 +95,8 @@ AGENTS.md
 GEMINI.md
 CLAUDE.local.md
 .claude/
+# Per-machine scratch: drafts, working notes, private prompts, old logs.
+/local/
 .env
 .env.*
 scripts/run-stata.local.*
@@ -131,4 +133,4 @@ Thumbs.db
 *.rar
 
 # --- Audit-kit scratch (the test pack writes synthetic data + outputs here) --
-verifications/**/tests/outputs/
+docs/audits/verifications/**/tests/outputs/
