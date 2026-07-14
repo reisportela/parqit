@@ -12,6 +12,7 @@
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
 {viewerjumpto "Materialisers" "parqit##materialisers"}{...}
 {viewerjumpto "Performance tips" "parqit##perf"}{...}
+{viewerjumpto "Exploring a view" "parqit##explore"}{...}
 {viewerjumpto "Expressions" "parqit##expressions"}{...}
 {viewerjumpto "Type mapping" "parqit##types"}{...}
 {viewerjumpto "Options" "parqit##options"}{...}
@@ -49,7 +50,7 @@ mismatch across the matched files is a loud error.
 
 {pstd}Verbs on the open view (all lazy):
 
-{p 8 16 2}{cmd:parqit keep} {it:varlist} | {cmd:parqit keep if} {it:exp} | {cmd:parqit keep in} {it:f}{cmd:/}{it:l}{p_end}
+{p 8 16 2}{cmd:parqit keep} {it:varlist} | {cmd:parqit keep if} {it:exp} | {cmd:parqit keep in} {it:f}{cmd:/}{it:l} | {cmd:parqit keep in} {it:#}{p_end}
 {p 8 16 2}{cmd:parqit drop} {it:varlist} | {cmd:parqit drop if} {it:exp}{p_end}
 {p 8 16 2}{cmd:parqit gen} [{it:type}] {it:newvar} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit replace} {it:var} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
@@ -69,16 +70,18 @@ mismatch across the matched files is a loud error.
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source}{p_end}
 
 {p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file} [{cmd:,} {it:merge_options}]{p_end}
-{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)}]{space 3}({opt keep()} names variables {it:of the file}, as in native {helpb append}){p_end}
+{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)} {opt force}]{space 3}({opt keep()} names variables {it:of the file}, as in native {helpb append}){p_end}
 
 {pstd}{cmd:mergein}/{cmd:appendin} join the data {it:already in Stata's memory}
-with a disk {it:file} via a {it:native} {help merge}/{help append}: the
+with a disk {it:file} via a {it:native} {help merge} / {help append}: the
 in-memory dataset stays put (no DuckDB round-trip), and parqit reads only the
 needed columns of the disk side. This is the fast route when the disk side is a
 {it:small lookup}; for big-on-big use the out-of-core
 {cmd:parqit use} + {cmd:parqit merge} path instead. {it:merge_options} are the native ones
 ({opt keepus:ing()}, {opt keep()}, {opt gen:erate()}, {opt nogen:erate},
-{opt update}, {opt assert()}, …).
+{opt update}, {opt replace}, {opt assert()}, {opt force}, {opt nol:abel},
+{opt non:otes}, {opt norep:ort}), forwarded verbatim to native {helpb merge};
+{cmd:appendin} forwards {opt keep()} and {opt force} to native {helpb append}.
 
 {pstd}where each {it:source} is a Parquet {it:filename} (file, glob or
 Hive directory) or {cmd:view:}{it:viewname} — another open view, joined
@@ -171,6 +174,18 @@ and only the final result is brought into Stata — or written straight back
 to Parquet without ever touching Stata's memory.
 
 {pstd}
+The one idea to internalise: {bf:verbs do not run when you type them}. A
+view is a plan — "the current dataset", except that it lives on disk and may
+be far larger than memory — and each verb appends a step and returns
+instantly. Only the materialisers ({cmd:parqit collect}, {cmd:parqit save})
+execute the plan, as a single engine query that reads just the columns and
+rows the result needs. The whole
+{help parqit##explore:exploration family} ({cmd:describe}, {cmd:head},
+{cmd:summarize}, {cmd:tabulate}, {cmd:codebook}, {cmd:misstable}, …) is
+computed engine-side too, so a file can be profiled {it:before} anything is
+loaded — explore first, load last. See {help parqit##lazy:The lazy view}.
+
+{pstd}
 Stata metadata survives: variable labels, value labels, notes, display
 formats, characteristics and original column names are stored in standard
 Parquet key-value metadata under a {cmd:parqit.*} namespace and restored on
@@ -223,9 +238,17 @@ named (default name: {cmd:default}) and several can be open at once — the
 vocabulary mirrors frames: {opt name()} opens under a name, {cmd:parqit view}
 {it:name} switches the current view, {cmd:parqit view} {it:name}{cmd::}
 {it:command} runs a one-off against another view, {cmd:parqit views} lists
-them and {cmd:parqit close} [{it:name}|{cmd:_all}] closes. Verbs always act
+them (bare {cmd:parqit view} does too) and {cmd:parqit close}
+[{it:name}|{cmd:_all}] closes a named view or every view — bare, the
+current one. Verbs always act
 on the current view. A view is a plan, not data: holding many costs
 nothing.
+
+{pstd}
+A typical first session: open the view, explore it engine-side
+({help parqit##explore:describe, head, summarize, tabulate, …} — nothing is
+loaded and the dataset in memory is untouched), then filter and derive
+lazily, and {cmd:collect} only the result — explore first, load last.
 
 {pstd}
 {cmd:parqit collect} executes the pipeline once (into a spillable temporary
@@ -285,13 +308,26 @@ Parquet, delimited text, Stata and Excel.)
 {marker verbs}{...}
 {title:Verbs}
 
+{pstd}Varlists expand Stata wildcards ({cmd:*} any run of characters,
+{cmd:?} one character) against the view's columns: the varlists of
+{cmd:keep}, {cmd:drop}, {cmd:order}, {cmd:contract} and
+{cmd:duplicates drop}, the {opt by()} of {cmd:egen} and {cmd:collapse},
+and {cmd:pivot}'s {opt rows()}. {cmd:sort}/{cmd:gsort} and {cmd:reshape}'s
+{opt i()} take explicit names only.
+
 {pstd}{cmd:collapse} statistics: {cmd:mean sum sd count min max median}
 {cmd:p}{it:##} {cmd:first last firstnm lastnm}. Percentiles follow Stata's
 {cmd:summarize} rule exactly. {cmd:first}/{cmd:last} are deterministic over
 the declared {cmd:parqit sort} order and keep a missing first value missing.
+Weights ({cmd:[fweight=}{it:exp}{cmd:]}, …) are not supported on
+{cmd:collapse}/{cmd:pivot} and are refused loudly.
 
 {pstd}{cmd:egen} functions: {cmd:total mean sd min max count} with
 {opt by()}.
+
+{pstd}{cmd:sample} draws an engine-side random sample: {it:#} is a
+percentage in (0,100]; with {opt count}, {it:#} is a number of rows.
+{opt seed(#)} makes the draw reproducible.
 
 {pstd}{cmd:pivot} is Excel's pivot table as one lazy verb: it aggregates
 the {cmd:(}{it:stat}{cmd:)} specs by ({opt rows()}, {opt cols()}) — exactly
@@ -328,7 +364,9 @@ that runs in parallel.
 
 {pstd}{cmd:keep in} {it:f}{cmd:/}{it:l} validates its range against the
 real observation count when the pipeline runs; out-of-range is an error,
-never a silent empty result.
+never a silent empty result. {cmd:keep in} {it:#} keeps exactly
+observation {it:#}; negative and reversed ranges are not supported on a
+lazy view.
 
 
 {marker materialisers}{...}
@@ -389,7 +427,7 @@ of these (e.g. a large {cmd:mergein}); {cmd:global PARQIT_NOTIPS 1} silences the
 {pstd}
 If your data is already in Stata's memory and you want to merge or append a
 {it:small} lookup that lives on disk, keep your data put: {cmd:parqit mergein} /
-{cmd:parqit appendin} run a {it:native} {help merge}/{help append}, reading only
+{cmd:parqit appendin} run a {it:native} {help merge} / {help append}, reading only
 the columns you ask for from the disk side — no round-trip through DuckDB.
 
 {phang2}{cmd:. parqit mergein m:1 firm_id using firms.parquet, keepusing(tfp)}{p_end}
@@ -469,14 +507,16 @@ count {cmd:""}){p_end}
 {opt limit(#)} (default 5,000){p_end}
 {p 8 12 2}{cmd:parqit head} [{it:#}]{space 13}materialises only {it:#} rows (default 5) into a
 scratch frame, lists them, discards them{p_end}
-{p 8 12 2}{cmd:parqit describe}{space 14}the view's schema and pipeline depth.
+{p 8 12 2}{cmd:parqit describe}{space 14}the view's schema and pipeline depth
+({cmd:parqit glimpse} is a synonym).
 The Stata types shown are the honest display of the file's declared/saved
 types {it:without} a data scan; {cmd:collect} additionally sizes integers and
 strings from the observed range, so a foreign file's column can arrive
 narrower than {cmd:describe} showed{p_end}
 {p 8 12 2}{cmd:parqit count if} {it:exp}{space 8}filtered count {it:without touching the view's pipeline} (any parqit expression, including {cmd:missing(a,b,c)}){p_end}
 {p 8 12 2}{cmd:parqit list} [{it:vars}] [{cmd:if}] [{cmd:in}]{space 2}non-mutating preview
-with projection, filter and row-range (bare {cmd:if} caps at 200 rows){p_end}
+with projection, filter and row-range (bare {cmd:parqit list} shows rows
+1-20; a bare {cmd:if} caps at 200 rows){p_end}
 {p 8 12 2}{cmd:parqit ds}{space 20}variable names → {cmd:r(varlist)}{p_end}
 {p 8 12 2}{cmd:parqit lookfor} {it:words}{space 8}match names and labels{p_end}
 {p 8 12 2}{cmd:parqit codebook} [{it:vars}]{space 6}per variable: kind, obs, missing,
@@ -484,11 +524,13 @@ distinct, min/max, label (one scan){p_end}
 {p 8 12 2}{cmd:parqit distinct} [{it:vars}]{space 6}distinct counts per variable;
 {opt joint} adds the distinct count of the tuple{p_end}
 {p 8 12 2}{cmd:parqit duplicates report} {it:keys}{space 1}copies/observations/surplus
-table; {cmd:duplicates list} shows the first offending rows{p_end}
+table; {cmd:duplicates list} shows the first offending rows
+({opt limit(#)}, default 20){p_end}
 {p 8 12 2}{cmd:parqit misstable patterns}{space 3}frequency of missing-data patterns
 ({cmd:+} observed, {cmd:.} missing; up to 14 variables){p_end}
 {p 8 12 2}{cmd:parqit tabstat} {it:vars}{cmd:, s()}{space 5}statistics × variables table
-({cmd:n mean sd var sum min max range median p##}); {opt by()} groups (≤200){p_end}
+({cmd:n mean sd var sum min max range median p##}; {cmd:count} ≡ {cmd:n});
+{opt by()} groups (≤200){p_end}
 {p 8 12 2}{cmd:parqit correlate} {it:vars}{space 7}correlation matrix, listwise like
 {helpb correlate}; {cmd:parqit pwcorr} is pairwise, with {opt obs} and {opt sig}
 (two-sided p from the t distribution){p_end}
@@ -623,7 +665,16 @@ with a per-column note (Stata strings are C strings).
 {p 8 12 2}{cmd:parqit set statamissing on}|{cmd:off}{space 4}expression missing-value mode{p_end}
 {p 8 12 2}{cmd:parqit set threads} {it:#}{space 14}engine threads{p_end}
 {p 8 12 2}{cmd:parqit set memory_limit} {it:value}{space 4}e.g. {cmd:8GB}{p_end}
-{p 8 12 2}{cmd:parqit set tempdir} {it:path}{space 9}spill directory for out-of-core execution{p_end}
+{p 8 12 2}{cmd:parqit set tempdir} {it:path}{space 9}spill directory for out-of-core
+execution (warns if the directory does not exist yet){p_end}
+
+{pstd}
+Three knobs live outside {cmd:parqit set}. The Stata global
+{cmd:PARQIT_PLUGIN_PATH} points the loader at a locally built plugin and
+takes precedence over the adopath search for {cmd:parqit.plugin};
+{cmd:global PARQIT_NOTIPS 1} mutes the one-line performance tips; and the
+operating-system environment variable {cmd:PARQIT_FILL_THREADS} controls
+the parallel memory fill (see {help parqit##perf:Performance tips}).
 
 
 {marker examples}{...}
@@ -778,10 +829,13 @@ materialising either side ({cmd:view:}{it:name} as a {cmd:using} source):{p_end}
 {phang2}{cmd:. parqit version}{p_end}
 {phang2}{cmd:. parqit selftest}{space 17}({it:end-to-end engine/codec check on a new machine}){p_end}
 
-{pstd}A complete, runnable {bf:self-verifying tour} ships with the source
-repository ({cmd:examples/parqit_tour.do}): the command-line data workflow is
-asserted against native Stata twins and ends in
-{cmd:VERDICT(PARQIT_TOUR): PASS}.{p_end}
+{pstd}Two runnable, {bf:self-verifying} companions ship with the source
+repository. {bf:Start with} {cmd:examples/parqit_basics.do}: it walks
+{cmd:use}/{cmd:save}/{cmd:merge}/{cmd:append} twice each — the eager way
+(everything into memory first) and the lazy way (view + verbs +
+collect/save) — asserting every lazy result against a native Stata twin.
+{cmd:examples/parqit_tour.do} then tours the complete command surface the
+same way. Each ends in a printed {cmd:VERDICT(...): PASS}.{p_end}
 
 
 {marker limitations}{...}
@@ -812,12 +866,18 @@ view (data on disk is never affected).{p_end}
 
 {pstd}{cmd:parqit use, clear} and {cmd:parqit collect} return {cmd:r(N)} and
 {cmd:r(k)}; a lazy {cmd:parqit use} (and {cmd:parqit sql}) returns {cmd:r(k)}
-and {cmd:r(view)}. {cmd:parqit count} returns {cmd:r(N)}. {cmd:parqit describe} {it:file} returns scalars {cmd:r(n_rows)}, {cmd:r(n_cols)},
+and {cmd:r(view)}; {cmd:parqit sql , clear} returns {cmd:r(N)}, {cmd:r(k)}
+and {cmd:r(view)}. {cmd:parqit count} returns {cmd:r(N)}. {cmd:parqit describe} {it:file} returns scalars {cmd:r(n_rows)}, {cmd:r(n_cols)}
+(alias {cmd:r(n_columns)}),
 {cmd:r(n_row_groups)}, {cmd:r(n_files)}, {cmd:r(has_parqit_meta)} and locals
 {cmd:r(name_}{it:i}{cmd:)}, {cmd:r(type_}{it:i}{cmd:)},
 {cmd:r(stata_type_}{it:i}{cmd:)}; the view form returns {cmd:r(n_cols)}
+(alias {cmd:r(n_columns)})
 and {cmd:r(n_steps)}. {cmd:parqit save} returns {cmd:r(N)}, {cmd:r(k)},
-{cmd:r(filename)} and, when a view was materialised, {cmd:r(view)}.
+{cmd:r(filename)} and, when a view was materialised, {cmd:r(view)};
+{cmd:r(ext_missing)} and {cmd:r(frac_dates)} list the variables whose
+extended missings were written as nulls or whose fractional date/period
+values were rounded (empty when nothing was lost).
 {cmd:parqit summarize} returns {cmd:r(N)}, {cmd:r(mean)}, {cmd:r(sd)},
 {cmd:r(min)}, {cmd:r(max)} of the last variable; with {cmd:detail} also
 {cmd:r(Var)}, {cmd:r(skewness)}, {cmd:r(kurtosis)} and {cmd:r(p1)} …
@@ -826,7 +886,8 @@ and {cmd:r(n_steps)}. {cmd:parqit save} returns {cmd:r(N)}, {cmd:r(k)},
 and {cmd:r(n_complete)}, the number of observations with no missing value
 in any of the selected variables. {cmd:parqit levelsof} returns {cmd:r(levels)} and
 {cmd:r(r)}. {cmd:parqit views} returns {cmd:r(n_views)}; {cmd:parqit view}
-returns {cmd:r(view)}. {cmd:parqit list} returns {cmd:r(N)} (rows shown).
+returns {cmd:r(view)}. {cmd:parqit head} and {cmd:parqit list} return
+{cmd:r(N)} (rows shown).
 {cmd:parqit ds} and {cmd:parqit lookfor} return {cmd:r(varlist)}. {cmd:parqit distinct} returns {cmd:r(N)} and {cmd:r(ndistinct)} (last row of its
 table). {cmd:parqit duplicates report} returns {cmd:r(N)},
 {cmd:r(unique_value)} and {cmd:r(surplus)}; {cmd:misstable patterns}

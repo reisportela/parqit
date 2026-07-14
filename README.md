@@ -5,11 +5,13 @@
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-`parqit` lets you read, write, join and **manipulate** columnar data files in Stata using
-ordinary Stata verbs — `keep`, `drop`, `gen`, `replace`, `collapse`, `pivot`,
-`merge`, `append`, `sort`, `reshape` — that run **out-of-core** on an embedded
-[DuckDB](https://duckdb.org) engine over Parquet, and materialise **one result
-table at a time** into Stata's memory.
+`parqit` lets you **explore** and **manipulate** columnar data files in Stata —
+not just read, write, merge or append them. Ordinary Stata verbs — `keep`,
+`drop`, `gen`, `replace`, `collapse`, `pivot`, `merge`, `append`, `sort`,
+`reshape` — run **out-of-core** on an embedded [DuckDB](https://duckdb.org)
+engine over Parquet, and materialise **one result table at a time** into
+Stata's memory. Files far larger than RAM can be profiled, filtered, joined
+and aggregated *before* anything is loaded.
 
 It is, in one line, **dbplyr's architecture with Stata's vocabulary**: you write
 Stata-flavoured verbs, `parqit` translates them to a DuckDB query, the engine executes
@@ -36,6 +38,43 @@ conditions for this release are recorded in the
 > of any kind** (see [LICENSE](LICENSE)); **feedback, issues and pull requests are
 > very welcome**.
 
+## How parqit thinks — the lazy view
+
+If your Stata reflex is *load → work → save*, parqit asks for exactly one new
+idea, and everything else follows from it: **verbs do not run when you type
+them.**
+
+`parqit use using` does not read the file — it opens a **view**: your "current
+dataset", except that it lives on disk and may be far larger than memory. Every
+verb you then type (`keep if`, `gen`, `collapse`, `merge`, …) returns
+instantly, because it only appends a step to the view's **pipeline** — a plan
+of work, like a do-file you are still writing. Nothing is read, nothing is
+computed, and whatever dataset you have in Stata's memory is not touched.
+
+Execution happens exactly once, when you ask for a result with a
+**materialiser**:
+
+- `parqit collect` compiles the whole pipeline into a single DuckDB query, runs
+  it, and loads **only the result** into Stata — atomically, so your in-memory
+  data is replaced only after the new data is complete and valid;
+- `parqit save` runs the same query and writes Parquet directly, so a dataset
+  that never fits in memory can still be filtered, joined, aggregated and
+  reshaped end to end.
+
+Laziness is not a gimmick; it is what makes parqit fast on large data. Because
+the engine sees the whole plan before touching the disk, it reads only the
+columns and row groups the result actually needs (Parquet is columnar, and
+filters are pushed into the scan), executes in vectorised, parallel C++ (the
+embedded DuckDB), and spills to a temporary directory when an intermediate
+result outgrows RAM. Typing `parqit keep if year >= 2019` on a huge panel costs
+nothing at the prompt — and at execution time it means "skip most of the file".
+
+Two habits complete the picture. `parqit show` prints the SQL your pipeline
+compiled to (`parqit explain`, the engine's plan), so the invisible work is one
+command away from visible. And because a view is a plan, not data, experiments
+are cheap: a verb that errors leaves the view exactly as it was, and
+`parqit close` + `parqit use` starts a fresh plan with no big read to redo.
+
 ## Why parqit
 
 Reading and writing Parquet in Stata is already well served — by
@@ -45,6 +84,11 @@ reader**. Its identity is the layer above I/O:
 
 - **Manipulation, not just transfer.** A full set of single-table and two-table
   verbs that compile to one DuckDB query and run before anything is loaded.
+- **Explore before you load.** `describe`, `head`, `summarize`, `tabulate`,
+  `codebook`, `misstable`, `distinct`, `duplicates report`, `count if`,
+  `histogram`, … are computed by the engine as push-down queries over the lazy
+  view; only the summary table (or a few preview rows) enters Stata. The first
+  contact with a 100-GB extract is not a 100-GB read.
 - **Out-of-core by default.** Filter, join, aggregate and reshape billion-row files
   on a laptop; DuckDB spills to disk transparently. The result that lands in Stata
   is only ever the *output* of the pipeline, not the input.
@@ -181,6 +225,10 @@ To make that permanent, add the `adopath` line to your `profile.do`
 * Open a lazy view over one or many Parquet files (nothing is read yet)
 parqit use using /data/qp_*.parquet
 
+* Look around first — computed by the engine, only summaries reach Stata
+parqit head
+parqit summarize wage
+
 * Build a pipeline with ordinary Stata verbs — still lazy
 parqit keep if year >= 2010 & inrange(age, 25, 64)
 parqit keep   id firm year wage
@@ -205,6 +253,36 @@ parqit use  mydata.parquet, clear          // read whole file into memory
 parqit save mydata.parquet, replace        // write the in-memory dataset
 parqit describe mydata.parquet             // schema, types, rows, row groups
 ```
+
+## First contact with a large file
+
+parqit is built for the first hour with unfamiliar — possibly enormous — data.
+The whole exploration family (`describe`, `head`, `list`, `summarize`,
+`tabulate`, `codebook`, `misstable`, `levelsof`, `distinct`,
+`duplicates report`, `tabstat`, `correlate`, `histogram`, `count if`) runs as
+push-down queries over the view: the engine computes, only the summary numbers
+(or a few preview rows) reach Stata, and the dataset in memory stays untouched
+throughout. You can profile a file that would never fit in RAM before deciding
+what — if anything — to load:
+
+```stata
+parqit describe /data/deals_*.parquet   // rows, columns, types: footer metadata only, no data scan
+parqit use using /data/deals_*.parquet  // lazy view over the whole glob; returns immediately
+parqit head 10                          // first rows, nothing else materialised
+parqit codebook                         // per variable: type, obs, missing, distinct, min/max
+parqit misstable patterns               // missing-data patterns
+parqit summarize amount, detail         // Stata-exact moments and percentiles
+parqit tabulate region sector, row      // two-way table with row percentages
+parqit count if missing(client_id)      // filtered count; the view's pipeline is untouched
+parqit histogram amount, bins(30)       // bins computed on disk, drawn with twoway bar
+parqit close
+```
+
+Each call re-executes the (lazy) pipeline, which on Parquet is fast: columnar
+scans read only the variables involved, filters prune row groups, and the
+engine parallelises across cores. This is the intended workflow — **explore
+first, load last** — and it is the sense in which parqit is not another
+Parquet reader: the interesting work happens before anything is imported.
 
 ## The verb grammar
 
@@ -282,6 +360,24 @@ lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` p
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`. |
 | `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. |
 
+### Explore the view (engine-side, nothing loaded)
+
+`count`, `head`, `list`, `summarize`, `tabulate` and `describe` above are
+push-down queries too; these complete the exploration family — every one
+computed by the engine, with only the summary table entering Stata:
+
+| Command | Effect |
+|---|---|
+| `parqit codebook [varlist]` | Per variable: type, obs, missing, distinct, min/max, label — in one scan |
+| `parqit misstable [summarize\|patterns]` | Missing counts and shares; missing-data pattern frequencies (≤14 vars) |
+| `parqit levelsof var [, limit()]` | Sorted distinct values → `r(levels)` (refuses beyond the cap, default 5,000) |
+| `parqit distinct [varlist] [, joint]` | Distinct counts per variable (and of the joint tuple) |
+| `parqit duplicates report\|list keys` | Copies/observations/surplus table; the first offending rows |
+| `parqit tabstat varlist, s() [by()]` | Statistics × variables table (`n mean sd var sum min max range median p##`) |
+| `parqit correlate` / `parqit pwcorr [, obs sig]` | Listwise / pairwise correlation matrices |
+| `parqit histogram var [, bins() nodraw]` | Engine-computed bins, drawn with `twoway bar` |
+| `parqit ds` / `parqit lookfor words` | Variable names → `r(varlist)`; search names and labels |
+
 ### Escape hatches
 
 | Command | Effect |
@@ -331,7 +427,21 @@ parqit collect, clear
 
 ## Tour & examples
 
-`examples/` ships a self-verifying tour of the complete command-line data
+**Start here:** `examples/parqit_basics.do` is a guided, self-verifying walk
+through the base operations — `use`, `save`, `merge`, `append` — each done
+twice over the same small data: the eager way (everything into memory first,
+the pq mental model) and the lazy parqit way (view + verbs + collect/save,
+only the result moves). Every lazy result is asserted against a native-Stata
+twin, it needs nothing beyond parqit itself, runs in seconds, and ends in
+`VERDICT(PARQIT_BASICS): PASS`:
+
+```stata
+. cd examples
+. do parqit_basics.do                  // parqit installed on the adopath
+. do parqit_basics.do <repo> <plugin>  // development tree
+```
+
+`examples/` also ships a self-verifying tour of the complete command-line data
 workflow over
 small artificial datasets (workers panel, firms, patents, wide incomes and
 a deliberately hostile file with reserved/duplicate/space column names,

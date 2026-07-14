@@ -987,3 +987,28 @@ entry notes the conservative fallback if the assumption proves wrong.
     failure deliberately retains the prior target under the recovery path named
     in the error. With the variables absent (the production default), none of
     these paths executes.
+82. **README/help identity framing is documentation-only (2026-07-14,
+    maintainer direction).** The README additions — "How parqit thinks — the
+    lazy view", "First contact with a large file", the "Explore before you
+    load" bullet and the "Explore the view" verb-grammar table — plus the
+    matching help-file Description/lazy-view paragraphs and the "Exploring a
+    view" viewer jump, document behaviour that already exists and is covered
+    by the Stata suites (t08/t09 explore, t05 power, tour §exploration). No
+    command syntax, option, default or semantics changed; the public surface
+    is additive per the non-regression rule. Framing parqit as "explore
+    first, load last" (a fast first pass over large data, not a plain
+    reader) follows the maintainer's 2026-07-14 direction.
+83. **The basics guide is additive executable documentation (2026-07-14,
+    maintainer direction).** `examples/parqit_basics.do` teaches the four base
+    operations (use/save/merge/append) in both philosophies — eager
+    ("pq-style", data in memory first) and lazy (view + verbs + materialise) —
+    using only parqit itself (no pq dependency, no Python; data generated in
+    pure Stata). It asserts each lazy result against a native-Stata oracle
+    (`cf _all` for exact copies, merge + `reldif < 1e-12` for aggregates,
+    the tour's pattern) and is pinned by `tests/integration/t14_basics.do`.
+    The README/help pointers to it are documentation-only; no command
+    surface changed. The untracked `examples/pq_to_parqit_common_workflows.do`
+    (which requires the `pq` package) remains a separate migration/parity
+    script; its comments were translated to English (2026-07-15, house rule:
+    researcher-facing text is English — code unchanged) and it was re-run
+    green against the installed `pq`.

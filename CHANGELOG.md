@@ -6,6 +6,49 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Added
+- `examples/parqit_basics.do` — a start-here, self-verifying guide that walks
+  `use`, `save`, `merge` and `append` twice each over the same small data:
+  the eager way (everything into memory first, the pq mental model) and the
+  lazy parqit way (view + verbs + collect/save), with every lazy result
+  asserted against a native-Stata twin and a final
+  `VERDICT(PARQIT_BASICS): PASS`. Wired into the Stata suite as
+  `tests/integration/t14_basics.do`; pointed to from the README "Tour &
+  examples" section and the help file's Examples section.
+- `examples/pq_to_parqit_common_workflows.do` — a lean pq → parqit parity and
+  migration script over the common functions (describe/path/use/save/merge/
+  append), asserting identical results command by command. Requires the `pq`
+  package; validated end to end against the installed `pq`.
+
+### Fixed
+- Lazy `parqit sql` now stores `r(k)` alongside `r(view)`, as the help file
+  has always documented.
+
+### Documentation
+- `parqit.sthlp` now exposes the full implemented surface: `appendin`'s
+  `force` option; the complete native option list forwarded by `mergein`
+  (`update`, `replace`, `assert()`, `force`, `nolabel`, `nonotes`,
+  `noreport`); varlist wildcard expansion (`*`/`?`) and where it is refused
+  (`sort`/`gsort`, `reshape i()`); the `keep in #` single-observation form;
+  `sample`'s percentage/rows contract; bare `list`'s 20-row preview;
+  `duplicates list`'s default `limit(20)`; `count` ≡ `n` in `tabstat`;
+  `glimpse` as a synonym of `describe`; the `PARQIT_PLUGIN_PATH`,
+  `PARQIT_NOTIPS` and `PARQIT_FILL_THREADS` knobs; and the stored results
+  `r(ext_missing)`/`r(frac_dates)` (save), `r(n_columns)` (describe alias)
+  and `r(N)` (head).
+- README: the lazy mental model and the explore-first workflow are now
+  explicit for Stata users new to lazy pipelines — a "How parqit thinks —
+  the lazy view" section, a "First contact with a large file" walk-through,
+  an "Explore before you load" identity bullet, and a verb-grammar table for
+  the engine-side exploration family (`codebook`, `misstable`, `levelsof`,
+  `distinct`, `duplicates report|list`, `tabstat`, `correlate`/`pwcorr`,
+  `histogram`, `ds`/`lookfor`). Documentation-only and additive: no command
+  semantics changed (flagged in `ASSUMPTIONS.md` §82).
+- Help file: the Description now states the lazy contract up front ("verbs
+  do not run when you type them") and points at the exploration family;
+  "The lazy view" gains the explore-first session shape; the viewer jump
+  list gains the previously unlisted "Exploring a view" section.
+
 ## [0.1.22] — 2026-07-14
 
 This release closes every S0/S1 blocker and every confirmed atomicity,
