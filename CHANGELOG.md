@@ -6,6 +6,61 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-08-08
+
+Correctness and hardening release closing the confirmed findings from the
+2026-08-08 independent adversarial audit. It restores native Stata semantics
+at the expression, list-parser, storage-coercion and wildcard boundaries, and
+makes both in-memory string writers fail safely or fall back automatically
+before an Arrow offset can overflow.
+
+### Added
+- Five Stata verify gates (`v61`–`v65`) and five focused audit reproducers pin
+  scalar-expression parity, literal-safe `list if` parsing, explicit-float
+  range coercion, honest extended-missing handling and Unicode-aware varlist
+  projection across eager, lazy and native-bridge paths. `v61` is a
+  table-driven, 31-expression oracle evaluated by live native Stata in both
+  expression-missing modes.
+
+### Changed
+- Lazy expressions now reject `.a`–`.z` literals with an actionable error.
+  A Parquet-backed view has already collapsed those categories to one null, so
+  treating `.a` as `.` fabricated distinctions that no longer existed; bare
+  `.` and `missing()` remain supported.
+- Slice determinism is documented without adding a hidden all-column sort:
+  `keep in` and previews over tied sort keys require an explicit unique
+  tiebreaker when repeatability matters. This avoids an unmeasured whole-row
+  `ORDER BY` cost and does not pretend to reconstruct Stata's lost physical
+  tie order.
+
+### Fixed
+- `strpos(s, "")` now matches live Stata: 1 for a non-empty haystack and 0
+  for an empty haystack, rather than returning 0 for every row.
+- `parqit list if` no longer lets a quoted `" in "` fragment reach Mata's
+  non-short-circuit indexing path; literal text, functions and a real trailing
+  `in` qualifier are separated safely. Bare `parqit list` now previews up to
+  20 rows without turning that cap into an invalid `in 1/20` on short views.
+- Explicit `gen float`/`egen float` maps finite results outside Stata's
+  float-storage range to missing instead of letting DuckDB raise a conversion
+  error during materialisation.
+- Eager `parqit use` accepts wildcard namelists. Eager/lazy projection,
+  `mergein, keepusing()` and `appendin, keep()` now share ordered, deduplicated
+  `*`/`?` expansion, with `?` consuming one Unicode codepoint.
+- Both in-memory strL writers now reject a failed length lookup or a short/error
+  result from `SF_strldata()` instead of consuming an incomplete buffer. The
+  diagnostic identifies the variable, observation, copied bytes and expected
+  bytes. The strL gate now forces and verifies both the default Arrow writer and
+  the staged `PARQIT_SAVE_NOARROW=1` fallback.
+- A string column above regular Arrow's signed-int32 offset ceiling no longer
+  fails at 2 GiB. The fast writer stops before narrowing an offset and retries
+  automatically through the byte-identical chunked staged writer, before any
+  destination is published. The strL gate forces this transition and verifies
+  the resulting payload independently with pyarrow.
+- The two percentile performance deferrals are closed without changing query
+  semantics: DuckDB 1.5.3 already common-subexpression-eliminates repeated
+  sorted-list expressions, and a fresh 5M x 4 Parquet A/B found the current full
+  `summarize, detail` faster than `quantile_disc` order statistics alone.
+
 ## [0.1.23] — 2026-07-15
 
 Documentation and onboarding release on top of the v0.1.22 reliability
@@ -896,8 +951,9 @@ suites and the C++ unit suite stay green (45/45 Stata, 50/784 C++).
 - **A foreign `parqit.dtalabel` longer than 80 chars no longer aborts the load
   (DTALABEL-LEN-1).** The dataset label is applied best-effort and truncated to
   Stata's 80-char limit instead of failing the whole `use`/`collect` with r(133).
-- **`strpos(s, "")` returns 0 like Stata (STRPOS-EMPTY-1)** (DuckDB returns 1 for
-  an empty needle); **`length()` on a numeric is a clear error naming `length()`**
+- **`strpos(s, "")` was forced to 0 (STRPOS-EMPTY-1); the accompanying
+  "like Stata" claim was wrong and is superseded by Unreleased's
+  STRPOS-EMPTY-2.** **`length()` on a numeric is a clear error naming `length()`**
   rather than the misleading "strlen() needs a string" (LENGTH-NUMERIC-1).
 - **`parqit open _data` no longer orphans its temp bridge** if the subsequent
   view-open fails (OPENDATA-BRIDGE-ORPHAN-1): the bridge is tracked for the

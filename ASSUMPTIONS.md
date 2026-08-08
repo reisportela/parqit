@@ -490,6 +490,12 @@ entry notes the conservative fallback if the assumption proves wrong.
     on a foreign column whose name was sanitised is dropped on a view re-save
     (the char target is not remapped through the sanitiser). These are tracked
     for a future pass; none silently corrupts data.
+    **Current status (2026-08-08):** this paragraph is historical. The fill path
+    checks every `SF_vstore`/`SF_sstore` return; #77 makes flat and partitioned
+    publication transactional; `v29` pins lazy conversion notes; and #62 carries
+    sanitised-name provenance through lazy collect/save; #87 closes the Arrow
+    offset ceiling. None of the items listed in this historical paragraph
+    remains a current constraint.
 
 48. **In-memory `parqit save …, data` assembles each column once as an Arrow
     array and COPYs from a registered Arrow scan.** Measurement (2026-06-15)
@@ -512,8 +518,9 @@ entry notes the conservative fallback if the assumption proves wrong.
     (so a DuckDB upgrade that drops/changes it fails the build, never a user),
     and `PARQIT_SAVE_NOARROW=1` selects the staged temp-table fallback (kept,
     byte-identical) at run time. Full-range only — `save_data` never carries
-    if/in. String columns whose on-disk payload would exceed 2 GiB (int32 Arrow
-    offsets) error loudly rather than overflow.
+    if/in. If a string column outgrows regular Arrow's signed-int32 offsets, the
+    assembler stops before narrowing an offset and automatically re-runs the
+    byte-identical chunked staged writer (#87).
 49. **`parqit save` requires valid UTF-8 in string cells; invalid bytes are a
     loud per-cell error, never a silent corruption.** Arrow/DuckDB/Parquet
     VARCHAR must be valid UTF-8, but a Stata `str#`/`strL` can hold arbitrary
@@ -542,9 +549,10 @@ entry notes the conservative fallback if the assumption proves wrong.
       zero* (`3.9`→`3`, `-2.5`→`-2`, not round-half) and an out-of-range value is
       *system missing* (`gen byte = 200`→`.`, `=101`→`.`; byte data range is
       −127..100). `View::gen` wraps the value in
-      `CASE WHEN trunc(v) ∉ [min,max] THEN NULL ELSE CAST(trunc(v) AS <int>) END`
-      (and `CAST(v AS FLOAT)` for float), which also sizes the collected column
-      to the requested type instead of widening to double. Applied to `gen`
+      `CASE WHEN trunc(v) ∉ [min,max] THEN NULL ELSE CAST(trunc(v) AS <int>) END`.
+      Float targets similarly map finite values outside ±1.70e38 to NULL before
+      `CAST(v AS FLOAT)`. This also sizes the collected column to the requested
+      type instead of widening to double. Applied to `gen`
       only (the documented storage-request entry point), not `replace` (which
       keeps the column's existing type and re-sizes at collect). Period/date
       formats are never attached by `gen`, so the coercion never re-truncates a
@@ -575,14 +583,10 @@ entry notes the conservative fallback if the assumption proves wrong.
       with `[fweight=…]`/`[aweight=…]`/… is a clear "not supported" error rather
       than a mis-parse; implementing weighted aggregates is left for a later
       feature pass (no precision loss — the path never produced a result).
-    - **Deferred (loud/safe today, low reward vs risk):** lazy `use`→`collect`
-      does not yet record a sanitised foreign column's original name in
-      `char[src_name]` the way the eager `use, clear` path does (INJID-2 — the
-      data and types load correctly; only the recovery characteristic is absent
-      on the lazy path); `summarize, detail` still scans once per variable
-      (PERF-DETAIL-KSCAN — a CTE rewrite risks changing a returned scalar, so it
-      is gated on a measured A/B with full re-test). Both are tracked for a
-      follow-up.
+    - **Historical deferrals:** lazy original-name provenance (INJID-2) was
+      deferred here and later closed by #62. The PERF-DETAIL-KSCAN concern was
+      measured and closed without a rewrite in #51: the current per-variable
+      parallel sort beat the proposed combined aggregate.
 
 51. **Residual-hazard fixes from the 2026-06-23 third audit round (post-Codex).**
     Decisions where Stata fidelity or cross-tool consistency was the deciding
@@ -622,7 +626,11 @@ entry notes the conservative fallback if the assumption proves wrong.
       over Stata's 80-char limit is truncated best-effort rather than aborting
       `use`/`collect` with r(133) (DTALABEL-LEN-1) — consistent with the
       best-effort metadata-restore posture.
-    - **`strpos(s,"")` -> 0** (Stata), not DuckDB's 1 (STRPOS-EMPTY-1);
+    - **Historical correction (reverified 2026-08-08):** the earlier claim
+      **`strpos(s,"")` -> 0** was false for a non-empty haystack. Live
+      StataNow 19.5 returns 1 when `s != ""` and 0 only when `s == ""`;
+      DuckDB's unconditional 1 therefore also needed a guarded translation
+      (STRPOS-EMPTY-2).
       **`length()` on a numeric is a clear error naming `length()`**
       (LENGTH-NUMERIC-1) — numeric (format-aware) `length()` is not implemented in
       the translator (no per-variable format there); use `parqit sql`.
@@ -640,14 +648,15 @@ entry notes the conservative fallback if the assumption proves wrong.
       parqit->parqit round trip — a precision/feature loss the maintainer's
       constraints forbid. The characteristic is kept; the staleness is a niche,
       rename-only cosmetic and not worth the trade-off.
-    - **Still deferred (loud/safe today):** strL save return codes stay unchecked
-      (#47a class); the sorted-array percentile list is rebuilt per percentile
-      (PERF-PCTILE-REBUILD-1) and `summarize, detail` scans once per variable
-      (PERF-DETAIL-KSCAN) — both gated on a measured A/B since a CTE rewrite could
-      change a returned scalar; `reshape long`/`wide` i()/j() grouping does not yet
-      fold ''/NaN keys (GROUPKEY-1 was applied to collapse/contract/duplicates/egen
-      but reshape was just restructured for leading-zero suffixes, so its key
-      folding is left for a focused follow-up).
+    - **Performance deferrals closed without a rewrite (2026-08-08):** the pinned
+      DuckDB 1.5.3 physical plan common-subexpression-eliminates repeated
+      `list_sort(list(x))` percentile expressions into one aggregate and one sort,
+      so PERF-PCTILE-REBUILD-1 was not real. On a generated 5M x 4 Parquet input
+      at eight threads, three warm runs of the current complete
+      `summarize, detail` took 1.044/1.024/1.028 s; `quantile_disc` took
+      1.804/1.888/1.842 s for the order statistics alone. PERF-DETAIL-KSCAN is
+      therefore the faster measured design, not actionable debt. The strL
+      return-code gap is closed by #86; the reshape missing-key deferral by #69.
 
 52. **Residual-hazard fixes from the 2026-06-24 fourth adversarial audit round
     (v0.1.11).** Every claim was checked against a native Stata oracle before any
@@ -1028,3 +1037,49 @@ entry notes the conservative fallback if the assumption proves wrong.
     `release_lint.sh` remains green: the path-leak gate scans code files
     only, so the relocated `.md` evidence stays exempt, and no version/date
     surface moved.
+
+85. **Independent 2026-08-08 semantic audit decisions (F1-F6).** Every
+    behavioural claim was first reproduced against live StataNow/MP 19.5 and
+    then pinned by `v61`-`v65` plus focused audit reproducers.
+    - `strpos(s,"")`, quoted `" in "` inside `list if`, explicit-float overflow
+      and wildcard projection were confirmed defects and fixed at their common
+      translation/planning boundary. Bare `list` now applies its 20-row default
+      as a query limit rather than fabricating `in 1/20`, which native Stata
+      rejects when the view has fewer than 20 rows.
+    - Extended-missing identity is irrecoverable after a Parquet boundary.
+      Lazy `.a`-`.z` literals are therefore a loud, atomic error; silently
+      treating every category as ordinary `.` was rejected as false fidelity.
+    - Varlist `?` means one Unicode codepoint, not one UTF-8 byte. Eager and
+      lazy reads, lazy projections and the `mergein`/`appendin` projection
+      bridges share ordered, deduplicated expansion over exposed Stata names.
+    - F6's proposed all-column fallback sort was not applied. No runtime
+      divergence was established; ordering every column can impose a large
+      CPU/memory cost, fails to recover Stata's discarded physical tie order
+      and silently changes the query contract. The honest contract is that a
+      tied slice is unspecified unless the user declares a unique sort key;
+      README/help now say so.
+    - DuckDB 1.5.3's vendored source defines its default memory ceiling as 80%
+      of available system memory. Shared-host guidance therefore recommends an
+      explicit `parqit set memory_limit` without changing the engine default.
+
+86. **Every `SF_strldata()` read is checked before a Stata strL is published
+    (2026-08-08, STRL-RC-1).** Despite its `ST_retcode` spelling in Stata's
+    public prototype, the documented result is the number of bytes copied and
+    `-1` on error; treating any nonzero result as failure would reject every
+    non-empty strL. Both the default Arrow writer and
+    `PARQIT_SAVE_NOARROW=1` staged fallback now reject a negative
+    `SF_sdatalen()` and require the copied byte count to equal that reported
+    length, with variable, observation, copied and expected counts in the
+    diagnostic. `v19_strl_boundary` invalidates the unchanged-source fast path
+    and verifies a 1-MiB strL plus a multibyte boundary through both writers
+    against pyarrow.
+
+87. **String columns above regular Arrow's 2-GiB offset ceiling retry through
+    the staged writer (2026-08-08, ARROW-OFFSET-FALLBACK-1).** The fast in-memory
+    writer keeps its compact int32 offsets for ordinary workloads. If cumulative
+    bytes would exceed `INT32_MAX`, it stops before the narrowing conversion and,
+    before any output transaction exists, `cmd_save_data` clears attempt-local
+    warnings and re-reads the data through the existing chunked DuckDB appender.
+    `v19_strl_boundary` lowers the boundary with a test-only environment hook and
+    simultaneously blocks Arrow registration: success plus the pyarrow payload
+    oracle therefore proves that the automatic staged retry actually ran.

@@ -78,3 +78,12 @@ TEST_CASE("case-sensitive: A and a never collide") {
     CHECK(out[0] == "A");
     CHECK(out[1] == "a");
 }
+
+TEST_CASE("varlist wildcards count Unicode code points") {
+    CHECK(glob_match("x*", "x_long"));
+    CHECK(glob_match("x?", "x1"));
+    CHECK_FALSE(glob_match("x?", "x12"));
+    CHECK(glob_match("caf?", "caf\xc3\xa9"));
+    CHECK(glob_match("caf??", "caf\xc3\xa9z"));
+    CHECK_FALSE(glob_match("caf?", "caf\xc3\xa9z"));
+}

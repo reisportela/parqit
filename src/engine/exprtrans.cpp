@@ -498,7 +498,12 @@ struct Parser {
             return true;
         }
         case Tok::MissingDot:
-            out->sql = "NULL"; /* .a-.z collapse to NULL (documented) */
+            if (cur.text != ".")
+                return fail("extended-missing literals (.a-.z) cannot be tested "
+                            "in a lazy view: the Parquet boundary collapses all "
+                            "extended missings to a single missing; test missing(x) "
+                            "or compare with . instead");
+            out->sql = "NULL";
             out->kind = 'n';
             advance();
             return true;
@@ -1106,9 +1111,12 @@ bool Parser::call(const std::string &fname, Val *out) {
         std::string sub = "coalesce(" + args[1].sql + ", '')";
         /* Stata strpos() returns a BYTE offset (ustrpos() is the character
          * variant). Convert DuckDB's character position to a byte offset via
-         * the byte length of the matched prefix. Stata strpos(s,"") == 0 for an
-         * empty needle, but DuckDB strpos(s,'') == 1 — guard it (STRPOS-EMPTY-1). */
-        out->sql = "(CASE WHEN " + sub + " = '' THEN 0 "
+         * the byte length of the matched prefix. Native StataNow 19.5,
+         * re-verified 08aug2026: strpos(nonempty, "") == 1 and
+         * strpos("", "") == 0; DuckDB returns 1 in both cases. Keep this
+         * handler pinned by v61_expr_native_oracle.do (STRPOS-EMPTY-2). */
+        out->sql = "(CASE WHEN " + sub + " = '' THEN (CASE WHEN " + s +
+                   " = '' THEN 0 ELSE 1 END) "
                    "WHEN strpos(" + s + ", " + sub + ") = 0 THEN 0 ELSE "
                    "strlen(substr(" + s + ", 1, strpos(" + s + ", " + sub +
                    ") - 1)) + 1 END)";

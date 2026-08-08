@@ -1,8 +1,8 @@
 * ADVERSARIAL: the 2045-byte str#/strL boundary and the strL sidecar.
 * Lengths are BYTES (UTF-8): a 2045-byte value stays str2045, 2046 bytes
 * must become strL; multibyte characters straddling internal chunk edges
-* must reassemble exactly; ~1MB strLs stream through the sidecar; binary
-* strLs (embedded NUL) are refused on save with a loud error.
+* must reassemble exactly; ~1MB strLs stream through both in-memory writers;
+* binary strLs (embedded NUL) are refused on save with a loud error.
 clear all
 set more off
 args repo plugin
@@ -60,23 +60,67 @@ assert strlen(big[1]) == 1048576
 assert substr(big[1], 1048574, 3) == "yzx"
 assert big[2] == "tiny"
 
-* ---------- strL round-trip back to parquet (pyarrow oracle) ----------------
-tempfile obase
+* ---------- both strL writers round-trip to parquet (pyarrow oracle) --------
+* Invalidate the unchanged-source fast path so both saves below must read the
+* Stata strL cells through SF_strldata() and return the full reported length.
+gen byte path_marker = 1
+tempfile obase sbase bbase abase
 local o `"`obase'.parquet"'
+local staged `"`sbase'.parquet"'
+local blocked `"`bbase'.parquet"'
+local automatic `"`abase'.parquet"'
+python:
+import os
+os.environ.pop("PARQIT_SAVE_NOARROW", None)
+os.environ.pop("PARQIT_TEST_ARROW_OFFSET_LIMIT", None)
+os.environ.pop("PARQIT_TEST_FAIL_ARROW_REGISTER", None)
+end
 qui parqit save `"`o'"', replace
+python:
+import os
+os.environ["PARQIT_SAVE_NOARROW"] = "1"
+end
+qui parqit save `"`staged'"', replace
+python:
+import os
+os.environ.pop("PARQIT_SAVE_NOARROW", None)
+os.environ["PARQIT_TEST_FAIL_ARROW_REGISTER"] = "1"
+end
+capture parqit save `"`blocked'"', replace
+if (_rc == 0) {
+    di as err "FAIL: Arrow registration hook did not fail"
+    local ++fails
+}
+capture confirm file `"`blocked'"'
+if (_rc == 0) {
+    di as err "FAIL: blocked Arrow registration published a destination"
+    local ++fails
+}
+python:
+import os
+os.environ["PARQIT_TEST_ARROW_OFFSET_LIMIT"] = "4096"
+end
+qui parqit save `"`automatic'"', replace
+python:
+import os
+os.environ.pop("PARQIT_TEST_ARROW_OFFSET_LIMIT", None)
+os.environ.pop("PARQIT_TEST_FAIL_ARROW_REGISTER", None)
+end
 python:
 from sfi import Macro, Scalar
 import pyarrow.parquet as pq
-t = pq.read_table(Macro.getLocal("o"))
 ok = 1
-if t.column("big").to_pylist()[0] != ("xyz" * 350000)[:1048576]: ok = 0
-if t.column("edge").to_pylist()[0] != "c" * 2044 + "\U0001F600": ok = 0
-if [len(x) if x is not None else None for x in t.column("over").to_pylist()] \
-        != [2046, 0, 1]: ok = 0
+for path in (Macro.getLocal("o"), Macro.getLocal("staged"),
+             Macro.getLocal("automatic")):
+    t = pq.read_table(path)
+    if t.column("big").to_pylist()[0] != ("xyz" * 350000)[:1048576]: ok = 0
+    if t.column("edge").to_pylist()[0] != "c" * 2044 + "\U0001F600": ok = 0
+    if [len(x) if x is not None else None for x in t.column("over").to_pylist()] \
+            != [2046, 0, 1]: ok = 0
 Scalar.setValue("pyok", ok)
 end
 if (scalar(pyok) != 1) {
-    di as err "FAIL: strL round-trip payload diverged (pyarrow)"
+    di as err "FAIL: Arrow, staged or automatic-fallback strL payload diverged (pyarrow)"
     local ++fails
 }
 
@@ -94,7 +138,7 @@ if (_rc == 0) {
     local ++fails
 }
 
-if (`fails' == 0) di "VERDICT(V19_STRL_BOUNDARY): PASS - 2045/2046 boundary exact, 1MB strL streams, multibyte edges survive, binary strL refused"
+if (`fails' == 0) di "VERDICT(V19_STRL_BOUNDARY): PASS - boundaries exact; Arrow, staged and automatic fallback preserve strL; binary refused"
 else {
     di as err "VERDICT(V19_STRL_BOUNDARY): FAIL - `fails' check(s)"
     exit 9

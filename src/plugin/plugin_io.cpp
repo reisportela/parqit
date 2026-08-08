@@ -71,6 +71,9 @@ constexpr ST_retcode kRcVarNotFound = 111;
 constexpr ST_retcode kRcMismatch = 459;
 constexpr ST_retcode kRcFileExists = 602;
 constexpr ST_retcode kRcEngine = 920;
+/* Internal signal from the Arrow assembler to cmd_save_data.  It must never
+ * cross the plugin boundary as a Stata return code. */
+constexpr ST_retcode kRcRetryStaged = -1;
 
 void cry(const std::string &s) {
     std::string line = s;
@@ -159,6 +162,17 @@ std::string output_nonce() {
 bool output_test_hook(const char *name) {
     const char *value = std::getenv(name);
     return value && std::strcmp(value, "1") == 0;
+}
+
+size_t arrow_offset_limit() {
+    constexpr unsigned long long kInt32Max = 2147483647ULL;
+    const char *value = std::getenv("PARQIT_TEST_ARROW_OFFSET_LIMIT");
+    if (!value) return static_cast<size_t>(kInt32Max);
+    char *end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || parsed == 0 || parsed > kInt32Max)
+        return static_cast<size_t>(kInt32Max);
+    return static_cast<size_t>(parsed);
 }
 
 bool reserve_output_transaction(const std::string &dest, OutputTransaction *tx,
@@ -690,16 +704,23 @@ ST_retcode plan_columns(Session &s, const Source &src,
 
     /* varlist selection: named columns, named order (charter §6.1) */
     if (!varlist.empty()) {
-        std::map<std::string, size_t> index;
-        for (size_t i = 0; i < plans.size(); i++) index[plans[i].stata_name] = i;
         std::vector<ColumnPlan> picked;
+        std::set<size_t> seen;
         for (const auto &want : varlist) {
-            auto it = index.find(want);
-            if (it == index.end()) {
+            const bool has_wild = want.find('*') != std::string::npos ||
+                                  want.find('?') != std::string::npos;
+            bool hit = false;
+            for (size_t i = 0; i < plans.size(); i++) {
+                if (has_wild ? parqit::glob_match(want, plans[i].stata_name)
+                             : want == plans[i].stata_name) {
+                    hit = true;
+                    if (seen.insert(i).second) picked.push_back(plans[i]);
+                }
+            }
+            if (!hit) {
                 *err = "variable " + want + " not found in the file(s)";
                 return kRcVarNotFound;
             }
-            picked.push_back(plans[it->second]);
         }
         plans.swap(picked);
     }
@@ -2521,6 +2542,7 @@ ST_retcode save_assemble_arrow(
 
     std::vector<bool> warned_frac(k, false), warned_ext(k, false);
     std::string strbuf(8192, '\0');
+    const size_t offset_limit = arrow_offset_limit();
     ST_retcode rc = 0;
     for (ST_int j = in1; j <= in2 && rc == 0; j++) {
         if (!SF_ifobs(j)) continue;
@@ -2536,13 +2558,28 @@ ST_retcode save_assemble_arrow(
                     rc = kRcUsage;
                     break;
                 }
-                ST_int len = SF_sdatalen(i + 1, j);
-                if (len < 0) len = 0;
+                const ST_int len = SF_sdatalen(i + 1, j);
+                if (len < 0) {
+                    *err = "parqit save: could not measure string " + v.name +
+                           "[" + std::to_string(j) + "]";
+                    rc = kRcEngine;
+                    break;
+                }
                 if (static_cast<size_t>(len) + 1 > strbuf.size())
                     strbuf.resize(static_cast<size_t>(len) + 1);
                 if (wk[i] == WStrL) {
-                    SF_strldata(i + 1, j, &strbuf[0],
-                                static_cast<ST_int>(strbuf.size()));
+                    const ST_int capacity =
+                        len < kSpiMaxObs ? len + 1 : len;
+                    const ST_int copied = SF_strldata(
+                        i + 1, j, &strbuf[0], capacity);
+                    if (copied != len) {
+                        *err = "parqit save: incomplete strL read for " +
+                               v.name + "[" + std::to_string(j) +
+                               "] (copied=" + std::to_string(copied) +
+                               ", expected=" + std::to_string(len) + ")";
+                        rc = kRcEngine;
+                        break;
+                    }
                 } else if (SF_sdata(i + 1, j, &strbuf[0]) != 0) {
                     *err = "parqit save: could not read " + v.name + "[" +
                            std::to_string(j) + "]";
@@ -2561,6 +2598,13 @@ ST_retcode save_assemble_arrow(
                 }
                 c.bytes.insert(c.bytes.end(), strbuf.data(),
                                strbuf.data() + len);
+                if (c.bytes.size() > offset_limit) {
+                    /* Regular Arrow utf8 uses signed int32 offsets.  Re-run
+                     * through the chunked staged writer before narrowing an
+                     * offset; no output transaction has started yet. */
+                    rc = kRcRetryStaged;
+                    break;
+                }
                 c.offs[static_cast<size_t>(idx) + 1] =
                     static_cast<int32_t>(c.bytes.size());
             } else {
@@ -2603,13 +2647,6 @@ ST_retcode save_assemble_arrow(
         }
     }
     if (rc != 0) return rc;
-
-    for (int i = 0; i < k; i++)
-        if (cols[i].is_str && cols[i].bytes.size() > 2147483647ULL) {
-            *err = "parqit save: string column " + vars[i].name +
-                   " exceeds 2 GiB on disk (not supported by the Arrow writer)";
-            return kRcUsage;
-        }
 
     /* Wrap the buffers as an Arrow struct array (record batch). All structs and
      * buffer-pointer arrays are locals that outlive the synchronous COPY. */
@@ -2665,6 +2702,10 @@ ST_retcode save_assemble_arrow(
 
     static long long arrow_counter = 0;
     const std::string view = "_parqit_arrow_" + std::to_string(++arrow_counter);
+    if (output_test_hook("PARQIT_TEST_FAIL_ARROW_REGISTER")) {
+        *err = "parqit test hook: Arrow registration blocked";
+        return kRcEngine;
+    }
     duckdb_arrow_stream stream = nullptr;
     duckdb_state st = duckdb_arrow_array_scan(
         s.con(), view.c_str(), reinterpret_cast<duckdb_arrow_schema>(&struct_s),
@@ -2802,16 +2843,26 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
      * assembly than staging through a DuckDB temp table (the temp-table
      * VARCHAR/data round-trip is the cost), for both strings and numerics.
      * PARQIT_SAVE_NOARROW forces the staged path below, which avoids the
-     * deprecated Arrow ingestion API and is the safety fallback. */
-    if (!std::getenv("PARQIT_SAVE_NOARROW")) {
+     * deprecated Arrow ingestion API and is also selected automatically when
+     * a string column outgrows regular Arrow's signed-int32 offsets. */
+    bool use_staged = std::getenv("PARQIT_SAVE_NOARROW") != nullptr;
+    if (!use_staged) {
         rc = save_assemble_arrow(s, vars, wk, dest, replace, compression,
                                  comp_level, partition_by, chunk, kv, &written,
                                  &appended, frac_warned, ext_missing, &err);
-        if (rc != 0) {
+        if (rc == kRcRetryStaged) {
+            use_staged = true;
+            rc = 0;
+            written = appended = 0;
+            frac_warned.clear();
+            ext_missing.clear();
+            err.clear();
+        } else if (rc != 0) {
             cry(err);
             return rc;
         }
-    } else {
+    }
+    if (use_staged) {
     /* staging temp table */
     static long long stage_counter = 0;
     const std::string stage = "_parqit_stage_" + std::to_string(++stage_counter);
@@ -2907,12 +2958,28 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
                     rc = kRcUsage;
                     break;
                 }
-                ST_int len = SF_sdatalen(i + 1, j);
-                if (len < 0) len = 0;
+                const ST_int len = SF_sdatalen(i + 1, j);
+                if (len < 0) {
+                    cry("parqit save: could not measure string " + v.name +
+                        "[" + std::to_string(j) + "]");
+                    rc = kRcEngine;
+                    break;
+                }
                 if (static_cast<size_t>(len) + 1 > strbuf.size())
                     strbuf.resize(static_cast<size_t>(len) + 1);
                 if (wk[i] == WStrL) {
-                    SF_strldata(i + 1, j, &strbuf[0], static_cast<ST_int>(strbuf.size()));
+                    const ST_int capacity =
+                        len < kSpiMaxObs ? len + 1 : len;
+                    const ST_int copied = SF_strldata(
+                        i + 1, j, &strbuf[0], capacity);
+                    if (copied != len) {
+                        cry("parqit save: incomplete strL read for " + v.name +
+                            "[" + std::to_string(j) + "] (copied=" +
+                            std::to_string(copied) + ", expected=" +
+                            std::to_string(len) + ")");
+                        rc = kRcEngine;
+                        break;
+                    }
                 } else if (SF_sdata(i + 1, j, &strbuf[0]) != 0) {
                     cry("parqit save: could not read " + v.name + "[" +
                         std::to_string(j) + "]");

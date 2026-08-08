@@ -23,6 +23,45 @@ bool is_reserved_stata_name(const std::string &name) {
     return false;
 }
 
+static bool utf8_codepoints(const std::string &s,
+                            std::vector<utf8proc_int32_t> *out) {
+    size_t pos = 0;
+    while (pos < s.size()) {
+        utf8proc_int32_t cp = 0;
+        const auto used = duckdb::utf8proc_iterate(
+            reinterpret_cast<const utf8proc_uint8_t *>(s.data() + pos),
+            static_cast<utf8proc_ssize_t>(s.size() - pos), &cp);
+        if (used <= 0) return false;
+        out->push_back(cp);
+        pos += static_cast<size_t>(used);
+    }
+    return true;
+}
+
+bool glob_match(const std::string &pattern, const std::string &name) {
+    std::vector<utf8proc_int32_t> pat, text;
+    if (!utf8_codepoints(pattern, &pat) || !utf8_codepoints(name, &text))
+        return false;
+
+    size_t p = 0, n = 0, star = std::string::npos, mark = 0;
+    while (n < text.size()) {
+        if (p < pat.size() && (pat[p] == '?' || pat[p] == text[n])) {
+            p++;
+            n++;
+        } else if (p < pat.size() && pat[p] == '*') {
+            star = p++;
+            mark = n;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            n = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (p < pat.size() && pat[p] == '*') p++;
+    return p == pat.size();
+}
+
 static bool unicode_letter(utf8proc_int32_t cp) {
     const auto cat = duckdb::utf8proc_category(cp);
     return cat >= duckdb::UTF8PROC_CATEGORY_LU &&

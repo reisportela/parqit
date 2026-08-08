@@ -1,4 +1,4 @@
-*! version 0.1.23 15jul2026
+*! version 0.1.24 8aug2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -303,7 +303,7 @@ program define _parqit_use, rclass
     * owned is INTERNAL (not in the help): the view takes ownership of the
     * backing file and the plugin erases it on close/replace — only
     * parqit open _data passes it for its per-promotion bridge snapshots.
-    capture syntax [namelist] using/ [, clear Name(name) OWNed RELAXed]
+    capture syntax [anything(name=namelist)] using/ [, clear Name(name) OWNed RELAXed]
     if (_rc) {
         syntax anything(name=fileraw id="filename") [, clear Name(name) OWNed RELAXed]
         local using `fileraw'
@@ -1126,13 +1126,11 @@ program define _parqit_list, rclass
         di as err "parqit list: invalid in range"
         exit 198
     }
-    if (`f' == 0 & `"`ifexp'"' == "") {
-        local f 1
-        local l `limit'
-    }
     _parqit_ensure_plugin
     tempfile req resp strl
-    local _sq_limit = cond(`"`ifexp'"' != "" & `f' == 0, 200, -1)
+    * A default preview is a LIMIT, not an explicit in 1/20 range: on a view
+    * with fewer than 20 rows native list shows what exists instead of r(198).
+    local _sq_limit = cond(`f' == 0, cond(`"`ifexp'"' != "", 200, `limit'), -1)
     local _sq_pvars `"`vars'"'
     local _sq_pfilter `"`ifexp'"'
     local _sq_pf `f'
@@ -3506,14 +3504,19 @@ void _parqit_split_in(string scalar src)
     p = strrpos(src, " in ")
     if (p == 0) return
     tailpart = strtrim(substr(src, p + 4, .))
+    if (tailpart == "") return
     t = ustrsplit(tailpart, "/")
-    if (cols(t) == 2 & strtoreal(t[1]) != . & strtoreal(t[2]) != .) {
-        st_local("parqit_inexpr", strtrim(substr(src, 1, p - 1)))
-        st_local("parqit_inrange", strtrim(t[1]) + " " + strtrim(t[2]))
+    if (cols(t) == 2) {
+        if (strtoreal(t[1]) != . & strtoreal(t[2]) != .) {
+            st_local("parqit_inexpr", strtrim(substr(src, 1, p - 1)))
+            st_local("parqit_inrange", strtrim(t[1]) + " " + strtrim(t[2]))
+        }
     }
-    else if (cols(t) == 1 & strtoreal(t[1]) != .) {
-        st_local("parqit_inexpr", strtrim(substr(src, 1, p - 1)))
-        st_local("parqit_inrange", strtrim(t[1]) + " " + strtrim(t[1]))
+    else if (cols(t) == 1) {
+        if (strtoreal(t[1]) != .) {
+            st_local("parqit_inexpr", strtrim(substr(src, 1, p - 1)))
+            st_local("parqit_inrange", strtrim(t[1]) + " " + strtrim(t[1]))
+        }
     }
 }
 

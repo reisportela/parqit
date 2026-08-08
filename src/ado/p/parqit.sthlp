@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.23 15jul2026}{...}
+{* *! version 0.1.24 8aug2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -309,11 +309,13 @@ Parquet, delimited text, Stata and Excel.)
 {title:Verbs}
 
 {pstd}Varlists expand Stata wildcards ({cmd:*} any run of characters,
-{cmd:?} one character) against the view's columns: the varlists of
-{cmd:keep}, {cmd:drop}, {cmd:order}, {cmd:contract} and
-{cmd:duplicates drop}, the {opt by()} of {cmd:egen} and {cmd:collapse},
-and {cmd:pivot}'s {opt rows()}. {cmd:sort}/{cmd:gsort} and {cmd:reshape}'s
-{opt i()} take explicit names only.
+{cmd:?} one Unicode character) against the exposed Stata column names, in
+pattern order without duplicates. This applies to the namelist in eager or
+lazy {cmd:parqit use}, the varlists of {cmd:keep}, {cmd:drop}, {cmd:order},
+{cmd:contract} and {cmd:duplicates drop}, the {opt by()} of {cmd:egen} and
+{cmd:collapse}, {cmd:pivot}'s {opt rows()}, {cmd:mergein}'s {opt keepusing()}
+and {cmd:appendin}'s {opt keep()}. {cmd:sort}/{cmd:gsort} and
+{cmd:reshape}'s {opt i()} take explicit names only.
 
 {pstd}{cmd:collapse} statistics: {cmd:mean sum sd count min max median}
 {cmd:p}{it:##} {cmd:first last firstnm lastnm}. Percentiles follow Stata's
@@ -472,6 +474,12 @@ the pipeline is lazy, so order is just a hint to push work toward the scan.{p_en
 than once, collect it once and work on the result; each {cmd:parqit collect}
 re-executes the pipeline.{p_end}
 
+{phang}o {bf:Set a shared-machine memory budget.} The pinned DuckDB engine's
+default memory limit is 80% of available system memory. On a shared server or
+scheduler allocation, set an explicit per-process ceiling with
+{cmd:parqit set memory_limit} (for example {cmd:8GB}) and, when useful, a spill
+location with {cmd:parqit set tempdir}.{p_end}
+
 {phang}o {bf:Force a serial fill if you need to.} Reads of 50,000+ rows fill
 Stata's memory using up to {cmd:min(cores, 8)} worker threads (the per-cell
 fill dominates the cost). To force the single-threaded path — for example on a
@@ -562,10 +570,8 @@ after a {cmd:collect} of the variables involved.
 {pstd}
 {cmd:keep if}, {cmd:gen}, {cmd:replace} and friends translate Stata
 expressions to SQL. Supported: arithmetic with Stata precedence ({cmd:^}
-is power, {cmd:/} never integer-divides), comparisons, {cmd:& | !},
-missing literals ({cmd:.} and {cmd:.a}-{cmd:.z}, which collapse to SQL
-NULL), string
-literals, and functions including:
+is power, {cmd:/} never integer-divides), comparisons, {cmd:& | !}, the
+ordinary missing literal {cmd:.}, string literals, and functions including:
 
 {p 8 8 2}{cmd:abs exp ln log log10 sqrt floor ceil int round mod min max}
 {cmd:cond inrange inlist missing mi}{p_end}
@@ -584,10 +590,25 @@ qualifier; those forms fail at the originating command without changing the
 view.
 
 {pstd}
+An order with tied keys is not a total order. Because a lazy plan is
+re-executed, {cmd:keep in}, {cmd:list in} and other sliced previews may select
+different members of a tied group across engine plans or platforms. When the
+identity of those rows matters, include an explicit unique tiebreaker in
+{cmd:parqit sort}/{cmd:gsort} before slicing.
+
+{pstd}
 {cmd:string()} and {cmd:strofreal()} use Stata's default {cmd:%9.0g}
 format. {cmd:substr()} and {cmd:strpos()} index bytes, like Stata; if a
 {cmd:substr()} slice splits a UTF-8 codepoint, parqit returns the replacement
 character because DuckDB/Arrow strings must remain valid UTF-8.
+Unicode-indexed {cmd:usubstr()} and {cmd:ustrpos()} are not implemented and
+fail loudly rather than silently using byte positions.
+
+{pstd}
+Extended-missing literals {cmd:.a}-{cmd:.z} are rejected in lazy expressions.
+At the Parquet boundary their category identity has already collapsed to the
+single ordinary missing value, so accepting them would fabricate a distinction
+the view cannot observe. Use {cmd:missing(x)} or compare with {cmd:.}.
 
 {pstd}
 Expressions compute in double precision, exactly like Stata's expression
@@ -597,7 +618,9 @@ result ({cmd:exp(800)}, {cmd:1e300*1e300}) or an out-of-range literal
 never an IEEE infinity. Because untyped results are double, control the
 storage of a generated column with a typed {cmd:parqit gen} (e.g.
 {cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
-is {cmd:float}. Date functions floor a fractional day count (like Stata:
+is {cmd:float}. For an explicit {cmd:float} target, a finite value outside
+Stata's ±1.70e38 storage range becomes missing, as in native assignment.
+Date functions floor a fractional day count (like Stata:
 {cmd:day(-0.5)} is 31) and an out-of-range argument is row-local missing.
 One documented dialect difference: {cmd:regexm()} runs on DuckDB's RE2
 engine, which understands {cmd:\d \w \s}, {cmd:{c -(}n,m{c )-}} and
@@ -845,7 +868,11 @@ same way. Each ends in a printed {cmd:VERDICT(...): PASS}.{p_end}
 (results are not cached once loaded).{p_end}
 {pstd}{cmd:•} Extended missings {cmd:.a}-{cmd:.z} become plain missing in
 Parquet (the format has one missing concept); parqit warns when they are
-written.{p_end}
+written. Their literals are therefore rejected in lazy expressions; use
+{cmd:missing()} or {cmd:.}.{p_end}
+{pstd}{cmd:•} A slice over tied sort keys has no defined within-tie order.
+Add a unique key to {cmd:sort}/{cmd:gsort} before {cmd:keep in} or a sliced
+preview when row identity must be reproducible.{p_end}
 {pstd}{cmd:•} Binary strLs are refused on save (text strLs round-trip
 fine).{p_end}
 {pstd}{cmd:•} Lazy {cmd:parqit merge m:m} is refused before adapter import or

@@ -7,6 +7,7 @@
 #include <set>
 
 #include "engine/exprtrans.hpp"
+#include "engine/sanitize.hpp"
 #include "engine/session.hpp"
 #include "engine/typemap.hpp"
 
@@ -21,8 +22,10 @@ static std::string prev_name(size_t k); /* defined below */
  * way native Stata does at assignment time: integers TRUNCATE toward zero and
  * an out-of-range value becomes system missing (gen byte x=3.9 -> 3,
  * gen byte x=200 -> ., gen byte x=-2.5 -> -2 — verified against Stata). float
- * targets round to float32 precision. The CAST to the matching DuckDB integer
- * type also makes the collected column size to the requested storage type
+ * targets round to float32 precision, with values outside Stata's non-missing
+ * float range mapped to missing instead of letting DuckDB's narrowing CAST
+ * abort the later materialisation. The CAST to the matching DuckDB integer type
+ * also makes the collected column size to the requested storage type
  * (byte/int/long), not silently widen to double (EXPR-1). A str# string target
  * truncates the value to the declared byte width (gen str3 x="hello" -> "hel"),
  * matching Stata (STR-GENWIDTH-1); a codepoint split exactly at the boundary
@@ -45,7 +48,10 @@ static std::string coerce_storage(const std::string &v,
     case StType::Byte: lo = kStataByteMin; hi = kStataByteMax; duckint = "TINYINT"; break;
     case StType::Int:  lo = kStataIntMin;  hi = kStataIntMax;  duckint = "SMALLINT"; break;
     case StType::Long: lo = kStataLongMin; hi = kStataLongMax; duckint = "INTEGER"; break;
-    case StType::Float: return "CAST(" + v + " AS FLOAT)";
+    case StType::Float:
+        return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN "
+               "abs(CAST((" + v + ") AS DOUBLE)) > " + dtoa(kStataFloatMax) +
+               " THEN NULL ELSE CAST((" + v + ") AS FLOAT) END)";
     case StType::Double: return "CAST(" + v + " AS DOUBLE)";
     default: return v; /* string-typed numeric targets are rejected by caller */
     }
@@ -192,27 +198,6 @@ std::string View::show() const {
 }
 
 /* ------------------------------------------------------------- helpers --- */
-
-static bool glob_match(const std::string &pat, const std::string &name) {
-    /* Stata varlist wildcards: * (any run) and ? (one char) */
-    size_t p = 0, n = 0, star = std::string::npos, mark = 0;
-    while (n < name.size()) {
-        if (p < pat.size() && (pat[p] == '?' || pat[p] == name[n])) {
-            p++;
-            n++;
-        } else if (p < pat.size() && pat[p] == '*') {
-            star = p++;
-            mark = n;
-        } else if (star != std::string::npos) {
-            p = star + 1;
-            n = ++mark;
-        } else {
-            return false;
-        }
-    }
-    while (p < pat.size() && pat[p] == '*') p++;
-    return p == pat.size();
-}
 
 std::string View::expand_patterns(const std::vector<std::string> &patterns,
                                   std::vector<std::string> *out) const {

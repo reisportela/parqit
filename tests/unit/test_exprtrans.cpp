@@ -76,7 +76,6 @@ TEST_CASE("filters: SQL missing semantics match Stata keep-if outcomes") {
     CHECK(count_where("x != .") == 4);
     CHECK(count_where("x < .") == 4);          /* the classic not-missing idiom */
     CHECK(count_where("x >= .") == 1);
-    CHECK(count_where("x == .a") == 1);        /* .a collapses to NULL */
 }
 
 TEST_CASE("statamissing mode: missing sorts above every number") {
@@ -102,7 +101,9 @@ TEST_CASE("string semantics: NULL behaves as empty string") {
     CHECK(eval_at("substr(s, 2, 1)", 2) == "b");
     CHECK(eval_at("substr(s, -1, 1)", 2) == "b"); /* negative from end */
     CHECK(eval_at("strpos(s, \"b\")", 2) == "1");
-    CHECK(eval_at("strpos(s, \"\")", 2) == "0");  /* Stata: empty needle -> 0 (STRPOS-EMPTY-1) */
+    CHECK(eval_at("strpos(s, \"\")", 2) == "1");  /* nonempty haystack */
+    CHECK(eval_at("strpos(s, \"\")", 3) == "0");  /* empty haystack */
+    CHECK(eval_at("strpos(s, \"\")", 4) == "0");  /* NULL folds to empty */
     CHECK(eval_at("regexm(\"xyz\", s)", 4) == "1"); /* NULL pattern is Stata "" */
     CHECK(eval_at("string(x)", 2) == "2");   /* Stata %9.0g: "2", not "2.0" */
     CHECK(eval_at("real(\"3.5\")", 1) == "3.5");
@@ -177,7 +178,10 @@ TEST_CASE("INF-1: generated infinities are missing everywhere, like Stata") {
 TEST_CASE("loud rejections match native Stata r(198)/r(109)") {
     ExprSchema sch = test_schema();
     CHECK_FALSE(translate_expression("x == .A", sch, false).ok);  /* uppercase */
-    CHECK(translate_expression("x == .a", sch, false).ok);        /* lowercase ok */
+    ExprResult ext = translate_expression("x == .a", sch, false);
+    CHECK_FALSE(ext.ok);
+    CHECK(ext.error.find("extended-missing literals (.a-.z)") != std::string::npos);
+    CHECK(translate_expression("x == .", sch, false).ok);
     CHECK_FALSE(translate_expression("x < 1.2.3", sch, false).ok);
     CHECK_FALSE(translate_expression("x == 1 || x == 2", sch, false).ok);
     CHECK_FALSE(translate_expression("x == 1 && x == 2", sch, false).ok);

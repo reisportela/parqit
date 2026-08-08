@@ -127,6 +127,20 @@ TEST_CASE("untyped numeric gen is a physical double") {
           "DOUBLE");
 }
 
+TEST_CASE("explicit float gen maps out-of-range values to missing") {
+    View v = make_view();
+    REQUIRE(v.gen("f_big", "float", "1e300", "", false).empty());
+    REQUIRE(v.gen("f_exp", "float", "exp(700)", "", false).empty());
+    REQUIRE(v.gen("f_neg", "float", "-1e39", "", false).empty());
+    REQUIRE(v.gen("f_ok", "float", "1e38", "", false).empty());
+    const std::string sql = v.compile(false);
+    CHECK(run_scalar("SELECT f_big IS NULL AND f_exp IS NULL AND f_neg IS NULL "
+                     "FROM (" + sql + ") LIMIT 1") == "true");
+    CHECK(run_scalar("SELECT typeof(f_ok) FROM (" + sql + ") LIMIT 1") == "FLOAT");
+    CHECK(std::strtod(run_scalar("SELECT f_ok FROM (" + sql + ") LIMIT 1").c_str(),
+                      nullptr) > 9.9e37);
+}
+
 TEST_CASE("replace storage is committed before later lazy expressions") {
     View d = make_view();
     REQUIRE(d.replace("wage", "4000000000", "", false).empty());

@@ -20,6 +20,10 @@ namespace parqit {
 
 bool is_reserved_stata_name(const std::string &name);
 
+/* Stata varlist wildcard matching over Unicode code points: * matches any run
+ * and ? exactly one character. Invalid UTF-8 never matches. */
+bool glob_match(const std::string &pattern, const std::string &name);
+
 /* Sanitise one candidate (steps 1–3 + 5); no uniqueness handling. */
 std::string sanitize_stata_name(const std::string &source, size_t position_1based);
 

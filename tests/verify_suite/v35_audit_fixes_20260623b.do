@@ -7,7 +7,7 @@
 *                   the group key (matching merge and native Stata)
 *   SAVE-SELFGLOB-1 partitioned save over the open view's glob/dir source refused
 *   SET-THREADS-1/2 non-integer / out-of-range threads is a clear loud error
-*   STRPOS-EMPTY-1  strpos(s,"") == 0 (not 1)
+*   STRPOS-EMPTY-2  strpos(s,"") == 1 for a non-empty haystack
 *   LENGTH-NUMERIC-1 length() on a numeric is a clear loud error naming length()
 clear all
 set more off
@@ -123,7 +123,7 @@ capture assert `rc_ok'==0 & `rc_frac'!=0 & `rc_huge'!=0
 if (_rc) di as err "FAIL SET-THREADS: ok=`rc_ok' frac=`rc_frac' huge=`rc_huge'"
 local fails = `fails' + (_rc!=0)
 
-* ---- STRPOS-EMPTY-1 and LENGTH-NUMERIC-1 -----------------------------------
+* ---- STRPOS-EMPTY-2 and LENGTH-NUMERIC-1 -----------------------------------
 clear
 input double x
 5
@@ -133,8 +133,8 @@ parqit save `"`t'_se.parquet"', replace data
 parqit use using `"`t'_se.parquet"'
 parqit gen p0 = strpos(s, "")
 parqit collect, clear
-capture assert p0[1]==0
-if (_rc) di as err "FAIL STRPOS-EMPTY-1: strpos(s,\"\")=`=p0[1]' (want 0)"
+capture assert p0[1]==1
+if (_rc) di as err `"FAIL STRPOS-EMPTY-2: strpos(s,"")=`=p0[1]' (want 1)"'
 local fails = `fails' + (_rc!=0)
 parqit use using `"`t'_se.parquet"'
 capture noisily parqit gen bad = length(x)
