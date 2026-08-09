@@ -45,6 +45,13 @@ struct ExprResult {
     std::string sql;
     char kind = 'n'; /* 'n' numeric, 's' string, 'b' boolean */
     std::string error;
+    /* ROWCTX-1: the expression consumed _n/_N, so `sql` carries the
+     * __PARQIT_ROW__/__PARQIT_NROWS__ placeholders that only the view compiler
+     * resolves (View::gen, keep if/drop if). A caller that cannot run that
+     * substitution — the read-only stats and preview filters — must refuse the
+     * expression itself; letting the placeholder reach DuckDB produced a raw
+     * Binder Error naming an internal token (charter §5/§6.12). */
+    bool uses_rowctx = false;
 };
 
 /* Translate a Stata expression. */

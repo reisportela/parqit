@@ -587,11 +587,20 @@ std::string View::reorder(const std::vector<std::string> &front) {
 
 std::string View::sort(const std::vector<std::string> &keys,
                        const std::vector<bool> &desc) {
+    /* SORT-WILD-1: sort/gsort take explicit names — a sort key list is an
+     * ordered contract, not a set, so a pattern's expansion order would be a
+     * silent second contract. Detect the pattern itself: the old count-based
+     * check below only fired when the expansion changed the key COUNT, so a
+     * wildcard matching exactly one column slipped through and sorted by
+     * whatever it happened to match. */
+    for (const auto &k : keys)
+        if (k.find('*') != std::string::npos || k.find('?') != std::string::npos)
+            return "wildcards are not allowed in parqit sort";
     std::vector<std::string> names;
     std::string err = expand_patterns(keys, &names);
     if (!err.empty()) return err;
     if (names.size() != keys.size())
-        return "wildcards are not allowed in parqit sort";
+        return "wildcards are not allowed in parqit sort"; /* belt: duplicates */
     sort_.clear();
     for (size_t i = 0; i < names.size(); i++)
         sort_.push_back(quote_ident(names[i]) +
@@ -981,6 +990,35 @@ static void merge_using_meta(View *, nlohmann::json *dst_vallabs,
     }
 }
 
+/* JOINKEY-1: the one place that decides whether a join key list is usable.
+ * merge_with/joinby_with call it, and so does the plugin BEFORE it runs the
+ * uniqueness contracts — those queries reference the keys, so an unknown key
+ * used to come back as "Binder Error: Referenced column ... not found" with
+ * the generated SQL attached, instead of parqit naming the key and the side. */
+std::string View::join_keys_error(const std::string &op,
+                                  const std::vector<std::string> &keys,
+                                  const UsingSide &u,
+                                  bool *type_mismatch) const {
+    if (type_mismatch) *type_mismatch = false;
+    std::map<std::string, const ViewCol *> ucols;
+    for (const auto &c : u.cols) ucols[c.name] = &c;
+    for (const auto &k : keys) {
+        int mi = col_index(k);
+        if (mi < 0) return op + ": key " + k + " not found in the master view";
+        auto it = ucols.find(k);
+        if (it == ucols.end())
+            return op + ": key " + k + " not found in the using data";
+        if (cols_[mi].kind != it->second->kind) {
+            if (type_mismatch) *type_mismatch = true;
+            return op + ": key " + k + " is " +
+                   (cols_[mi].kind == 's' ? "string" : "numeric") +
+                   " in master but " +
+                   (it->second->kind == 's' ? "string" : "numeric") + " in using";
+        }
+    }
+    return "";
+}
+
 std::string View::merge_with(const std::string &kind,
                              const std::vector<std::string> &keys, UsingSide u,
                              const std::vector<std::string> &keepusing,
@@ -991,19 +1029,8 @@ std::string View::merge_with(const std::string &kind,
         return "merge: kind must be 1:1, m:1, 1:m or m:m";
 
     /* keys must exist on both sides with matching kinds */
-    std::map<std::string, const ViewCol *> ucols;
-    for (const auto &c : u.cols) ucols[c.name] = &c;
-    for (const auto &k : keys) {
-        int mi = col_index(k);
-        if (mi < 0) return "merge: key " + k + " not found in the master view";
-        auto it = ucols.find(k);
-        if (it == ucols.end()) return "merge: key " + k + " not found in the using data";
-        if (cols_[mi].kind != it->second->kind)
-            return "merge: key " + k + " is " +
-                   (cols_[mi].kind == 's' ? "string" : "numeric") +
-                   " in master but " +
-                   (it->second->kind == 's' ? "string" : "numeric") + " in using";
-    }
+    std::string kerr = join_keys_error("merge", keys, u);
+    if (!kerr.empty()) return kerr;
     std::set<std::string> keyset(keys.begin(), keys.end());
 
     /* Normalise a join key to Stata's missing/empty equivalence INSIDE the join
@@ -1341,16 +1368,8 @@ std::string View::append_with(std::vector<UsingSide> sources,
 std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
                               std::vector<std::string> *warnings) {
     if (keys.empty()) return "joinby: key varlist required";
-    std::map<std::string, const ViewCol *> ucols;
-    for (const auto &c : u.cols) ucols[c.name] = &c;
-    for (const auto &k : keys) {
-        int mi = col_index(k);
-        if (mi < 0) return "joinby: key " + k + " not found in the master view";
-        auto it = ucols.find(k);
-        if (it == ucols.end()) return "joinby: key " + k + " not found in the using data";
-        if (cols_[mi].kind != it->second->kind)
-            return "joinby: key " + k + " has different types in master and using";
-    }
+    std::string kerr = join_keys_error("joinby", keys, u);
+    if (!kerr.empty()) return kerr;
     std::set<std::string> keyset(keys.begin(), keys.end());
 
     std::vector<ViewCol> ncols = cols_;

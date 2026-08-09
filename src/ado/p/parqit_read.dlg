@@ -1,7 +1,7 @@
 /*
   parqit — read Parquet (or CSV/dta/Excel) data
 
-*!  VERSION 0.1.24  8aug2026
+*!  VERSION 0.1.25  9aug2026
 
   Launch with:  db parqit_read
   Install a User-menu entry with:  parqit menu
@@ -61,7 +61,7 @@ BEGIN
 	onclickoff(script clear_off)
 
   TEXT tx_lazy			_lft	+25	_iwd	.,		///
-	label("Default: open a lazy view — nothing is read until parqit collect/save")
+	label("Default: lazy view — schema probed, no rows loaded into Stata")
 
   TEXT tx_name			_lft	+25	_vnwd	.,		///
 	label("View name (optional)")

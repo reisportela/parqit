@@ -6,6 +6,81 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.25] — 2026-08-09
+
+Documentation and runtime-contract hardening release following the 2026-08-08/09
+adversarial review. It makes the lazy-opening contract precise, marks one
+long-standing expression extension explicitly and hardens the remaining
+user-name error boundary. Successful plan, type, metadata and data paths are
+unchanged, and every error path involved stays loud.
+
+### Added
+- `ExprResult::uses_rowctx` reports that a translated expression still carries
+  the `__PARQIT_ROW__`/`__PARQIT_NROWS__` placeholders, so a caller that cannot
+  run the view compiler's substitution can refuse before DuckDB sees them.
+
+### Fixed
+- Apple-Silicon macOS console installs now select the shipped arm64 plugin via
+  `g OSX.ARM64`, alongside the existing `MACARM64` GUI selector. Stata assigns
+  distinct package platform names to GUI and terminal sessions; without the
+  console alias, `net install` reached `h parqit.plugin` with no plugin selected
+  and aborted. Both selectors install the same `parqit_macarm64.plugin`.
+- `parqit count if` and `parqit list if` with `_n`/`_N` now refuse with parqit's
+  own message and `rc 198`. They previously reached the engine and returned
+  `rc 920` with a raw `Binder Error: Referenced column "__PARQIT_ROW__" not
+  found` — an internal token in a user-facing message (charter §5/§6.12).
+- Errors raised on the shared `collect`/`head`/`list` entry point now name the
+  command the user typed. `parqit list in 50/60` out of range, an unknown
+  preview variable and "no lazy view is open" from `parqit head` all reported
+  themselves as `parqit collect:` before.
+- `parqit sort`/`gsort` reject a wildcard key even when it matches exactly one
+  column. The previous guard compared expansion counts, so `sort w*` silently
+  sorted by whatever `w*` happened to match, against the documented
+  explicit-names-only contract.
+- `parqit sql "…", clear` reports the committed view name; it printed the
+  internal candidate tempname (`view __000000 remains open`) while returning
+  `r(view)` as `default`.
+- `parqit summarize …, detail` no longer prints a stray `%` with no percentile
+  beside it on the last row of the nine-percentile block.
+- A lazy `merge`/`joinby` key that is missing from a side stops with native
+  variable-not-found `rc 111`; a key that is string on one side and numeric on
+  the other stops with native type-mismatch `rc 106`. Both name the key and the
+  side. `merge`'s uniqueness contracts run before the plan mutation and group by
+  the keys, so an invalid key previously reached DuckDB first and returned
+  `rc 920` with a `Binder Error` quoting parqit's generated SQL; `joinby`
+  reported the same class of mistake as a generic `rc 198`. The check now lives
+  once in `View::join_keys_error`, called by both verbs and by their caller
+  before any query runs.
+- Two-table error messages no longer double their verb (`parqit joinby: joinby:
+  key … not found`): the engine verbs already prefix their own message.
+- `parqit reshape long` now validates every `i()` name and stub before its
+  uniqueness query; `reshape wide` does the same for its stubs, `i()` and `j()`
+  before the missingness and uniqueness scans. Unknown names return native
+  variable-not-found `rc 111` with parqit's own message instead of either a
+  late generic `rc 198` or leaked DuckDB `Binder Error` text, generated SQL and
+  `__parqit_s*` identifiers with `rc 920`.
+
+### Changed
+- The lazy `parqit use` line reads `schema probed, no rows loaded` instead of
+  `nothing read`, matching the help: opening a view does read the source schema
+  and metadata.
+- README, the ado message and the read dialog now use the same precise lazy
+  contract: opening/validation may inspect the source, but no result
+  observations are loaded into Stata until materialisation.
+- README and the help distinguish the unchanged current dataset from bounded
+  preview staging, Parquet row-group pruning from streamed delimited-text
+  parsing, and the pure-read collect fast path from transformed-result staging.
+- The help identifies `ty()` as a parqit extension (native Stata writes a
+  `%ty` value as the bare year) and states explicitly that the `if` qualifier
+  of `gen`/`replace` follows the selected missing-value mode.
+- Importing a non-Parquet `using` side no longer prints its import chatter or
+  the package-owned bridge path. Failures stay visible and keep their return
+  code: `quietly` suppresses neither native error text nor the plugin's
+  `SF_error` output.
+- `parqit describe`/`glimpse` of a `.csv`/`.tsv`/`.txt`/`.tab`/`.dta`/`.xls`/
+  `.xlsx` source stops with `rc 198` and points at `parqit use`, instead of
+  passing the file to `read_parquet` and surfacing the engine's raw error.
+
 ## [0.1.24] — 2026-08-08
 
 Correctness and hardening release closing the confirmed findings from the

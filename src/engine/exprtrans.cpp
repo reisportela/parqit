@@ -348,6 +348,9 @@ struct Parser {
     bool stmiss;
     std::string error;
     const std::string &src;
+    /* ROWCTX-1: set when _n/_N is consumed, so the caller can tell whether the
+     * emitted SQL still needs the view compiler's row-context substitution. */
+    bool used_rowctx = false;
 
     Parser(const std::string &s, const ExprSchema &sch, bool sm)
         : lex(s), schema(sch), stmiss(sm), src(s) {
@@ -522,11 +525,13 @@ struct Parser {
         case Tok::SysN:
             out->sql = "__PARQIT_ROW__"; /* resolved by the view compiler */
             out->kind = 'n';
+            used_rowctx = true;
             advance();
             return true;
         case Tok::SysBigN:
             out->sql = "__PARQIT_NROWS__";
             out->kind = 'n';
+            used_rowctx = true;
             advance();
             return true;
         case Tok::LParen: {
@@ -1274,6 +1279,7 @@ ExprResult translate_expression(const std::string &expr, const ExprSchema &schem
         return r;
     }
     r.ok = true;
+    r.uses_rowctx = p.used_rowctx;
     r.sql = v.kind == 'b'
                 ? "(CASE WHEN " + v.sql + " THEN 1 WHEN NOT (" + v.sql +
                       ") THEN 0 ELSE NULL END)"
@@ -1312,6 +1318,7 @@ ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
     }
     r.ok = true;
     r.kind = 'b';
+    r.uses_rowctx = p.used_rowctx;
     /* Stata `keep if x`: a row is kept when x is nonzero OR missing (a missing
      * value is treated as true), matching as_bool(). */
     r.sql = (v.kind == 'b')

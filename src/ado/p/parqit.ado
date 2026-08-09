@@ -1,4 +1,4 @@
-*! version 0.1.24 8aug2026
+*! version 0.1.25 9aug2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -236,15 +236,23 @@ program define _parqit_import_to_bridge, rclass
     tempname fr
     capture noisily frame create `fr'
     local rc = _rc
+    * BRIDGE-QUIET-1: the import and the snapshot are package internals; their
+    * chatter ("(3 vars, 6 obs)", "(6 obs, 2 vars written to …/bridge.parquet)")
+    * only exposed a temporary path the user never named. `capture noisily {
+    * quietly ... }` keeps the FAILURE loud — quietly does not suppress error
+    * output, and the plugin's SF_error text and rc still reach the caller,
+    * while dropping the success noise.
     if (!`rc') capture noisily frame `fr' {
-        if ("`kind'" == "dta")        use `"`src'"', clear
-        else if ("`kind'" == "excel") import excel `"`src'"', firstrow clear
-        else                          import delimited `"`src'"', clear
-        if (c(k) == 0 | _N == 0) {
-            * still snapshot an empty schema so downstream errors are about the
-            * data, not a missing file
+        quietly {
+            if ("`kind'" == "dta")        use `"`src'"', clear
+            else if ("`kind'" == "excel") import excel `"`src'"', firstrow clear
+            else                          import delimited `"`src'"', clear
+            if (c(k) == 0 | _N == 0) {
+                * still snapshot an empty schema so downstream errors are about
+                * the data, not a missing file
+            }
+            parqit save `"`bridge'"', replace data
         }
-        parqit save `"`bridge'"', replace data
     }
     if (!`rc') local rc = _rc
     capture frame drop `fr'
@@ -325,7 +333,7 @@ program define _parqit_use, rclass
     local _sq_bridge `"`r(bridge)'"'
 
     if ("`clear'" == "") {
-        * open (or replace) the named lazy view — nothing is read
+        * open (or replace) the named lazy view — schema probed, no rows loaded
         if ("`name'" == "") local name "default"
         tempfile req
         local _sq_file `"`using'"'
@@ -347,7 +355,7 @@ program define _parqit_use, rclass
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
             as res `"`using'"' as txt ": " as res "`parqit_view_k'" ///
-            as txt " columns; nothing read — use {bf:parqit collect} or {bf:parqit save})"
+            as txt " columns; schema probed, no rows loaded — use {bf:parqit collect} or {bf:parqit save})"
         return scalar k = `parqit_view_k'
         return local view "`vname'"
         if (`"`_sq_owned_file'"' != "") return local bridge `"`_sq_owned_file'"'
@@ -997,6 +1005,7 @@ program define _parqit_collect, rclass
     _parqit_ensure_plugin
     tempfile req resp strl
     local _sq_limit -1
+    local _sq_cmdlabel "collect"
     mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
     capture noisily plugin call parqit_plugin, view_collect_prepare `reqhex'
     if (_rc) exit _rc
@@ -1056,6 +1065,7 @@ program define _parqit_head, rclass
     _parqit_ensure_plugin
     tempfile req resp strl
     local _sq_limit `nrows'
+    local _sq_cmdlabel "head"
     mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
     capture noisily plugin call parqit_plugin, view_collect_prepare `reqhex'
     if (_rc) exit _rc
@@ -1135,6 +1145,7 @@ program define _parqit_list, rclass
     local _sq_pfilter `"`ifexp'"'
     local _sq_pf `f'
     local _sq_pl `l'
+    local _sq_cmdlabel "list"
     mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
     capture noisily plugin call parqit_plugin, view_collect_prepare `reqhex'
     if (_rc) exit _rc
@@ -1367,6 +1378,25 @@ program define _parqit_describe, rclass
     }
 
     local file `target'
+    * DESCRIBE-EXT-1: describe/glimpse of a SOURCE is a Parquet footer read; it
+    * deliberately does not invoke the CSV/Stata/Excel adapters (documented in
+    * the help). Handing a .csv/.dta to read_parquet produced the engine's raw
+    * "Invalid Input Error" with rc 920 — technically loud, but it named neither
+    * the cause nor the remedy. Classify the extension the same way
+    * _parqit_resolve_source does (basename, final dot, case-insensitive).
+    * A Hive directory may legitimately be named with any suffix, so only a
+    * non-directory is classified by extension.
+    mata: st_local("_d_isdir", strofreal(direxists(st_local("file"))))
+    local _d_base = substr(`"`file'"', strrpos(`"`file'"', "/") + 1, .)
+    local _d_ext ""
+    if ("`_d_isdir'" == "0" & strpos(`"`_d_base'"', ".") > 0) ///
+        local _d_ext = lower(substr(`"`_d_base'"', strrpos(`"`_d_base'"', ".") + 1, .))
+    if inlist("`_d_ext'", "csv", "tsv", "txt", "tab", "dta") | ///
+       inlist("`_d_ext'", "xls", "xlsx") {
+        di as err "parqit describe: reads Parquet footers only (file, glob or Hive directory)"
+        di as err `"open `_d_ext' input with {bf:parqit use using `file'} and describe the view instead"'
+        exit 198
+    }
     tempfile req resp
     local _sq_file `"`file'"'
     mata: _parqit_wr_describe_request("`req'", "`resp'")
@@ -2054,7 +2084,12 @@ program define _parqit_sql, rclass
     capture noisily plugin call parqit_plugin, view_sql `reqhex'
     if (_rc) exit _rc
     if ("`clear'" != "") {
-        capture noisily _parqit_collect, clear
+        * SQL-CANDNAME-1: the collect runs while the CANDIDATE view (a tempname)
+        * is current, so its own "view __000000 remains open" line leaked an
+        * internal name and contradicted r(view). Quiet the success line only —
+        * capture noisily keeps any failure visible — and reprint below with the
+        * committed name.
+        capture noisily quietly _parqit_collect, clear
         local collect_rc = _rc
         if (`collect_rc') {
             mata: st_local("candhex", _parqit_hex(st_local("name")))
@@ -2065,10 +2100,14 @@ program define _parqit_sql, rclass
             }
             exit `collect_rc'
         }
+        local sql_n = r(N)
+        local sql_k = r(k)
         mata: st_local("candhex", _parqit_hex(st_local("name")))
         mata: st_local("targethex", _parqit_hex(st_local("sql_target")))
         capture noisily plugin call parqit_plugin, view_commit `candhex' `targethex'
         if (_rc) exit _rc
+        di as txt "(" as res "`sql_k'" as txt " vars, " as res "`sql_n'" ///
+            as txt " obs collected; view " as res "`sql_target'" as txt " remains open)"
         return local view "`sql_target'"
         return add
         exit
@@ -2402,10 +2441,15 @@ void _parqit_wr_collect_request(string scalar req, string scalar resp,
 {
     string rowvector p
 
+    /* MSG-LABEL-1: collect/head/list share this entry point; the label lets the
+     * plugin name the command the user typed in every message. Absent (older
+     * caller) means collect, so the wire stays backward-compatible. */
     p = (_parqit_jtext("cmd", "view_collect_prepare"),
          _parqit_jtext("respfile", resp),
          _parqit_jtext("strlfile", strl),
          _parqit_jpair("limit", st_local("_sq_limit")),
+         _parqit_jtext("label",
+             (st_local("_sq_cmdlabel") != "" ? st_local("_sq_cmdlabel") : "collect")),
          _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
     if (st_local("_sq_pvars") != "") {
         p = (p, _parqit_jpair("vars", _parqit_jlist(tokens(st_local("_sq_pvars")))))
@@ -3344,9 +3388,19 @@ void _parqit_print_detail(string scalar resp)
                "kurtosis", substr(f[7], 1, 12))
         printf("  %12s %-14s %14s %-12s\n", "min", substr(f[8], 1, 12),
                "max", substr(f[9], 1, 12))
+        /* DETAIL-ODDCELL-1: nine percentiles in two columns leave the last row
+         * with no right-hand pair. Printing the empty pair anyway emitted a
+         * stray "%" with nothing attached to it, so the final row is emitted
+         * with the left column only (same widths, so the columns still line up). */
         for (i = 1; i <= 9; i = i + 2) {
-            printf("  %11s%% %-14s %13s%% %-12s\n", pl[i], substr(f[9 + i], 1, 12),
-                   (i < 9 ? pl[i + 1] : ""), (i < 9 ? substr(f[10 + i], 1, 12) : ""))
+            if (i < 9) {
+                printf("  %11s%% %-14s %13s%% %-12s\n", pl[i],
+                       substr(f[9 + i], 1, 12), pl[i + 1],
+                       substr(f[10 + i], 1, 12))
+            }
+            else {
+                printf("  %11s%% %-14s\n", pl[i], substr(f[9 + i], 1, 12))
+            }
         }
         st_local("parqit_det_n", f[2])
         st_local("parqit_det_mean", f[3])

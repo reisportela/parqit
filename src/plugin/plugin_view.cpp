@@ -49,6 +49,7 @@ using parqit::ViewCol;
 namespace {
 
 constexpr ST_retcode kRcUsage = 198;
+constexpr ST_retcode kRcTypeMismatch = 106;
 constexpr ST_retcode kRcVarNotFound = 111;
 constexpr ST_retcode kRcEngine = 920;
 /* Stata's "no room to add more observations" — the SPI obs index (ST_int)
@@ -1125,13 +1126,31 @@ ST_retcode cmd_view_info(const std::vector<std::string> &args) {
 
 ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     std::string err;
-    if (require_view(&err) != 0) {
-        cry("parqit collect: " + err);
-        return kRcUsage;
-    }
     json req;
+    /* MSG-LABEL-1: the request is parsed before the view check so every message
+     * below can name the command the user actually typed. collect, head and
+     * list share this entry point; reporting all three as "parqit collect"
+     * sent users looking at a command they never ran. load_req only fails on a
+     * malformed request written by our own Mata (an internal bug), and its
+     * message carries no prefix, so the swap changes no user-facing ordering. */
     if (!load_req(args, &req, &err)) {
         cry(err);
+        return kRcUsage;
+    }
+    /* Every user-originated string on this wire is hex (CLAUDE.md), so the
+     * label is read through req_text, not json::value — reading the raw field
+     * yields the hex digits and silently falls back. Optional: an older caller
+     * that omits it means collect. Never echo wire text into a message: accept
+     * only the three known labels. */
+    std::string label;
+    if (!parqit::req_text(req, "label", &label, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    if (label != "collect" && label != "head" && label != "list") label = "collect";
+    const std::string who = "parqit " + label + ": ";
+    if (require_view(&err) != 0) {
+        cry(who + err);
         return kRcUsage;
     }
     std::string respfile, strlfile, tmpdir;
@@ -1147,7 +1166,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
 
     ST_retcode rrc = validate_ranges(s, g_view_ref(), &err);
     if (rrc != 0) {
-        cry("parqit collect: " + err);
+        cry(who + err);
         return rrc;
     }
 
@@ -1165,12 +1184,12 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         if (!s.query_scalar("SELECT count(*) FROM (" +
                                 g_view_ref().compile(false) + ")",
                             &nstr, &err)) {
-            cry("parqit list: " + err);
+            cry(who + err);
             return kRcEngine;
         }
         long long have = std::strtoll(nstr.c_str(), nullptr, 10);
         if (pl > have) {
-            cry("parqit list: in " + std::to_string(pf) + "/" +
+            cry(who + "in " + std::to_string(pf) + "/" +
                 std::to_string(pl) + " is out of range: only " +
                 std::to_string(have) + " observations");
             return kRcUsage;
@@ -1188,7 +1207,16 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         for (const auto &c : g_view_ref().cols()) sch.kinds[c.name] = c.kind;
         parqit::ExprResult tr = parqit::translate_filter(pfilter, sch, g_statamissing);
         if (!tr.ok) {
-            cry("parqit list: " + tr.error);
+            cry(who + tr.error);
+            return kRcUsage;
+        }
+        /* ROWCTX-1: only the view compiler resolves __PARQIT_ROW__/_NROWS__.
+         * This preview filter is applied to an already-compiled SELECT, so the
+         * placeholder would reach DuckDB and come back as a Binder Error naming
+         * an internal token. Refuse it here, the way View::gen already does. */
+        if (tr.uses_rowctx) {
+            cry(who + "_n/_N are not supported in the if filter of " + label +
+                "; use parqit keep if instead");
             return kRcUsage;
         }
         sql = "SELECT * FROM (" + sql + ") WHERE " + tr.sql;
@@ -1204,7 +1232,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
             bool found = false;
             for (const auto &c : g_view_ref().cols()) found = found || c.name == v;
             if (!found) {
-                cry("parqit list: variable " + v + " not found in the view");
+                cry(who + "variable " + v + " not found in the view");
                 return kRcVarNotFound;
             }
             selv += (selv.empty() ? "" : ", ") + quote_ident(v);
@@ -1237,7 +1265,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         if (vsrc.paths_sql.empty()) vsrc.paths_sql = "[]";
     } else {
         if (!s.exec("CREATE TEMP TABLE " + quote_ident(table) + " AS " + sql, &err)) {
-            cry("parqit collect: " + err);
+            cry(who + err);
             return kRcEngine;
         }
         vsrc.scan_sql = quote_ident(table);
@@ -1248,7 +1276,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     if (rc != 0) {
         std::string derr;
         if (drop_source_after) s.exec("DROP TABLE IF EXISTS " + quote_ident(table), &derr);
-        cry("parqit collect: " + err);
+        cry(who + err);
         return rc;
     }
 
@@ -1324,7 +1352,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
      * died as the ado's bare `option n() invalid`). Refuse loudly before
      * any fetch machinery spins up; every out-of-core remedy stays open. */
     if (ctx.nrows > kSpiMaxObs) {
-        cry("parqit collect: the result has " + std::to_string(ctx.nrows) +
+        cry(who + "the result has " + std::to_string(ctx.nrows) +
             " rows — more than the 2,147,483,647 observations the Stata "
             "plugin interface can address; aggregate or filter the lazy view "
             "first (parqit collapse, parqit keep if/in), or write it to "
@@ -1970,7 +1998,8 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
         }
         std::string e = g_view_ref().append_with(std::move(sources), gen, &warns);
         if (!e.empty()) {
-            cry("parqit append: " + e);
+            /* the engine verbs prefix their own message with the verb name */
+            cry("parqit " + e);
             return kRcUsage;
         }
     } else if (op == "merge" || op == "joinby") {
@@ -1989,10 +2018,26 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             cry("parqit " + op + ": " + err);
             return rc;
         }
+        /* JOINKEY-1: both verbs validate their keys HERE, before anything else
+         * touches them. merge's uniqueness contracts below run queries that
+         * reference the keys, so an unknown or type-mismatched key used to
+         * reach DuckDB and return a Binder Error quoting parqit's generated
+         * SQL instead of naming the key and the side; joinby reported the same
+         * class of mistake as rc 198. Both now stop with the engine's own
+         * message: native rc 111 for an absent variable and native rc 106 for
+         * incompatible key types. merge_with/joinby_with keep the check for
+         * the plan-mutation path. */
+        bool key_type_mismatch = false;
+        std::string kerr =
+            g_view_ref().join_keys_error(op, keys, u, &key_type_mismatch);
+        if (!kerr.empty()) {
+            cry("parqit " + kerr);
+            return key_type_mismatch ? kRcTypeMismatch : kRcVarNotFound;
+        }
         if (op == "joinby") {
             std::string e = g_view_ref().joinby_with(keys, std::move(u), &warns);
             if (!e.empty()) {
-                cry("parqit joinby: " + e);
+                cry("parqit " + e);
                 return kRcUsage;
             }
         } else {
@@ -2040,7 +2085,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             std::string e = g_view_ref().merge_with(merge_kind, keys, std::move(u), keepusing,
                                               keep_mask, gen, nogen, &warns);
             if (!e.empty()) {
-                cry("parqit merge: " + e);
+                cry("parqit " + e);
                 return kRcUsage;
             }
         }
@@ -2191,7 +2236,40 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
+    auto has_view_col = [](const std::string &name) {
+        for (const auto &c : g_view_ref().cols())
+            if (c.name == name) return true;
+        return false;
+    };
     if (dir == "long") {
+        /* RESHAPE-NAME-1: the uniqueness query below is deliberately eager.
+         * Validate its user-supplied keys against the live manifest first so
+         * DuckDB can never expose generated SQL or __parqit_s* in a Binder
+         * Error for an unknown i() variable. */
+        for (const auto &iv : ivars) {
+            if (!has_view_col(iv)) {
+                cry("parqit reshape long: i() variable " + iv +
+                    " not found in the view");
+                return kRcVarNotFound;
+            }
+        }
+        for (const auto &stub : stubs) {
+            bool has_stub_col = false;
+            for (const auto &c : g_view_ref().cols()) {
+                if (std::find(ivars.begin(), ivars.end(), c.name) != ivars.end())
+                    continue;
+                if (c.name.size() > stub.size() &&
+                    c.name.compare(0, stub.size(), stub) == 0) {
+                    has_stub_col = true;
+                    break;
+                }
+            }
+            if (!has_stub_col) {
+                cry("parqit reshape long: no variables match stub(s) " + stub +
+                    "…");
+                return kRcVarNotFound;
+            }
+        }
         /* Stata's contract: i() uniquely identifies the wide observations.
          * Accepting duplicates would silently fabricate long data, so check
          * eagerly (one aggregation pass), exactly like wide does for (i,j). */
@@ -2227,6 +2305,28 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
     if (dir != "wide") {
         cry("parqit reshape: direction must be long or wide");
         return kRcUsage;
+    }
+
+    /* RESHAPE-NAME-1: wide_j_scan queries j() missingness and (i,j)
+     * uniqueness. Refuse unknown names before either query reaches DuckDB. */
+    if (!has_view_col(jname)) {
+        cry("parqit reshape wide: j() variable " + jname +
+            " not found in the view");
+        return kRcVarNotFound;
+    }
+    for (const auto &iv : ivars) {
+        if (!has_view_col(iv)) {
+            cry("parqit reshape wide: i() variable " + iv +
+                " not found in the view");
+            return kRcVarNotFound;
+        }
+    }
+    for (const auto &stub : stubs) {
+        if (!has_view_col(stub)) {
+            cry("parqit reshape wide: stub variable " + stub +
+                " not found in the view");
+            return kRcVarNotFound;
+        }
     }
 
     /* wide needs the j values and Stata's (i, j) uniqueness contract */
@@ -2989,6 +3089,15 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         parqit::ExprResult tr = parqit::translate_filter(expr, sch, g_statamissing);
         if (!tr.ok) {
             cry("parqit count: " + tr.error);
+            return kRcUsage;
+        }
+        /* ROWCTX-1: see cmd_view_collect_prepare — this count runs the filter
+         * against the compiled view, where the _n/_N placeholders have no
+         * binding. Refuse with parqit's own message instead of letting an
+         * internal token surface as a DuckDB Binder Error. */
+        if (tr.uses_rowctx) {
+            cry("parqit count: _n/_N are not supported in count if; apply "
+                "parqit keep if first, or collect and count natively");
             return kRcUsage;
         }
         std::string n;

@@ -5,7 +5,8 @@ d data with ordinary Stata verbs -- keep, drop, gen, replace,
 d collapse, pivot, merge, append, sort, reshape -- that run out-of-core
 d on an embedded DuckDB engine and materialise one result table
 d at a time into Stata's memory, or write it straight back to
-d Parquet without touching memory. Variable labels, value labels,
+d Parquet without loading the result into Stata's current dataset.
+d Variable labels, value labels,
 d notes, display formats and characteristics survive a parqit save /
 d parqit use round-trip through standard Parquet key-value metadata,
 d while files remain plain Parquet for Python (pandas, polars), R,
@@ -20,7 +21,7 @@ d KW: data management
 d
 d Requires: Stata version 16
 d
-d Distribution-Date: 20260808
+d Distribution-Date: 20260809
 d
 d Author: Miguel Portela, Universidade do Minho & NIPE
 d Support: email miguel.portela@@eeg.uminho.pt
@@ -39,5 +40,6 @@ f parqit_write.dlg
 f parqit_views.dlg
 g LINUX64 parqit_linux64.plugin parqit.plugin
 g MACARM64 parqit_macarm64.plugin parqit.plugin
+g OSX.ARM64 parqit_macarm64.plugin parqit.plugin
 g WIN64 parqit_win64.plugin parqit.plugin
 h parqit.plugin

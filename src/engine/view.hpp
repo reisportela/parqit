@@ -131,6 +131,17 @@ class View {
         std::vector<ViewCol> cols;
         nlohmann::json vallabs;       /* definitions carried from its parqit.* */
     };
+    /* JOINKEY-1: every join key must exist on both sides with the same kind.
+     * merge_with/joinby_with enforce this, but the caller runs the uniqueness
+     * contracts BEFORE them, and a key absent from a side turned that query
+     * into a raw DuckDB Binder Error quoting internal SQL. Callers that query
+     * first must call this themselves; "" means the keys are usable. The
+     * optional flag distinguishes native rc 106 type mismatches from rc 111
+     * missing-variable errors without duplicating validation in the plugin. */
+    std::string join_keys_error(const std::string &op,
+                                const std::vector<std::string> &keys,
+                                const UsingSide &u,
+                                bool *type_mismatch = nullptr) const;
     /* kind: "1:1", "m:1", "1:m", "m:m" (uniqueness already validated by the
      * caller — the engine layer cannot run queries). keep_mask: bit 1 = keep
      * _merge==1 rows, bit 2 = ==2, bit 4 = ==3; 0 means keep all. */
