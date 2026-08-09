@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.25 — the full surface below is implemented and covered by a
+> **Status:** v0.1.26 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -141,13 +141,13 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.25") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.26") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.25` to the tag you want; for the newest, use
+- For a different version, change `v0.1.26` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.

@@ -1,4 +1,4 @@
-*! version 0.1.25 9aug2026
+*! version 0.1.26 9aug2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -127,19 +127,21 @@ program define _parqit_menu
     }
     capture {
         window menu append submenu "stUser" "&parqit"
-        window menu append item "&parqit" "&Read data (use)..." "db parqit_read"
-        window menu append item "&parqit" "&Explore / data quality..." "db parqit_explore"
-        window menu append item "&parqit" "Descriptive &statistics..." "db parqit_stats"
+        window menu append item "&parqit" "&Read / open / path..." "db parqit_read"
+        window menu append item "&parqit" "&Explore / previews..." "db parqit_explore"
+        window menu append item "&parqit" "&Statistics..." "db parqit_stats"
         window menu append separator "&parqit"
-        window menu append item "&parqit" "&Filter observations (if/in)..." "db parqit_filter"
-        window menu append item "&parqit" "&Variables and sort..." "db parqit_vars"
-        window menu append item "&parqit" "&Generate / replace..." "db parqit_gen"
-        window menu append item "&parqit" "Pivot &table (Excel-style)..." "db parqit_pivot"
-        window menu append item "&parqit" "Co&mbine (merge/append/joinby)..." "db parqit_combine"
+        window menu append item "&parqit" "&Filter / sample..." "db parqit_filter"
+        window menu append item "&parqit" "&Variables / duplicates..." "db parqit_vars"
+        window menu append item "&parqit" "&Generate / egen / replace..." "db parqit_gen"
+        window menu append item "&parqit" "&Aggregate / reshape / pivot..." "db parqit_pivot"
+        window menu append item "&parqit" "Co&mbine lazy / in-memory..." "db parqit_combine"
         window menu append separator "&parqit"
-        window menu append item "&parqit" "&Collect / save (run pipeline)..." "db parqit_write"
-        window menu append item "&parqit" "Vie&ws and settings..." "db parqit_views"
+        window menu append item "&parqit" "C&ollect / save..." "db parqit_write"
+        window menu append item "&parqit" "Vie&ws / SQL / settings..." "db parqit_views"
         window menu append separator "&parqit"
+        window menu append item "&parqit" "Vers&ion" "parqit version"
+        window menu append item "&parqit" "Self-&test" "parqit selftest"
         window menu append item "&parqit" "&Help on parqit" "help parqit"
         window menu refresh
     }

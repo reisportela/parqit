@@ -6,6 +6,27 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.26] — 2026-08-09
+
+Point-and-click completeness and layout-correction release. The User menu now
+matches the command-line surface, and every shipped dialog uses the wide Stata
+canvas without clipped controls.
+
+### Added
+- The point-and-click surface now exposes every public `parqit` subcommand:
+  source/open/path management, all previews and diagnostics, sampling and
+  duplicate removal, `egen`, collapse/contract/reshape, both lazy and
+  in-memory combine paths, SQL/query and named-view execution. The User menu
+  labels mirror those functional groups and include direct version/self-test
+  entries.
+
+### Fixed
+- All ten dialogs now use Stata's 600-unit wide layout and their dense controls
+  have been realigned inside that boundary. This removes clipped labels,
+  buttons and fields in the statistics and workflow dialogs. Release lint now
+  rejects a public dispatcher command missing from the dialogs, a dialog not
+  linked from the User menu, or a return to the narrower layout.
+
 ## [0.1.25] — 2026-08-09
 
 Documentation and runtime-contract hardening release following the 2026-08-08/09

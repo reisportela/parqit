@@ -1,7 +1,7 @@
 /*
   parqit — descriptive statistics over the open view (engine-side)
 
-*!  VERSION 0.1.25  9aug2026
+*!  VERSION 0.1.26  9aug2026
 
   Launch with:  db parqit_stats     (installed on the menu by: parqit menu)
   Everything is computed by the engine as a push-down query; only the
@@ -10,7 +10,7 @@
 
 VERSION 16.0
 
-INCLUDE _std_medium
+INCLUDE _std_wide
 DEFINE _dlght 470
 INCLUDE header
 HELP hlp1, view("help parqit")
@@ -46,6 +46,7 @@ BEGIN
 	main.ck_sig.disable
 	main.ed_hvar.disable
 	main.ed_bins.disable
+	main.ck_nodraw.disable
 END
 
 SCRIPT sum_on
@@ -104,6 +105,7 @@ BEGIN
 	script all_off
 	main.ed_hvar.enable
 	main.ed_bins.enable
+	main.ck_nodraw.enable
 END
 
 DIALOG main, label("parqit — descriptive statistics (engine-side)") tabtitle("Main")
@@ -142,13 +144,13 @@ BEGIN
   CHECKBOX ck_s_min		+55	@	55	., label("min")
   CHECKBOX ck_s_max		+60	@	60	., label("max")
   CHECKBOX ck_s_med		+65	@	75	., label("median")
-  CHECKBOX ck_s_sum		_indent	+22	55	., label("sum")
+  CHECKBOX ck_s_sum		_ilft	+22	55	., label("sum")
   CHECKBOX ck_s_var		+60	@	55	., label("var")
   TEXT tx_sextra		+65	@	120	.,		///
 	label("Other (p90 ...):")
   EDIT ed_sextra		+125	@	90	.,		///
 	label("extra statistics")
-  TEXT tx_tsby			_indent	+25	80	.,		///
+  TEXT tx_tsby			_ilft	+25	80	.,		///
 	label("By group:")
   EDIT ed_tsby			+85	@	140	.,		///
 	option(by) label("group variable")
@@ -176,6 +178,8 @@ BEGIN
 	label("Bins:")
   EDIT ed_bins			+55	@	70	.,		///
 	numonly option(bins) label("bins")
+  CHECKBOX ck_nodraw		+140	@	210	.,		///
+	option(nodraw) label("Return bins without drawing")
 END
 
 PROGRAM pq_show_vars
@@ -264,6 +268,7 @@ BEGIN
 		put main.ed_hvar
 		beginoptions
 			optionarg main.ed_bins
+			option main.ck_nodraw
 		endoptions
 	}
 END
