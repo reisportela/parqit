@@ -6,6 +6,18 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.27] — 2026-08-09
+
+macOS Intel distribution release. It restores the x86_64 Mac build and makes
+the same package installable from both GUI and console Stata.
+
+### Added
+- Releases now include `parqit_macos_x86_64.zip` and the loose
+  `parqit_macintel64.plugin`, built and tested on GitHub's supported
+  `macos-15-intel` runner. The all-platforms ZIP includes this binary too.
+- `parqit.pkg` selects the Intel plugin through both `MACINTEL64` (GUI) and
+  `OSX.X8664` (console), while release lint keeps both selectors byte-aligned.
+
 ## [0.1.26] — 2026-08-09
 
 Point-and-click completeness and layout-correction release. The User menu now

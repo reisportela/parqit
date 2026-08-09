@@ -27,14 +27,10 @@ jobs:
             os: ubuntu-latest
             preset: linux
             artifact: parqit_linux_x86_64
-          # macos-x86_64 (Intel) is temporarily omitted: GitHub's macos-13
-          # runners queue for hours on the free tier. The build is proven —
-          # identical code/fix to macos-arm64, which passes. Re-add this entry
-          # to ship the Intel binary again once a runner is reliably available.
-          # - label: macos-x86_64
-          #   os: macos-13
-          #   preset: macos-x86_64
-          #   artifact: parqit_macos_x86_64
+          - label: macos-x86_64
+            os: macos-15-intel
+            preset: macos-x86_64
+            artifact: parqit_macos_x86_64
           - label: macos-arm64
             os: macos-14
             preset: macos-arm64
@@ -131,9 +127,10 @@ jobs:
           # install aborts on the first missing file) — hence the .dlg glob.
           STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_*.dlg"
           mkdir -p dist/parqit_all_platforms
-          for plat in linux_x86_64 macos_arm64 windows_x86_64; do
+          for plat in linux_x86_64 macos_x86_64 macos_arm64 windows_x86_64; do
             case $plat in
               linux_x86_64)   bin=parqit_linux64.plugin ;;
+              macos_x86_64)   bin=parqit_macintel64.plugin ;;
               macos_arm64)    bin=parqit_macarm64.plugin ;;
               windows_x86_64) bin=parqit_win64.plugin ;;
             esac
@@ -146,6 +143,7 @@ jobs:
           # a colleague on any OS can net install from the same zip.
           cp $STATA_FILES dist/parqit_all_platforms/
           cp artifacts/parqit_linux_x86_64/parqit.plugin   dist/parqit_all_platforms/parqit_linux64.plugin
+          cp artifacts/parqit_macos_x86_64/parqit.plugin   dist/parqit_all_platforms/parqit_macintel64.plugin
           cp artifacts/parqit_macos_arm64/parqit.plugin    dist/parqit_all_platforms/parqit_macarm64.plugin
           cp artifacts/parqit_windows_x86_64/parqit.plugin dist/parqit_all_platforms/parqit_win64.plugin
           (cd dist/parqit_all_platforms && zip -r ../parqit_all_platforms.zip .)
@@ -169,6 +167,7 @@ jobs:
             dist/parqit_all_platforms/parqit.sthlp
             dist/parqit_all_platforms/parqit_*.dlg
             dist/parqit_all_platforms/parqit_linux64.plugin
+            dist/parqit_all_platforms/parqit_macintel64.plugin
             dist/parqit_all_platforms/parqit_macarm64.plugin
             dist/parqit_all_platforms/parqit_win64.plugin
           generate_release_notes: true

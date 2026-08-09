@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.26 9aug2026}{...}
+{* *! version 0.1.27 9aug2026}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}

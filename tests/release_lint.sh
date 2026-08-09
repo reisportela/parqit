@@ -13,6 +13,7 @@
 #   * the newest dated CHANGELOG section matches the project version
 #   * no CHANGELOG section repeats the same "### <Type>" heading
 #   * every public command is reachable through a wide dialog on the User menu
+#   * GUI and console selectors agree for both macOS architectures
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -119,6 +120,26 @@ while read -r _ _ gbin _; do
     printf '%s\n' "$built" | grep -qx "$gbin" || \
         err "parqit.pkg declares platform binary '$gbin' the release workflow never builds"
 done < <(grep -E '^g ' "$REPO/src/ado/p/parqit.pkg")
+
+# Stata assigns different package platform names to GUI and console sessions
+# on both Mac architectures. Each pair executes the same binary; omitting a
+# console alias makes the final `h parqit.plugin` line abort net install from
+# stata-mp/stata-se launched in a terminal.
+check_mac_pair() {
+    local gui_code="$1" console_code="$2" gui console
+    gui=$(awk -v code="$gui_code" \
+              '$1 == "g" && $2 == code {print $3 " " $4}' \
+              "$REPO/src/ado/p/parqit.pkg")
+    console=$(awk -v code="$console_code" \
+                  '$1 == "g" && $2 == code {print $3 " " $4}' \
+                  "$REPO/src/ado/p/parqit.pkg")
+    [ -n "$gui" ] || err "parqit.pkg has no $gui_code GUI plugin selector"
+    [ -n "$console" ] || err "parqit.pkg has no $console_code console plugin selector"
+    [ -n "$gui" ] && [ -n "$console" ] && [ "$gui" != "$console" ] && \
+        err "$gui_code and $console_code must install the same source and destination"
+}
+check_mac_pair MACARM64 OSX.ARM64
+check_mac_pair MACINTEL64 OSX.X8664
 
 # --- README net-install example pins the current version ---------------------
 rd_v=$(grep -oE 'releases/download/v'"$semver" "$REPO/README.md" | grep -oE "$semver" | head -1)

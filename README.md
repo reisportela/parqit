@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.26 — the full surface below is implemented and covered by a
+> **Status:** v0.1.27 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -128,11 +128,13 @@ plugin embeds DuckDB; there are **no external library dependencies** to install.
 ### Option 1 — `net install` from GitHub (no compiler needed)
 
 `parqit` ships as a standard Stata package. Its compiled plugin (`parqit.plugin`,
-~40 MB, one binary per OS) is **not** in the git tree — it is distributed through
-[GitHub Releases](https://github.com/reisportela/parqit/releases). You can install
-it **straight from GitHub over the internet in one line**, or download a zip and
-install offline. Both routes cover **Linux x86_64**, **Windows x86_64** and
-**Apple-Silicon macOS (arm64, GUI and console Stata)**.
+~40 MB, one binary per supported OS/architecture) is **not** in the git tree —
+it is distributed through [GitHub Releases](https://github.com/reisportela/parqit/releases).
+You can install it **straight from GitHub over the internet in one line**, or
+download a zip and install offline. Both routes cover **Linux x86_64**,
+**Windows x86_64**,
+**Intel macOS (x86_64)** and **Apple-Silicon macOS (arm64)**, including GUI and
+console Stata on both Mac architectures.
 
 #### Install directly from GitHub (recommended)
 
@@ -141,13 +143,13 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.26") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.27") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.26` to the tag you want; for the newest, use
+- For a different version, change `v0.1.27` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
@@ -157,7 +159,8 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 Download the zip for your platform from the
 [latest release](https://github.com/reisportela/parqit/releases), extract it into a
 **dedicated folder**, and run `net install` from that folder (the one holding
-`parqit.pkg`). `parqit_all_platforms.zip` bundles all three OSes.
+`parqit.pkg`). `parqit_all_platforms.zip` bundles all four OS/architecture
+targets.
 
 **Linux (x86_64)** — runs on EL7/EL8+, Ubuntu 18.04+ and HPC clusters (the binary
 needs only glibc 2.25):
@@ -168,6 +171,18 @@ mkdir -p parqit_pkg && unzip parqit_linux_x86_64.zip -d parqit_pkg
 ```
 ```stata
 . net install parqit, from("/home/<you>/Downloads/parqit_pkg") replace
+. parqit version
+. parqit selftest
+```
+
+**macOS — Intel (x86_64):**
+
+```bash
+cd ~/Downloads
+mkdir -p parqit_pkg && unzip parqit_macos_x86_64.zip -d parqit_pkg
+```
+```stata
+. net install parqit, from("/Users/<you>/Downloads/parqit_pkg") replace
 . parqit version
 . parqit selftest
 ```
@@ -184,7 +199,7 @@ mkdir -p parqit_pkg && unzip parqit_macos_arm64.zip -d parqit_pkg
 . parqit selftest
 ```
 
-(If macOS Gatekeeper quarantines the binary, clear it once with
+(If macOS Gatekeeper quarantines either Mac binary, clear it once with
 `xattr -dr com.apple.quarantine ~/Downloads/parqit_pkg`.)
 
 **Windows (x86_64)** — right-click `parqit_windows_x86_64.zip` → *Extract All…*
@@ -197,10 +212,8 @@ in the path:
 . parqit selftest
 ```
 
-> **macOS Intel (x86_64)** is not in this release yet (the CI Intel-Mac runner was
-> unavailable); build from source (Option 2) for an Intel Mac in the meantime. A
-> binary you build yourself on a newer Linux (glibc ≥ 2.34) will **not** run on an
-> old-glibc HPC cluster (EL7/EL8) — use the AlmaLinux-8 binary from the release
+> A binary you build yourself on a newer Linux (glibc ≥ 2.34) will **not** run on
+> an old-glibc HPC cluster (EL7/EL8) — use the AlmaLinux-8 binary from the release
 > there.
 
 ### Option 2 — clone and build from source

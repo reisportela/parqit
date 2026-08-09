@@ -1,7 +1,7 @@
 /*
   parqit — combine lazy views or join a disk source into Stata memory
 
-*!  VERSION 0.1.26  9aug2026
+*!  VERSION 0.1.27  9aug2026
 
   Launch with:  db parqit_combine     (installed on the menu by: parqit menu)
   The using side may be Parquet, a glob, a Hive directory, CSV, dta or Excel

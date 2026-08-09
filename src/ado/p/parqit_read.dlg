@@ -1,7 +1,7 @@
 /*
   parqit — read a source, open memory, or resolve a path
 
-*!  VERSION 0.1.26  9aug2026
+*!  VERSION 0.1.27  9aug2026
 
   Launch with:  db parqit_read
   Install a User-menu entry with:  parqit menu
