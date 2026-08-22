@@ -1,5 +1,7 @@
 #include "doctest.h"
 
+#include <limits>
+
 #include "duckdb.h"
 #include "engine/typemap.hpp"
 
@@ -196,7 +198,8 @@ TEST_CASE("TC-US-1: %tc ms -> epoch us is exact beyond 2^56 us (A1-1/A1-11)") {
     CHECK_FALSE(stata_tc_ms_to_epoch_us(9223372036854776.0 + kEpochShiftMs, &us));
     CHECK_FALSE(stata_tc_ms_to_epoch_us(-9223372036854776.0 + kEpochShiftMs, &us));
     CHECK_FALSE(stata_tc_ms_to_epoch_us(1.5, &us));          /* not a whole ms */
-    CHECK_FALSE(stata_tc_ms_to_epoch_us(1.0 / 0.0, &us));    /* not finite */
+    /* MSVC rejects a constant 1.0/0.0 (C2124); build the infinity portably */
+    CHECK_FALSE(stata_tc_ms_to_epoch_us(std::numeric_limits<double>::infinity(), &us)); /* not finite */
     CHECK(stata_tc_ms_to_epoch_us(0.0, &us));
     CHECK(us == -kEpochShiftMs * 1000LL);
 }
