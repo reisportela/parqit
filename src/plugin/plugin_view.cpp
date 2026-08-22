@@ -30,6 +30,7 @@
 
 #include "engine/exprtrans.hpp"
 #include "engine/hexcodec.hpp"
+#include "engine/legacy_encoding.hpp"
 #include "engine/request.hpp"
 #include "engine/sanitize.hpp"
 #include "engine/session.hpp"
@@ -314,9 +315,14 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
         break;
     case DUCKDB_TYPE_TIMESTAMP_S:
     case DUCKDB_TYPE_TIMESTAMP_MS:
-    case DUCKDB_TYPE_TIMESTAMP_NS:
     case DUCKDB_TYPE_TIMESTAMP_TZ:
         b.sql = ts_ms_sql("CAST(" + ref + " AS TIMESTAMP)");
+        b.fmt = "%tc";
+        break;
+    case DUCKDB_TYPE_TIMESTAMP_NS:
+        /* TS-NS-FLOOR-1: floor the ns count to us toward -infinity (the plain
+         * CAST truncates toward zero) — identical to the eager typemap plan */
+        b.sql = ts_ms_sql(parqit::timestamp_ns_floor_us_sql(ref));
         b.fmt = "%tc";
         break;
     case DUCKDB_TYPE_TIME:
@@ -381,9 +387,13 @@ std::string compile_for_save(const View &v) {
         const std::string ref = quote_ident(c.name);
         std::string expr = ref;
         const parqit::FmtClass fcls = parqit::classify_format(c.fmt);
+        /* TEMPORAL-ROUND-1: the one rounding rule shared with the in-memory
+         * writers (an exact integer count passes through; a fraction rounds
+         * half-up) */
+        const std::string rounded = parqit::stata_round_temporal_sql(ref);
         switch (fcls) {
         case parqit::FmtClass::Td:
-            expr = "(DATE '1960-01-01' + CAST(floor((" + ref + ") + 0.5) AS INTEGER))";
+            expr = "(DATE '1960-01-01' + CAST(" + rounded + " AS INTEGER))";
             break;
         case parqit::FmtClass::Tc:
             /* epoch_ms(bigint) builds the instant from ms-since-1970 with no
@@ -391,11 +401,11 @@ std::string compile_for_save(const View &v) {
              * down-cast the multiplier to INT32, so the disk/view save of any
              * %tc datetime outside ~[1969-12-07, 1970-01-25] failed with
              * rc 920 — including parqit's own files (STR1). */
-            expr = "epoch_ms(CAST(floor((" + ref + ") + 0.5) AS BIGINT) - " +
+            expr = "epoch_ms(CAST(" + rounded + " AS BIGINT) - " +
                    std::to_string(parqit::kEpochShiftMs) + ")";
             break;
         case parqit::FmtClass::TC:
-            expr = "CAST(floor((" + ref + ") + 0.5) AS BIGINT)";
+            expr = "CAST(" + rounded + " AS BIGINT)";
             break;
         case parqit::FmtClass::Tm:
         case parqit::FmtClass::Tq:
@@ -403,7 +413,7 @@ std::string compile_for_save(const View &v) {
         case parqit::FmtClass::Tw:
         case parqit::FmtClass::Ty:
         case parqit::FmtClass::Tb:
-            expr = "CAST(floor((" + ref + ") + 0.5) AS INTEGER)";
+            expr = "CAST(" + rounded + " AS INTEGER)";
             break;
         default:
             /* PQ-AUD-001/002 defensive final guard for non-date columns. A
@@ -459,8 +469,8 @@ std::string view_kv_fragment(const View &v) {
     std::set<std::string> used_labs;
     for (const auto &c : v.cols()) {
         json jv;
-        jv["name"] = c.name;
-        jv["src"] = c.name;
+        jv["name"] = c.exposed(); /* NAME-CASE-1: the exact Stata/file name */
+        jv["src"] = c.exposed();
         if (!c.meta_type.empty()) jv["type"] = c.meta_type;
         jv["fmt"] = c.fmt;
         jv["varlab"] = c.varlab;
@@ -470,15 +480,17 @@ std::string view_kv_fragment(const View &v) {
     }
     schema["vars"] = jvars;
     schema["sortedby"] = v.sortedby_names();
-    json vallabs = json::object();
-    if (v.vallabs().is_object()) {
-        for (const auto &l : v.vallabs().items())
-            if (used_labs.count(l.key())) vallabs[l.key()] = l.value();
-    }
+    /* VALLAB-ALL-1 (audit 2026-08-22, A1-10 / V2.4): every value-label
+     * definition the view carries is written — attached or not — exactly as
+     * the memory save (`label dir`) and native `save` do; the open path loads
+     * all definitions, so an unattached label survived a memory save but a
+     * view save silently dropped it. */
+    (void)used_labs;
+    json vallabs = v.vallabs().is_object() ? v.vallabs() : json::object();
     json chars = json::object();
     if (v.chars().is_object()) {
         std::set<std::string> live;
-        for (const auto &c : v.cols()) live.insert(c.name);
+        for (const auto &c : v.cols()) live.insert(c.exposed()); /* NAME-CASE-1 */
         live.insert("_dta");
         for (const auto &t : v.chars().items())
             if (live.count(t.key())) chars[t.key()] = t.value();
@@ -576,9 +588,10 @@ std::vector<std::string> detect_frac_rounding(Session &s, const View &v) {
     std::string sel;
     for (size_t i = 0; i < cand.size(); i++) {
         const std::string r = quote_ident(cand[i]);
+        /* TEMPORAL-ROUND-1: a count rounds iff it is not an exact integer */
         sel += (i ? ", " : "") +
-               std::string("CAST(coalesce(bool_or(floor((") + r + ") + 0.5) <> " +
-               r + "), false) AS INTEGER)";
+               std::string("CAST(coalesce(bool_or(") + r + " <> trunc(" + r +
+               ")), false) AS INTEGER)";
     }
     duckdb_result agg;
     if (!s.query("SELECT " + sel + " FROM " + inner, &agg, &err)) return out;
@@ -720,9 +733,6 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     }
     duckdb_destroy_result(&res);
 
-    std::vector<bool> renamed;
-    std::vector<std::string> stata_names = parqit::sanitize_unique(src_names, &renamed);
-
     /* parqit.* metadata rides along: reuse the planner's reader via a tiny
      * plan context (no stats, no varlist) */
     PlanContext meta_ctx;
@@ -731,7 +741,23 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         /* metadata/schema only — no row count needed (PERF-3) */
         plan_columns(s, src, {}, /*with_stats=*/false, &meta_ctx, &merr,
                      /*need_count=*/false);
+        /* HIVE-CLASH-1 / RELAXED-NAMES-1: a source the planner refuses on
+         * every path (the metadata-only plan's other failures are not fatal
+         * here — the scan itself bound above) */
+        if (!meta_ctx.refusal.empty()) {
+            cry("parqit use: " + meta_ctx.refusal);
+            return kRcUsage;
+        }
     }
+    /* NAME-CASE-1: Stata names derive from the TRUE parquet names (DuckDB
+     * case-dedups the scan names: NUEMP -> NUEMP_1). The engine cannot hold
+     * two names differing only by case, so such a column gets a case-unique
+     * alias inside the view (ViewCol.name) and keeps its exact Stata name in
+     * ViewCol.stata, which collect and save expose. */
+    std::vector<std::string> raw_names = stata_name_basis(src_names, meta_ctx.parquet_names);
+    std::vector<bool> renamed;
+    std::vector<std::string> stata_names = parqit::sanitize_unique(raw_names, &renamed);
+    std::vector<std::string> aliases = parqit::engine_unique_ci(stata_names);
     std::map<std::string, const json *> meta_by_src;
     if (meta_ctx.meta.present && meta_ctx.meta.schema.contains("vars")) {
         for (const auto &v : meta_ctx.meta.schema["vars"].items()) {
@@ -757,14 +783,47 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     json vchars = meta_ctx.meta.present && meta_ctx.meta.chars.is_object()
                       ? meta_ctx.meta.chars
                       : json::object();
-    for (idx_t c = 0; c < ncol; c++) {
+    /* COLORDER-1 (A1-8): follow the manifest's variable order (plan_columns
+     * already ordered meta_ctx.active that way); columns it does not know keep
+     * their scan position */
+    std::vector<idx_t> order;
+    {
+        std::map<std::string, idx_t> pos;
+        for (idx_t c = 0; c < ncol; c++) pos[src_names[c]] = c;
+        std::vector<bool> taken(ncol, false);
+        for (const auto &p : meta_ctx.active) {
+            auto it = pos.find(p.source_name);
+            if (it != pos.end() && !taken[it->second]) {
+                order.push_back(it->second);
+                taken[it->second] = true;
+            }
+        }
+        for (idx_t c = 0; c < ncol; c++)
+            if (!taken[c]) order.push_back(c);
+    }
+    for (idx_t c : order) {
         if (bounds[c].dropped) {
             drops.push_back("column \"" + src_names[c] + "\" dropped: " +
                             bounds[c].drop_reason);
             continue;
         }
+        /* HIVE-TYPE-1 (A1-3): a partition key whose manifest records a
+         * numeric/%tc type but which arrived as directory TEXT (DuckDB only
+         * autocasts integer/date-looking values, so a float/double/%tc key
+         * stays VARCHAR) is cast back to its recorded type. A key DuckDB
+         * already autocast (DATE, integer) comes in numeric — leave it. */
+        if (bounds[c].kind == 's') {
+            std::string hsql, hfmt;
+            char hkind = 'n';
+            if (hive_boundary_override(meta_ctx, src_names[c], &hsql, &hfmt, &hkind)) {
+                bounds[c].sql = hsql;
+                bounds[c].kind = 'n';
+                bounds[c].fmt = hfmt;
+            }
+        }
         ViewCol vc;
-        vc.name = stata_names[c];
+        vc.name = aliases[c];
+        if (aliases[c] != stata_names[c]) vc.stata = stata_names[c]; /* NAME-CASE-1 */
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
         vc.note = bounds[c].note;
@@ -782,10 +841,33 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         vc.varlab = sget(jm, "varlab");
         vc.vallab = sget(jm, "vallab");
         vc.meta_type = sget(jm, "type");
-        if (renamed[c] || original_name != src_names[c]) {
-            warns.push_back("column \"" + original_name + "\" is " + vc.name +
-                            " in the view");
-            vchars[vc.name]["src_name"] = original_name;
+        if (!vc.stata.empty()) {
+            /* NAME-CASE-1: exact Stata name kept; alias only inside the view */
+            warns.push_back("column \"" + vc.stata + "\" differs only by case from "
+                            "another column: it is " + vc.name +
+                            " in lazy verbs and expressions; collect and save "
+                            "restore the name " + vc.stata);
+        }
+        if (original_name.empty()) {
+            /* A2-15(1): an empty file name becomes v<position>, as on the
+             * eager path; there is no source name to keep */
+            warns.push_back("column " + std::to_string(static_cast<size_t>(c) + 1) +
+                            " has an empty name; it is " + vc.exposed() + " in the view");
+        } else if (renamed[c] || vc.exposed() != original_name) {
+            /* sanitised, or an exact duplicate (dup, dup_1): the true file
+             * name travels in char varname[src_name], as on the eager path.
+             * A2-10: independent of the case alias — a column both sanitised
+             * AND aliased (`A B` -> Stata A_B, engine A_B_1) keeps its true
+             * source name too. */
+            if (vc.stata.empty())
+                warns.push_back("column \"" + original_name + "\" is " + vc.name +
+                                " in the view (original name kept in char "
+                                "varname[src_name])");
+            else
+                warns.push_back("column \"" + original_name + "\" is Stata variable " +
+                                vc.stata + " (original name kept in char "
+                                "varname[src_name])");
+            vchars[vc.exposed()]["src_name"] = original_name;
         }
         if (!original_to_live.count(original_name))
             original_to_live[original_name] = vc.name;
@@ -1106,7 +1188,7 @@ ST_retcode cmd_view_info(const std::vector<std::string> &args) {
         for (size_t i = 0; i < cols.size(); i++) {
             w.rec("vcol", {std::to_string(i + 1)},
                   {cols[i].name, std::string(1, cols[i].kind), cols[i].fmt,
-                   cols[i].varlab});
+                   cols[i].varlab, cols[i].stata /* NAME-CASE-1: "" unless aliased */});
         }
         save_local("_parqit_view_k", std::to_string(cols.size()));
         save_local("_parqit_view_src", parqit::hex_encode(g_view_ref().source_desc()));
@@ -1249,9 +1331,11 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     Source vsrc;
     vsrc.paths_sql = "[]";
     bool drop_source_after = false;
+    std::vector<FileIdentity> snap; /* TORN-READ-1: pre-plan identities (direct read) */
     if (direct_read) {
         /* Pure `parqit use` + `parqit collect` is a read path. Avoid copying the
          * whole file into a DuckDB temp table before the Arrow→Stata fill. */
+        snap = snapshot_source_files(s, g_view_ref().source_paths_sql());
         vsrc.scan_sql = "(" + sql + ") AS __parqit_collect_direct";
         /* A full-file passthrough (n_stages()==0, the direct_read guard
          * above) has columns identical to a direct `parqit use`, so its
@@ -1272,6 +1356,12 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         drop_source_after = true;
     }
     PlanContext ctx;
+    /* FLOAT-EXACT-1 / TYPE-PARITY-1 (V2.3): the view's carried Stata type and
+     * display format per engine column, so the planner sizes a %tc float /
+     * %td byte-int in-plan (float-exactness scan, range sizing) exactly as on
+     * the eager path; the manifest of a direct read still takes precedence */
+    for (const auto &c : g_view_ref().cols())
+        if (!c.meta_type.empty()) ctx.meta_hint[c.name] = {c.meta_type, c.fmt};
     ST_retcode rc = plan_columns(s, vsrc, {}, /*with_stats=*/true, &ctx, &err);
     if (rc != 0) {
         std::string derr;
@@ -1291,11 +1381,61 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     } else {
         vcols = vcols_all;
     }
-    if (ctx.active.size() == vcols.size()) {
+    /* A2-3 defensive gate: the Stata names the collect will create must be
+     * unique (the verbs keep this invariant; a violation would stop the staged
+     * frame with a raw r(110) half-way) */
+    {
+        std::set<std::string> seen;
+        for (const auto &c : vcols)
+            if (!seen.insert(c.exposed()).second) {
+                cry(who + "two view columns would be collected under the same name " +
+                    c.exposed() + " (internal invariant); rename one of them first");
+                if (drop_source_after) {
+                    std::string derr;
+                    s.exec("DROP TABLE IF EXISTS " + quote_ident(table), &derr);
+                }
+                return kRcUsage;
+            }
+    }
+    /* OVERLAY-BY-NAME-1 (audit 2026-08-22 round 2): match the planned columns
+     * to the view's columns by ENGINE NAME — the compiled SELECT names every
+     * column `AS <vc.name>` — and restore the view's column order. A direct
+     * read's planner may re-order the plans by the file manifest (COLORDER-1)
+     * and leave a case-aliased column it could not map unmatched; the old
+     * positional overlay then stamped one column's metadata and Stata name
+     * onto another (seen on a relaxed union whose files carry manifests). */
+    bool by_name = ctx.active.size() == vcols.size();
+    if (by_name) {
+        std::map<std::string, size_t> at;
+        for (size_t i = 0; i < ctx.active.size(); i++) at[ctx.active[i].source_name] = i;
+        std::vector<parqit::ColumnPlan> matched;
+        std::vector<bool> used(ctx.active.size(), false);
+        for (const auto &vc : vcols) {
+            auto it = at.find(vc.name);
+            if (it == at.end() || used[it->second]) {
+                by_name = false;
+                break;
+            }
+            used[it->second] = true;
+            matched.push_back(ctx.active[it->second]);
+        }
+        if (by_name) ctx.active.swap(matched);
+    }
+    if (by_name) {
         for (size_t i = 0; i < ctx.active.size(); i++) {
             parqit::ColumnPlan &p = ctx.active[i];
             const ViewCol &vc = vcols[i];
             if (!vc.fmt.empty()) p.stata_format = vc.fmt;
+            /* NAME-CASE-1: the engine alias stays in the view; Stata gets the
+             * exact (case-distinct) name. R2/A2-10: the var record's "original"
+             * must equal that Stata name — never the engine alias — or the ado
+             * would stamp the alias into char varname[src_name]; a true source
+             * name that differs (a sanitised column) travels in the view's
+             * chars, set at open. */
+            if (!vc.stata.empty()) {
+                p.stata_name = vc.stata;
+                ctx.parquet_names[p.source_name] = vc.stata;
+            }
             p.varlab = vc.varlab;
             p.vallab = vc.vallab;
             if (!vc.note.empty())
@@ -1314,12 +1454,19 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
                  * %td date with no recorded Stata type is stored Long. (Parqit-
                  * written files carry meta_type and take the branch above.) */
                 p.stata_type = parqit::StType::Long;
+            } else if (parqit::classify_format(p.stata_format) == parqit::FmtClass::Tc &&
+                       p.stata_type != parqit::StType::Double) {
+                /* TYPE-PARITY-1 (A1-6): a foreign TIMESTAMP with no recorded
+                 * type is double on the eager path (ms counts need it); the
+                 * view's integer ms column would otherwise range-size to long
+                 * for instants near 1960 — match `use` */
+                p.stata_type = parqit::StType::Double;
             }
         }
     } else {
-        /* never skip the overlay silently: a count mismatch (the planner
-         * dropped a column the view still carries, or vice versa) means the
-         * view's formats/labels/storage types cannot be matched positionally.
+        /* never skip the overlay silently: a count or name mismatch (the
+         * planner dropped a column the view still carries, or vice versa) means
+         * the view's formats/labels/storage types cannot be matched.
          * Say so through the same warn-record channel plan_columns uses, so
          * the collected data arrives loud, not quietly stripped of metadata. */
         ctx.warnings.push_back(
@@ -1365,7 +1512,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
         names += ctx.active[i].stata_name;
     }
     set_prepared_read(vsrc.scan_sql, ctx.active, ctx.nrows, strlfile,
-                      drop_source_after, &tag);
+                      drop_source_after, &tag, snap /* A4-3, direct read */);
     save_local("_parqit_tag", parqit::hex_encode(tag));
     save_local("_parqit_n", std::to_string(ctx.nrows));
     save_local("_parqit_k", std::to_string(ctx.active.size()));
@@ -1400,14 +1547,75 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
         cry("parqit save: chunk() must be a positive number of rows per row group");
         return kRcUsage;
     }
+    /* ENC-VIEW-1 (audit 2026-08-22, A5-1/A2-14): encoding() is validated on
+     * this path too — the help promises an unknown name is refused before
+     * anything is written. A valid name has no effect here: a lazy view
+     * already holds UTF-8 (a .dta/Excel bridge was transcoded when it was
+     * written — see the bridge path). */
+    {
+        std::string encoding_name;
+        if (!parqit::req_text(req, "encoding", &encoding_name, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        parqit::LegacyEncoding enc;
+        if (!parqit::legacy_encoding_parse(encoding_name, &enc)) {
+            cry("parqit save: encoding() must be windows-1252 (the default), latin1, "
+                "latin9 or macroman; got '" + encoding_name + "'");
+            return kRcUsage;
+        }
+    }
     std::vector<std::string> partition_by = req_list_or_empty(req, "partition_by");
-    for (const auto &pv : partition_by) {
+    for (auto &pv : partition_by) {
+        /* R3: the exact Stata name of an aliased column is accepted too */
         bool found = false;
-        for (const auto &c : g_view_ref().cols()) found = found || c.name == pv;
+        for (const auto &c : g_view_ref().cols())
+            if (c.name == pv || (!c.stata.empty() && c.stata == pv)) {
+                pv = c.name;
+                found = true;
+                break;
+            }
         if (!found) {
             cry("parqit save: partition_by(" + pv + ") is not a variable in the view");
             return kRcUsage;
         }
+    }
+    if (!partition_by.empty() &&
+        std::set<std::string>(partition_by.begin(), partition_by.end()).size() >=
+            g_view_ref().cols().size()) {
+        /* MSG-PART-1 (audit 2026-08-22, V2.7): the engine's "Not implemented
+         * Error: No column to write as all columns are specified as partition
+         * columns" in parqit's words, before anything is staged */
+        cry("parqit save: partition_by() must leave at least one non-partition "
+            "column (every variable being saved is a partition key)");
+        return kRcUsage;
+    }
+    /* NAME-CASE-1: columns the view holds under a case alias are written back
+     * under their exact Stata names (footer rename after the COPY); that is
+     * not available for a partitioned tree */
+    std::vector<std::string> leaf_names;
+    bool case_alias = false;
+    for (const auto &c : g_view_ref().cols()) {
+        leaf_names.push_back(c.exposed());
+        case_alias = case_alias || !c.stata.empty();
+    }
+    if (case_alias && !partition_by.empty()) {
+        cry("parqit save: partition_by() is not supported while the view holds "
+            "variables that differ only by case; save a single file instead");
+        return kRcUsage;
+    }
+    /* A2-3 defensive gate: the file's column names are the exposed names and
+     * MUST be unique — a duplicate would produce a Parquet file no reader can
+     * open (rc 0, silent). The verbs keep this invariant; refuse here so it can
+     * never be violated by a future verb either. */
+    {
+        std::set<std::string> seen;
+        for (const auto &n : leaf_names)
+            if (!seen.insert(n).second) {
+                cry("parqit save: two view columns would be written under the same "
+                    "name " + n + " (internal invariant); rename one of them first");
+                return kRcUsage;
+            }
     }
 
     /* Refuse to overwrite the open view's own backing file. A lazy view rereads
@@ -1513,6 +1721,17 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
                     (slash == std::string::npos) ? sabs : sabs.substr(0, slash);
                 clash = gmatch(sabs.c_str(), dabs.c_str()) ||
                         path_contains(dabs, base);
+                /* SAVE-SELFDIR-1 (audit 2026-08-22, A4-5): a DIRECTORY source
+                 * scans every .parquet file below <dir> (the stored glob), so any
+                 * destination INSIDE that directory (a file, or a partitioned
+                 * tree whose files end in .parquet) would be read back by the
+                 * view on its next fetch and silently change its result. The
+                 * recursive glob above already matches a .parquet file under
+                 * the directory; cover a tree/any name under it as well. */
+                const std::string kTail = "/**/*.parquet"; /* what a dir source scans */
+                if (!clash && sabs.size() > kTail.size() &&
+                    sabs.compare(sabs.size() - kTail.size(), kTail.size(), kTail) == 0)
+                    clash = path_contains(sabs.substr(0, sabs.size() - kTail.size()), dabs);
             } else {
                 clash = (!sabs.empty() && !dabs.empty() &&
                          (sabs == dabs || path_contains(dabs, sabs)));
@@ -1545,7 +1764,8 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
     long long written = 0;
     ST_retcode rc = copy_out_parquet(s, compile_for_save(g_view_ref()), dest, replace,
                                      compression, comp_level, partition_by, chunk,
-                                     view_kv_fragment(g_view_ref()), &written, &err);
+                                     view_kv_fragment(g_view_ref()), &written, &err,
+                                     case_alias ? &leaf_names : nullptr);
     if (rc != 0) {
         cry("parqit save: " + err);
         return rc;
@@ -1795,7 +2015,8 @@ static std::string stata_num_varchar(const std::string &ref) {
 /* boundary-cast a using source (files on disk) into a View::UsingSide */
 ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
                          View::UsingSide *out, std::vector<std::string> *drops,
-                         std::string *err) {
+                         std::string *err,
+                         const std::vector<ViewCol> *master /* NAME-CASE-1 */) {
     const Source src = source_for(files);
     ST_retcode grc =
         strict_schema_gate(s, src, files, /*relaxed=*/false, /*csv=*/false, err);
@@ -1815,14 +2036,45 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
     }
     duckdb_destroy_result(&res);
 
-    std::vector<std::string> stata_names = parqit::sanitize_unique(src_names, nullptr);
-
     PlanContext meta_ctx;
     {
         std::string merr;
         /* metadata/schema only — no row count needed (PERF-3) */
         plan_columns(s, src, {}, /*with_stats=*/false, &meta_ctx, &merr,
                      /*need_count=*/false);
+        if (!meta_ctx.refusal.empty()) { /* HIVE-CLASH-1 / RELAXED-NAMES-1 */
+            *err = meta_ctx.refusal;
+            return kRcUsage;
+        }
+    }
+    /* NAME-CASE-1: exact names from the parquet footer; the engine alias of a
+     * case-clashing column aligns with the master's engine name where the
+     * Stata-facing names match (so keys resolve on both sides) and dodges
+     * every other master name (so nothing can bind ambiguously in the join). */
+    std::vector<std::string> raw_names = stata_name_basis(src_names, meta_ctx.parquet_names);
+    std::vector<std::string> stata_names = parqit::sanitize_unique(raw_names, nullptr);
+    std::vector<std::string> aliases(ncol);
+    {
+        std::set<std::string> taken;
+        std::map<std::string, std::string> master_alias; /* exposed -> engine */
+        if (master)
+            for (const auto &mc : *master) {
+                taken.insert(parqit::ascii_lower(mc.name));
+                master_alias[mc.exposed()] = mc.name;
+            }
+        std::vector<std::string> fresh_in;
+        std::vector<size_t> fresh_at;
+        for (idx_t c = 0; c < ncol; c++) {
+            auto ma = master_alias.find(stata_names[c]);
+            if (ma != master_alias.end()) {
+                aliases[c] = ma->second; /* same Stata name: share the engine name */
+            } else {
+                fresh_in.push_back(stata_names[c]);
+                fresh_at.push_back(static_cast<size_t>(c));
+            }
+        }
+        const std::vector<std::string> fresh = parqit::engine_unique_ci(fresh_in, taken);
+        for (size_t i = 0; i < fresh.size(); i++) aliases[fresh_at[i]] = fresh[i];
     }
     std::map<std::string, const json *> meta_by_src;
     if (meta_ctx.meta.present && meta_ctx.meta.schema.contains("vars")) {
@@ -1838,20 +2090,46 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
                    : std::string();
     };
 
+    /* COLORDER-1 (A1-8) / HIVE-TYPE-1 (A1-3): same rules as cmd_view_open */
+    std::vector<idx_t> order;
+    {
+        std::map<std::string, idx_t> pos;
+        for (idx_t c = 0; c < ncol; c++) pos[src_names[c]] = c;
+        std::vector<bool> taken(ncol, false);
+        for (const auto &p : meta_ctx.active) {
+            auto it = pos.find(p.source_name);
+            if (it != pos.end() && !taken[it->second]) {
+                order.push_back(it->second);
+                taken[it->second] = true;
+            }
+        }
+        for (idx_t c = 0; c < ncol; c++)
+            if (!taken[c]) order.push_back(c);
+    }
     std::string sel;
-    for (idx_t c = 0; c < ncol; c++) {
+    for (idx_t c : order) {
         if (bounds[c].dropped) {
             drops->push_back("using column \"" + src_names[c] + "\" dropped: " +
                              bounds[c].drop_reason);
             continue;
         }
+        if (bounds[c].kind == 's') {
+            std::string hsql, hfmt;
+            char hkind = 'n';
+            if (hive_boundary_override(meta_ctx, src_names[c], &hsql, &hfmt, &hkind)) {
+                bounds[c].sql = hsql;
+                bounds[c].kind = 'n';
+                bounds[c].fmt = hfmt;
+            }
+        }
         ViewCol vc;
-        vc.name = stata_names[c];
+        vc.name = aliases[c];
+        if (aliases[c] != stata_names[c]) vc.stata = stata_names[c]; /* NAME-CASE-1 */
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
         vc.normalized = true; /* MISS-1: boundary-normalized using column */
         const json *jm = nullptr;
-        auto it = meta_by_src.find(src_names[c]);
+        auto it = meta_by_src.find(raw_names[c]);
         if (it != meta_by_src.end()) jm = it->second;
         std::string mfmt = sget(jm, "fmt");
         if (!mfmt.empty()) vc.fmt = mfmt;
@@ -1893,7 +2171,10 @@ ST_retcode make_using(Session &s, const std::string &entry, View::UsingSide *out
                       std::vector<std::string> *drops, std::string *err) {
     if (entry.rfind("view:", 0) == 0)
         return using_from_view(s, entry.substr(5), out, err);
-    return prepare_using(s, {entry}, out, drops, err);
+    /* NAME-CASE-1: the master's columns let using aliases align with (and
+     * dodge) the master's engine names */
+    const View &mv = g_view_ref();
+    return prepare_using(s, {entry}, out, drops, err, mv.live() ? &mv.cols() : nullptr);
 }
 
 /* Stata merge uniqueness contracts: 1 side of m:1 / 1:m / both of 1:1. The
@@ -2182,11 +2463,11 @@ static ST_retcode wide_j_scan(const std::string &jname,
     duckdb_result res;
     std::string jquery =
         *j_is_string
-            ? "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v FROM " + base +
-                  " WHERE " + jq + " IS NOT NULL ORDER BY v"
-            : "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS v, " + jq +
-                  " AS jn FROM " + base + " WHERE " + jq +
-                  " IS NOT NULL ORDER BY jn";
+            ? "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS __parqit_jv FROM " + base +
+                  " WHERE " + jq + " IS NOT NULL ORDER BY __parqit_jv"
+            : "SELECT DISTINCT CAST(" + jq + " AS VARCHAR) AS __parqit_jv, " + jq +
+                  " AS __parqit_jn FROM " + base + " WHERE " + jq +
+                  " IS NOT NULL ORDER BY __parqit_jn";
     if (!s.query(jquery, &res, &err)) {
         cry("parqit " + verb + ": " + err);
         return kRcEngine;
@@ -2483,10 +2764,67 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
     }
     duckdb_destroy_result(&res);
 
-    std::vector<std::string> stata_names = parqit::sanitize_unique(src_names, nullptr);
+    /* NAME-CASE-1: a raw query can return result names that differ only by
+     * case. The subquery scan above already carries DuckDB's dedup (NUEMP ->
+     * NUEMP_1); DESCRIBE of the query itself still reports the names as
+     * written, so recover them positionally when it agrees in width (any
+     * failure just keeps the scan names). The engine holds clashing columns
+     * under aliases; Stata gets the exact names. */
+    std::vector<std::string> raw_names(src_names);
+    {
+        duckdb_result dres;
+        std::string derr;
+        if (s.query("DESCRIBE " + sql, &dres, &derr)) {
+            if (duckdb_row_count(&dres) == ncol && duckdb_column_count(&dres) > 0) {
+                for (idx_t c = 0; c < ncol; c++) {
+                    char *nm = duckdb_value_varchar(&dres, 0, c);
+                    if (nm) {
+                        raw_names[c] = nm;
+                        duckdb_free(nm);
+                    }
+                }
+            }
+            duckdb_destroy_result(&dres);
+        }
+    }
+    std::vector<std::string> stata_names = parqit::sanitize_unique(raw_names, nullptr);
+    std::vector<std::string> aliases = parqit::engine_unique_ci(stata_names);
     std::string sel;
     std::vector<ViewCol> cols;
-    std::vector<std::string> drops;
+    std::vector<std::string> drops, notes;
+    /* A2-13 (audit 2026-08-22): a raw query over a case-clashing SOURCE
+     * (`SELECT * FROM read_parquet(f)`) arrives with DuckDB's own dedup names
+     * (`x`, `X_1`, `x_1_1`…) that DESCRIBE cannot undo; say so when a result
+     * name has the shape <another result name>(_<digits>)+ */
+    {
+        auto is_dedup_shape = [](const std::string &scan, const std::string &leaf) {
+            if (scan.size() <= leaf.size() + 1 ||
+                parqit::ascii_lower(scan.substr(0, leaf.size())) != parqit::ascii_lower(leaf) ||
+                scan[leaf.size()] != '_')
+                return false;
+            size_t i = leaf.size();
+            while (i < scan.size()) {
+                if (scan[i] != '_' || i + 1 >= scan.size()) return false;
+                size_t j = i + 1;
+                while (j < scan.size() && scan[j] >= '0' && scan[j] <= '9') j++;
+                if (j == i + 1) return false;
+                i = j;
+            }
+            return true;
+        };
+        std::string dedup;
+        for (idx_t c = 0; c < ncol; c++)
+            for (idx_t d = 0; d < ncol; d++)
+                if (c != d && is_dedup_shape(raw_names[c], raw_names[d])) {
+                    dedup += (dedup.empty() ? "" : ", ") + raw_names[c];
+                    break;
+                }
+        if (!dedup.empty())
+            notes.push_back("result column(s) " + dedup + " look like DuckDB's own "
+                            "dedup of names that differ only by case in the scanned "
+                            "source; a raw sql query exposes the engine's names — "
+                            "open the file with parqit use to keep the exact names");
+    }
     for (idx_t c = 0; c < ncol; c++) {
         if (bounds[c].dropped) {
             drops.push_back("column \"" + src_names[c] + "\" dropped: " +
@@ -2494,7 +2832,15 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
             continue;
         }
         ViewCol vc;
-        vc.name = stata_names[c];
+        vc.name = aliases[c];
+        if (aliases[c] != stata_names[c]) {
+            vc.stata = stata_names[c]; /* NAME-CASE-1 */
+            /* A5-12: a note, like parqit use (not a red warning) */
+            notes.push_back("column \"" + vc.stata + "\" differs only by case from "
+                            "another result column: it is " + vc.name +
+                            " in lazy verbs and expressions; collect and save "
+                            "restore the name " + vc.stata);
+        }
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
         vc.note = bounds[c].note;
@@ -2515,6 +2861,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         cry("warning: parqit sql: " + cleanup_err);
     g_views[target] = std::move(candidate);
     g_current = target;
+    for (const auto &n : notes) cry("note: " + n);
     for (const auto &d : drops) cry("warning: " + d);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     save_local("_parqit_view_name", parqit::hex_encode(g_current));
@@ -2933,9 +3280,15 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         std::string expr = (kind == 's') ? r : stata_num_varchar(r);
         std::string where = (kind == 's') ? (r + " IS NOT NULL AND " + r + " <> ''")
                                           : (r + " IS NOT NULL");
+        /* LEVELSOF-ALIAS-1 (audit 2026-08-22, A3-5): the rendered level is
+         * aliased with a reserved helper name and the ORDER BY names the SOURCE
+         * column through the FROM scope — a bare `AS v ... ORDER BY "v"` bound
+         * to the query's own VARCHAR alias whenever the variable itself was
+         * named v, and numeric levels came back in text order. */
         duckdb_result res;
-        if (!s.query("SELECT DISTINCT " + expr + " AS v FROM " + base + " WHERE " +
-                         where + " ORDER BY " + r + " LIMIT " +
+        if (!s.query("SELECT __parqit_lvl FROM (SELECT DISTINCT " + expr +
+                         " AS __parqit_lvl, " + r + " AS __parqit_key FROM " + base +
+                         " WHERE " + where + ") ORDER BY __parqit_key LIMIT " +
                          std::to_string(limit + 1),
                      &res, &err)) {
             cry("parqit levelsof: " + err);
@@ -2973,10 +3326,15 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         const std::string g2 = norm_view_key(vars[1]);
         bool incmiss = req.value("missing", false);
         char k1 = 'n', k2 = 'n';
+        std::string f1, f2;
         for (const auto &c : g_view_ref().cols()) {
-            if (c.name == vars[0]) k1 = c.kind;
-            if (c.name == vars[1]) k2 = c.kind;
+            if (c.name == vars[0]) { k1 = c.kind; f1 = c.fmt; }
+            if (c.name == vars[1]) { k2 = c.kind; f2 = c.fmt; }
         }
+        /* RENDER-NATIVE-1 (audit 2026-08-22, A3-6): the ado renders numeric
+         * levels with the variable's display format, as native tabulate does;
+         * the header record carries kind and format per axis */
+        w.rec("t2h", {std::string(1, k1), std::string(1, k2)}, {f1, f2});
         std::string base2 = base;
         if (!incmiss) {
             base2 = "(SELECT * FROM " + base + " WHERE " + g1 +
@@ -3046,8 +3404,12 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         const std::string g = norm_view_key(vars[0]);
         bool incmiss = req.value("missing", false);
         char k1 = 'n';
+        std::string f1;
         for (const auto &c : g_view_ref().cols())
-            if (c.name == vars[0]) k1 = c.kind;
+            if (c.name == vars[0]) { k1 = c.kind; f1 = c.fmt; }
+        /* RENDER-NATIVE-1 (A3-6): the ado renders numeric levels with the
+         * variable's display format, as native tabulate does */
+        w.rec("tabh", {std::string(1, k1)}, {f1});
         std::string where = incmiss ? std::string(" ")
                                     : " WHERE " + g + " IS NOT NULL ";
         /* TAB-FLOAT-1: render integer-valued numeric levels without a trailing
@@ -3055,7 +3417,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         const std::string vexpr =
             (k1 == 's') ? "coalesce(" + g + ", '')" : stata_num_varchar(g);
         duckdb_result res;
-        if (!s.query("SELECT " + vexpr + " AS v, count(*) AS n FROM " +
+        /* helper aliases (A3-5 audit): never a bare name a user column could
+         * shadow in GROUP BY / ORDER BY */
+        if (!s.query("SELECT " + vexpr + " AS __parqit_v, count(*) AS __parqit_n FROM " +
                          base + where + " GROUP BY " + g + " ORDER BY " + g +
                          " NULLS LAST",
                      &res, &err)) {
@@ -3299,8 +3663,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             names += (i ? " " : "") + targets[i].first;
         }
         duckdb_result res;
-        if (!s.query("SELECT " + inds + " AS pat, count(*) FROM " + base +
-                         " GROUP BY pat ORDER BY count(*) DESC, pat LIMIT 100",
+        if (!s.query("SELECT " + inds + " AS __parqit_pat, count(*) FROM " + base +
+                         " GROUP BY __parqit_pat ORDER BY count(*) DESC, __parqit_pat "
+                         "LIMIT 100",
                      &res, &err)) {
             cry("parqit misstable patterns: " + err);
             return kRcEngine;
@@ -3390,7 +3755,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             }
         const std::string g = by.empty() ? "" : norm_view_key(by);
         std::string gsel = by.empty() ? "" : "CAST(" + g +
-                                                 " AS VARCHAR) AS __g, ";
+                                                 " AS VARCHAR) AS __parqit_g, ";
         std::string tail = by.empty() ? "" : " WHERE " + g +
                                                  " IS NOT NULL GROUP BY " + g +
                                                  " ORDER BY " + g + " NULLS LAST";
@@ -3535,8 +3900,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                       wbuf + ")) AS BIGINT), " + std::to_string(bins - 1) +
                       "), 0)";
         duckdb_result res;
-        if (!s.query("SELECT " + bexpr + " AS b, count(*) FROM " + base + " WHERE " +
-                         r + " IS NOT NULL GROUP BY b ORDER BY b",
+        if (!s.query("SELECT " + bexpr + " AS __parqit_b, count(*) FROM " + base +
+                         " WHERE " + r + " IS NOT NULL GROUP BY __parqit_b ORDER BY "
+                         "__parqit_b",
                      &res, &err)) {
             cry("parqit histogram: " + err);
             return kRcEngine;

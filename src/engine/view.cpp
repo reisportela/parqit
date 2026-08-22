@@ -117,6 +117,33 @@ int View::col_index(const std::string &name) const {
     return -1;
 }
 
+/* ASCII case-insensitive equality of two DIFFERENT names — the clash DuckDB's
+ * identifier resolution cannot tell apart (it folds ASCII case only). */
+static bool ci_clash(const std::string &a, const std::string &b) {
+    if (a == b || a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        unsigned char x = static_cast<unsigned char>(a[i]);
+        unsigned char y = static_cast<unsigned char>(b[i]);
+        if (x >= 'A' && x <= 'Z') x = static_cast<unsigned char>(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = static_cast<unsigned char>(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return true;
+}
+
+std::string View::ci_guard(const std::string &name,
+                           const std::set<std::string> &ignore) const {
+    for (const auto &c : cols_) {
+        if (ignore.count(c.name)) continue;
+        if (ci_clash(c.name, name))
+            return "variable " + name + " differs only by case from " + c.name +
+                   ", which the engine cannot hold in one view (DuckDB column names "
+                   "are case-insensitive); choose another name, or collect first "
+                   "and create it in Stata";
+    }
+    return "";
+}
+
 std::string View::fresh_helper(const std::string &hint,
                                const std::set<std::string> &taken) {
     for (;;) {
@@ -156,7 +183,12 @@ std::vector<std::string> View::sortedby_names() const {
             return {}; /* gsort is ordered, but not Stata sortedby metadata */
         if (key.size() < 2 || key.front() != '"' || key.back() != '"')
             return {};
-        out.push_back(key.substr(1, key.size() - 2));
+        /* A2-9 (audit 2026-08-22): the marker names the EXPOSED (Stata/file)
+         * columns, never an engine alias — a view save writes it into
+         * parqit.schema.sortedby and collect hands it to Stata's sort */
+        const std::string engine = key.substr(1, key.size() - 2);
+        const int i = col_index(engine);
+        out.push_back(i < 0 ? engine : cols_[static_cast<size_t>(i)].exposed());
     }
     return out;
 }
@@ -207,7 +239,18 @@ std::string View::expand_patterns(const std::vector<std::string> &patterns,
                         pat.find('?') != std::string::npos;
         bool hit = false;
         for (const auto &c : cols_) {
-            if (has_wild ? glob_match(pat, c.name) : (pat == c.name)) {
+            /* NAME-CASE-1 / R3 (audit 2026-08-22): a selection varlist accepts
+             * the engine alias (`NUEMP_1`) OR the exact Stata name (`NUEMP`) of
+             * a case-aliased column, like the eager `use <varlist>` does; the
+             * result always carries the ENGINE name, so every caller keeps
+             * building SQL from engine identifiers. An exact match on an alias
+             * of another column cannot be ambiguous: aliases are case-unique
+             * against every exposed name (engine_unique_ci). */
+            const bool m = has_wild
+                               ? (glob_match(pat, c.name) ||
+                                  (!c.stata.empty() && glob_match(pat, c.stata)))
+                               : (pat == c.name || (!c.stata.empty() && pat == c.stata));
+            if (m) {
                 hit = true;
                 if (seen.insert(c.name).second) out->push_back(c.name);
             }
@@ -215,6 +258,39 @@ std::string View::expand_patterns(const std::vector<std::string> &patterns,
         if (!hit) return "variable " + pat + " not found in the view";
     }
     return "";
+}
+
+/* NAME-CASE-1 invariant (audit 2026-08-22, A2-3): `ViewCol.stata` travels ONLY
+ * with a column that keeps its engine name. Every verb that renames or derives
+ * a column goes through here: the user's new name IS the Stata-facing name
+ * (already ci-guarded), so the alias is cleared. */
+static ViewCol derive_col(const ViewCol &src, const std::string &name) {
+    ViewCol c = src;
+    c.name = name;
+    c.stata.clear();
+    return c;
+}
+
+/* R1 / A2-4: characteristics and notes of a column are keyed by its EXPOSED
+ * name (`NUEMP`, set at open/collect), so a rename must move the entry keyed
+ * by the old exposed name — and, for safety, any entry keyed by the old
+ * engine name — to the new name, or an aliased column's notes would be
+ * orphaned and dropped on the next collect/save (META-2). */
+static void move_chars(nlohmann::json *chars, const ViewCol &old_col,
+                       const std::string &newn) {
+    if (!chars->is_object()) return;
+    nlohmann::json merged = nlohmann::json::object();
+    for (const std::string &key : {old_col.exposed(), old_col.name}) {
+        if (!chars->contains(key)) continue;
+        if ((*chars)[key].is_object())
+            for (const auto &kv : (*chars)[key].items())
+                if (!merged.contains(kv.key())) merged[kv.key()] = kv.value();
+        chars->erase(key);
+    }
+    /* a stale entry under the new name (a column dropped by an earlier
+     * projection) must never attach its notes to the renamed column */
+    chars->erase(newn);
+    if (!merged.empty()) (*chars)[newn] = merged;
 }
 
 static ExprSchema schema_of(const std::vector<ViewCol> &cols) {
@@ -349,6 +425,10 @@ std::string View::gen(const std::string &name, const std::string &type_req,
                       const std::string &expr, const std::string &if_expr,
                       bool statamissing) {
     if (col_index(name) >= 0) return "variable " + name + " already defined";
+    {
+        const std::string cig = ci_guard(name);
+        if (!cig.empty()) return cig;
+    }
     ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
     if (!r.ok) return r.error;
     /* GEN-TYPEFAMILY-1: native Stata rejects an explicit storage type whose
@@ -481,6 +561,10 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
     int idx = col_index(oldn);
     if (idx < 0) return "variable " + oldn + " not found in the view";
     if (col_index(newn) >= 0) return "variable " + newn + " already defined";
+    {
+        const std::string cig = ci_guard(newn, {oldn});
+        if (!cig.empty()) return cig;
+    }
     std::string sel;
     for (size_t i = 0; i < cols_.size(); i++) {
         if (i) sel += ", ";
@@ -489,15 +573,14 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
         else
             sel += quote_ident(cols_[i].name);
     }
-    cols_[idx].name = newn;
     /* characteristics (and notes, which are characteristics) are keyed by the
-     * variable name; follow the rename so they are not dropped on a later
-     * save/collect, which serialises only chars whose key is a live column
-     * (META-2). Value labels ride on ViewCol.vallab and need no remap. */
-    if (chars_.is_object() && chars_.contains(oldn)) {
-        chars_[newn] = chars_[oldn];
-        chars_.erase(oldn);
-    }
+     * variable's EXPOSED name; follow the rename so they are not dropped on a
+     * later save/collect, which serialises only chars whose key is a live
+     * column (META-2). Value labels ride on ViewCol.vallab and need no remap.
+     * R1/A2-4: the renamed column loses its case alias — the new name is the
+     * Stata-facing name. */
+    move_chars(&chars_, cols_[idx], newn);
+    cols_[idx] = derive_col(cols_[idx], newn);
     /* sort keys referencing the old name follow the rename */
     for (auto &k : sort_) {
         if (k == quote_ident(oldn)) k = quote_ident(newn);
@@ -528,6 +611,15 @@ std::string View::rename_many(const std::vector<std::string> &old_names,
     for (const auto &nn : new_names)
         if (col_index(nn) >= 0 && !oldset.count(nn))
             return "variable " + nn + " already defined";
+    for (const auto &nn : new_names) {
+        /* NAME-CASE-1: against the survivors, and among the new names */
+        const std::string cig = ci_guard(nn, oldset);
+        if (!cig.empty()) return cig;
+        for (const auto &other : new_names)
+            if (other != nn && ci_clash(other, nn))
+                return "rename: target variables " + nn + " and " + other +
+                       " differ only by case, which the engine cannot hold in one view";
+    }
 
     /* Build every replacement off to the side.  This single projection also
      * supports cycles (a b)->(b a); no intermediate public name exists. */
@@ -540,17 +632,33 @@ std::string View::rename_many(const std::vector<std::string> &old_names,
             sel += quote_ident(cols_[i].name);
         } else {
             sel += quote_ident(cols_[i].name) + " AS " + quote_ident(it->second);
-            ncols[i].name = it->second;
+            ncols[i] = derive_col(cols_[i], it->second); /* R1: alias cleared */
         }
     }
 
+    /* chars follow the rename, keyed by the EXPOSED name (R1/A2-4); collect
+     * every moved entry first (a cycle (a b)->(b a) must not let b's entry be
+     * read after a's was written over it), then reinsert under the new names */
     json nchars = chars_;
-    std::map<std::string, json> moved_chars;
     if (nchars.is_object()) {
-        for (const auto &oldn : old_names)
-            if (nchars.contains(oldn)) moved_chars[oldn] = nchars[oldn];
-        for (const auto &oldn : old_names) nchars.erase(oldn);
-        for (const auto &m : moved_chars) nchars[mapping[m.first]] = m.second;
+        std::map<std::string, json> moved;
+        for (const auto &c : cols_) {
+            auto it = mapping.find(c.name);
+            if (it == mapping.end()) continue;
+            json merged = json::object();
+            for (const std::string &key : {c.exposed(), c.name}) {
+                if (!nchars.contains(key)) continue;
+                if (nchars[key].is_object())
+                    for (const auto &kv : nchars[key].items())
+                        if (!merged.contains(kv.key())) merged[kv.key()] = kv.value();
+                nchars.erase(key);
+            }
+            moved[it->second] = merged;
+        }
+        for (const auto &m : moved) {
+            nchars.erase(m.first); /* never inherit a stale entry under the new name */
+            if (!m.second.empty()) nchars[m.first] = m.second;
+        }
     }
     std::vector<std::string> nsort = sort_;
     for (auto &key : nsort) {
@@ -637,6 +745,20 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
     for (const auto &sp : specs)
         needs_rn |= (sp.stat == "first" || sp.stat == "last" ||
                      sp.stat == "firstnm" || sp.stat == "lastnm");
+    /* NAME-CASE-1: every output name must be case-insensitively unique, or
+     * DuckDB would dedup the aggregate's result and later references would
+     * bind to the wrong column silently */
+    {
+        std::vector<std::string> outs(byn);
+        for (const auto &sp : specs)
+            outs.push_back(sp.target.empty() ? sp.source : sp.target);
+        for (size_t i = 0; i < outs.size(); i++)
+            for (size_t j = i + 1; j < outs.size(); j++)
+                if (ci_clash(outs[i], outs[j]))
+                    return "collapse: " + outs[i] + " and " + outs[j] +
+                           " differ only by case, which the engine cannot hold in "
+                           "one view";
+    }
     std::string rn = fresh_helper("rn");
     const std::string prev = prev_name(stages_.size());
     std::string src = prev;
@@ -727,12 +849,23 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         sel += agg + " AS " + quote_ident(tgt);
         ViewCol nc;
         nc.name = tgt;
+        /* A2-5: a default target keeps the source column's identity, alias
+         * included (collect/save expose `NUEMP`, not `NUEMP_1`); an explicit
+         * target is a new Stata-facing name (ci-guarded above). */
+        if (sp.target.empty()) nc.stata = scol.stata;
         nc.kind = (sp.stat == "count") ? 'n' : kind;
+        /* COLLAPSE-META-1 (audit 2026-08-22, A3-8): native collapse labels the
+         * result "(stat) source" and keeps the source's display format; a
+         * (count) is a long. first/last/firstnm/lastnm keep the value label
+         * and storage type too (they carry a source value). */
+        nc.varlab = "(" + sp.stat + ") " + scol.exposed();
+        nc.fmt = scol.fmt;
         if (sp.stat == "first" || sp.stat == "last" || sp.stat == "firstnm" ||
             sp.stat == "lastnm") {
-            nc.fmt = scol.fmt;
             nc.vallab = scol.vallab;
             nc.meta_type = scol.meta_type;
+        } else if (sp.stat == "count") {
+            nc.meta_type = "long";
         }
         ncols.push_back(nc);
     }
@@ -777,8 +910,21 @@ std::string View::contract(const std::vector<std::string> &by,
     if (!err.empty()) return err;
     if (byn.empty()) return "contract needs a varlist";
     std::string fname = freq.empty() ? "_freq" : freq;
-    for (const auto &b : byn)
+    for (const auto &b : byn) {
         if (b == fname) return "freq() name collides with a contracted variable";
+        if (ci_clash(b, fname))
+            return "freq() name " + fname + " differs only by case from " + b +
+                   ", which the engine cannot hold in one view";
+    }
+    /* CONTRACT-FREQ-1 (audit 2026-08-22, A2-15.4): native contract stops with
+     * r(110) when the frequency variable already exists; parqit silently
+     * projected the old column away. Refuse loudly (a live column, by alias or
+     * exact name, that is not itself a by-variable). */
+    for (const auto &c : cols_)
+        if ((c.name == fname || c.exposed() == fname) &&
+            std::find(byn.begin(), byn.end(), c.name) == byn.end())
+            return "contract: variable " + fname +
+                   " already defined; name the frequency variable with freq()";
     std::string sel;
     std::vector<ViewCol> ncols;
     for (const auto &b : byn) {
@@ -898,6 +1044,10 @@ std::string View::egen(const std::string &name, const std::string &fcn,
                        const std::vector<std::string> &by, bool statamissing,
                        const std::string &type_req) {
     if (col_index(name) >= 0) return "variable " + name + " already defined";
+    {
+        const std::string cig = ci_guard(name);
+        if (!cig.empty()) return cig;
+    }
     ExprResult a = translate_expression(arg_expr, schema_of(cols_), statamissing);
     if (!a.ok) return a.error;
     if (a.kind == 's') return "egen " + fcn + "() needs a numeric expression";
@@ -1068,13 +1218,33 @@ std::string View::merge_with(const std::string &kind,
         }
     }
     std::vector<const ViewCol *> brought;
+    /* MERGE-COMMON-1 (audit 2026-08-22, A3-1): a non-key column present on
+     * BOTH sides and kept from using keeps the master value on matched and
+     * master-only rows, but on a using-only row (_merge==2) native Stata
+     * carries the USING value — parqit left it missing. Track such columns so
+     * the projection below can coalesce them by the master marker. */
+    std::map<std::string, const ViewCol *> common; /* engine name -> using col */
     for (const auto &c : u.cols) {
         if (keyset.count(c.name)) continue;
         if (!keepusing.empty() && !wanted.count(c.name)) continue;
-        if (col_index(c.name) >= 0) {
+        int mi = col_index(c.name);
+        if (mi >= 0) {
+            /* native merge stops with r(106) when a common variable is string
+             * on one side and numeric on the other; silently keeping the
+             * master would leave the using-only rows unfillable */
+            if (cols_[mi].kind != c.kind)
+                return "merge: variable " + c.name + " is " +
+                       (cols_[mi].kind == 's' ? "string" : "numeric") +
+                       " in master but " + (c.kind == 's' ? "string" : "numeric") +
+                       " in using";
             warnings->push_back("variable " + c.name +
                                 " exists in master and using; master values kept");
+            common[c.name] = &c;
             continue;
+        }
+        {
+            const std::string cig = ci_guard(c.name);
+            if (!cig.empty()) return "merge: using " + cig;
         }
         brought.push_back(&c);
     }
@@ -1084,6 +1254,15 @@ std::string View::merge_with(const std::string &kind,
     if (!nogen && col_index(mname) >= 0)
         return "merge: variable " + mname +
                " already exists (use gen() or nogenerate)";
+    if (!nogen) {
+        const std::string cig = ci_guard(mname);
+        if (!cig.empty()) return "merge: " + cig;
+        for (const auto *c : brought)
+            if (ci_clash(c->name, mname))
+                return "merge: variable " + mname + " differs only by case from the "
+                       "using variable " + c->name +
+                       ", which the engine cannot hold in one view (use gen())";
+    }
 
     const std::string prev = prev_name(stages_.size());
     /* helper names must dodge the USING side's columns too: a using column
@@ -1173,17 +1352,38 @@ std::string View::merge_with(const std::string &kind,
 
     /* output projection: master cols (coalesced keys), brought using cols,
      * then the merge marker */
+    /* one projection builder for both branches: master columns (coalesced
+     * keys; common columns filled from using on using-only rows), brought
+     * using columns. `keysrc` is the side the keys come from ("__m" with a
+     * coalesce against __u in the join branch, "__s" = the spine in m:m). */
+    auto project_master = [&](const char *keysrc) -> std::string {
+        std::string out;
+        for (const auto &c : cols_) {
+            if (!out.empty()) out += ", ";
+            const std::string q = quote_ident(c.name);
+            if (keyset.count(c.name)) {
+                out += std::string(keysrc) == "__m"
+                           ? "coalesce(__m." + q + ", __u." + q + ") AS " + q
+                           : std::string(keysrc) + "." + q + " AS " + q;
+            } else if (common.count(c.name)) {
+                /* MERGE-COMMON-1: using-only row -> using value */
+                out += "(CASE WHEN __m." + quote_ident(mm) + " IS NULL THEN __u." + q +
+                       " ELSE __m." + q + " END) AS " + q;
+            } else {
+                out += "__m." + q + " AS " + q;
+            }
+        }
+        return out;
+    };
     std::vector<ViewCol> ncols;
-    std::string sel;
     for (const auto &c : cols_) {
-        if (!sel.empty()) sel += ", ";
-        if (keyset.count(c.name))
-            sel += "coalesce(__m." + quote_ident(c.name) + ", __u." +
-                   quote_ident(c.name) + ") AS " + quote_ident(c.name);
-        else
-            sel += "__m." + quote_ident(c.name) + " AS " + quote_ident(c.name);
         ncols.push_back(c);
+        /* MISS-1: a common column may now carry a using-side value; it stays
+         * normalized only when the using column is normalized too */
+        auto it = common.find(c.name);
+        if (it != common.end() && !it->second->normalized) ncols.back().normalized = false;
     }
+    std::string sel = project_master("__m");
     for (const ViewCol *c : brought) {
         sel += ", __u." + quote_ident(c->name) + " AS " + quote_ident(c->name);
         ncols.push_back(*c);
@@ -1219,14 +1419,7 @@ std::string View::merge_with(const std::string &kind,
         ju += " AND __u." + quote_ident(rnu) + " = least(__s." + quote_ident(spine_i) +
               ", __u." + quote_ident(nux) + ")";
         /* rebuild sel against __m/__u as before but keys come from spine */
-        std::string sel2;
-        for (const auto &c : cols_) {
-            if (!sel2.empty()) sel2 += ", ";
-            if (keyset.count(c.name))
-                sel2 += "__s." + quote_ident(c.name) + " AS " + quote_ident(c.name);
-            else
-                sel2 += "__m." + quote_ident(c.name) + " AS " + quote_ident(c.name);
-        }
+        std::string sel2 = project_master("__s");
         for (const ViewCol *c : brought)
             sel2 += ", __u." + quote_ident(c->name) + " AS " + quote_ident(c->name);
         sel2 += ", " + merge_expr + " AS " + quote_ident(mtmp);
@@ -1257,6 +1450,7 @@ std::string View::merge_with(const std::string &kind,
         mc.kind = 'n';
         mc.varlab = "Matching result from merge";
         mc.meta_type = "byte";
+        mc.fmt = "%23.0g"; /* native's _merge format (A3-8): labels display */
         mc.vallab = "_merge"; /* TT-3 */
         ncols.push_back(mc);
     }
@@ -1288,15 +1482,29 @@ std::string View::append_with(std::vector<UsingSide> sources,
     if (sources.empty()) return "append: at least one using file required";
     if (!gen_name.empty() && col_index(gen_name) >= 0)
         return "append: generate() variable " + gen_name + " already exists";
+    if (!gen_name.empty()) {
+        const std::string cig = ci_guard(gen_name);
+        if (!cig.empty()) return "append: " + cig;
+    }
     /* TT-A2: a generate() name colliding with a using-file column would emit a
      * duplicate output name into UNION ALL BY NAME and surface a cryptic DuckDB
      * Binder Error; check the using sides too and fail loudly and clearly. */
     if (!gen_name.empty())
         for (size_t s = 0; s < sources.size(); s++)
-            for (const auto &c : sources[s].cols)
+            for (const auto &c : sources[s].cols) {
                 if (c.name == gen_name)
                     return "append: generate() variable " + gen_name +
                            " already exists in using file " + std::to_string(s + 1);
+                /* A2-6 (audit 2026-08-22): a case-only clash with a using column
+                 * made UNION BY NAME bind the marker onto that column and
+                 * collect die with a raw Binder Error — refuse before mutation,
+                 * like merge's gen() does. */
+                if (ci_clash(c.name, gen_name))
+                    return "append: generate() variable " + gen_name +
+                           " differs only by case from variable " + c.name +
+                           " of using file " + std::to_string(s + 1) +
+                           ", which the engine cannot hold in one view";
+            }
 
     /* kind conflicts are loud (a column cannot be string here and numeric
      * there); new columns are adopted with the using side's metadata */
@@ -1381,6 +1589,10 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
                                 " exists in master and using; master values kept");
             continue;
         }
+        {
+            const std::string cig = ci_guard(c.name);
+            if (!cig.empty()) return "joinby: using " + cig;
+        }
         brought.push_back(&c);
         ncols.push_back(c);
     }
@@ -1442,6 +1654,10 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
     if (jname.empty()) return "reshape long: j() required";
     if (col_index(jname) >= 0)
         return "reshape long: variable " + jname + " already defined";
+    {
+        const std::string cig = ci_guard(jname);
+        if (!cig.empty()) return "reshape long: " + cig;
+    }
     for (const auto &iv : ivars)
         if (col_index(iv) < 0) return "reshape long: i variable " + iv + " not found";
 
@@ -1650,15 +1866,56 @@ std::string View::reshape_wide(const std::vector<std::string> &stubs,
                 return false;
         return true;
     };
+    /* A2-3 (audit 2026-08-22): the generated name derives from the stub's
+     * EXPOSED (Stata) name — an aliased stub `X_1` (Stata `X`) spreads into
+     * `X1`, `X2`, not `X_11` — and the new columns never carry the alias
+     * (derive_col), so two generated columns can never share one exposed name
+     * and a view save can never write a duplicate-name file. */
+    auto stub_base = [&](const std::string &st) -> std::string {
+        const int si = col_index(st);
+        return si < 0 ? st : cols_[si].exposed();
+    };
+    /* the generated names must also be case-insensitively unique AMONG
+     * THEMSELVES (stubs `x` and `X` would spread into x1/X1, which DuckDB
+     * binds to one column): refuse loudly */
+    {
+        std::vector<std::string> gen;
+        for (const auto &st : stubs)
+            for (const auto &jv : jvalues) gen.push_back(stub_base(st) + jv);
+        for (size_t a = 0; a < gen.size(); a++)
+            for (size_t b = a + 1; b < gen.size(); b++)
+                if (gen[a] == gen[b] || ci_clash(gen[a], gen[b]))
+                    return "reshape wide: generated names " + gen[a] + " and " +
+                           gen[b] + " differ only by case (or coincide), which the "
+                           "engine cannot hold in one view";
+    }
     for (const auto &st : stubs)
         for (const auto &jv : jvalues) {
-            std::string nn = st + jv;
+            std::string nn = stub_base(st) + jv;
             if (!valid_stata_name(nn))
                 return "reshape wide: generated name " + nn +
                        " is not a valid Stata variable name (from j value " + jv +
                        ")";
             if (known.count(nn) || col_index(nn) >= 0)
                 return "reshape wide: generated name " + nn + " collides";
+            /* an i() variable survives the pivot: its exposed name must not be
+             * taken by a generated column either (alias-aware) */
+            for (const auto &iv : ivars) {
+                const int ii = col_index(iv);
+                if (ii >= 0 && cols_[ii].exposed() == nn)
+                    return "reshape wide: generated name " + nn + " collides";
+            }
+            /* NAME-CASE-1: j values differing only by case (A/a) would generate
+             * names DuckDB cannot hold apart in one relation */
+            for (const auto &kn : known)
+                if (ci_clash(kn, nn))
+                    return "reshape wide: generated names " + nn + " and " + kn +
+                           " differ only by case, which the engine cannot hold in one "
+                           "view";
+            {
+                const std::string cig = ci_guard(nn);
+                if (!cig.empty()) return "reshape wide: " + cig;
+            }
         }
 
     const std::string prev = prev_name(stages_.size());
@@ -1676,10 +1933,14 @@ std::string View::reshape_wide(const std::vector<std::string> &stubs,
             std::string cond = quote_ident(jvar) +
                                (j_is_string ? " = " + quote_literal(jv)
                                             : " = " + jv);
+            const std::string nn = stub_base(st) + jv; /* A2-3: from the exposed name */
             sel += ", max(" + quote_ident(st) + ") FILTER (WHERE " + cond +
-                   ") AS " + quote_ident(st + jv);
-            ViewCol nc = sc;
-            nc.name = st + jv;
+                   ") AS " + quote_ident(nn);
+            /* RESHAPE-WIDE-LABEL (A3-8): native labels the spread column
+             * "<j value> <stub name>" (verified: stub `inc` labelled "income"
+             * spreads into inc1 labelled "1 inc"); the display format is kept */
+            ViewCol nc = derive_col(sc, nn);
+            nc.varlab = jv + " " + sc.exposed();
             ncols.push_back(nc);
         }
     }

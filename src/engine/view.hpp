@@ -25,7 +25,14 @@
 namespace parqit {
 
 struct ViewCol {
-    std::string name;      /* engine + Stata name inside the pipeline */
+    std::string name;      /* engine identifier = the name lazy verbs use */
+    /* NAME-CASE-1: the Stata-facing name when it differs from `name` — only
+     * for a column whose file name differs merely by case from another
+     * column's (DuckDB identifiers are case-insensitive, so the engine holds it
+     * under a suffixed alias); "" otherwise. collect/use and save expose this
+     * exact name; the compiled SQL never sees it. */
+    std::string stata;
+    const std::string &exposed() const { return stata.empty() ? name : stata; }
     char kind = 'n';       /* 'n' numeric, 's' string */
     std::string fmt;       /* Stata display format ("" = default) */
     std::string varlab;
@@ -186,6 +193,13 @@ class View {
 
   private:
     int col_index(const std::string &name) const;
+    /* NAME-CASE-1: "" when `name` can be created in this view, else the loud
+     * refusal: a live column (not in `ignore`) differs from it only by case,
+     * and DuckDB would silently bind references to whichever it dedups first.
+     * Every verb that introduces a user-chosen name calls this after its exact
+     * "already defined" check. */
+    std::string ci_guard(const std::string &name,
+                         const std::set<std::string> &ignore = {}) const;
     /* `taken`: extra names the helper must dodge beyond the live manifest —
      * two-table verbs pass the using side's column names here, so a using
      * column literally named like a generated helper can never make the

@@ -321,6 +321,32 @@ static View::UsingSide make_using(const char *sql,
     return u;
 }
 
+TEST_CASE("join key validation classifies missing names and type mismatches") {
+    View v = make_view();
+    auto numeric = make_using("SELECT 1 AS id", {{"id", 'n'}});
+    auto string = make_using("SELECT '1' AS id", {{"id", 's'}});
+
+    bool type_mismatch = true;
+    std::string e =
+        v.join_keys_error("merge", {"nosuch"}, numeric, &type_mismatch);
+    CHECK(e == "merge: key nosuch not found in the master view");
+    CHECK_FALSE(type_mismatch);
+
+    type_mismatch = true;
+    e = v.join_keys_error("merge", {"year"}, numeric, &type_mismatch);
+    CHECK(e == "merge: key year not found in the using data");
+    CHECK_FALSE(type_mismatch);
+
+    type_mismatch = false;
+    e = v.join_keys_error("joinby", {"id"}, string, &type_mismatch);
+    CHECK(e == "joinby: key id is numeric in master but string in using");
+    CHECK(type_mismatch);
+
+    type_mismatch = true;
+    CHECK(v.join_keys_error("merge", {"id"}, numeric, &type_mismatch).empty());
+    CHECK_FALSE(type_mismatch);
+}
+
 TEST_CASE("merge m:1: _merge semantics, NULL keys match, master wins") {
     View v = make_view(); /* ids 1,2,3 (×2 each) */
     std::vector<std::string> warns;
@@ -715,4 +741,236 @@ TEST_CASE("pivot decomposition: collapse + reshape_wide, and the snapshot restor
     CHECK(w.compile(false) == make_view().compile(false));
     CHECK(w.cols().size() == 4);
     CHECK(run_count(w) == 6);
+}
+
+/* ---- audit 2026-08-22: NAME-CASE-1 alias invariants, merge common columns --- */
+
+/* a view with a case-aliased column: engine nuemp / NUEMP_1 (Stata NUEMP) / x */
+static View make_alias_view() {
+    View v;
+    std::vector<ViewCol> cols;
+    ViewCol a; a.name = "nuemp"; a.kind = 'n';
+    ViewCol b; b.name = "NUEMP_1"; b.stata = "NUEMP"; b.kind = 'n'; b.varlab = "Upper";
+    ViewCol c; c.name = "x"; c.kind = 'n';
+    cols = {a, b, c};
+    nlohmann::json chars = nlohmann::json::object();
+    chars["NUEMP"]["note1"] = "upper note";
+    chars["x"]["note1"] = "x note";
+    v.open("SELECT * FROM (VALUES (1, 10, 0.5), (2, 20, 1.5)) t(nuemp, NUEMP_1, x)",
+           cols, nlohmann::json::object(), chars, "", "alias fixture");
+    return v;
+}
+
+TEST_CASE("R1/A2-4: renaming an aliased column clears the alias and moves its chars") {
+    View v = make_alias_view();
+    REQUIRE(v.rename("NUEMP_1", "foo").empty());
+    CHECK(v.cols()[1].name == "foo");
+    CHECK(v.cols()[1].stata.empty());
+    CHECK(v.cols()[1].exposed() == "foo");
+    CHECK(v.cols()[1].varlab == "Upper");
+    CHECK(v.chars().contains("foo"));
+    CHECK(v.chars()["foo"]["note1"] == "upper note");
+    CHECK_FALSE(v.chars().contains("NUEMP"));
+    CHECK_FALSE(v.chars().contains("NUEMP_1"));
+    CHECK(v.chars()["x"]["note1"] == "x note"); /* untouched */
+    CHECK(run_scalar("SELECT sum(foo) FROM (" + v.compile(false) + ")") == "30");
+    /* sortedby follows too, by exposed name */
+    View w = make_alias_view();
+    REQUIRE(w.sort({"NUEMP_1"}, {false}).empty());
+    CHECK(w.sortedby_names() == std::vector<std::string>{"NUEMP"}); /* A2-9 */
+    REQUIRE(w.rename("NUEMP_1", "bar").empty());
+    CHECK(w.sortedby_names() == std::vector<std::string>{"bar"});
+    /* group form, with a cycle through an aliased column */
+    View g = make_alias_view();
+    REQUIRE(g.rename_many({"nuemp", "NUEMP_1"}, {"lo", "hi"}).empty());
+    CHECK(g.cols()[0].name == "lo");
+    CHECK(g.cols()[1].name == "hi");
+    CHECK(g.cols()[1].stata.empty());
+    CHECK(g.chars()["hi"]["note1"] == "upper note");
+    CHECK_FALSE(g.chars().contains("NUEMP"));
+    View cyc = make_alias_view();
+    REQUIRE(cyc.rename_many({"nuemp", "x"}, {"x", "nuemp"}).empty());
+    CHECK(cyc.chars()["nuemp"]["note1"] == "x note");
+    CHECK_FALSE(cyc.chars().contains("x"));
+    /* a rename onto an alias's exposed name is still the documented refusal */
+    View r = make_alias_view();
+    CHECK_FALSE(r.rename("x", "NUEMP").empty());
+}
+
+TEST_CASE("R3/A2-12: selection varlists accept the exact Stata name or the alias") {
+    View v = make_alias_view();
+    std::vector<std::string> out;
+    REQUIRE(v.expand_patterns({"NUEMP"}, &out).empty());
+    CHECK(out == std::vector<std::string>{"NUEMP_1"}); /* engine name returned */
+    out.clear();
+    REQUIRE(v.expand_patterns({"NUE*"}, &out).empty());
+    CHECK(out == std::vector<std::string>{"NUEMP_1"});
+    out.clear();
+    REQUIRE(v.expand_patterns({"n*"}, &out).empty());
+    CHECK(out == std::vector<std::string>{"nuemp"});
+    REQUIRE(v.keep_vars({"NUEMP", "x"}).empty());
+    CHECK(v.cols().size() == 2);
+    CHECK(v.cols()[0].name == "NUEMP_1");
+    CHECK(v.cols()[0].stata == "NUEMP");
+    CHECK(run_scalar("SELECT sum(NUEMP_1) FROM (" + v.compile(false) + ")") == "30");
+    View d = make_alias_view();
+    REQUIRE(d.drop_vars({"NUEMP"}).empty());
+    CHECK(d.cols().size() == 2);
+    View o = make_alias_view();
+    REQUIRE(o.reorder({"x", "NUEMP"}).empty());
+    CHECK(o.cols()[1].name == "NUEMP_1");
+}
+
+TEST_CASE("A2-5/A3-8: collapse default targets keep the source identity; labels and formats follow native") {
+    View v = make_alias_view();
+    REQUIRE(v.collapse({{"mean", "", "NUEMP_1"}, {"sum", "s", "NUEMP_1"},
+                        {"count", "n", "x"}},
+                       {"nuemp"})
+                .empty());
+    REQUIRE(v.cols().size() == 4);
+    CHECK(v.cols()[1].name == "NUEMP_1");
+    CHECK(v.cols()[1].stata == "NUEMP");       /* default target: alias kept */
+    CHECK(v.cols()[1].varlab == "(mean) NUEMP");
+    CHECK(v.cols()[2].name == "s");
+    CHECK(v.cols()[2].stata.empty());          /* explicit target: new name */
+    CHECK(v.cols()[2].varlab == "(sum) NUEMP");
+    CHECK(v.cols()[3].varlab == "(count) x");
+    CHECK(v.cols()[3].meta_type == "long");
+    View f = make_view();
+    REQUIRE(f.collapse({{"mean", "", "wage"}}, {"firm"}).empty());
+    CHECK(f.cols()[1].varlab == "(mean) wage");
+}
+
+TEST_CASE("A2-3: reshape wide / pivot over an aliased stub generate names from the exposed name") {
+    View v;
+    std::vector<ViewCol> cols;
+    ViewCol id; id.name = "id"; id.kind = 'n';
+    ViewCol j; j.name = "j"; j.kind = 'n';
+    ViewCol x; x.name = "x"; x.kind = 'n';
+    ViewCol X; X.name = "X_1"; X.stata = "X"; X.kind = 'n'; X.fmt = "%9.2f";
+    cols = {id, j, x, X};
+    v.open("SELECT * FROM (VALUES (1, 1, 5.0, 10.0), (1, 2, 5.0, 20.0)) t(id, j, x, X_1)",
+           cols, nlohmann::json::object(), nlohmann::json::object(), "", "wide fixture");
+    /* stubs x and X_1 (Stata X) would generate x1/X1 — names DuckDB cannot
+     * hold apart in one relation: refused loudly, view untouched */
+    View clash = v;
+    CHECK_FALSE(clash.reshape_wide({"x", "X_1"}, {"id"}, "j", {"1", "2"}, false).empty());
+    CHECK(clash.compile(false) == v.compile(false));
+    REQUIRE(v.reshape_wide({"X_1"}, {"id", "x"}, "j", {"1", "2"}, false).empty());
+    std::vector<std::string> names;
+    for (const auto &c : v.cols()) names.push_back(c.exposed());
+    CHECK(names == std::vector<std::string>{"id", "x", "X1", "X2"});
+    for (const auto &c : v.cols()) CHECK(c.stata.empty());
+    CHECK(v.cols()[2].name == "X1");
+    CHECK(v.cols()[2].varlab == "1 X");  /* native: "<j> <stub name>" */
+    CHECK(v.cols()[2].fmt == "%9.2f");   /* format kept */
+    CHECK(run_scalar("SELECT X2 FROM (" + v.compile(false) + ")") == "20.0");
+    /* a generated name clashing only by case with an i() variable is refused */
+    View w;
+    ViewCol i2; i2.name = "x1"; i2.kind = 'n';
+    w.open("SELECT * FROM (VALUES (1, 1, 1.0, 10.0)) t(x1, j, x, X_1)", {i2, j, x, X},
+           nlohmann::json::object(), nlohmann::json::object(), "", "clash");
+    CHECK_FALSE(w.reshape_wide({"X_1"}, {"x1"}, "j", {"1"}, false).empty());
+    /* the pivot decomposition over an aliased source: collapse default target
+     * keeps the alias, the spread derives X1/X2 (no leaked alias, no duplicate) */
+    View p = make_alias_view();
+    REQUIRE(p.gen("j", "", "nuemp", "", false).empty());
+    REQUIRE(p.collapse({{"mean", "", "NUEMP_1"}}, {"x", "j"}).empty());
+    REQUIRE(p.reshape_wide({"NUEMP_1"}, {"x"}, "j", {"1", "2"}, false).empty());
+    std::vector<std::string> pn;
+    for (const auto &c : p.cols()) pn.push_back(c.exposed());
+    CHECK(pn == std::vector<std::string>{"x", "NUEMP1", "NUEMP2"});
+}
+
+TEST_CASE("MERGE-COMMON-1/A3-1: common non-key columns take the using value on using-only rows") {
+    /* master (k c sc a), using (k c sc b): k=4 exists only in using */
+    View m;
+    std::vector<ViewCol> mc;
+    for (const char *n : {"k", "c", "sc", "a"}) {
+        ViewCol col; col.name = n; col.kind = (std::string(n) == "sc") ? 's' : 'n';
+        mc.push_back(col);
+    }
+    m.open("SELECT * FROM (VALUES (1, 11, 'm1', 1.0), (2, NULL, '', 2.0), (3, 33, 'm3', 3.0)) "
+           "t(k, c, sc, a)", mc, nlohmann::json::object(), nlohmann::json::object(), "", "m");
+    View::UsingSide u;
+    for (const char *n : {"k", "c", "sc", "b"}) {
+        ViewCol col; col.name = n; col.kind = (std::string(n) == "sc") ? 's' : 'n';
+        col.normalized = true;
+        u.cols.push_back(col);
+    }
+    u.select_sql = "SELECT * FROM (VALUES (2, 222, 'u2', 20.0), (3, 333, 'u3', 30.0), "
+                   "(4, 444, 'u4', 40.0)) t(k, c, sc, b)";
+    u.vallabs = nlohmann::json::object();
+    std::vector<std::string> warns;
+    View v = m;
+    REQUIRE(v.merge_with("1:1", {"k"}, u, {}, 0, "", false, &warns).empty());
+    const std::string sql = v.compile(false);
+    /* matched rows keep the MASTER value, even a missing one (k=2) */
+    CHECK(run_scalar("SELECT c IS NULL FROM (" + sql + ") WHERE k = 2") == "true");
+    CHECK(run_scalar("SELECT sc FROM (" + sql + ") WHERE k = 2") == "");
+    CHECK(run_scalar("SELECT c FROM (" + sql + ") WHERE k = 3") == "33");
+    CHECK(run_scalar("SELECT sc FROM (" + sql + ") WHERE k = 3") == "m3");
+    /* master-only row: master values */
+    CHECK(run_scalar("SELECT c FROM (" + sql + ") WHERE k = 1") == "11");
+    /* using-only row (_merge == 2): USING values, like native Stata */
+    CHECK(run_scalar("SELECT c FROM (" + sql + ") WHERE k = 4") == "444");
+    CHECK(run_scalar("SELECT sc FROM (" + sql + ") WHERE k = 4") == "u4");
+    CHECK(run_scalar("SELECT b FROM (" + sql + ") WHERE k = 4") == "40.0");
+    CHECK(run_scalar("SELECT a IS NULL FROM (" + sql + ") WHERE k = 4") == "true");
+    CHECK(run_scalar("SELECT _merge FROM (" + sql + ") WHERE k = 4") == "2");
+    CHECK(v.cols().back().fmt == "%23.0g"); /* A3-8: native _merge format */
+    /* keep(using) / keepusing(c) variants */
+    View v2 = m;
+    REQUIRE(v2.merge_with("m:1", {"k"}, u, {"c"}, 2, "", false, &warns).empty());
+    const std::string sql2 = v2.compile(false);
+    CHECK(run_count(v2) == 1);
+    CHECK(run_scalar("SELECT c FROM (" + sql2 + ")") == "444");
+    CHECK(run_scalar("SELECT sc FROM (" + sql2 + ")") == ""); /* sc not kept from using */
+    /* keepusing(b): the common c is not brought -> master (missing) on k=4 */
+    View v3 = m;
+    REQUIRE(v3.merge_with("1:1", {"k"}, u, {"b"}, 0, "", false, &warns).empty());
+    CHECK(run_scalar("SELECT c IS NULL FROM (" + v3.compile(false) + ") WHERE k = 4") == "true");
+    /* m:m (sequential) branch fills too */
+    View v4 = m;
+    REQUIRE(v4.merge_with("m:m", {"k"}, u, {}, 0, "", false, &warns).empty());
+    CHECK(run_scalar("SELECT c FROM (" + v4.compile(false) + ") WHERE k = 4") == "444");
+    /* a common column string on one side and numeric on the other is refused (native r(106)) */
+    View::UsingSide bad = u;
+    bad.cols[1].kind = 's';
+    View v5 = m;
+    CHECK_FALSE(v5.merge_with("1:1", {"k"}, bad, {}, 0, "", false, &warns).empty());
+}
+
+TEST_CASE("A2-6: append gen() clashing only by case with a using column is refused before mutation") {
+    View v = make_view();
+    View::UsingSide u;
+    ViewCol id; id.name = "id"; id.kind = 'n';
+    ViewCol val; val.name = "val"; val.kind = 'n';
+    u.cols = {id, val};
+    u.select_sql = "SELECT * FROM (VALUES (9, 1.0)) t(id, val)";
+    u.vallabs = nlohmann::json::object();
+    std::vector<std::string> warns;
+    const std::string before = v.compile(false);
+    CHECK_FALSE(v.append_with({u}, "Val", &warns).empty());
+    CHECK(v.compile(false) == before);
+    CHECK(v.append_with({u}, "src", &warns).empty());
+}
+
+TEST_CASE("CONTRACT-FREQ-1/A2-15.4: contract refuses an existing frequency variable like native r(110)") {
+    View v;
+    std::vector<ViewCol> cols;
+    ViewCol g; g.name = "g"; g.kind = 'n';
+    ViewCol f; f.name = "_freq"; f.kind = 'n';
+    v.open("SELECT * FROM (VALUES (1, 5), (1, 6)) t(g, _freq)", {g, f},
+           nlohmann::json::object(), nlohmann::json::object(), "", "contract fixture");
+    CHECK_FALSE(v.contract({"g"}, "").empty());
+    CHECK(v.contract({"g"}, "n").empty());
+    CHECK(v.cols().size() == 2);
+    CHECK(v.cols()[1].name == "n");
+    /* contracting ON the frequency variable itself is fine */
+    View w;
+    w.open("SELECT * FROM (VALUES (1, 5), (1, 6)) t(g, _freq)", {g, f},
+           nlohmann::json::object(), nlohmann::json::object(), "", "contract fixture");
+    CHECK_FALSE(w.contract({"_freq"}, "").empty()); /* _freq by-var AND frequency name */
+    CHECK(w.contract({"_freq"}, "cnt").empty());
 }

@@ -1160,11 +1160,20 @@ bool Parser::call(const std::string &fname, Val *out) {
     if (fname == "real") {
         if (!need(1, 1)) return false;
         if (args[0].kind != 's') return fail("real() needs a string");
-        /* Stata real() yields missing for non-finite text ('inf'/'nan'); a raw
-         * TRY_CAST would keep them as inf/nan, so map non-finite to NULL. */
-        out->sql = "(CASE WHEN isfinite(TRY_CAST(" + args[0].sql +
-                   " AS DOUBLE)) THEN TRY_CAST(" + args[0].sql +
-                   " AS DOUBLE) ELSE NULL END)";
+        /* REAL-GRAMMAR-1 (audit 2026-08-22, A3-2): Stata's real() accepts
+         * exactly a Stata numeric literal — optional sign, digits with one
+         * optional decimal point, an optional e/E/d/D exponent, surrounded by
+         * blanks — and is missing for anything else. DuckDB's VARCHAR->DOUBLE
+         * cast is a different grammar: it accepts digit-group underscores
+         * ("2019_01" -> 201901, "12_345_678") and rejects Stata's Fortran-style
+         * d exponent ("1d3" = 1000 natively). Validate against Stata's grammar
+         * first (blanks trimmed, NULL == ""), translate d/D to e, and keep the
+         * non-finite guard ('inf'/'nan'/'1e400' are missing natively). */
+        const std::string raw = "trim(coalesce(" + args[0].sql + ", ''))";
+        const std::string num = "TRY_CAST(translate(" + raw + ", 'dD', 'ee') AS DOUBLE)";
+        out->sql = "(CASE WHEN regexp_matches(" + raw +
+                   ", '^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eEdD][+-]?[0-9]+)?$') "
+                   "AND isfinite(" + num + ") THEN " + num + " ELSE NULL END)";
         out->kind = 'n';
         return true;
     }
@@ -1182,9 +1191,19 @@ bool Parser::call(const std::string &fname, Val *out) {
      * 31dec1959) and `day(21915.9)` = day(21915) — and an out-of-range count
      * (`year(3e9)`) is row-local missing, not a query abort: floor() + a
      * try()-wrapped cast, exactly like mdy/dofm got in DATE-1. */
+    /* DATE-DOMAIN-1 (audit 2026-08-22, A3-3/A3-4): Stata's date functions are
+     * defined on 01jan0100..31dec9999 (day counts -679350..2936549) and return
+     * MISSING outside it — year(2936550) is `.` natively — while DuckDB's DATE
+     * reaches far beyond, so an out-of-domain count (a %tm/%tc value fed to a
+     * %td function, a corrupted count) produced a plausible year, and a count
+     * near 2^31 even aborted the whole query ("Date out of range", r(920))
+     * because try() only wrapped the INTEGER cast. Guard the domain explicitly
+     * (row-local NULL, never an abort) and keep try() around the whole
+     * expression as a belt. A fractional count floors (DATE-2). */
     auto day_arg = [&](size_t k) {
-        return "(DATE '1960-01-01' + try(CAST(floor(" + as_num(args[k]) +
-               ") AS INTEGER)))";
+        const std::string x = "floor(" + as_num(args[k]) + ")";
+        return "try(CASE WHEN " + x + " BETWEEN -679350 AND 2936549 THEN DATE "
+               "'1960-01-01' + CAST(" + x + " AS INTEGER) ELSE NULL END)";
     };
     auto datepart = [&](const char *part) {
         if (!need(1, 1)) return false;
@@ -1219,11 +1238,17 @@ bool Parser::call(const std::string &fname, Val *out) {
         /* Stata mdy() of an invalid date (mdy(2,30,2020), mdy(13,1,2020)) is
          * row-local missing, not a hard error; try() turns DuckDB's range error
          * into NULL so one bad triple no longer aborts the whole query (DATE-1).
-         * Components floor like day counts do (DATE-2). */
-        out->sql = "(try(make_date(CAST(floor(" + as_num(args[2]) +
-                   ") AS INTEGER), CAST(floor(" + as_num(args[0]) +
-                   ") AS INTEGER), CAST(floor(" + as_num(args[1]) +
-                   ") AS INTEGER)) - DATE '1960-01-01'))";
+         * Components floor like day counts do (DATE-2). DATE-DOMAIN-1: the year
+         * must lie in Stata's 100..9999 (mdy(1,1,99) and mdy(1,1,10000) are `.`
+         * natively, while DuckDB's make_date happily builds year 99). */
+        const std::string yy = "floor(" + as_num(args[2]) + ")";
+        const std::string mm = "floor(" + as_num(args[0]) + ")";
+        const std::string dd = "floor(" + as_num(args[1]) + ")";
+        out->sql = "(CASE WHEN " + yy + " BETWEEN 100 AND 9999 AND " + mm +
+                   " BETWEEN 1 AND 12 AND " + dd + " BETWEEN 1 AND 31 THEN "
+                   "try(make_date(CAST(" + yy + " AS INTEGER), CAST(" + mm +
+                   " AS INTEGER), CAST(" + dd + " AS INTEGER)) - DATE '1960-01-01') "
+                   "ELSE NULL END)";
         out->kind = 'n';
         return true;
     }
@@ -1231,12 +1256,15 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail("dofm() needs a numeric argument");
         /* try(): an out-of-range month count yields missing, not a query abort
-         * (DATE-1); fractional month counts floor (DATE-2). */
+         * (DATE-1); fractional month counts floor (DATE-2). DATE-DOMAIN-1: the
+         * month count must lie in jan0100..dec9999 = -22320..96479 (dofm(96480)
+         * is `.` natively). */
         std::string m = "floor(" + as_num(args[0]) + ")";
-        out->sql = "(try(make_date(1960 + CAST(floor((" + m +
+        out->sql = "(CASE WHEN " + m + " BETWEEN -22320 AND 96479 THEN "
+                   "try(make_date(1960 + CAST(floor((" + m +
                    ") / 12.0) AS INTEGER), CAST((" + m +
                    ") - 12 * floor((" + m +
-                   ") / 12.0) AS INTEGER) + 1, 1) - DATE '1960-01-01'))";
+                   ") / 12.0) AS INTEGER) + 1, 1) - DATE '1960-01-01') ELSE NULL END)";
         out->kind = 'n';
         return true;
     }

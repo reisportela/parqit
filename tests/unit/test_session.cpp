@@ -155,3 +155,28 @@ TEST_CASE("temp_directory configuration applies") {
     REQUIRE_MESSAGE(s.query_scalar("SELECT current_setting('threads')::VARCHAR", &v, &err), err);
     CHECK(v == "4");
 }
+
+TEST_CASE("STRING-DENORMAL-1: parqit_stata_string renders subnormals like Stata's %9.0g (A3-7)") {
+    Session &s = Session::instance();
+    std::string err, v;
+    REQUIRE(s.ensure_open());
+    auto str_of = [&](const char *lit) {
+        std::string out;
+        REQUIRE_MESSAGE(s.query_scalar(std::string("SELECT parqit_stata_string(") + lit +
+                                           "::DOUBLE)",
+                                       &out, &err),
+                        err);
+        return out;
+    };
+    /* verified natively (StataNow 19.5): string(5e-324) = "4.9e-324" */
+    CHECK(str_of("5e-324") == "4.9e-324");
+    CHECK(str_of("1e-323") == "9.9e-324");
+    CHECK(str_of("1e-310") == "1.0e-310");
+    CHECK(str_of("1e-308") == "1.0e-308");
+    CHECK(str_of("2.2250738585072014e-308") == "2.2e-308");
+    CHECK(str_of("1e300") == "1.0e+300");
+    CHECK(str_of("0") == "0");
+    CHECK(str_of("-0.0") == "0");
+    CHECK(str_of("1.5") == "1.5");
+    CHECK(str_of("-2.5e-7") == "-2.50e-07");
+}

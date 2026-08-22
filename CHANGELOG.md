@@ -6,6 +6,215 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-08-23
+
+Data-integrity release driven by the 2026-08-22 adversarial audit (six parallel auditors, ≈1,300
+checks, reports in `local/audit_2026-08-22/` and `docs/audits/2026-08-22/`): legacy (non-UTF-8)
+text is transcoded on save instead of refused, variable names that differ only by case survive
+save and read exactly, `merge` fills common variables on using-only rows, the unchanged-source
+copy save becomes the explicit `copysource` opt-in with a content-sensitive fingerprint, `%tc`
+precision beyond year 4253, `real()` and date-domain guards, partition-key types, torn-read
+protection, loud `.dta` bridges, and the help/README/dialogs brought to full coverage.
+See ASSUMPTIONS #94–#98.
+
+### Changed
+- **The unchanged-source copy save is now an explicit `copysource` option, not
+  an automatic fast path (audit 2026-08-22, A4-1/A4-2/A1-2).** `parqit save`
+  after a `parqit use ..., clear` of one Parquet file used to copy the source
+  file directly whenever `c(changed)==0` — but `c(changed)` cannot prove the
+  dataset still equals the file: Stata leaves it 0 after `sort`/`gsort` and
+  after Mata `st_store`/`st_sstore`/`st_view` writes, so the file written could
+  differ from memory in row order or values (rc 0), and the written manifest
+  claimed a `sortedby` the rows did not have. The default `parqit save` now
+  **always reads the dataset in memory**. The copy capability is preserved as
+  the opt-in `parqit save ..., data copysource` (you assert nothing changed);
+  even then it refuses loudly unless the source's full identity still matches
+  (size, mtime, ctime, inode and a Parquet-footer digest, re-checked immediately
+  before and after the copy), the in-memory variable names/kinds, observation
+  count and sort order equal the file's, and the data cannot be reproduced
+  (case-distinct names, sanitised names, `%tc`, binary strL are refused). The
+  content check compares the first and last 64 observations of every variable:
+  a sort, a gsort or an edit touching either end is caught; an edit confined to
+  the middle rows is not — with `copysource` you assert nothing changed (the
+  help, README and ASSUMPTIONS #96 state the sampling explicitly; round 2,
+  V2.1). The KV `sortedby` a copy writes is the source file's own sort claim,
+  copied as is, and `r(copysource)` reports the file copied. Verify tests `v72`,
+  `t11` (rewritten); ASSUMPTIONS #96.
+- **`collapse`/`merge`/`reshape wide` result metadata now follows native Stata
+  (audit 2026-08-22, A3-8).** A `collapse` target is labelled `(stat) source`
+  and keeps the source variable's display format; a `(count)` target is stored
+  `long`. The `_merge` marker keeps its `%23.0g` format (with the byte storage,
+  variable label and `_merge` value label it already had). A `reshape wide`
+  spread column is labelled `<j value> <stub name>` and keeps the stub's format.
+  These change the metadata of a saved file, so third-party readers see the new
+  labels/formats; the data values are unchanged. Verify test `v75`.
+- **`parqit sql` reports a case-distinct result alias as a `note:`, not a red
+  `warning:` (audit 2026-08-22, A5-12)**, matching `parqit use`.
+- **`parqit save` transcodes legacy 8-bit text instead of refusing it (ENC-2).**
+  A string cell, variable/data label, value-label text, note or characteristic
+  that is not valid UTF-8 (raw Latin-1/Windows-1252 bytes — administrative data
+  saved by Stata 13 and earlier, or loaded without `unicode translate`) used to
+  stop the save with a "run -unicode translate- first" error at the first bad
+  cell, and a legacy *label* crashed the metadata serialiser (`internal error:
+  [json.exception.type_error.316] invalid UTF-8 byte`, rc 920 — found on a
+  30 GB Stata 14 panel whose merged `_EMP_QP` labels were Latin-1). Both
+  writers now transcode such items from the declared legacy code page —
+  `windows-1252` by default; `encoding(latin1|latin9|macroman)` selects
+  another — item by item, exactly what `unicode translate` would do and with
+  no translate step required: valid UTF-8 is written byte-exact, `str#` widths
+  follow the longer UTF-8 form, a loud `note:` reports counts, and
+  `r(transcoded_cells)`, `r(transcoded_meta)`, `r(transcoded_vars)`,
+  `r(encoding)` are returned. Verify test `v32` (rewritten) and `v38` block E,
+  unit test `test_legacy_encoding`; ASSUMPTIONS #94 (supersedes #49).
+- **Variable names that differ only by case survive save and read exactly
+  (NAME-CASE-1).** Stata keeps `nuemp` and `NUEMP` apart; DuckDB identifiers
+  do not, so `parqit save` wrote the second as `NUEMP_1` (and the `parqit.*`
+  manifest no longer matched it — its label and format were silently lost on
+  read-back), while reading a file carrying both columns loaded `NUEMP_1`. The
+  written file now carries the exact names (the engine writes through
+  case-unique aliases and parqit restores the names in the Parquet footer
+  before the file is verified and published), `parqit use ..., clear`,
+  `parqit collect` and a view `save` restore the exact names, and inside a lazy
+  view such a column is addressed by a documented alias (`NUEMP_1`, shown by
+  `parqit describe` and the open note) that `collect`/`save` translate back.
+  Creating a lazy name that differs only by case from a live one (`gen`,
+  `egen`, `rename`, `collapse` targets, `contract` freq, `merge`/`append`/
+  `joinby` gen and brought columns, `reshape`) is now refused loudly — DuckDB
+  would otherwise dedup the CTE and bind later references to the wrong column
+  silently. `partition_by()` is refused for such datasets. Verify test `v70`,
+  unit test `test_name_case`; ASSUMPTIONS #95.
+
+### Added
+- `parqit save ..., encoding(name)` (also on the save dialog): the legacy code
+  page for text that is not valid UTF-8 — `windows-1252` (default), `latin1`,
+  `latin9`, `macroman`.
+- `parqit save ..., data copysource` — the explicit, hardened opt-in that copies
+  the unchanged Parquet file loaded by the last `parqit use ..., clear` instead
+  of reading the dataset in memory (see the Changed entry and ASSUMPTIONS #96);
+  returns `r(copysource)`.
+- `encoding(name)` on the commands that bridge a non-UTF-8 `.dta`/Excel source —
+  `parqit use` (lazy and eager), `parqit merge`/`joinby`/`append`, and
+  `parqit open _data` — chooses the legacy code page for the bridge snapshot
+  (audit 2026-08-22, A5-3/A5-2/A2-8). Those bridging commands now also **report**
+  the save-side losses of the snapshot (extended-missing collapse, fractional
+  date/period rounding, legacy-text transcoding) with a `note:` naming the
+  bridged file and return `r(ext_missing)`/`r(frac_dates)`/`r(transcoded_vars)`/
+  `r(transcoded_cells)`/`r(transcoded_meta)`/`r(encoding)`; before, the bridge
+  applied these conversions silently. Verify test `v77`.
+- `parqit keep in` accepts `f`, `l` and negative bounds like native `keep in`
+  (audit 2026-08-22, A3-9); the count is resolved from the view when needed.
+
+### Fixed
+- **`merge` no longer leaves a common non-key variable missing on using-only
+  rows (audit 2026-08-22, A3-1).** A variable present on both the master and the
+  kept using side now carries the using value on a `_merge==2` row, as native
+  merge does (matched and master-only rows keep the master value, missing
+  included); a common variable that is string on one side and numeric on the
+  other is refused with native `rc 106`. Verify test `v71`.
+- **`%tc` datetimes beyond year ~4253 round-trip exactly (audit 2026-08-22,
+  A1-1/A1-11).** Both in-memory writers computed the on-disk microsecond count as
+  `ms * 1000.0` in double, inexact for |µs| ≥ 2^56, so ~25–38 % of far-future
+  instants read back 1 ms early. The conversion is now integer arithmetic and
+  the on-disk value is exact. Unit test `TC-US-1`, verify `v74`.
+- **`real()` follows Stata's literal grammar (audit 2026-08-22, A3-2):**
+  `real("2019_01")`, `real("12_345_678")`, `real("1_000.5")` are missing (DuckDB
+  digit-group underscores), and `real("1d3")`/`real("1.5d2")` parse the Fortran
+  `d` exponent (1000/150) as native does. Unit + verify tests.
+- **Date functions are row-local missing outside Stata's 01jan0100–31dec9999
+  domain and never abort a `collect` (audit 2026-08-22, A3-3/A3-4).**
+  `year(2936550)`, `mdy(1,1,99)`, `dofm(96480)` and the like return `.`; a day
+  count near 2^31 no longer stops the query with `rc 920`. Verify `v75`.
+- **A float/double/`%tc` `partition_by()` key restores its recorded type
+  (audit 2026-08-22, A1-3).** Such a Hive key came back as a string (`"2020.0"`);
+  the manifest type is now cast back on every read path. Verify `v74`.
+- **Multi-file and nested-dedup name recovery (audit 2026-08-22, A2-1/A2-2).**
+  A glob/Hive/relaxed source, and a single file whose case-clash candidate `_1`
+  is already taken (`a, a_1, A` → scan `A_1_1`), now recover the exact
+  case-distinct names and their labels/formats instead of loading `NUEMP_1` and
+  dropping its metadata. Verify `v70` (extended), `v74`.
+- **`rename`/`collapse`/`reshape wide`/`pivot` of a case-aliased column no longer
+  leak the engine alias (audit 2026-08-22, A2-3/A2-4/A2-5).** `rename` clears the
+  alias and moves the column's notes/chars; a `collapse` default target keeps the
+  source's exposed name; `reshape wide`/`pivot` derive generated names from the
+  exposed stub name — so a view save can never write a duplicate-name Parquet
+  file (a defensive uniqueness check refuses one). Verify `v70`, `v75`.
+- **A zero-observation `partition_by()` save writes a readable empty tree
+  (audit 2026-08-22, A1-5)** instead of failing with a raw engine IO error.
+- **A variable legally named `str` keeps its name (audit 2026-08-22, A1-4);**
+  only `strL` and the `str#` family are reserved.
+- **Storage-type parity across eager and lazy reads (audit 2026-08-22, A1-6);
+  exact integer counts ≥ 2^52 are not bumped or flagged fractional (A1-7);
+  partition columns keep the manifest variable order (A1-8); nanosecond
+  timestamps before 1970 floor toward −infinity (A1-9); value labels not
+  attached to any variable are written like native `save` (A1-10).** Verify `v74`.
+- **`levelsof`/`tabulate`/stats verbs no longer misbehave on a variable named
+  like a helper alias (audit 2026-08-22, A3-5)** — `levelsof v` sorts numerically;
+  every fixed plugin-side SQL alias is a reserved `__parqit_*` name.
+  `levelsof`/`tabulate` render non-integers like native (`.3`, `1.00000000000e-07`)
+  (A3-6), and `string()` of a denormal no longer renders `infe-324` (A3-7).
+  Verify `v75`, unit `STRING-DENORMAL-1`.
+- **Torn read under a concurrent replace is refused (audit 2026-08-22, A4-3):**
+  every source file's identity is captured before planning and re-checked before
+  and after the fetch, and the fetched column types are compared with the plan;
+  a file that changed mid-read fails loudly and leaves the dataset in memory
+  untouched. Verify `v73`.
+- **I/O edges (audit 2026-08-22):** valid destination names up to `NAME_MAX` are
+  accepted (short digest-keyed lock/staging siblings, A4-4); a save into the open
+  view's own directory source is refused (A4-5); a symlink destination is written
+  through to its target and a read-only destination refuses `replace` with
+  `rc 608` (A4-6); a foreign Hive tree with `=` in a partition value fails with a
+  parqit message naming the remedy (A4-7); the publish-failure test hook now
+  covers the POSIX flat-file commit (A4-8). Verify `v76`.
+- **`encoding()` is validated on a lazy view save (audit 2026-08-22, A5-1):** an
+  unknown name is refused before anything is written; a valid name is accepted
+  (a view already holds UTF-8). Verify `v76`, `v32`.
+- **`relaxed` unions recover the exact column names too (audit 2026-08-22
+  round 2, A2-2/V2.2).** Under `union_by_name` the scan lists the first file's
+  (reader-deduped) columns and then every later file's new ones, matched
+  case-insensitively, so the one-file recovery never aligned with a differing
+  schema and `NUEMP_1` loaded silently without its metadata. parqit now predicts
+  the engine's union exactly — replicas of DuckDB's reader dedup, union and Hive
+  key rules, unit-tested against the fetched source — and restores
+  `nuemp NUEMP s extra` on eager, lazy and view-save reads; a later file's column
+  unioned into a case-variant (`NUEMP` into `nuemp`) prints a `note:`, and a
+  union that would split one name across two columns is refused. The lazy
+  collect now overlays the view's metadata by engine name (not position), so a
+  planner re-order can never stamp one column's name onto another. Verify `v70`.
+- **A foreign Hive tree whose partition key clashes only by case with a file
+  column is refused (V2.6):** the engine binds the key onto the ci-equal file
+  column (`G` in the files, `g=` in the path) and the column's values silently
+  became the key; parqit refuses such a tree on every path (eager, lazy,
+  describe, glob) and notes a key that exactly duplicates a file column (the
+  directory value is used). Verify `v70`.
+- **An empty Parquet column name loads as `v<position>` (A2-15(1))** on eager
+  and lazy reads, as documented, instead of DuckDB's `C<index>`. Verify `v70`.
+- **A `float` `%tc` comes back `float` when every value fits (V2.3).** A `%tc`
+  whose millisecond range exceeds long was stuck at `double`; the planner now
+  proves float-exactness by a scan (eager, lazy-direct, lazy-with-verb and
+  view-save reads), and a foreign manifest claiming float over values that do
+  not fit comes back `double`, never a rounded float. Unit `FLOAT-EXACT-1`,
+  verify `v74`.
+- **A lazy view save writes every value-label definition the view carries
+  (V2.4)**, attached or not, like the memory save and native `save`; an
+  unattached label vanished on that path. Verify `v74`.
+- **parqit messages (V2.7)** for a missing file or pattern on `parqit use`/
+  `describe` (`r(601)` "file not found: no file matches …", no raw IO Error or
+  SQL snippet), for `partition_by()` naming every variable (`r(198)`, before
+  anything is staged), and for a source replaced between plan and fetch (the
+  torn-read message instead of a raw Binder Error). Verify `v76`.
+- **A characteristic that exceeds Stata's 67,783-byte limit (a foreign one, or a
+  legacy note grown by transcoding) is truncated with a loud note on read
+  (audit 2026-08-22, A2-7)** instead of vanishing; `append gen()` clashing only by
+  case with a using column, and `contract` with an existing `_freq`, are refused
+  loudly (A2-6/A2-15). `parqit use ..., <unknown option>` names the option
+  instead of reporting "filename required" (A5-13). Verify `v75`, `v77`.
+- Lazy selection varlists (`parqit use <varlist> using`, `keep`/`drop`/`order`,
+  `partition_by()`) accept the exact Stata name of a case-aliased column, not only
+  its `_1` alias (audit 2026-08-22, R3/A2-12).
+- The view-save `parqit.schema.sortedby` marker records exposed (file) names, not
+  engine aliases (audit 2026-08-22, A2-9); a sanitised-and-aliased column keeps
+  its true source name in `char var[src_name]` (A2-10/R2).
+
 ## [0.1.27] — 2026-08-09
 
 macOS Intel distribution release. It restores the x86_64 Mac build and makes

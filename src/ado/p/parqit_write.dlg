@@ -1,7 +1,7 @@
 /*
   parqit — run the pipeline: collect into memory, or save to Parquet
 
-*!  VERSION 0.1.27  9aug2026
+*!  VERSION 0.1.28  23aug2026
 
   Launch with:  db parqit_write     (installed on the menu by: parqit menu)
 */
@@ -31,7 +31,9 @@ BEGIN
 	main.ed_level.disable
 	main.ed_part.disable
 	main.ed_chunk.disable
+	main.cb_enc.disable
 	main.ck_data.disable
+	main.ck_copy.disable
 END
 
 SCRIPT save_on
@@ -43,7 +45,9 @@ BEGIN
 	main.ed_level.enable
 	main.ed_part.enable
 	main.ed_chunk.enable
+	main.cb_enc.enable
 	main.ck_data.enable
+	main.ck_copy.enable
 END
 
 DIALOG main, label("parqit — collect or save (runs the pipeline)") tabtitle("Main")
@@ -74,6 +78,10 @@ BEGIN
 	option(data)							///
 	label("Export the in-memory dataset")
 
+  CHECKBOX ck_copy		_lft	275	_ibwd	.,		///
+	option(copysource)						///
+	label("With Export: copy the unchanged file loaded by parqit use (assert nothing changed)")
+
   TEXT tx_comp			_lft	165	130	.,		///
 	label("Compression")
   COMBOBOX cb_comp		_lft	185	120	.,		///
@@ -94,6 +102,12 @@ BEGIN
 	label("Rows per row group (optional)")
   EDIT ed_chunk			_lft	245	120	.,		///
 	numonly option(chunk) label("rows per row group")
+
+  TEXT tx_enc			260	225	300	.,		///
+	label("Legacy text encoding (for non-UTF-8 strings/labels)")
+  COMBOBOX cb_enc		260	245	150	.,		///
+	dropdownlist contents(enc_list) default("windows-1252")	///
+	option(encoding) label("encoding")
 END
 
 LIST comp_list
@@ -102,8 +116,17 @@ BEGIN
 	zstd
 	gzip
 	lz4
+	lz4_raw
 	brotli
 	uncompressed
+END
+
+LIST enc_list
+BEGIN
+	windows-1252
+	latin1
+	latin9
+	macroman
 END
 
 PROGRAM command
@@ -124,7 +147,9 @@ BEGIN
 			optionarg main.ed_level
 			optionarg main.ed_part
 			optionarg main.ed_chunk
+			optionarg /hidedefault main.cb_enc
 			option main.ck_data
+			option main.ck_copy
 		endoptions
 	}
 END

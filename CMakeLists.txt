@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.27 LANGUAGES C CXX)
+project(parqit VERSION 0.1.28 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -76,6 +76,8 @@ set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 # ---------------------------------------------------------------------------
 set(PARQIT_ENGINE_SOURCES
     src/engine/hexcodec.cpp
+    src/engine/legacy_encoding.cpp
+    src/engine/parquet_footer.cpp
     src/engine/session.cpp
     src/engine/typemap.cpp
     src/engine/sanitize.cpp
@@ -237,6 +239,8 @@ if(PARQIT_BUILD_TESTS)
     add_executable(parqit_tests
         tests/unit/test_main.cpp
         tests/unit/test_hexcodec.cpp
+        tests/unit/test_legacy_encoding.cpp
+        tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
         tests/unit/test_typemap.cpp
         tests/unit/test_sanitize.cpp

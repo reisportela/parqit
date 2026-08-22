@@ -17,6 +17,7 @@
  */
 #pragma once
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,14 @@ struct ColumnPlan {
     bool needs_strlen = false;     /* VARCHAR family: max octet_length */
     bool needs_big53 = false;      /* double-from-wide-int: check > 2^53 */
     bool needs_float_range = false; /* float32: promote to double > float max */
+    /* FLOAT-EXACT-1 (audit 2026-08-22, V2.3): the manifest records `float`
+     * but the engine column is not FLOAT (a %tc TIMESTAMP, the lazy integer
+     * millisecond count, an INTEGER period count, a cast Hive key): restore
+     * float storage only when every observed value is exactly representable
+     * as a float32 — proved by a scan (stats.float_exact), never assumed. */
+    bool needs_float_exact = false;
+    bool float_exact_checked = false; /* the scan ran (with_stats planning) */
+    bool float_exact = false;         /* … and every non-null value fits float */
 };
 
 /* Decide the plan for one column given its DuckDB logical type (no data
@@ -106,6 +115,8 @@ struct ColumnStats {
     double min = 0.0, max = 0.0;
     long long max_strlen = 0;
     bool any_beyond_2p53 = false;
+    bool float_exact_checked = false; /* FLOAT-EXACT-1 scan ran */
+    bool float_exact = false;         /* every non-null value is float32-exact */
 };
 void refine_plan(ColumnPlan &p, const ColumnStats &s);
 
@@ -142,5 +153,37 @@ inline long long floordiv(long long a, long long b) {
     long long q = a / b, r = a % b;
     return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
 }
+
+/* ---- temporal write conversions shared by every writer ------------------ */
+
+/* Native Stata's round() resolves exact half ties toward +infinity:
+ * floor(x + 0.5). TEMPORAL-ROUND-1 (audit 2026-08-22, A1-7): an integer-valued
+ * x passes through UNCHANGED — for an odd integer in [2^52, 2^53) x + 0.5 is
+ * not representable and rounds to even, so floor(x + 0.5) bumped exact day/ms/
+ * period counts by +1 and flagged them "fractional". Below 2^52 x + 0.5 is
+ * exact for every non-integer x. Both physical writers and the lazy
+ * compile_for_save (see stata_round_temporal_sql) use this one rule. */
+inline double stata_round_temporal(double d) {
+    return (d == std::trunc(d)) ? d : std::floor(d + 0.5);
+}
+/* The same rule as SQL over an expression `ref` (evaluated twice: pass a
+ * column reference or a cheap expression). */
+std::string stata_round_temporal_sql(const std::string &ref);
+
+/* %tc on disk: a Stata ms count since 1960 (already rounded to a whole ms,
+ * i.e. integer-valued) -> epoch microseconds since 1970, EXACT (TC-US-1, audit
+ * 2026-08-22 A1-1/A1-11). The former `ms * 1000.0` double product is not
+ * representable for |us| >= 2^56 (year ~4253) and llround() landed up to 8 us
+ * off, so instants beyond that read back 1 ms early ~30% of the time. Integer
+ * arithmetic throughout: the integer-valued double converts to int64 exactly,
+ * the epoch shift is subtracted in int64, and |ms| is bounded by
+ * INT64_MAX/1000 so the product cannot overflow (DT-001 ceiling, unchanged
+ * domain: the old check `|ms*1000.0| < 2^63` admitted exactly the same ms
+ * values). Returns false when the instant does not fit the on-disk int64. */
+bool stata_tc_ms_to_epoch_us(double stata_ms, long long *epoch_us);
+
+/* A TIMESTAMP_NS column floored (toward -infinity) to microseconds as a
+ * TIMESTAMP expression over the quoted reference `ref` (TS-NS-FLOOR-1). */
+std::string timestamp_ns_floor_us_sql(const std::string &ref);
 
 } // namespace parqit

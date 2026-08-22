@@ -157,7 +157,7 @@ program define _parqit_use, rclass
     _parqit_ensure_plugin
 
     if ("`clear'" == "") {
-        * open (or replace) the named lazy view — nothing is read
+        * open (or replace) the named lazy view — schema probed, no rows loaded
         if ("`name'" == "") local name "default"
         tempfile req
         local _sq_file `"`using'"'
@@ -175,7 +175,7 @@ program define _parqit_use, rclass
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
             as res `"`using'"' as txt ": " as res "`parqit_view_k'" ///
-            as txt " columns; nothing read — use {bf:parqit collect} or {bf:parqit save})"
+            as txt " columns; schema probed, no rows loaded — use {bf:parqit collect} or {bf:parqit save})"
         return scalar k = `parqit_view_k'
         return local view "`vname'"
         if (`"`_sq_owned_file'"' != "") return local bridge `"`_sq_owned_file'"'

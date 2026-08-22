@@ -37,11 +37,25 @@ parqit keep in 2
 parqit collect, clear
 assert _N == 1 & x[1] == 22
 
-* invalid forms are loud at the verb (form) or at materialisation (EOF)
+* KEEPIN-FL-1 (audit 2026-08-22, A3-9): negative bounds and f/l letters count
+* from the ends like native `keep in`; inverted and zero ranges stay loud
 clear
 parqit use using `"`f'"'
-capture parqit keep in -2/-1
-assert _rc != 0
+parqit sort x
+parqit keep in -2/-1
+parqit collect, clear
+assert _N == 2 & x[1] == 44 & x[2] == 55
+clear
+parqit use using `"`f'"'
+parqit sort x
+parqit keep in f/l
+parqit count
+assert r(N) == 5
+parqit keep in l
+parqit count
+assert r(N) == 1
+clear
+parqit use using `"`f'"'
 capture parqit keep in 4/2
 assert _rc != 0
 capture parqit keep in 0/3

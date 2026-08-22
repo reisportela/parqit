@@ -185,7 +185,13 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_format = "%tc";
         break;
     case DUCKDB_TYPE_TIMESTAMP_NS:
-        p.cast_sql = "CAST(" + ref + " AS TIMESTAMP)";
+        /* TS-NS-FLOOR-1 (audit 2026-08-22, A1-9): CAST(TIMESTAMP_NS AS
+         * TIMESTAMP) truncates toward ZERO, so a pre-1970 instant within 1 us
+         * below a millisecond boundary landed 1 ms LATER than the documented
+         * floor. Floor the nanosecond count to microseconds in integer
+         * arithmetic (positive-modulus form: DuckDB's // truncates) and rebuild
+         * the instant; the ms floor then happens in the fill/ts_ms_sql. */
+        p.cast_sql = timestamp_ns_floor_us_sql(ref);
         p.transfer = Transfer::TimestampUs;
         p.stata_type = StType::Double;
         p.stata_format = "%tc";
@@ -314,6 +320,11 @@ void refine_plan(ColumnPlan &p, const ColumnStats &s) {
                  std::string("float32 values beyond Stata's float range; "
                              "stored as double");
     }
+    /* FLOAT-EXACT-1: carry the scan's verdict to apply_meta_type */
+    if (p.needs_float_exact && s.float_exact_checked) {
+        p.float_exact_checked = true;
+        p.float_exact = s.float_exact;
+    }
     if (p.needs_strlen) {
         long long len = s.max_strlen;
         if (len <= 0) len = 1; /* all-null/empty strings: str1 */
@@ -362,7 +373,19 @@ void apply_meta_type(ColumnPlan &p) {
      * the wider of (saved type, observed range type) */
     if (mt == StType::Float &&
         (p.stata_type == StType::Float || int_rank(p.stata_type) > 0)) {
-        if (p.stata_type != StType::Double) p.stata_type = StType::Float;
+        if (p.stata_type == StType::Float) return;
+        /* FLOAT-EXACT-1 (audit 2026-08-22, V2.3): a manifest float held in a
+         * non-FLOAT engine column (a %tc TIMESTAMP, an integer ms/period
+         * count, a cast Hive key) comes back float when the scan proved every
+         * value float32-exact — a %tc whose ms range exceeds long was stuck at
+         * double although its values fit — and double when a value does not
+         * fit (a foreign edit), never a silently rounded float. Without a scan
+         * (describe) the saved type is the honest display unless the range
+         * already forced double. */
+        if (p.float_exact_checked)
+            p.stata_type = p.float_exact ? StType::Float : StType::Double;
+        else if (p.stata_type != StType::Double)
+            p.stata_type = StType::Float;
         return;
     }
     int mr = int_rank(mt), pr = int_rank(p.stata_type);
@@ -394,6 +417,30 @@ std::string duck_type_for(StType t, FmtClass fmt) {
     case StType::StrL: return "VARCHAR";
     }
     return "DOUBLE";
+}
+
+std::string stata_round_temporal_sql(const std::string &ref) {
+    /* TEMPORAL-ROUND-1: integer-valued passes through; else floor(x + 0.5) */
+    return "(CASE WHEN (" + ref + ") = trunc(" + ref + ") THEN (" + ref +
+           ") ELSE floor((" + ref + ") + 0.5) END)";
+}
+
+bool stata_tc_ms_to_epoch_us(double stata_ms, long long *epoch_us) {
+    /* the caller passes a whole-ms count; anything that is not a finite
+     * integer-valued double inside int64 cannot be an instant on disk */
+    if (!std::isfinite(stata_ms) || stata_ms != std::trunc(stata_ms)) return false;
+    if (!(stata_ms > -9.2e18 && stata_ms < 9.2e18)) return false;
+    const long long r = static_cast<long long>(stata_ms); /* exact: integer-valued */
+    const long long ms = r - kEpochShiftMs;               /* exact int64 */
+    constexpr long long kMaxMs = 9223372036854775LL;      /* INT64_MAX / 1000 */
+    if (ms > kMaxMs || ms < -kMaxMs) return false;
+    *epoch_us = ms * 1000LL;
+    return true;
+}
+
+std::string timestamp_ns_floor_us_sql(const std::string &ref) {
+    const std::string ns = "epoch_ns(" + ref + ")";
+    return "make_timestamp(((" + ns + ") - (((" + ns + ") % 1000 + 1000) % 1000)) // 1000)";
 }
 
 } // namespace parqit

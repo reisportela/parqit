@@ -415,3 +415,162 @@ TEST_CASE("audit fixes: Stata-faithful semantics (verified vs Stata 19.5)") {
         translate_expression("\"a__PARQIT_ROW__b\"", test_schema(), false);
     CHECK_FALSE(bad.ok);
 }
+
+TEST_CASE("ROWCTX-1: _n/_N mark the result so non-compiling callers can refuse") {
+    /* The translator emits __PARQIT_ROW__/__PARQIT_NROWS__ placeholders that
+     * only the view compiler resolves. Callers that apply a filter to an
+     * already-compiled SELECT (count if, the list/head preview) must be able
+     * to detect that and refuse with their own message — before the token
+     * reaches DuckDB and comes back as a Binder Error naming an internal
+     * name (charter §5/§6.12). */
+    ExprResult f_row = translate_filter("_n <= 5", test_schema(), false);
+    REQUIRE(f_row.ok);
+    CHECK(f_row.uses_rowctx);
+
+    ExprResult f_bign = translate_filter("_N > 1", test_schema(), false);
+    REQUIRE(f_bign.ok);
+    CHECK(f_bign.uses_rowctx);
+
+    /* nested inside a function call and behind an operator, not just bare */
+    ExprResult f_deep = translate_filter("mod(_n, 2) == 0 & x > 1", test_schema(), false);
+    REQUIRE(f_deep.ok);
+    CHECK(f_deep.uses_rowctx);
+
+    /* an ordinary filter must NOT be flagged: the refusal has to be precise */
+    ExprResult f_plain = translate_filter("x <= 5", test_schema(), false);
+    REQUIRE(f_plain.ok);
+    CHECK_FALSE(f_plain.uses_rowctx);
+
+    /* the flag survives statamissing mode and the assignment entry point too */
+    ExprResult f_sm = translate_filter("_n < 3", test_schema(), true);
+    REQUIRE(f_sm.ok);
+    CHECK(f_sm.uses_rowctx);
+
+    ExprResult e_row = translate_expression("_n", test_schema(), false);
+    REQUIRE(e_row.ok);
+    CHECK(e_row.uses_rowctx);
+
+    ExprResult e_plain = translate_expression("x + 1", test_schema(), false);
+    REQUIRE(e_plain.ok);
+    CHECK_FALSE(e_plain.uses_rowctx);
+
+    /* a string literal that merely spells the marker is still rejected (XLAT-8),
+     * so the flag can never be spoofed from user text */
+    ExprResult spoof =
+        translate_filter("s == \"__PARQIT_ROW__\"", test_schema(), false);
+    CHECK_FALSE(spoof.ok);
+}
+
+/* ---- audit 2026-08-22 ---------------------------------------------------- */
+
+/* real(<text>) evaluated against DuckDB; "" means NULL (Stata missing) */
+static std::string real_of(const std::string &txt) {
+    ExprResult r = translate_expression("real(s)", test_schema(), false);
+    REQUIRE_MESSAGE(r.ok, r.error);
+    Session &s = Session::instance();
+    std::string v, err;
+    bool ok = s.query_scalar("SELECT CAST((" + r.sql + ") AS VARCHAR) FROM (SELECT " +
+                                 quote_literal(txt) + " AS s)",
+                             &v, &err);
+    REQUIRE_MESSAGE(ok, (err + " [sql: " + r.sql + "]"));
+    return v;
+}
+static double real_num(const std::string &txt) {
+    const std::string v = real_of(txt);
+    REQUIRE_MESSAGE(!v.empty(), ("real(" + txt + ") unexpectedly missing"));
+    return std::strtod(v.c_str(), nullptr);
+}
+
+TEST_CASE("REAL-GRAMMAR-1: real() follows Stata's literal grammar (A3-2)") {
+    /* verified against StataNow 19.5 (local/audit_2026-08-22/impl/probe) */
+    CHECK(real_of("2019_01") == "");     /* DuckDB digit groups: missing natively */
+    CHECK(real_of("12_345_678") == "");
+    CHECK(real_of("1_000.5") == "");
+    CHECK(real_of("1e1_0") == "");
+    CHECK(real_num("1d3") == 1000.0);    /* Fortran-style exponent: 1000 natively */
+    CHECK(real_num("1D3") == 1000.0);
+    CHECK(real_num("1d-3") == 0.001);
+    CHECK(real_num("1.5d2") == 150.0);
+    CHECK(real_num(" 2 ") == 2.0);
+    CHECK(real_num("+3") == 3.0);
+    CHECK(real_num(".5") == 0.5);
+    CHECK(real_num("5.") == 5.0);
+    CHECK(real_num("12.e3") == 12000.0);
+    CHECK(real_num("1.e3") == 1000.0);
+    CHECK(real_num("-.5") == -0.5);
+    CHECK(real_num("1e+3") == 1000.0);
+    CHECK(real_num("1.5e-3") == 0.0015);
+    CHECK(real_num("0.0") == 0.0);
+    CHECK(real_num("1E5") == 100000.0);
+    CHECK(real_of("1e") == "");
+    CHECK(real_of("0x1A") == "");
+    CHECK(real_of("1,5") == "");
+    CHECK(real_of("inf") == "");
+    CHECK(real_of("nan") == "");
+    CHECK(real_of("1e400") == "");
+    CHECK(real_of("1,000") == "");
+    CHECK(real_of("$5") == "");
+    CHECK(real_of("--1") == "");
+    CHECK(real_of("1.5.5") == "");
+    CHECK(real_of(".e3") == "");
+    CHECK(real_of("e3") == "");
+    CHECK(real_of("+") == "");
+    CHECK(real_of(".") == "");
+    CHECK(real_of("") == "");
+    CHECK(real_of("  ") == "");
+    CHECK(real_of("1 2") == "");
+    CHECK(real_of("\xef\xbc\x91\xef\xbc\x92") == ""); /* full-width digits */
+}
+
+/* a date function over a single day count d; "" means NULL */
+static std::string date_of(const std::string &expr, const std::string &dval) {
+    ExprResult r = translate_expression(expr, test_schema(), false);
+    REQUIRE_MESSAGE(r.ok, r.error);
+    Session &s = Session::instance();
+    std::string v, err;
+    bool ok = s.query_scalar("SELECT CAST((" + r.sql + ") AS VARCHAR) FROM (SELECT " +
+                                 dval + "::DOUBLE AS d)",
+                             &v, &err);
+    REQUIRE_MESSAGE(ok, (err + " [sql: " + r.sql + "]"));
+    return v;
+}
+
+TEST_CASE("DATE-DOMAIN-1: date functions are missing outside 01jan0100..31dec9999 and never abort (A3-3/A3-4)") {
+    /* natively: year(2936549)=9999, year(2936550)=., year(-679350)=100,
+     * year(-679351)=., year(2147483647)=., year(3000000)=. */
+    CHECK(date_of("year(d)", "2936549") == "9999");
+    CHECK(date_of("year(d)", "2936550") == "");
+    CHECK(date_of("year(d)", "-679350") == "100");
+    CHECK(date_of("year(d)", "-679351") == "");
+    CHECK(date_of("year(d)", "2147483647") == ""); /* used to abort the query */
+    CHECK(date_of("year(d)", "-2147483648") == "");
+    CHECK(date_of("year(d)", "3000000") == "");
+    CHECK(date_of("year(d)", "1e10") == "");
+    CHECK(date_of("month(d)", "2936550") == "");
+    CHECK(date_of("day(d)", "-679351") == "");
+    CHECK(date_of("dow(d)", "2936549") == "5");
+    CHECK(date_of("doy(d)", "-679350") == "1");
+    CHECK(date_of("mofd(d)", "2936549") == "96479");
+    CHECK(date_of("mofd(d)", "2936550") == "");
+    CHECK(date_of("yofd(d)", "2936550") == "");
+    CHECK(date_of("quarter(d)", "2936550") == "");
+    /* mdy: year 100..9999 only; impossible dates missing (natively) */
+    CHECK(date_of("mdy(1,1,99)", "0") == "");
+    CHECK(date_of("mdy(1,1,100)", "0") == "-679350");
+    CHECK(date_of("mdy(12,31,9999)", "0") == "2936549");
+    CHECK(date_of("mdy(1,1,10000)", "0") == "");
+    CHECK(date_of("mdy(2,30,2020)", "0") == "");
+    CHECK(date_of("mdy(0,1,2020)", "0") == "");
+    CHECK(date_of("mdy(1,0,2020)", "0") == "");
+    CHECK(date_of("mdy(6,15,-1)", "0") == "");
+    /* dofm: month counts jan0100..dec9999 = -22320..96479 */
+    CHECK(date_of("dofm(d)", "-22320") == "-679350");
+    CHECK(date_of("dofm(d)", "-22321") == "");
+    CHECK(date_of("dofm(d)", "96479") == "2936519");
+    CHECK(date_of("dofm(d)", "96480") == "");
+    CHECK(date_of("dofm(d)", "123456.79") == "");
+    CHECK(date_of("dofm(d)", "-1234567") == "");
+    /* in-domain values unchanged */
+    CHECK(date_of("year(d)", "21915") == "2020");
+    CHECK(date_of("dofm(d)", "720") == "21915");
+}

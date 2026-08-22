@@ -1,7 +1,7 @@
 /*
   parqit — combine lazy views or join a disk source into Stata memory
 
-*!  VERSION 0.1.27  9aug2026
+*!  VERSION 0.1.28  23aug2026
 
   Launch with:  db parqit_combine     (installed on the menu by: parqit menu)
   The using side may be Parquet, a glob, a Hive directory, CSV, dta or Excel
@@ -43,6 +43,7 @@ BEGIN
 	main.ed_gen.disable
 	main.ed_native.disable
 	main.ck_force.disable
+	main.cb_enc.disable
 END
 
 SCRIPT merge_on
@@ -57,6 +58,7 @@ BEGIN
 	main.ck_musing.enable
 	main.ck_nogen.enable
 	main.ed_mgen.enable
+	main.cb_enc.enable
 END
 
 SCRIPT append_on
@@ -65,6 +67,7 @@ BEGIN
 	main.fi_using.enable
 	main.ed_more.enable
 	main.ed_gen.enable
+	main.cb_enc.enable
 END
 
 SCRIPT joinby_on
@@ -72,6 +75,7 @@ BEGIN
 	script all_off
 	main.fi_using.enable
 	main.ed_keys.enable
+	main.cb_enc.enable
 END
 
 SCRIPT mergein_on
@@ -166,8 +170,22 @@ BEGIN
   EDIT ed_native		_lft	420	_iwd	.,		///
 	label("additional native merge options")
 
-  TEXT tx_note			_lft	460	_iwd	.,		///
+  TEXT tx_enc			_lft	460	320	.,		///
+	label("Legacy code page for a non-UTF-8 .dta/Excel using source (lazy merge/append/joinby)")
+  COMBOBOX cb_enc		+325	@	150	.,		///
+	dropdownlist contents(enc_list) default("windows-1252")	///
+	option(encoding) label("encoding")
+
+  TEXT tx_note			_lft	490	_iwd	.,		///
 	label("Lazy modes build the open-view pipeline; mergein/appendin modify Stata memory now.")
+END
+
+LIST enc_list
+BEGIN
+	windows-1252
+	latin1
+	latin9
+	macroman
 END
 
 LIST kind_list
@@ -219,6 +237,7 @@ BEGIN
 			if !main.ck_nogen {
 				optionarg main.ed_mgen
 			}
+			optionarg /hidedefault main.cb_enc
 		endoptions
 	}
 	if main.rb_append {
@@ -230,6 +249,7 @@ BEGIN
 		}
 		beginoptions
 			optionarg main.ed_gen
+			optionarg /hidedefault main.cb_enc
 		endoptions
 	}
 	if main.rb_joinby {
@@ -238,6 +258,9 @@ BEGIN
 		put main.ed_keys " using "
 		require main.fi_using
 		put `"""' main.fi_using `"""'
+		beginoptions
+			optionarg /hidedefault main.cb_enc
+		endoptions
 	}
 	if main.rb_mergein {
 		put "parqit mergein " main.cb_inkind " "

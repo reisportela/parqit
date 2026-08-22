@@ -53,7 +53,13 @@ static int ndigits_int(int v) {
 
 static std::string format_sci(double a) {
     int exp = static_cast<int>(std::floor(std::log10(a)));
-    double mant = a / std::pow(10.0, exp);
+    /* STRING-DENORMAL-1 (audit 2026-08-22, A3-7): for a subnormal `a`
+     * (5e-324 .. 2.2e-308) pow(10, exp) underflows to 0 (exp < -307) or to a
+     * subnormal with few significant bits, so the mantissa came out as inf
+     * ("infe-324") or imprecise. Scale in two steps through 1e300 so every
+     * intermediate is a normal double: a * 1e300 / 10^(exp + 300). */
+    double mant = (exp < -290) ? (a * 1e300) / std::pow(10.0, exp + 300)
+                               : a / std::pow(10.0, exp);
 
     for (;;) {
         int exp_width = std::max(2, ndigits_int(std::abs(exp)));

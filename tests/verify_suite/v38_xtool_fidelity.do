@@ -181,13 +181,17 @@ if (_rc) di as err "FAIL D dataset label"
 local fails=`fails'+(_rc!=0)
 
 * ===================== E. losses are LOUD, never silent ======================
-* invalid UTF-8 on write -> refused
+* ENC-2: invalid UTF-8 on write -> transcoded LOUDLY (never refused, never verbatim)
 clear
 set obs 1
 gen str5 sb = char(200)+char(255)+"x"
 capture noisily parqit save `"`t'_bad.parquet"', replace data
-capture assert _rc!=0
-if (_rc) di as err "FAIL E invalid UTF-8 not refused"
+capture assert _rc==0 & r(transcoded_cells)==1 & "`r(transcoded_vars)'"=="sb"
+if (_rc) di as err "FAIL E invalid UTF-8 not transcoded/reported"
+local fails=`fails'+(_rc!=0)
+capture parqit use using `"`t'_bad.parquet"', clear
+capture assert sb[1]=="Èÿx"
+if (_rc) di as err "FAIL E transcoded value wrong"
 local fails=`fails'+(_rc!=0)
 * DT-001: a %tc value at the int64-microsecond ceiling must error loudly, never
 * silently write INT64_MIN (the guard literal used to round up one ulp)

@@ -87,3 +87,14 @@ TEST_CASE("varlist wildcards count Unicode code points") {
     CHECK(glob_match("caf??", "caf\xc3\xa9z"));
     CHECK_FALSE(glob_match("caf?", "caf\xc3\xa9z"));
 }
+
+TEST_CASE("NAME-STR-1: plain `str` is a legal Stata name; strL and str# stay reserved (A1-4)") {
+    CHECK(sanitize_stata_name("str", 1) == "str");
+    CHECK(sanitize_stata_name("strL", 1) == "_strL");
+    CHECK(sanitize_stata_name("str1", 1) == "_str1");
+    CHECK(sanitize_stata_name("str2045", 1) == "_str2045");
+    CHECK(sanitize_stata_name("Str", 1) == "Str");
+    CHECK(sanitize_stata_name("strata", 1) == "strata");
+    CHECK_FALSE(is_reserved_stata_name("str"));
+    CHECK(is_reserved_stata_name("strL"));
+}

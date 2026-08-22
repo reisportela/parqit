@@ -169,3 +169,156 @@ TEST_CASE("epoch arithmetic: floor division is negative-safe") {
     CHECK(floordiv(999, 1000) == 0);
     CHECK(kEpochShiftMs == 315619200000LL);
 }
+
+#include "engine/session.hpp"
+
+TEST_CASE("TC-US-1: %tc ms -> epoch us is exact beyond 2^56 us (A1-1/A1-11)") {
+    auto check_exact = [](long long stata_ms) {
+        long long us = 0;
+        REQUIRE(stata_tc_ms_to_epoch_us(static_cast<double>(stata_ms), &us));
+        CHECK(us == (stata_ms - kEpochShiftMs) * 1000LL);
+        CHECK(us % 1000 == 0);
+        CHECK(floordiv(us, 1000) + kEpochShiftMs == stata_ms);
+    };
+    /* 01jan5000 12:00:00.001 (day 1110338) and 31dec9999 23:59:59.999 (day 2936549) */
+    check_exact(1110338LL * 86400000LL + 43200001LL);
+    check_exact(2936549LL * 86400000LL + 86399999LL);
+    /* a sweep of odd ms instants across 4253..9999 (where ms*1000.0 is inexact) */
+    for (long long day = 837502; day <= 2936549; day += 97651)
+        for (long long ms = 1; ms < 86400000; ms += 7919333)
+            check_exact(day * 86400000LL + ms);
+    /* the DT-001 ceiling: INT64_MAX/1000 ms past the epoch is the last instant */
+    long long us = 0;
+    /* (the Stata-side count is past 2^53, so only EVEN ms counts are
+     * representable doubles; 9223372036854774 + shift is one) */
+    CHECK(stata_tc_ms_to_epoch_us(9223372036854774.0 + kEpochShiftMs, &us));
+    CHECK(us == 9223372036854774000LL);
+    CHECK_FALSE(stata_tc_ms_to_epoch_us(9223372036854776.0 + kEpochShiftMs, &us));
+    CHECK_FALSE(stata_tc_ms_to_epoch_us(-9223372036854776.0 + kEpochShiftMs, &us));
+    CHECK_FALSE(stata_tc_ms_to_epoch_us(1.5, &us));          /* not a whole ms */
+    CHECK_FALSE(stata_tc_ms_to_epoch_us(1.0 / 0.0, &us));    /* not finite */
+    CHECK(stata_tc_ms_to_epoch_us(0.0, &us));
+    CHECK(us == -kEpochShiftMs * 1000LL);
+}
+
+TEST_CASE("TEMPORAL-ROUND-1: integer-valued counts pass through, ties round up (A1-7)") {
+    CHECK(stata_round_temporal(2.5) == 3.0);
+    CHECK(stata_round_temporal(-2.5) == -2.0);
+    CHECK(stata_round_temporal(-0.4) == 0.0);
+    CHECK(stata_round_temporal(2.4999) == 2.0);
+    CHECK(stata_round_temporal(100.5) == 101.0);
+    const double odd52 = 4503599627370497.0; /* 2^52 + 1: x + 0.5 is not representable */
+    CHECK(stata_round_temporal(odd52) == odd52);
+    CHECK(stata_round_temporal(9007199254740991.0) == 9007199254740991.0);
+    CHECK(stata_round_temporal(-4503599627370497.0) == -4503599627370497.0);
+    /* the SQL twin agrees with the C++ rule */
+    parqit::Session &s = parqit::Session::instance();
+    std::string v, err;
+    REQUIRE(s.ensure_open());
+    auto sql_round = [&](const char *lit) {
+        std::string out;
+        REQUIRE_MESSAGE(s.query_scalar("SELECT CAST(" + stata_round_temporal_sql(lit) +
+                                           " AS VARCHAR)",
+                                       &out, &err),
+                        err);
+        return out;
+    };
+    CHECK(sql_round("2.5::DOUBLE") == "3.0");
+    CHECK(sql_round("-2.5::DOUBLE") == "-2.0");
+    CHECK(sql_round("4503599627370497::DOUBLE") == "4503599627370497.0");
+    CHECK(sql_round("NULL::DOUBLE") == "");
+}
+
+TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infinity (A1-9)") {
+    parqit::Session &s = parqit::Session::instance();
+    std::string v, err;
+    REQUIRE(s.ensure_open());
+    REQUIRE_MESSAGE(s.query_scalar("SELECT CAST(epoch_us(" +
+                                       timestamp_ns_floor_us_sql("TIMESTAMP_NS '1969-12-31 23:59:59.999999999'") +
+                                       ") AS VARCHAR)",
+                                   &v, &err),
+                    err);
+    CHECK(v == "-1"); /* CAST(... AS TIMESTAMP) gave 0 (truncation toward zero) */
+    REQUIRE_MESSAGE(s.query_scalar("SELECT CAST(epoch_us(" +
+                                       timestamp_ns_floor_us_sql("TIMESTAMP_NS '1970-01-01 00:00:00.000001999'") +
+                                       ") AS VARCHAR)",
+                                   &v, &err),
+                    err);
+    CHECK(v == "1");
+    ColumnPlan p = plan_for(DUCKDB_TYPE_TIMESTAMP_NS, "t");
+    CHECK(p.cast_sql.find("epoch_ns") != std::string::npos);
+    CHECK(p.transfer == Transfer::TimestampUs);
+}
+
+TEST_CASE("FLOAT-EXACT-1: a manifest float held in a non-FLOAT column is float only when proven exact (V2.3)") {
+    /* a %tc written from a float variable is a TIMESTAMP on disk; its ms range
+     * (≈1.8e12) exceeds long, so range sizing says double — the recorded float
+     * is restored only when the scan proved every value float32-exact */
+    ColumnPlan p;
+    p.meta_type = "float";
+    p.transfer = Transfer::TimestampUs;
+    p.stata_format = "%tc";
+    p.needs_minmax = true;
+    p.needs_float_exact = true;
+    ColumnStats st;
+    st.has_minmax = true;
+    st.min = 1.8e12;
+    st.max = 1.8e12;
+    /* no scan verdict (describe-style planning): the range forced double */
+    {
+        ColumnPlan q = p;
+        refine_plan(q, st);
+        CHECK(q.stata_type == StType::Double);
+        apply_meta_type(q);
+        CHECK(q.stata_type == StType::Double);
+    }
+    /* scanned and exact -> float */
+    {
+        ColumnStats s2 = st;
+        s2.float_exact_checked = true;
+        s2.float_exact = true;
+        ColumnPlan q = p;
+        refine_plan(q, s2);
+        CHECK(q.float_exact_checked);
+        apply_meta_type(q);
+        CHECK(q.stata_type == StType::Float);
+    }
+    /* scanned and NOT exact (a foreign edit) -> double, never a rounded float */
+    {
+        ColumnStats s2 = st;
+        s2.float_exact_checked = true;
+        s2.float_exact = false;
+        ColumnPlan q = p;
+        refine_plan(q, s2);
+        apply_meta_type(q);
+        CHECK(q.stata_type == StType::Double);
+    }
+    /* a small range (int ladder): unchecked keeps the old rule (float); checked
+     * follows the verdict */
+    {
+        ColumnStats s3;
+        s3.has_minmax = true;
+        s3.min = 123;
+        s3.max = 123;
+        ColumnPlan q = p;
+        refine_plan(q, s3);
+        CHECK(q.stata_type == StType::Int); /* byte -> int under a date format */
+        apply_meta_type(q);
+        CHECK(q.stata_type == StType::Float);
+        s3.float_exact_checked = true;
+        s3.float_exact = false;
+        ColumnPlan r = p;
+        refine_plan(r, s3);
+        apply_meta_type(r);
+        CHECK(r.stata_type == StType::Double);
+    }
+    /* a genuine FLOAT column is untouched by the rule */
+    {
+        ColumnPlan f;
+        f.meta_type = "float";
+        f.transfer = Transfer::Float32;
+        f.stata_type = StType::Float;
+        apply_meta_type(f);
+        CHECK(f.stata_type == StType::Float);
+    }
+}

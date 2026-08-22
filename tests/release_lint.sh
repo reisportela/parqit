@@ -12,7 +12,10 @@
 #   * CHANGELOG has exactly one "## [Unreleased]" heading
 #   * the newest dated CHANGELOG section matches the project version
 #   * no CHANGELOG section repeats the same "### <Type>" heading
+#   * every public dispatcher command appears in the help syntax surface
 #   * every public command is reachable through a wide dialog on the User menu
+#   * the help's expression-function list and exprtrans.cpp agree both ways
+#   * every parqit## reference in the help (jump or inline link) has a marker
 #   * GUI and console selectors agree for both macOS architectures
 set -u
 
@@ -170,6 +173,101 @@ leak=$(git -C "$REPO" grep -lE '/home/[^/ ]+/|/Users/[^/ ]+/' -- \
         '*.sh' '*.yml' '*.yaml' '*.cmake' 'CMakeLists.txt' \
         ':!tests/release_lint.sh' 2>/dev/null || true)
 [ -z "$leak" ] || err "private/home-absolute path in tracked source file(s): $(echo $leak)"
+
+# --- lazy-contract wording --------------------------------------------------
+# Opening a view reads schema/metadata (and may sample/bridge a source), while
+# no RESULT rows enter Stata. These old absolutes repeatedly drifted back into
+# the README, ado mirror and dialog and contradict the executable contract.
+lazy_overclaim=$(grep -niE \
+    'nothing (is )?(read|materialised)|does not read the file|nothing executes until|nothing below materialises data|no observations (are )?loaded into Stata|before any observations enter Stata memory|Stata.?s? memory (is )?(never )?(un)?touched|without (ever )?touching (Stata.?s )?memory|never enters (Stata.?s )?memory|first contact with a 100-GB extract is not a 100-GB read|only the columns and rows your verbs need are' \
+    "$REPO/README.md" \
+    "$REPO/src/ado/p/parqit.ado" \
+    "$REPO/src/ado/p/parqit.sthlp" \
+    "$REPO"/src/ado/p/parqit_*.dlg \
+    "$REPO/benchmarks/profile_parqit.ado" 2>/dev/null || true)
+[ -z "$lazy_overclaim" ] || \
+    err "stale absolute lazy-I/O claim(s); say schema probed/no result rows loaded: $(echo "$lazy_overclaim")"
+
+# --- public command/help contract -------------------------------------------
+# Derive the list from the dispatcher's `local cmds` declaration so adding a
+# public subcommand without updating the help is a release-blocking failure.
+public_cmds=$(awk '
+    /^[[:space:]]*local cmds[[:space:]]/ {
+        sub(/^[[:space:]]*local cmds[[:space:]]+/, "")
+        active=1
+    }
+    active {
+        continued=($0 ~ /\/\/\/[[:space:]]*$/)
+        sub(/[[:space:]]*\/\/\/[[:space:]]*$/, "")
+        print
+        if (!continued) exit
+    }
+' "$REPO/src/ado/p/parqit.ado")
+
+for cmd in $public_cmds; do
+    [ "$cmd" = "_dlgvars" ] && continue
+    awk -v needle="{cmd:parqit $cmd" '
+        /\{marker syntax\}/       { inside=1 }
+        /\{marker description\}/  { inside=0 }
+        inside && index($0, needle) { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$REPO/src/ado/p/parqit.sthlp" || \
+        err "public subcommand '$cmd' is absent from the help syntax section"
+done
+
+# The help carries one delimited block listing the expression functions. Both
+# directions are release-blocking: an implemented function missing from the
+# block (undocumented surface) and a name in the block that the translator does
+# not implement (a promise parqit cannot keep).
+expr_fns=$(grep -oE 'fname == "[A-Za-z0-9_]+"' \
+               "$REPO/src/engine/exprtrans.cpp" \
+           | sed -E 's/.*"([A-Za-z0-9_]+)"/\1/' | sort -u)
+[ -n "$expr_fns" ] || err "could not derive expression functions from exprtrans.cpp"
+
+help_fns=$(awk '
+    /parqit-lint: expression-function-list begin/ { inside=1; next }
+    /parqit-lint: expression-function-list end/   { inside=0 }
+    inside {
+        line=$0
+        # keep only what is inside {cmd:...} groups: prose between the groups
+        # ("and the date literals") must not be read as function names
+        out=""
+        while (match(line, /\{cmd:[^}]*\}/)) {
+            out = out " " substr(line, RSTART + 5, RLENGTH - 6)
+            line = substr(line, RSTART + RLENGTH)
+        }
+        gsub(/[^[:alnum:]_]/, " ", out)
+        print out
+    }
+' "$REPO/src/ado/p/parqit.sthlp" | tr ' ' '\n' | grep -v '^$' | sort -u)
+[ -n "$help_fns" ] || \
+    err "could not read the delimited expression-function list from parqit.sthlp"
+
+for fn in $expr_fns; do
+    printf '%s\n' "$help_fns" | grep -qx "$fn" || \
+        err "expression function '$fn()' is absent from the help expression-function list"
+done
+for fn in $help_fns; do
+    printf '%s\n' "$expr_fns" | grep -qx "$fn" || \
+        err "help lists expression function '$fn()', which exprtrans.cpp does not implement"
+done
+
+# Every internal reference — viewerjumpto targets and inline {help parqit##x:…}
+# links alike — must resolve to a marker in the same file.
+jump_targets=$(grep -oE 'parqit##[A-Za-z0-9_]+' \
+                   "$REPO/src/ado/p/parqit.sthlp" \
+               | sed 's/^parqit##//' | sort -u)
+[ -n "$jump_targets" ] || err "no parqit## targets found in parqit.sthlp"
+for target in $jump_targets; do
+    grep -Fq "{marker $target}" "$REPO/src/ado/p/parqit.sthlp" || \
+        err "help jump target 'parqit##$target' has no marker"
+done
+
+# Inline SMCL directives cannot span physical lines: Stata otherwise prints
+# the opening token literally (for example "{bf:") instead of styling it.
+smcl_open=$(grep -nE '\{(bf|it|cmd|opt):[^}]*$' \
+                "$REPO/src/ado/p/parqit.sthlp" || true)
+[ -z "$smcl_open" ] || err "unterminated inline SMCL directive(s): $(echo "$smcl_open")"
 
 # --- menu/dialog command coverage and geometry ------------------------------
 # The menu is an entrypoint into the dialog family. Derive both sides from the

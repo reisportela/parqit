@@ -1,7 +1,7 @@
 /*
   parqit — choose, order, rename, sort and deduplicate variables (lazy)
 
-*!  VERSION 0.1.27  9aug2026
+*!  VERSION 0.1.28  23aug2026
 
   Launch with:  db parqit_vars     (installed on the menu by: parqit menu)
 */

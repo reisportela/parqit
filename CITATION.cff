@@ -7,8 +7,8 @@ authors:
     affiliation: "NIPE / Universidade do Minho and BPLIM / Banco de Portugal"
     email: "miguel.portela@eeg.uminho.pt"
     website: "https://reisportela.github.io"
-version: "0.1.27"
-date-released: 2026-08-09
+version: "0.1.28"
+date-released: 2026-08-23
 url: "https://github.com/reisportela/parqit"
 license: MIT
 # Built with the assistance of two AI coding agents used in tandem — Anthropic's

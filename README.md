@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.27 — the full surface below is implemented and covered by a
+> **Status:** v0.1.28 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -143,13 +143,13 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.27") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.28") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.27` to the tag you want; for the newest, use
+- For a different version, change `v0.1.28` to the tag you want; for the newest, use
   `.../releases/latest/download`.
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
@@ -321,8 +321,8 @@ validation queries. Only a *materialiser* executes the full result plan.
 
 | Command | Compiles to | Notes |
 |---|---|---|
-| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `relaxed` unions a mixed-schema glob by column name. |
-| `parqit open _data` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
+| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge. |
+| `parqit open _data [, name() encoding()]` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
 
 **Input formats.** Parquet and delimited text are scanned *out of core* (the
 file can exceed memory). Stata `.dta` and Excel `.xls`/`.xlsx` are not
@@ -356,10 +356,10 @@ matches one Unicode character; the same expansion is used by lazy projections,
 | `parqit rename (old) (new)` | column alias |
 | `parqit order <varlist>` | column order |
 | `parqit sort <varlist>` / `parqit gsort [-]<varlist>` | `ORDER BY` |
-| `parqit collapse (stat) v ... , by()` | `GROUP BY` + aggregates (mean/sum/sd/median/pXX/count/min/max/first/last) |
-| `parqit contract <varlist>` | grouped counts |
-| `parqit duplicates drop [varlist]` | `DISTINCT` / dedup |
-| `parqit keep in <range>` | validated `LIMIT/OFFSET` |
+| `parqit collapse (stat) v ... , by()` | `GROUP BY` + aggregates (mean/sum/sd/median/pXX/count/min/max/first/last/firstnm/lastnm) |
+| `parqit contract <varlist> [, freq()]` | grouped counts |
+| `parqit duplicates drop [varlist] [, force]` | `DISTINCT` / dedup |
+| `parqit keep in <range>` | validated `LIMIT/OFFSET` (`f`/`l` and negative bounds accepted) |
 | `parqit sample # [, count seed()]` | reservoir sample: percent by default, rows with `count`; reproducible with `seed()` |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
@@ -368,9 +368,9 @@ matches one Unicode character; the same expansion is used by lazy projections,
 
 | Command | Compiles to |
 |---|---|
-| `parqit merge 1:1\|m:1\|1:m <keys> using <file\|view:name> [, keep() keepusing() gen()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view**. Lazy `m:m` is refused; use `joinby` or native `mergein m:m`. |
-| `parqit append using <files\|view:name ...>` | `UNION BY NAME`, aligning columns by name with safe recasts; sources may be files or views |
-| `parqit joinby <keys> using <file\|view:name>` | many-to-many join |
+| `parqit merge 1:1\|m:1\|1:m <keys> using <file\|view:name> [, keep() keepusing() gen() nogenerate encoding()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view**. A non-key variable on both sides takes the using value on using-only rows, as native. Lazy `m:m` is refused; use `joinby` or native `mergein m:m`. |
+| `parqit append using <files\|view:name ...> [, generate() encoding()]` | `UNION BY NAME`, aligning columns by name with safe recasts; sources may be files or views |
+| `parqit joinby <keys> using <file\|view:name> [, encoding()]` | many-to-many join |
 
 **In-memory + disk, fast.** When your data is already in Stata's memory and you
 want to join a disk file (a small lookup), `parqit mergein`/`parqit appendin` keep
@@ -382,7 +382,7 @@ lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` p
 | Command | Effect |
 |---|---|
 | `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts>]` | Native `merge` of the in-memory data with a disk lookup (read via parqit) |
-| `parqit appendin using <file> [, keep()]` | Native `append` of a disk file onto the in-memory data |
+| `parqit appendin using <file> [, keep() force]` | Native `append` of a disk file onto the in-memory data |
 
 ### Materialisers and engine-side result commands
 
@@ -393,7 +393,7 @@ the view without replacing the current dataset.
 | Command | Effect |
 |---|---|
 | `parqit collect [, clear]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). |
-| `parqit save <dest> [, replace data partition_by() compression() compression_level() chunk()]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open. |
+| `parqit save <dest> [, replace data partition_by() compression() compression_level() chunk() encoding() copysource]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match. |
 | `parqit count` | Row count → `r(N)` (no rows materialised). |
 | `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`. |
@@ -422,9 +422,11 @@ reaching Stata:
 
 | Command | Effect |
 |---|---|
-| `parqit sql "<DuckDB SQL>" [, clear]` | Run raw DuckDB SQL; collect or save the result. |
+| `parqit sql "<DuckDB SQL>" [, clear name()]` | Run raw DuckDB SQL; lazy by default (opens/replaces a view, current dataset untouched), or `clear` collects it. `name()` opens under a view name. |
 | `parqit query "<sql fragment>"` | Inject a raw fragment into the current pipeline (e.g. a `QUALIFY`). |
 | `parqit show` / `parqit explain` | Print the generated SQL / the query plan. |
+| `parqit set statamissing\|threads\|memory_limit\|tempdir <value>` | Engine settings (missing-value mode, DuckDB threads, memory budget, spill directory). |
+| `parqit path <file>` / `parqit menu` / `db parqit_*` | Resolve a path (→ `r(path)`, `r(exists)`); install the User menu; the ten point-and-click dialogs. |
 
 **Tuning the read.** Reads of 50,000+ rows fill Stata's memory in parallel (up
 to `min(cores, 8)` worker threads), because that per-cell fill dominates the
@@ -545,11 +547,45 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   translated faithfully either way. `parqit set statamissing on` emulates Stata's
   ordering in every comparison where it matters.
 - **Extended missings** `.a`–`.z` collapse to a single null in Parquet (the
-  format has one missing concept); `parqit save` warns when this loses
-  information. Labels attached to extended missings do survive (they live in
-  `parqit.*` metadata). Since their identity is then unavailable, `.a`–`.z`
-  literals are rejected in lazy expressions; use `missing(x)` or compare with
-  ordinary `.`.
+  format has one missing concept); `parqit save`, `parqit open _data` and any
+  command that bridges a `.dta`/Excel source warn when this loses information.
+  Labels attached to extended missings do survive (they live in `parqit.*`
+  metadata). Since their identity is then unavailable, `.a`–`.z` literals are
+  rejected in lazy expressions; use `missing(x)` or compare with ordinary `.`.
+- **Legacy (non-UTF-8) text.** Parquet strings must be UTF-8. `parqit save`
+  transcodes string cells, labels, value labels, notes and characteristics
+  that carry raw Latin-1/Windows-1252/MacRoman bytes (data saved by Stata 13
+  and earlier, or loaded without `unicode translate`) from the `encoding()`
+  code page (default `windows-1252`) — item by item, like `unicode translate`,
+  with no translate step on your side — and says so in a `note:`; valid UTF-8
+  is written byte-exact. Because a `.dta`/Excel source is read through a
+  `parqit save` bridge, the same collapse/rounding/transcoding applies there
+  and is now reported (with `encoding()` to choose the code page) by
+  `parqit use`, `merge`/`joinby`/`append` and `parqit open _data`. On read
+  parqit never transcodes: a foreign Parquet file whose string payload is not
+  valid UTF-8 is refused loudly, naming the column.
+- **Names that differ only by case** (`nuemp`/`NUEMP`) are exact in the
+  written file and in Stata (`save`, `use`, `collect`); inside a lazy view the
+  second is addressed by a numbered alias (`NUEMP_1`, shown by
+  `parqit describe`), and creating a lazy name that clashes only by case is
+  refused — DuckDB's identifiers are case-insensitive. A `relaxed` union
+  (the engine's `union_by_name`) matches the files' names case-insensitively:
+  parqit recovers every column's exact name, notes a later file's column
+  unioned into a case-variant, and refuses a union that would split one name
+  across two columns. A Hive tree whose partition key differs only by case
+  from a file column is refused (the engine would replace the column's values
+  with the key); an empty column name loads as `v<position>`.
+- **A source replaced while it is being read is refused, not mixed.** Every
+  matched file's identity is captured before planning and re-checked before
+  and after the fetch (and the fetched types against the plan); a change fails
+  loudly (`r(920)`) and leaves the dataset in memory untouched — retry when the
+  file is stable. `parqit save ..., data copysource` verifies identity, names,
+  kinds, count, the sort marker and the first/last 64 observations only; an
+  edit confined to the middle rows is not detected (you assert nothing
+  changed).
+- **`reshape wide`/`pivot` generated names** must not clash with a live name
+  even when differing only by case (`x1` vs `X1`): such a spread is refused
+  rather than written as a duplicate-name file.
 - **Slices need a total order when tied rows matter.** `keep in`, `list in` and
   sliced previews cannot reconstruct Stata's physical within-tie order from a
   Parquet-backed plan. Add a unique tiebreaker to `parqit sort`/`gsort` before

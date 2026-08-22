@@ -1,7 +1,7 @@
 /*
   parqit — generate, egen or replace a variable on the open view (lazy)
 
-*!  VERSION 0.1.27  9aug2026
+*!  VERSION 0.1.28  23aug2026
 
   Launch with:  db parqit_gen     (installed on the menu by: parqit menu)
   Both Create... buttons open Stata's expression builder (dates via td(),
