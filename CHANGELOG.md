@@ -6,6 +6,115 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.29] — 2026-08-25
+
+Menu and dialog review against StataCorp's own interface guidelines
+([P] Dialog programming, Appendix C) and its shipped data-management dialogs
+(`use`, `describe`, `merge`, `append`, `collapse`, `import parquet`, ...),
+2026-08-24, independently re-audited and remediated on 2026-08-25. The command
+surface is unchanged; the point-and-click surface now looks and behaves like
+Stata's.
+
+### Changed
+- **The User menu speaks Stata's menu language.** `parqit menu` still installs
+  one submenu, **User > parqit**, but the entries are the task phrases of
+  Stata's Data/File menus, in session order and grouped by separators:
+  "Read Parquet data (lazy view or into memory)...", "Describe and explore
+  data...", "Summary statistics, tables, and correlations...", "Keep or drop
+  observations, or draw a sample...", "Keep, drop, order, sort, or rename
+  variables...", "Create or change variables...", "Collapse, contract, pivot
+  table, or reshape...", "Combine datasets (merge, append, joinby)...",
+  "Collect into memory or save as Parquet...", "Views, SQL, and engine
+  settings...", then Version, Self-test and Help on parqit. Mnemonics are
+  unique within the submenu.
+- **All ten dialogs rewritten in the official dialog idiom.** Titles follow
+  the "command - Description" form of Stata's dialogs (`parqit use - Read
+  Parquet data as a lazy view or into memory`); labels end with a colon when
+  they name the control below and are right-aligned when they sit to the
+  left of a small field (From:/to:, Rows:, Bins:); every label is given its
+  full column width (two labels that were truncated on Linux — the code-page
+  labels of the read and combine dialogs — are fixed); heights use the
+  standard `_ht#` constants and each dialog is sized to its content; the
+  Help button opens the help's new Menu section.
+- **Operations with many choices use a list box.** The explore dialog (15
+  operations) and the views dialog (10 actions) replace their radio walls
+  with a `LISTBOX` whose selection enables the relevant inputs — Appendix C
+  limits a radio group to about seven choices and asks for a list box beyond
+  about twelve — and the views dialog's overlapping controls are gone.
+- **Populate, as in Stata's use/describe/merge dialogs.** The variable
+  pickers are editable comboboxes with a **Populate** button that fills them
+  from the current view (`parqit ds`), from Stata's current dataset when the
+  write dialog selects `save, data`, or, in the read and combine dialogs, from
+  the Parquet footer of the file named in the dialog (`parqit describe`);
+  the internal `parqit _dlgvars` helper gains the `using` and `data` forms,
+  clears stale list entries, returns its name/count contract for tests, fills
+  the complete list without a silent 500-variable cap, and reports a failure
+  through the dialog's `pq_populate_error` property (the official
+  `main_des_error` pattern). The former "View variables"/"Load variables"
+  buttons are subsumed.
+- **The report buttons are echoed.** Describe/Views/Show SQL/Explain/
+  Variables/Version/Self-test buttons run through the dialog engine's plain
+  `stata` directive, so the command appears in the Results and Review windows
+  like a typed command; only the internal Populate helper stays hidden. The
+  help's reproducibility claim is now true for every button.
+- **Remembered settings are honoured.** Each dialog dispatches its
+  enable/disable state from `POSTINIT` (or `forceselchange` for list boxes),
+  so a reopened dialog whose previously submitted mode is not the first one
+  shows the right inputs enabled — previously `PREINIT` always enabled the
+  first mode's inputs regardless of the remembered radio. As in Stata's
+  dialogs, OK/Submit commit remembered settings and Cancel discards changes.
+- **Stata-style validation.** `stopbox` messages for a pivot/collapse with no
+  statistic, and for a lazy `merge m:m` (refused with the joinby/mergein
+  remedy); the save dialog asks before replacing an existing file
+  (`repfile`, as Stata's save/export dialogs do) while keeping the explicit
+  `replace` box for partition directories; `copysource` can only be ticked
+  together with `data`; the combine dialog gains an **Options** tab with the
+  native merge options `mergein` forwards (update, replace, nolabel, nonotes,
+  force, noreport, assert()) as check boxes instead of a free-text field.
+- The help file declares every dialog with `{viewerdialog}` (they appear in
+  the Viewer's Dialog menu, as for official commands), gains a **Menu**
+  section in the official position (after Syntax) that documents each entry
+  and the shared conventions, and states parqit's relationship to StataNow's
+  native `import parquet`; the README gains a matching "Point and click"
+  paragraph. ASSUMPTIONS #100.
+- The README's recommended `net install` command uses GitHub's
+  `releases/latest/download` route, so ordinary installation always follows
+  the newest public release without editing a version number; `vX.Y.Z` remains
+  available only for deliberate pinning.
+
+### Fixed
+- The `duplicates drop` dialog's force box was labelled "Allow a blank key
+  list (compare complete rows)" — the opposite of the contract (a blank list
+  needs no `force`; a key list requires it). It now reads as native Stata's
+  "Force the drop, even though information may be lost".
+- The tabstat dialog emitted `statistics( )` when no statistic was ticked;
+  the option is now emitted only when a statistic is chosen.
+- The `keep in` fields refused the documented `f`/`l` letters and negative
+  bounds (`numonly`); they accept them now.
+- The read dialog left the code-page combobox enabled in the Path mode and
+  the encoding field applied to no command there; every control is now
+  enabled only in the modes whose command takes it.
+- The write dialog populated `partition_by()` from the lazy view even when
+  `data` meant the command would save Stata's in-memory dataset. It now uses
+  the variables of the data path actually selected and works without an open
+  view; repopulating a shorter source cannot retain stale tail entries.
+- File and spill-directory controls now use the dialog language's documented
+  `/smartquote` construction. Legal paths containing spaces, commas or a
+  double quote therefore remain one literal argument (ordinary double quotes
+  made the last case syntactically invalid).
+- `parqit sql` now accepts the ordinary SQL-console habit of one or more
+  trailing semicolons. They are removed before the statement is embedded as a
+  lazy subquery; semicolons inside SQL literals remain unchanged.
+
+### Added
+- `tests/integration/t15_dialog_shapes.do`: executes every command shape the
+  ten dialogs can emit against a synthetic Parquet fixture, so the
+  dialog→ado contract is checked by the Stata suite even though batch Stata
+  cannot open a dialog.
+- `tests/dialog_lint.py`, called by `tests/release_lint.sh`: resolves dialog
+  control references, LIST triplets and option targets statically and gates
+  the shared help/geometry, smart-quoting and Populate-source contracts.
+
 ## [0.1.28] — 2026-08-23
 
 Data-integrity release driven by the 2026-08-22 adversarial audit (six parallel auditors, ≈1,300

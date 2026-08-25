@@ -1336,3 +1336,87 @@ entry notes the conservative fallback if the assumption proves wrong.
     to the planner so the scan runs in-plan on both paths, and overlays the
     view's metadata by engine name rather than position. Verify `v70`, `v74`;
     unit `DUCKDB-DEDUP-1`, `DUCKDB-UNION-1`, `DUCKDB-HIVE-1`, `FLOAT-EXACT-1`.
+100. **The point-and-click surface follows StataCorp's own dialog guidelines
+    and menu idioms rather than a parqit-specific style (2026-08-24; audited
+    and remediated 2026-08-25).** The
+    brief asks for a package that looks like it came from the same hand as
+    Stata itself; for dialogs the reference is [P] Dialog programming,
+    Appendix C (interface guidelines) and the shipped data-management
+    dialogs (`use_option.dlg`, `describe.dlg`, `merge.dlg`, `append.dlg`,
+    `collapse.dlg`, `import_parquet.dlg`, ...). Decisions recorded here so
+    they are not relitigated: (a) one submenu **User > parqit** (not the
+    built-in `stUserData`/`stUserStatistics` submenus, which would split a
+    single session's workflow across three menus and bury it a level deeper)
+    whose entries are task phrases in the wording of Stata's Data/File menus,
+    grouped by separators in session order — read, describe/explore, change,
+    combine, materialise, manage — and ending with direct commands
+    (Version, Self-test, Help), as official menus do; (b) dialog titles in
+    the official "command - Description" form; labels with a trailing colon
+    when they name the control below, right-aligned when they sit left of a
+    small field, always given the full column width (Appendix C: never let a
+    label truncate); every dialog keeps the family's single geometry policy
+    (`_std_wide`, release-lint enforced) and is sized to its content;
+    (c) a radio group holds at most seven choices — beyond that, a
+    `LISTBOX` with `onselchangelist` (explore: 15 operations; views: 10
+    actions), with `forceselchange`/`POSTINIT` dispatch so a remembered
+    selection submitted with OK/Submit reopens with the right inputs enabled
+    (Cancel discards changes); (d) variable pickers
+    are editable `append dropdown` comboboxes filled on demand by a
+    **Populate** button — the `use`/`describe`/`merge` idiom — through the
+    internal `parqit _dlgvars <dlg> <list> [using <source>] [, data]` helper,
+    which reads the current view (`parqit ds`), Stata's current dataset for a
+    write with `data`, or a Parquet footer (`parqit describe`, so a
+    CSV/.dta/Excel source cannot be populated, by design: populating would
+    mean opening it); it clears the list before every fill, never silently
+    caps wide schemas, validates class/list names defensively and signals
+    failure through the dialog's `pq_populate_error` property (the official
+    `main_des_error` pattern); the fill is on demand, never at open, so no
+    dialog needs `SYNCHRONOUS_ONLY` and opening a dialog never runs the plugin;
+    (e) report buttons (Describe, Views, Show SQL, Explain, Variables,
+    Version, Self-test) use the plain `stata` directive so the command is
+    echoed to Results and Review — the help's reproducibility promise —
+    while Populate alone stays `stata hidden immediate`; (f) validation in
+    the official style: `require` on mandatory fields, `stopbox stop` for a
+    pivot/collapse without a statistic and for a lazy `merge m:m` (the ado
+    would refuse it anyway; the dialog says so before submitting), `repfile`
+    on the save dialog's FILE control when `replace` is not ticked (the
+    explicit box stays, because `repfile` cannot see a partition directory),
+    every single-path FILE/spill control uses the documented `/smartquote`
+    command construction,
+    and `copysource` is enabled only with `data`; (g) the combine dialog takes
+    an **Options** tab for the native merge options `mergein` forwards and
+    the code page, the official Main/Options split, so the Main tab stays
+    readable; (h) the help declares each dialog with `{viewerdialog}` (the
+    Viewer's Dialog menu lists them) and documents the menu in a Menu
+    section placed after Syntax, the official position, and states that
+    StataNow's native `import parquet` (Stata 19.5, File > Import) is
+    complementary — parqit's contribution is the lazy grammar, the writer and
+    the metadata round-trip — without a `{vieweralsosee}` link to it, which
+    would be a dead link on Stata 16–19.0; (i) `VERSION 16.0` stays on every
+    dialog (the package baseline), so the Stata 19 `_frame_aware_pr` include
+    and other newer idioms are deliberately not used. The dialog→ado
+    contract is pinned by `tests/integration/t15_dialog_shapes.do`, which
+    executes every command shape the dialogs can emit, and by
+    `tests/dialog_lint.py`, which resolves controls, LIST triplets, option
+    targets, smart-quoted paths and Populate-source invariants; the dialogs
+    themselves are checked by opening each one in GUI Stata under Xvfb and
+    driving its `PROGRAM command` through the dialog class instance
+    (`.parqit_<name>_dlg.main.<control>.setvalue` + `.command`), since batch
+    Stata cannot open a dialog; real clicks synthesised through the XTest
+    extension (a 20-line C helper against `libXtst`) confirmed that Populate
+    fills the picker from the Parquet footer, that OK builds and echoes the
+    command to Results and Review, and that the combine Options tab renders.
+    The harness lives in `local/gui_dialog_harness/` (git-ignored,
+    per-machine). `window menu clear` is deliberately never called by parqit:
+    Stata can remove only all packages' additions at once and exposes no
+    package-local existence query, so that external command leaves the
+    session flag stale; the documented recovery is `global PARQIT_MENU_ON`
+    followed by `parqit menu`.
+101. **Raw SQL accepts trailing statement terminators (2026-08-25).**
+    `parqit sql` embeds one statement as a lazy subquery, where a terminal
+    semicolon is syntactically invalid inside parentheses even though it is
+    conventional at an interactive SQL prompt. After outer Stata quoting is
+    removed, parqit trims one or more semicolons only from the end of the SQL;
+    semicolons inside expressions or string literals are preserved. An input
+    consisting only of terminators remains an empty-query error. Pinned by
+    `tests/integration/t15_dialog_shapes.do`.

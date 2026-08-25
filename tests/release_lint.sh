@@ -144,11 +144,12 @@ check_mac_pair() {
 check_mac_pair MACARM64 OSX.ARM64
 check_mac_pair MACINTEL64 OSX.X8664
 
-# --- README net-install example pins the current version ---------------------
-rd_v=$(grep -oE 'releases/download/v'"$semver" "$REPO/README.md" | grep -oE "$semver" | head -1)
-[ -n "$rd_v" ] || err "README.md has no 'net install ... releases/download/vX.Y.Z' example"
-[ -n "$rd_v" ] && [ "$rd_v" != "$cmake_v" ] && \
-    err "README net install example v$rd_v != project version $cmake_v"
+# --- README default net-install route follows the newest public release ------
+# The installation command must not need a version edit after every release;
+# users who deliberately pin an older tag can substitute download/vX.Y.Z.
+latest_install='net install parqit, from("https://github.com/reisportela/parqit/releases/latest/download") replace'
+grep -Fq "$latest_install" "$REPO/README.md" || \
+    err "README default net install must use releases/latest/download"
 
 # --- CHANGELOG sectioning ----------------------------------------------------
 unrel=$(grep -cE '^## \[Unreleased\]' "$REPO/CHANGELOG.md")
@@ -270,6 +271,14 @@ smcl_open=$(grep -nE '\{(bf|it|cmd|opt):[^}]*$' \
 [ -z "$smcl_open" ] || err "unterminated inline SMCL directive(s): $(echo "$smcl_open")"
 
 # --- menu/dialog command coverage and geometry ------------------------------
+# Parse the dialog language rather than relying only on grep-shaped coverage:
+# control references must resolve, LIST triplets must align, optionarg targets
+# must declare option(), FILE controls must use smartquote, and the Populate
+# helper must expose the complete and semantically correct variable source.
+if ! python3 "$REPO/tests/dialog_lint.py" "$REPO"; then
+    err "static dialog-language contract failed"
+fi
+
 # The menu is an entrypoint into the dialog family. Derive both sides from the
 # live dispatcher/dialogs so a future public verb cannot ship as command-line
 # only by accident. `menu` installs the surface and `_dlgvars` is private dialog

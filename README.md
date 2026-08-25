@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.28 — the full surface below is implemented and covered by a
+> **Status:** v0.1.29 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -143,14 +143,15 @@ In Stata, point `net install` at the release's download URL. Stata reads
 onto your `PLUS` adopath (run `sysdir` to see where):
 
 ```stata
-. net install parqit, from("https://github.com/reisportela/parqit/releases/download/v0.1.28") replace
+. net install parqit, from("https://github.com/reisportela/parqit/releases/latest/download") replace
 . parqit version        // confirms the plugin loaded
 . parqit selftest       // end-to-end self-check, prints "ok"
 ```
 
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
-- For a different version, change `v0.1.28` to the tag you want; for the newest, use
-  `.../releases/latest/download`.
+- The URL above always follows the newest public GitHub release.
+- To pin a specific version instead, replace `latest/download` with
+  `download/vX.Y.Z` (for example, `download/v0.1.29`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -426,7 +427,27 @@ reaching Stata:
 | `parqit query "<sql fragment>"` | Inject a raw fragment into the current pipeline (e.g. a `QUALIFY`). |
 | `parqit show` / `parqit explain` | Print the generated SQL / the query plan. |
 | `parqit set statamissing\|threads\|memory_limit\|tempdir <value>` | Engine settings (missing-value mode, DuckDB threads, memory budget, spill directory). |
-| `parqit path <file>` / `parqit menu` / `db parqit_*` | Resolve a path (→ `r(path)`, `r(exists)`); install the User menu; the ten point-and-click dialogs. |
+| `parqit path <file>` / `parqit menu` / `db parqit_*` | Resolve a path (→ `r(path)`, `r(exists)`); install the **User > parqit** submenu (GUI Stata; one line in `profile.do` keeps it); the ten point-and-click dialogs, also listed in the help file's Dialog menu. |
+
+### Point and click
+
+`parqit menu` adds **User > parqit** to GUI Stata: Read Parquet data (lazy
+view or into memory); Describe and explore data; Summary statistics, tables,
+and correlations; Keep or drop observations, or draw a sample; Keep, drop,
+order, sort, or rename variables; Create or change variables; Collapse,
+contract, pivot table, or reshape; Combine datasets (merge, append, joinby);
+Collect into memory or save as Parquet; Views, SQL, and engine settings;
+Version; Self-test; Help. Every dialog builds an ordinary `parqit` command,
+echoed to the Results and Review windows like a typed command, and follows
+Stata's own dialog conventions: a **Populate** button fills the variable
+pickers from the current view, from the dataset in memory when the write dialog
+selects `data`, or from the Parquet footer of the file named in the dialog (as
+Stata's `use`/`describe`/`merge` dialogs populate from a dataset on disk),
+**Create...** opens the expression builder, an existing output file asks before
+being replaced, and operations with many choices use a list box rather than a
+wall of radio buttons. StataNow's native
+`import parquet` (File > Import) reads a file into memory; parqit's dialogs
+complement it and never alter Stata's own menus.
 
 **Tuning the read.** Reads of 50,000+ rows fill Stata's memory in parallel (up
 to `min(cores, 8)` worker threads), because that per-cell fill dominates the
