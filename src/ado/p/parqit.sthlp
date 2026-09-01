@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.29 25aug2026}{...}
+{* *! version 0.1.30 01sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -75,7 +75,7 @@ for a Parquet/CSV source (read as UTF-8).
 {pstd}Verbs on the open view (all lazy):
 
 {p 8 16 2}{cmd:parqit keep} {it:varlist} | {cmd:parqit keep if} {it:exp} | {cmd:parqit keep in} {it:f}[{cmd:/}{it:l}]{p_end}
-{p 8 16 2}{cmd:parqit drop} {it:varlist} | {cmd:parqit drop if} {it:exp}{p_end}
+{p 8 16 2}{cmd:parqit drop} {it:varlist} | {cmd:parqit drop if} {it:exp} | {cmd:parqit drop in} {it:f}[{cmd:/}{it:l}]{p_end}
 {p 8 16 2}{cmd:parqit gen} [{it:type}] {it:newvar} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit replace} {it:var} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:fcn}{cmd:(}{it:exp}{cmd:)} [{cmd:,} {opt by(varlist)}]{p_end}
@@ -124,7 +124,7 @@ pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 {p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
-{p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}]{space 2}({opt row}/{opt col} apply to the two-way form; the one-way form ignores them){p_end}
+{p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col} {opt nol:abel}]{space 2}({opt row}/{opt col} apply to the two-way form; the one-way form ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit misstable} [{cmd:summarize}|{cmd:patterns}] [{it:varlist}]{p_end}
 {p 8 16 2}{cmd:parqit levelsof} {it:varname} [{cmd:,} {opt l:imit(#)}]{p_end}
 {p 8 16 2}{cmd:parqit count} [{cmd:if} {it:exp}]{p_end}
@@ -195,7 +195,7 @@ check boxes and {opt by()}, {cmd:correlate}/{cmd:pwcorr} and
 {cmd:histogram}.{p_end}
 
 {phang2}{bf:User > parqit > Keep or drop observations, or draw a sample...}{p_end}
-{p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if}, {cmd:keep in}
+{p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if}, {cmd:keep in}, {cmd:drop in}
 ({cmd:f}, {cmd:l} and negative bounds accepted) and {cmd:sample}; the
 {bf:Create...} button opens Stata's expression builder.{p_end}
 
@@ -415,6 +415,13 @@ On the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, Parquet stays
 on disk, while delimited text, {cmd:.dta} and Excel are first imported to a
 package-owned Parquet bridge; this keeps the engine's two-table input contract
 uniform and is intended for a comparatively small using side.
+Delimited-text header names get the same treatment as Parquet column names
+(see {it:Column names} under {help parqit##types:Types and metadata}): a
+repeated name keeps the engine's numbered form ({cmd:a_1}, with
+{cmd:char a_1[src_name]} holding the original), a name that differs only by
+case from another is exact in Stata (an alias inside the lazy view, with a
+note), an empty header cell becomes {cmd:v}{it:#}, and a file without a header
+keeps the engine's {cmd:column0}, {cmd:column1}, … names.
 
 {pstd}
 Because a bridge {it:is} a {cmd:parqit save} of the imported frame, the
@@ -502,7 +509,8 @@ are numeric, so a string result type is refused.
 
 {pstd}{cmd:collapse} statistics: {cmd:mean sum sd count min max median}
 {cmd:p}{it:##} {cmd:first last firstnm lastnm}. Percentiles follow Stata's
-{cmd:summarize} rule exactly. {cmd:first}/{cmd:last} are deterministic over
+{cmd:summarize} rule exactly and are computed out of core, by rank, so a
+huge group needs no in-memory list. {cmd:first}/{cmd:last} are deterministic over
 the declared {cmd:parqit sort} order and keep a missing first value missing.
 Weights ({cmd:[fweight=}{it:exp}{cmd:]}, …) are not supported on
 {cmd:collapse}/{cmd:pivot} and are refused loudly.
@@ -518,8 +526,8 @@ reproducible total order over all columns; declare the intended sort whenever
 
 {pstd}Result metadata follows native Stata where it is unambiguous. A
 {cmd:collapse} target is labelled {cmd:(}{it:stat}{cmd:)} {it:source} and keeps
-the source variable's display format; a {cmd:(count)} target is stored
-{cmd:long}. The {cmd:merge} marker keeps native's {cmd:%23.0g} format with its
+the source variable's display format (a {cmd:(count)} of a string source
+carries {cmd:%8.0g}); a {cmd:(count)} target is stored {cmd:long}. The {cmd:merge} marker keeps native's {cmd:%23.0g} format with its
 {cmd:_merge} value label. A {cmd:reshape wide} spread column is labelled
 {it:jvalue} {it:stub} and keeps the stub's format. Because these travel into the
 saved file's {cmd:parqit.*} metadata, third-party readers see the same
@@ -614,7 +622,10 @@ never a silent empty result. As in native {helpb keep}, the bounds may be the
 letters {cmd:f} (first) and {cmd:l} (last) and negative counts from the end
 ({cmd:-1} is the last observation); {cmd:l} and negative bounds are resolved
 from the view's current row count. {cmd:keep in} {it:#} keeps exactly
-observation {it:#}; a reversed range is refused.
+observation {it:#}; a reversed range is refused. {cmd:drop in} {it:f}{cmd:/}{it:l}
+is the complement: it removes observations {it:f} to {it:l} of the same order
+and keeps every other row in place, with the same bounds grammar and the same
+validation against the real count.
 
 
 {marker materialisers}{...}
@@ -649,7 +660,15 @@ value) keeps the engine default. {opt partition_by(varlist)} names columns in
 the result and writes a directory tree rather than a single file; a partition
 key is restored to its recorded Stata type on read (a float/double/{cmd:%tc}
 key too), and a zero-observation partitioned save writes an empty tree that
-reads back as 0 observations with every variable. A save is
+reads back as 0 observations with every variable. A string partition key
+whose value is the text {cmd:NULL} or {cmd:__HIVE_DEFAULT_PARTITION__} is
+refused before the tree is published: the engine names the directory of a
+{it:missing} partition that way and would read the value back as missing
+(empty). A foreign tree carrying such a directory under a string key loads
+those rows with the key empty, and says so in a {cmd:note:}; every other
+value — the empty string, {cmd:=}, {cmd:/}, spaces, {cmd:%}, Unicode,
+names differing only by case, numeric-looking text — round-trips exactly,
+as does a missing numeric or date key. A save is
 refused if its destination is the current view's own source file, matches one
 of its source-glob paths, or lies inside (or would replace a directory
 containing) a directory the view scans; collect first or choose a
@@ -895,7 +914,8 @@ Each call re-executes the (lazy) pipeline; on Parquet this is fast because
 filters and column selections are pushed into the scan. {cmd:parqit tabulate}
 excludes missing values unless {opt missing} is given, like native
 {helpb tabulate}; {opt row}/{opt col} add percentage panels to the two-way
-form. {cmd:codebook}'s unique count and {cmd:distinct} exclude missing values;
+form; a labelled numeric variable is displayed through its value labels, as
+native does, and {opt nolabel} shows the codes instead. {cmd:codebook}'s unique count and {cmd:distinct} exclude missing values;
 {cmd:tabstat, by()} omits a missing by-group, matching native Stata. SQL NULL,
 empty-string and NaN encodings of the same Stata missing value are folded before
 grouping. Stata transforms that have no special command translate directly:
@@ -937,7 +957,7 @@ literal {cmd:.} are supported. The complete function list is:
 {* be implemented by src/engine/exprtrans.cpp, and every implemented function}{...}
 {* keep this list synchronized with exprtrans.cpp.}{...}
 {p 8 8 2}{cmd:abs exp ln log log10 sqrt floor ceil int trunc round mod min max}
-{cmd:cond inrange inlist missing mi}{p_end}
+{cmd:float cond inrange inlist missing mi}{p_end}
 {p 8 8 2}{cmd:strlen length ustrlen upper strupper ustrupper lower strlower}
 {cmd:ustrlower trim strtrim ltrim rtrim substr strpos subinstr string strofreal}
 {cmd:real regexm}{p_end}
@@ -1007,6 +1027,16 @@ the replace-all form whose fourth argument is {cmd:.}. {cmd:substr()} and
 character because DuckDB/Arrow strings must remain valid UTF-8.
 Unicode-indexed {cmd:usubstr()} and {cmd:ustrpos()} are not implemented and
 fail loudly rather than silently using byte positions.
+{cmd:ustrupper()}/{cmd:ustrlower()} apply the engine's simple one-to-one
+Unicode case mapping, not ICU's full mapping: {cmd:ustrupper("straße")} is
+{cmd:STRAẞE} where native gives {cmd:STRASSE}, and {cmd:ustrlower("İ")} is
+a plain {cmd:i} where native keeps a combining dot. {cmd:regexm()} has no
+multiline mode: {cmd:^} and {cmd:$} anchor only at the ends of the whole
+value and {cmd:.} does not match a newline, whereas native matches
+{cmd:"^line1$"} and {cmd:"1.l"} inside {cmd:"line1"+char(10)+"line2"}.
+{cmd:mod(x,y)} follows native's arithmetic for a non-integer modulus
+({cmd:mod(7, 0.00001)} is {cmd:9.99999999911e-06}, as in Stata, not the
+manual's {cmd:x - y*floor(x/y)}).
 
 {pstd}
 Extended-missing literals {cmd:.a}-{cmd:.z} are rejected in lazy expressions.
@@ -1024,6 +1054,14 @@ storage of a generated column with a typed {cmd:parqit gen} (e.g.
 {cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
 is {cmd:float}. For an explicit {cmd:float} target, a finite value outside
 Stata's ±1.70e38 storage range becomes missing, as in native assignment.
+A {cmd:float} variable compared with a decimal literal ({cmd:x == 0.1},
+{cmd:x > 0.1}, and inside {cmd:inrange()}, {cmd:inlist()}, {cmd:cond()},
+{cmd:round()}) is compared in double, exactly as native Stata does:
+{cmd:x == 0.1} is false for a float {cmd:x} holding 0.1, and
+{cmd:x == float(0.1)} is the native idiom. {cmd:float(x)} rounds {cmd:x} to
+float precision (a value beyond ±1.70e38 is missing). One residual: an
+integral literal beyond 2^24 ({cmd:x == 16777217}) keeps its integer type,
+so against a float variable that comparison still runs in single precision.
 Date functions floor a fractional day count (like Stata:
 {cmd:day(-0.5)} is 31) and an out-of-range argument is row-local missing.
 One documented dialect difference: {cmd:regexm()} runs on DuckDB's RE2
@@ -1059,7 +1097,10 @@ to IS NULL tests in either mode. Strings have no missing: NULL and
 An unsupported function is a loud, position-anchored error that names the
 function — never a silent guess; syntax native Stata rejects ({cmd:||},
 {cmd:&&}, uppercase extended missings like {cmd:.A}, malformed numbers) is
-rejected here too. {cmd:parqit sql} and {cmd:parqit query} are the escape
+rejected here too, with one lenience: a unary plus ({cmd:+x}) is accepted.
+Every value whose magnitude reaches Stata's missing sentinel (8.99e+307) is
+missing in either sign; native Stata still stores such a {it:negative}
+value. {cmd:parqit sql} and {cmd:parqit query} are the escape
 hatches.
 
 {pstd}
@@ -1094,7 +1135,8 @@ Foreign strings are sized by maximum UTF-8 byte length: up to 2,045 bytes use
 {cmd:str#}, longer values use {cmd:strL}, and empty/all-null columns use
 {cmd:str1}. {cmd:ENUM}, {cmd:UUID} and logical {cmd:JSON} load as text.
 
-{pstd}{it:Dates and times.} {cmd:%td} variables are {cmd:DATE} on disk,
+{pstd}{it:Dates and times.} {cmd:%td} variables (and the old-style {cmd:%d}
+synonyms) are {cmd:DATE} on disk,
 {cmd:%tc} variables are {cmd:TIMESTAMP}, and {cmd:%tm %tq %th %tw %ty %tb}
 stay integer period counts — never mis-scaled calendar dates. A parqit-written
 {cmd:%td} or {cmd:%tc} column restores its recorded storage type on both the
@@ -1380,13 +1422,25 @@ materialising either side ({cmd:view:}{it:name} as a {cmd:using} source):{p_end}
 {phang2}{cmd:. parqit version}{p_end}
 {phang2}{cmd:. parqit selftest}{space 17}({it:end-to-end engine/codec check on a new machine}){p_end}
 
-{pstd}Two runnable, {bf:self-verifying} companions ship with the source
-repository. {bf:Start with} {cmd:examples/parqit_basics.do}: it walks
-{cmd:use}/{cmd:save}/{cmd:merge}/{cmd:append} twice each — the eager way
-(everything into memory first) and the lazy way (view + verbs +
-collect/save) — asserting every lazy result against a native Stata twin.
-{cmd:examples/parqit_tour.do} then tours the complete command surface the
-same way. Each ends in a printed {cmd:VERDICT(...): PASS}.{p_end}
+{pstd}Two runnable companions, {cmd:parqit_basics.do} and
+{cmd:parqit_tour.do}, ship with parqit as ancillary files
+({cmd:ssc install parqit, all replace}, or {cmd:net get parqit} after a
+{cmd:net install} from the same source, copies them into the current
+directory) and live in the source repository{c 39}s {cmd:examples/} directory.
+Both create small artificial NLS-style labour-panel data under Stata{c 39}s
+temporary directory, so they require no data download. {bf:Start with}
+{cmd:parqit_basics.do}: a gentle course in Parquet I/O and metadata, lazy
+views and sampling, {cmd:collect} versus {cmd:save} (including a partitioned
+directory and a multi-file glob), lazy and in-memory merge and append, and
+CSV-to-Parquet conversion. {cmd:parqit_tour.do} then covers engine-side
+statistics and missing-value modes, richer lazy transformations, collapse,
+pivot, contract and reshape, named views, view-to-view merge, joinby, raw SQL
+and engine settings. Comments identify the matching {bf:User > parqit}
+dialogs; neither file is exhaustive.{p_end}
+
+{phang2}{cmd:. ssc install parqit, all replace}{p_end}
+{phang2}{cmd:. do parqit_basics.do}{p_end}
+{phang2}{cmd:. do parqit_tour.do}{p_end}
 
 
 {marker limitations}{...}

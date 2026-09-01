@@ -1,12 +1,12 @@
 /*
   parqit keep - Keep or drop observations, or draw a random sample
 
-*!  VERSION 0.1.29  25aug2026
+*!  VERSION 0.1.30  01sep2026
 
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)
 
-  Builds parqit keep if / drop if / keep in / sample. The Create... button
+  Builds parqit keep if / drop if / keep in / drop in / sample. The Create... button
   opens Stata's expression builder (date functions td(), tm(), year(), ...
   included); Variables lists the names of the current view (parqit ds).
   These verbs are lazy: they change the view's plan, not the data in memory.
@@ -15,7 +15,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 285
+DEFINE _dlght 305
 INCLUDE header
 HELP hlp1, view("help parqit##menu")
 RESET res1
@@ -59,6 +59,9 @@ BEGIN
 	label("to")
   TEXT tx_fl			_ilft	_ss	_ibwd	.,		///
 	label("Bounds may be numbers, f (first), l (last), or negative counts from the end (-1 is the last observation).")
+  RADIO rb_dropin		_lft	_ss	_iwd	.,		///
+	onclickon(program main_mode)					///
+	label("Drop a range of observations of the pipeline result (drop in)")
 
   RADIO rb_sample		_lft	_ls	_iwd	.,		///
 	last								///
@@ -101,7 +104,7 @@ BEGIN
 		call main.tx_if.enable
 		call main.ex_if.enable
 	}
-	if main.rb_keepin {
+	if main.rb_keepin | main.rb_dropin {
 		call main.tx_from.enable
 		call main.ed_from.enable
 		call main.tx_to.enable
@@ -137,6 +140,11 @@ BEGIN
 		require main.ed_from
 		require main.ed_to
 		put "parqit keep in " main.ed_from "/" main.ed_to
+	}
+	if main.rb_dropin {
+		require main.ed_from
+		require main.ed_to
+		put "parqit drop in " main.ed_from "/" main.ed_to
 	}
 	if main.rb_sample {
 		require main.ed_amount

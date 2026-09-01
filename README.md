@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.29 — the full surface below is implemented and covered by a
+> **Status:** v0.1.30 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -151,7 +151,7 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.1.29`).
+  `download/vX.Y.Z` (for example, `download/v0.1.30`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -360,7 +360,7 @@ matches one Unicode character; the same expansion is used by lazy projections,
 | `parqit collapse (stat) v ... , by()` | `GROUP BY` + aggregates (mean/sum/sd/median/pXX/count/min/max/first/last/firstnm/lastnm) |
 | `parqit contract <varlist> [, freq()]` | grouped counts |
 | `parqit duplicates drop [varlist] [, force]` | `DISTINCT` / dedup |
-| `parqit keep in <range>` | validated `LIMIT/OFFSET` (`f`/`l` and negative bounds accepted) |
+| `parqit keep in <range>` / `parqit drop in <range>` | validated `LIMIT/OFFSET` and its complement (`f`/`l` and negative bounds accepted) |
 | `parqit sample # [, count seed()]` | reservoir sample: percent by default, rows with `count`; reproducible with `seed()` |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
@@ -397,7 +397,7 @@ the view without replacing the current dataset.
 | `parqit save <dest> [, replace data partition_by() compression() compression_level() chunk() encoding() copysource]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match. |
 | `parqit count` | Row count → `r(N)` (no rows materialised). |
 | `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
-| `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`. |
+| `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). |
 | `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. |
 
 ### Explore the view (engine-side, current dataset unchanged)
@@ -490,37 +490,38 @@ parqit collect, clear
 
 ## Tour & examples
 
-**Start here:** `examples/parqit_basics.do` is a guided, self-verifying walk
-through the base operations — `use`, `save`, `merge`, `append` — each done
-twice over the same small data: the eager way (everything into memory first,
-the pq mental model) and the lazy parqit way (view + verbs + collect/save,
-only the result moves). Every lazy result is asserted against a native-Stata
-twin, it needs nothing beyond parqit itself, runs in seconds, and ends in
-`VERDICT(PARQIT_BASICS): PASS`:
+Two self-contained crash courses ship with parqit — as ancillary files of the
+SSC package (`ssc install parqit, all replace` copies them into the current
+directory) and in the repository's `examples/` directory. Both generate a small
+artificial NLS-style labour panel under Stata's temporary directory, so they
+need no data download, and each block names the matching **User > parqit**
+dialog:
+
+- **Start here:** `examples/parqit_basics.do` — writing and inspecting a
+  Parquet file, eager and lazy reads, metadata round-trips, a reproducible
+  engine-side sample, `collect` versus a direct Parquet `save` (including a
+  partitioned directory and a multi-file glob), lazy merge and append,
+  `mergein`/`appendin` for data already in memory, and a CSV converted to
+  Parquet without loading it.
+- `examples/parqit_tour.do` — exploring a lazy table without replacing the
+  current data (the engine-side statistics family), the SQL-versus-Stata
+  missing-value rule, richer lazy pipelines, `collapse`/`pivot`/`contract`/
+  `reshape`, named views and a view-to-view merge, `joinby`, the `query`/`sql`
+  escape hatches and the engine settings.
 
 ```stata
-. cd examples
-. do parqit_basics.do                  // parqit installed on the adopath
-. do parqit_basics.do <repo> <plugin>  // development tree
+. adopath ++ "<repo>/ado/plus/p"      // development tree (every build refreshes it)
+. do examples/parqit_basics.do
+. do examples/parqit_tour.do
 ```
 
-`examples/` also ships a self-verifying tour of the complete command-line data
-workflow over
-small artificial datasets (workers panel, firms, patents, wide incomes and
-a deliberately hostile file with reserved/duplicate/space column names,
-uint32 overflow values and decimals):
-
-```stata
-. cd examples
-. do parqit_tour.do                  // parqit installed on the adopath
-. do parqit_tour.do <repo> <plugin>  // development tree
-```
-
-The data is generated by `examples/make_data.py` (pyarrow, deterministic)
-on first run. Because the datasets are small, the tour loads a native twin
-into memory and uses Stata itself as the oracle for every lazy result —
-each of its eleven sections both demonstrates the commands and asserts
-their correctness, ending in `VERDICT(PARQIT_TOUR): PASS`.
+The oracle-checked twins of these tours are integration tests:
+`tests/integration/t14_basics.do` (use/save/merge/append done the eager and
+the lazy way, every lazy result asserted against a native-Stata twin) and
+`tests/integration/t13_tour.do` (eleven sections over the artificial datasets
+of `examples/make_data.py` — workers, firms, patents, wide incomes and a
+deliberately hostile file — each asserted against a native twin). Both run
+under `bash tests/run_stata.sh` and end in `VERDICT(...): PASS`.
 
 ## Type mapping
 
@@ -616,6 +617,18 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   needed for Stata's sequential reuse rule. Use `parqit joinby` for the
   Cartesian many-to-many join, or `parqit mergein m:m` when native Stata's
   order-dependent sequential behaviour is deliberately required.
+- **A `float` variable compared with a decimal literal** (`x == 0.1`,
+  `x > 0.1`, `inrange()`, `inlist()`, `cond()`, `round()`) is compared in
+  double, as native Stata does: `x == 0.1` is false for a float `x` holding
+  0.1 and `x == float(0.1)` is the native idiom (`float()` is implemented).
+  One residual: an integral literal beyond 2^24 keeps its integer type and
+  still compares with a float variable in single precision.
+- **String partition keys.** `partition_by()` on a string variable refuses the
+  values `NULL` and `__HIVE_DEFAULT_PARTITION__` (the engine names the
+  directory of a *missing* partition that way and would read them back as
+  missing); every other value round-trips exactly. A foreign tree carrying
+  such a directory under a string key loads those rows with the key empty,
+  with a note.
 - **Binary `strL`s containing NUL** are refused on a direct memory-to-Parquet
   save because Stata's plugin interface exposes text; text `strL`s round-trip,
   and a lazy Parquet-to-Parquet save preserves those bytes without crossing the

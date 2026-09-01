@@ -325,3 +325,18 @@ TEST_CASE("FLOAT-EXACT-1: a manifest float held in a non-FLOAT column is float o
         CHECK(f.stata_type == StType::Float);
     }
 }
+
+TEST_CASE("DFMT-1: the old-style %d daily date format is a date (audit 2026-09-01, F6)") {
+    CHECK(classify_format("%d") == FmtClass::Td);
+    CHECK(classify_format("%-d") == FmtClass::Td);
+    CHECK(classify_format("%dCCYY-NN-DD") == FmtClass::Td);
+    CHECK(classify_format("%dM_d,_CY") == FmtClass::Td);
+    CHECK(classify_format("%td") == FmtClass::Td);
+    /* numeric formats never start with %d followed by a letter */
+    CHECK(classify_format("%9.2f") == FmtClass::None);
+    CHECK(classify_format("%-12.0g") == FmtClass::None);
+    CHECK(classify_format("%9,2f") == FmtClass::None);
+    CHECK(classify_format("%8.0gc") == FmtClass::None);
+    CHECK(classify_format("%d1") == FmtClass::None);
+    CHECK(duck_type_for(StType::Long, classify_format("%d")) == "DATE");
+}

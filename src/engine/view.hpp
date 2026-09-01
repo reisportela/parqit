@@ -52,7 +52,10 @@ struct ViewCol {
  * over `ref`: np = n*p/100 on the sorted nonmissing values; integer np →
  * mean of x[np], x[np+1]; else x[ceil(np)]. Shared by collapse and
  * summarize-detail. */
-std::string stata_pctile_sql(const std::string &ref, double p);
+/* Stata's percentile rule over per-group ranks (PCT-WINDOW-1): `prn` ranks
+ * the nonmissing values within the group, `pn` counts them. */
+std::string pct_window_sql(const std::string &ref, const std::string &prn,
+                           const std::string &pn, double p);
 
 struct PendingRange { /* keep in f/l — validated against real counts at
                          materialisation (charter §6.13) */
@@ -126,6 +129,9 @@ class View {
     std::string contract(const std::vector<std::string> &by, const std::string &freq);
     std::string duplicates_drop(const std::vector<std::string> &by, bool force);
     std::string keep_in(long long f, long long l);
+    /* drop in f/l: the complement of keep in over the same (declared or
+     * engine) order, validated against the real count the same way. */
+    std::string drop_in(long long f, long long l);
     std::string sample(double amount, bool is_count, long long seed /* <0 none */);
     std::string egen(const std::string &name, const std::string &fcn,
                      const std::string &arg_expr, const std::vector<std::string> &by,
@@ -190,6 +196,15 @@ class View {
     std::string compile_prefix(size_t stages) const;
     /* dbplyr-style pretty form for parqit show */
     std::string show() const;
+    /* A helper-column name that no live column (nor `taken`) collides with —
+     * every internal column is generated this way, never a fixed magic name.
+     * `taken`: extra names the helper must dodge beyond the live manifest —
+     * two-table verbs pass the using side's column names here, so a using
+     * column literally named like a generated helper can never make the
+     * compiled join reference ambiguous (charter §6.12). The engine-side
+     * statistics (tabstat's rank windows) use it too. */
+    std::string fresh_helper(const std::string &hint,
+                             const std::set<std::string> &taken = {});
 
   private:
     int col_index(const std::string &name) const;
@@ -200,12 +215,6 @@ class View {
      * "already defined" check. */
     std::string ci_guard(const std::string &name,
                          const std::set<std::string> &ignore = {}) const;
-    /* `taken`: extra names the helper must dodge beyond the live manifest —
-     * two-table verbs pass the using side's column names here, so a using
-     * column literally named like a generated helper can never make the
-     * compiled join reference ambiguous (charter §6.12). */
-    std::string fresh_helper(const std::string &hint,
-                             const std::set<std::string> &taken = {});
     /* FROM-source for a keep/drop projection stage: when the projection is
      * about to remove a sort-key column, bakes the full current ORDER BY into
      * the source subquery (the physical order survives via DuckDB's default

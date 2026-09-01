@@ -21,7 +21,7 @@ d KW: data management
 d
 d Requires: Stata version 16
 d
-d Distribution-Date: 20260825
+d Distribution-Date: 20260901
 d
 d Author: Miguel Portela, Universidade do Minho & NIPE
 d Support: email miguel.portela@@eeg.uminho.pt
@@ -38,6 +38,8 @@ f parqit_pivot.dlg
 f parqit_combine.dlg
 f parqit_write.dlg
 f parqit_views.dlg
+f parqit_basics.do
+f parqit_tour.do
 g LINUX64 parqit_linux64.plugin parqit.plugin
 g MACINTEL64 parqit_macintel64.plugin parqit.plugin
 g OSX.X8664 parqit_macintel64.plugin parqit.plugin

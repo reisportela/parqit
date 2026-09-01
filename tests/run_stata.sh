@@ -26,6 +26,14 @@ fi
 RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/parqit_tests.XXXXXX")"
 cd "$RUNDIR"
 echo "running in $RUNDIR"
+# HARNESS-PATH-1 (audit 2026-09-01, F15): Stata wraps output lines at
+# linesize; a very long temp root pushes messages that quote a path past the
+# wrap and log-grep assertions (v67, v70, …) then miss their phrase.
+if [ ${#RUNDIR} -gt 100 ]; then
+    echo "warning: the run directory is ${#RUNDIR} bytes long; Stata wraps long" \
+         "output lines and log-grep assertions may fail — export a short TMPDIR" \
+         "(for example /tmp) and rerun" >&2
+fi
 
 declare -a logs=()
 selected=0

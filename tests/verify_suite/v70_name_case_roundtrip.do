@@ -291,7 +291,7 @@ assert "`r(varlist)'" == "nuemp s"
 assert _N == 4
 python:
 from sfi import Macro
-txt = open(Macro.getLocal("v70log") + ".log", encoding="utf-8", errors="replace").read()
+txt = open(Macro.getLocal("v70log") + ".log", encoding="utf-8", errors="replace").read().replace("\n> ", "")  # HARNESS-PATH-1: undo Stata line wraps
 Macro.setLocal("soft_note", "1" if 'column "NUEMP"' in txt and "unioned into" in txt else "0")
 end
 assert "`soft_note'" == "1"

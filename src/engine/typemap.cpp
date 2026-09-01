@@ -41,9 +41,19 @@ FmtClass classify_format(const std::string &fmt) {
     /* Prefix classification only — display tokens after the class prefix
      * (HH:MM, CCYY, …) must never change the storage class (charter §6.5).
      * Stata time formats are %t? or %-t? (left-justified). */
-    if (fmt.size() < 3 || fmt[0] != '%') return FmtClass::None;
+    if (fmt.size() < 2 || fmt[0] != '%') return FmtClass::None;
     size_t i = 1;
     if (fmt[i] == '-') i++;
+    /* DFMT-1 (audit 2026-09-01, F6): the old-style daily date format %d
+     * (with or without display tokens: %d, %-d, %dCCYY-NN-DD, %dM_d,_CY) is
+     * documented by Stata as a synonym of %td; it used to fall through to
+     * "plain numeric" and was written as a raw INT32 instead of a DATE. No
+     * numeric format starts with %d followed by anything but a digit or '.'
+     * (%9.2f, %-12.0g …), so the letter alone decides. */
+    if (i < fmt.size() && fmt[i] == 'd' &&
+        (i + 1 == fmt.size() ||
+         !((fmt[i + 1] >= '0' && fmt[i + 1] <= '9') || fmt[i + 1] == '.')))
+        return FmtClass::Td;
     if (i + 1 >= fmt.size() || fmt[i] != 't') return FmtClass::None;
     switch (fmt[i + 1]) {
     case 'd': return FmtClass::Td;

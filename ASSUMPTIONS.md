@@ -1420,3 +1420,137 @@ entry notes the conservative fallback if the assumption proves wrong.
     semicolons inside expressions or string literals are preserved. An input
     consisting only of terminators remains an empty-query error. Pinned by
     `tests/integration/t15_dialog_shapes.do`.
+102. **Examples are the SSC crash courses; the oracle-checked tours are tests
+    (2026-08-28, maintainer direction).** Kit Baum's SSC review asked for the
+    example do-files named in the help. The two self-contained crash courses
+    written for the submission replaced `examples/parqit_basics.do` and
+    `examples/parqit_tour.do` (the staging copies in `ssc_submission/examples/`
+    must stay byte-identical; `build_candidate.sh` refuses drift): they take no
+    arguments, print no verdict, use artificial NLS-style data under
+    `c(tmpdir)`, name the matching **User > parqit** dialog per block and never
+    mention the comparison command. Their former self-verifying versions moved
+    content-preserving into `tests/integration/t14_basics.do` and
+    `t13_tour.do` (the wrappers that already ran them), so the regression
+    contract is unchanged. Stata's `net` classifies package `.do` files as
+    ancillary — delivered by `net get` / `ssc install, all`, never installed on
+    the adopath — and the help's Examples paragraph says so. Since v0.1.30
+    (2026-09-01) `parqit.pkg` lists them with `f` lines, the release workflow
+    copies them beside the package files into every zip and into the loose
+    release assets, and `release_lint.sh` verifies that each `f` file exists
+    (installation files in `src/ado/p/`, `.do` files in `examples/`) and is
+    copied by the workflow; the SSC candidate script's own two-line `.pkg`
+    overlay is redundant from this tag on.
+103. **Float-column comparisons are evaluated in double by typing the literal
+    (2026-09-01, FLOAT-LIT-1, audit F2).** DuckDB binds `FLOAT <op> DECIMAL`
+    by casting the literal to FLOAT, so `x == 0.1` was true for a float x —
+    native Stata, an all-double evaluator, says false. The translator now
+    emits `CAST(<lit> AS DOUBLE)` for a literal in a comparison (`relational()`,
+    `inrange()`, and `round()`'s operands) when the literal is non-integral
+    and not exactly representable in float32; the engine then widens the
+    column (SQL rule) and the filter still pushes into the Parquet scan
+    (verified with EXPLAIN). Integral literals are deliberately left untyped
+    even beyond 2^24: typing them DOUBLE would change every integer-key
+    filter's plan, and a float variable compared with such a literal is rare;
+    the residual (`x == 16777217` on a float x) is documented in the help.
+    A column-level `CAST(FLOAT AS DOUBLE)` at the boundary was rejected as
+    the fix because it changes the collected storage type of foreign FLOAT
+    columns and the physical type of lazy saves. FLOAT-vs-INTEGER column
+    comparisons (no literal) still follow the engine's promotion (FLOAT).
+104. **A string partition value the Hive reader maps to a missing partition is
+    refused on save; foreign trees note it (2026-09-01, PART-STRKEY-1, audit
+    F1).** DuckDB 1.5.3 writes a string value `NULL` to the directory `k=NULL`
+    and a missing numeric key to `k=__HIVE_DEFAULT_PARTITION__`; its reader
+    maps both tokens to SQL NULL, so the string value loaded as `""`. The
+    audit plan proposed a generic source-vs-tree DISTINCT comparison of every
+    key; that re-executes the whole pipeline for a lazy save, so the check is
+    instead a walk of the staged tree's directory names for a VARCHAR key
+    holding either token — exact, because parqit never writes a NULL string
+    (the boundary and both writers fold it to ''), and free of any extra
+    scan. Every other value was verified to round-trip (`v78`): the engine
+    URL-encodes `=`, `/`, space, `%`, `\`, Unicode, and keeps `.`, `..`,
+    `01` and the empty string (`k=`). The read-side note is emitted from
+    `plan_columns` (eager) and forwarded by `cmd_view_open` (lazy).
+105. **`describe` pairs engine types by name (2026-09-01, DESCRIBE-ALIGN-1,
+    audit F3).** The `dtype` response records now carry the Stata name in
+    the manifest order of the `var` records; `_parqit_resp_describe` looks the
+    type up by name with a positional fallback only for a name it cannot
+    find. The printed table and `r(type_i)` of flat files are byte-identical
+    to before.
+106. **CSV header names recovered through the sniffed dialect (2026-09-01,
+    CSV-HEADER-1, audit F4).** `sniff_csv()` reports the dialect but its own
+    column list is already deduplicated, and it reports an unset quote,
+    escape or comment character as the literal text `(empty)` (passing that
+    to `read_csv` fails with "The quote option cannot exceed a size of 1
+    byte"). parqit therefore reads the header line as data
+    (`read_csv(header = false, all_varchar = true, delim/quote/escape/skip/
+    comment from the sniff)`) from the first matched file, aligns it
+    positionally with the scan when the widths agree and `HasHeader` is true,
+    and reuses the Parquet recovery (`parquet_names`), so the Stata names,
+    `src_name` characteristics, case aliases and notes follow the same rules
+    as Parquet. Any probe failure or width mismatch keeps the engine's names
+    exactly as before (never a refusal); a headerless file keeps
+    `column0…`. Only the first file of a glob is sniffed (strict mode proves
+    one schema).
+107. **`mod()` reproduces native's truncated remainder (2026-09-01,
+    MOD-TRUNC-1, audit F7).** Stata's manual defines `mod(x,y) = x - y*floor(x/y)`,
+    but the executable behaviour for a non-integer modulus is
+    `r = x - y*trunc(x/y); r < 0 ? r + y : r` (native `mod(7, 0.00001)` is
+    `9.99999999911182e-06`, exactly `-8.88e-16 + 1e-5`, while the manual's
+    formula evaluated natively gives `-8.88e-16`). parqit emits that formula in
+    double; DuckDB's `fmod()` is the floor form and was rejected. Every value
+    verified against native: (7,1e-5) (1,0.1) (0.3,0.1) (5.5,2) (-5.5,2)
+    (1e15+0.5,1) (-7,3) (7,3) (2.5,0.3) (10,1e-5); `y <= 0` stays missing.
+108. **`%d` is a date format (2026-09-01, DFMT-1, audit F6).** Stata documents
+    `%d` (and `%-d`, `%d` with display tokens) as the older synonym of `%td`.
+    `classify_format` maps any `%d`/`%-d` not followed by a digit or `.` to
+    `Td`, so both writers and the lazy boundary treat it as a day count and
+    the file carries a `DATE`; the display format itself is restored verbatim.
+    No numeric display format begins that way (`%9.2f`, `%-12.0g`, `%9,2f`).
+109. **A string `(count)` target carries `%8.0g` (2026-09-01, COUNT-FMT-1,
+    audit F5).** Native `collapse` keeps the source's display format on every
+    target, count included (verified: `(count) n = price` keeps `%12.2f`), so
+    parqit keeps doing that for numeric sources; for a string source — a
+    parqit extension native refuses — the `%s` format is replaced by `%8.0g`
+    rather than being rejected at collect time with a note.
+110. **`drop in` numbers the rows instead of slicing (2026-09-01, DROP-IN-1,
+    audit F10).** `keep in` is a `LIMIT/OFFSET` over the ordered pipeline;
+    the complement keeps rows whose `row_number()` over the declared order
+    (engine order when none is declared — the same caveat as `_n` and `keep
+    in`, documented) lies outside `f..l`, and registers the same pending
+    range so an out-of-range bound fails loudly at materialisation, like
+    native's r(198). Native semantics reproduced: `2/3`, `3/l`, `-2/l`, `5`,
+    `f/2`, `1/l`, reversed/zero bounds refused, composition with a prior
+    `keep if` and with `_n`.
+111. **Tabulate labels travel as response records (2026-09-01, TAB-LABEL-1,
+    audit F12).** The plugin emits the tabulated variable's value-label
+    entries (`tvl`, `tvl1`/`tvl2`) from the view's carried definitions, and
+    the ado maps a numeric level to its label by numeric key comparison;
+    `nolabel` (a new option) or an unlabelled level falls back to the
+    formatted code. Counts, ordering and every `r()` result are unchanged.
+112. **Duplicates-list cells are joined with the unit separator (2026-09-01,
+    DUPLIST-SEP-1, audit F13)** — `\x1f` cannot occur in the hex-decoded text
+    of a Stata string the way a TAB can.
+113. **The Stata runner warns on a long temp root (2026-09-01,
+    HARNESS-PATH-1, audit F15).** Batch Stata wraps output at `linesize`
+    (255 in the tests), so a temp root beyond ~100 bytes pushes messages that
+    quote a path past the wrap and log-grep assertions miss their phrase.
+    `run_stata.sh` warns; `v67` compares blank-free as well, and `v70` undoes
+    the wrap (`\n> `) before searching. The runner keeps `/tmp` by default.
+114. **Percentiles are ranks, not lists (2026-09-01, PCT-WINDOW-1, audit
+    F16).** `collapse (median/p##)` and `tabstat` built each group's sorted
+    value list in memory (`list_sort(list(x))`); DuckDB cannot spill a list
+    aggregate, so under a 1 GB `memory_limit` that query failed with an
+    out-of-memory error at 200 million rows, with and without `by()`. The
+    rank formulation — `row_number()` over the group's nonmissing values and
+    `count()` per group, then Stata's rule on those ranks — completed under
+    the same limit (63 s for one group, 35 s for 200,000 groups) and ran the
+    20-million-row probe in 20 s instead of 24 s; the optimizer prunes the
+    unused columns before the window (verified with EXPLAIN). One cost:
+    without a memory limit the window materialisation used more memory than
+    the list did on that probe (peak RSS of the whole Stata process 8.7 GB
+    against 6.0 GB), but it is bounded by `memory_limit` (DuckDB's default is
+    80% of RAM) and spills, which the list never did. The arithmetic is the
+    same — `(x[np] + x[np+1])/2` for an integral `np`, `x[ceil(np)]`
+    otherwise, NULL for an all-missing group; `summarize, detail` already used
+    an order-based path and is unchanged. `v83` pins collapse against native
+    `collapse` (`cf`) and tabstat against native `tabstat, save`.

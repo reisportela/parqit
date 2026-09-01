@@ -1,4 +1,4 @@
-*! version 0.1.29 25aug2026
+*! version 0.1.30 01sep2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -648,7 +648,7 @@ program define _parqit_keep
     }
     if (`"`first'"' == "in") {
         gettoken first 0 : 0, parse(" ")
-        _parqit_op_keepin `0'
+        _parqit_op_keepin keep_in `0'
         exit
     }
     _parqit_op_names keep_vars `0'
@@ -660,6 +660,13 @@ program define _parqit_drop
     if (`"`first'"' == "if") {
         gettoken first 0 : 0, parse(" ")
         _parqit_op_filter drop_if `0'
+        exit
+    }
+    if (`"`first'"' == "in") {
+        * DROP-IN-1 (audit 2026-09-01, F10): native `drop in` exists; parqit
+        * answered "variable in not found" — the complement of keep in
+        gettoken first 0 : 0, parse(" ")
+        _parqit_op_keepin drop_in `0'
         exit
     }
     _parqit_op_names drop_vars `0'
@@ -703,7 +710,10 @@ program define _parqit_op_keepin
     * 2026-08-22 A3-9): `f' and `l' may be numbers, the letters f (first) and
     * l (last), or negative counts from the end (-1 = last); `l'/negatives
     * resolve against the view's current row count (one count query — rigor
-    * over cost), exactly like native `keep in`.
+    * over cost), exactly like native `keep in`. The first token is the plugin
+    * op: keep_in or drop_in (DROP-IN-1), which share the grammar.
+    gettoken op 0 : 0, parse(" ")
+    local verb = cond("`op'" == "drop_in", "drop", "keep")
     local range = strtrim(`"`0'"')
     local f 1
     local l .
@@ -731,7 +741,7 @@ program define _parqit_op_keepin
         else if (substr(`"``b''"', 1, 1) == "-") {
             capture confirm integer number ``b''
             if (_rc) {
-                di as err "parqit keep in: range must be f/l with integer, f/l or negative bounds"
+                di as err "parqit `verb' in: range must be f/l with integer, f/l or negative bounds"
                 exit 198
             }
             local `b' = `N' + ``b'' + 1
@@ -741,14 +751,15 @@ program define _parqit_op_keepin
     local bad = _rc
     capture confirm integer number `l'
     if (`bad' | _rc) {
-        di as err "parqit keep in: range must be f/l with integer, f/l or negative bounds"
+        di as err "parqit `verb' in: range must be f/l with integer, f/l or negative bounds"
         exit 198
     }
     if (`f' < 1 | `l' < `f') {
-        di as err "parqit keep in: invalid range `range' (observations 1 to `=cond("`N'" == "", "N", "`N'")')"
+        di as err "parqit `verb' in: invalid range `range' (observations 1 to `=cond("`N'" == "", "N", "`N'")')"
         exit 198
     }
     tempfile req
+    local _sq_op "`op'"
     local _sq_f `f'
     local _sq_l `l'
     mata: _parqit_wr_op_keepin_request("`req'")
@@ -2471,12 +2482,15 @@ end
 
 program define _parqit_tabulate, rclass
     version 16.0
-    syntax anything(name=vars) [, Missing ROW COL]
+    syntax anything(name=vars) [, Missing ROW COL NOLabel]
     local nv : word count `vars'
     if (`nv' < 1 | `nv' > 2) {
         di as err "parqit tabulate: one variable (oneway) or two (twoway)"
         exit 198
     }
+    * TAB-LABEL-1: value labels are displayed like native tabulate unless
+    * nolabel asks for the codes (read by the Mata printers)
+    local parqit_tab_nolabel = ("`nolabel'" != "")
     _parqit_ensure_plugin
     tempfile req resp
     local _sq_what = cond(`nv' == 2, "tab2", "tabulate")
@@ -2784,7 +2798,7 @@ void _parqit_wr_op_keepin_request(string scalar req)
 {
     _parqit_emit(req, _parqit_jobj((
         _parqit_jtext("cmd", "view_op"),
-        _parqit_jtext("op", "keep_in"),
+        _parqit_jtext("op", st_local("_sq_op") == "drop_in" ? "drop_in" : "keep_in"),
         _parqit_jpair("f", st_local("_sq_f")),
         _parqit_jpair("l", st_local("_sq_l")))))
 }
@@ -3339,7 +3353,8 @@ void _parqit_resp_decorate(string scalar resp)
 void _parqit_resp_describe(string scalar resp)
 {
     real scalar      i, k, _li, _nl
-    string scalar    line
+    real colvector   sel
+    string scalar    line, dt
     string rowvector f
     string colvector dnames, dtypes, snames, stypes, sfmts, _lines
 
@@ -3372,13 +3387,17 @@ void _parqit_resp_describe(string scalar resp)
     printf("  %s\n", 72 * "-")
     k = rows(snames)
     for (i = 1; i <= k; i++) {
-        printf("  %-32s %-18s %-10s %s\n",
-               snames[i],
-               (i <= rows(dtypes) ? dtypes[i] : ""),
-               stypes[i], sfmts[i])
+        /* DESCRIBE-ALIGN-1 (audit 2026-09-01, F3): the engine type is looked
+         * up by the variable's NAME (the dtype records now carry the Stata
+         * name, in the var records' manifest order); a positional fallback
+         * only when the name is absent. The old positional zip shifted every
+         * type after a Hive partition key, which the scan lists last while the
+         * manifest keeps it in its original place. */
+        sel = selectindex(dnames :== snames[i])
+        dt = (rows(sel) >= 1 ? dtypes[sel[1]] : (i <= rows(dtypes) ? dtypes[i] : ""))
+        printf("  %-32s %-18s %-10s %s\n", snames[i], dt, stypes[i], sfmts[i])
         st_local("parqit_dname_" + strofreal(i), snames[i])
-        st_local("parqit_dtype_" + strofreal(i),
-                 (i <= rows(dtypes) ? dtypes[i] : ""))
+        st_local("parqit_dtype_" + strofreal(i), dt)
         st_local("parqit_dstype_" + strofreal(i), stypes[i])
     }
     printf("\n")
@@ -3617,17 +3636,36 @@ string scalar _parqit_render_num(string scalar raw, string scalar fmt)
     return(out == "" ? raw : out)
 }
 
+/* TAB-LABEL-1 (audit 2026-09-01, F12): the value-label text of a numeric
+ * level (its engine text form), or "" when the level carries no label; keys
+ * compare numerically so 1 and 1.0 both find the entry for 1. */
+string scalar _parqit_vlabel(string scalar raw, string colvector keys,
+                             string colvector texts)
+{
+    real scalar v, i
+
+    if (rows(keys) == 0) return("")
+    v = strtoreal(raw)
+    if (v == .) return("")
+    for (i = 1; i <= rows(keys); i++) {
+        if (strtoreal(keys[i]) == v) return(texts[i])
+    }
+    return("")
+}
+
 void _parqit_print_tabulate(string scalar resp)
 {
-    real scalar      fh, total, rows, n, i
-    string scalar    line, kind, fmt
+    real scalar      fh, total, rows, n, i, uselab
+    string scalar    line, kind, fmt, raw, lab
     string rowvector f
-    string colvector vals
+    string colvector vals, lkeys, ltexts
     real colvector   counts
 
     fh = fopen(resp, "r")
     vals = J(0, 1, "")
     counts = J(0, 1, .)
+    lkeys = ltexts = J(0, 1, "")
+    uselab = (st_local("parqit_tab_nolabel") != "1")
     kind = "n"
     fmt = ""
     while ((line = fget(fh)) != J(0, 0, "")) {
@@ -3637,10 +3675,18 @@ void _parqit_print_tabulate(string scalar resp)
             fmt = _parqit_unhex(f[3])
             continue
         }
+        if (f[1] == "tvl") {
+            lkeys = lkeys \ _parqit_unhex(f[2])
+            ltexts = ltexts \ _parqit_unhex(f[3])
+            continue
+        }
         if (f[1] != "tab") continue
         counts = counts \ strtoreal(f[2])
-        vals = vals \ (kind == "n" ? _parqit_render_num(_parqit_unhex(f[3]), fmt)
-                                   : _parqit_unhex(f[3]))
+        raw = _parqit_unhex(f[3])
+        /* a labelled numeric level shows its label, like native tabulate */
+        lab = (kind == "n" & uselab) ? _parqit_vlabel(raw, lkeys, ltexts) : ""
+        vals = vals \ (lab != "" ? lab
+                                 : (kind == "n" ? _parqit_render_num(raw, fmt) : raw))
     }
     fclose(fh)
     total = sum(counts)
@@ -3801,12 +3847,15 @@ void _parqit_print_tab2(string scalar resp)
     real colvector   rowtot
     real rowvector   coltot
 
-    string scalar    k1, k2, f1, f2
-    string colvector rvd, cvd
+    string scalar    k1, k2, f1, f2, lab
+    string colvector rvd, cvd, lk1, lt1, lk2, lt2
+    real scalar      uselab
 
     fh = fopen(resp, "r")
     cells_r = cells_c = J(0, 1, "")
     cells_n = J(0, 1, .)
+    lk1 = lt1 = lk2 = lt2 = J(0, 1, "")
+    uselab = (st_local("parqit_tab_nolabel") != "1")
     k1 = k2 = "n"
     f1 = f2 = ""
     while ((line = fget(fh)) != J(0, 0, "")) {
@@ -3816,6 +3865,16 @@ void _parqit_print_tab2(string scalar resp)
             k2 = f[3]
             f1 = _parqit_unhex(f[4])
             f2 = _parqit_unhex(f[5])
+            continue
+        }
+        if (f[1] == "tvl1") {  /* TAB-LABEL-1: row-axis value labels */
+            lk1 = lk1 \ _parqit_unhex(f[2])
+            lt1 = lt1 \ _parqit_unhex(f[3])
+            continue
+        }
+        if (f[1] == "tvl2") {  /* column-axis value labels */
+            lk2 = lk2 \ _parqit_unhex(f[2])
+            lt2 = lt2 \ _parqit_unhex(f[3])
             continue
         }
         if (f[1] != "t2") continue
@@ -3837,11 +3896,22 @@ void _parqit_print_tab2(string scalar resp)
     rowtot = rowsum(M)
     coltot = colsum(M)
     total = sum(M)
-    /* RENDER-NATIVE-1: display labels use the variables' formats (numeric) */
+    /* RENDER-NATIVE-1: display labels use the variables' formats (numeric);
+     * TAB-LABEL-1: a labelled level shows its value label unless nolabel */
     rvd = rv
     cvd = cv
-    if (k1 == "n") for (i = 1; i <= r; i++) rvd[i] = _parqit_render_num(rv[i], f1)
-    if (k2 == "n") for (j = 1; j <= c; j++) cvd[j] = _parqit_render_num(cv[j], f2)
+    if (k1 == "n") {
+        for (i = 1; i <= r; i++) {
+            lab = uselab ? _parqit_vlabel(rv[i], lk1, lt1) : ""
+            rvd[i] = (lab != "" ? lab : _parqit_render_num(rv[i], f1))
+        }
+    }
+    if (k2 == "n") {
+        for (j = 1; j <= c; j++) {
+            lab = uselab ? _parqit_vlabel(cv[j], lk2, lt2) : ""
+            cvd[j] = (lab != "" ? lab : _parqit_render_num(cv[j], f2))
+        }
+    }
 
     displayas("text")
     printf("\n  %-20s", "")
@@ -4097,13 +4167,13 @@ void _parqit_print_duplist(string scalar resp)
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 2)
         if (f[1] == "duph") {
-            parts = ustrsplit(_parqit_unhex(f[2]), "\t")
+            parts = ustrsplit(_parqit_unhex(f[2]), char(31))   /* DUPLIST-SEP-1 */
             printf("\n  ")
             for (i = 1; i <= cols(parts); i++) printf("%-14s", abbrev(parts[i], 13))
             printf("\n  %s\n", (14 * cols(parts)) * "-")
         }
         else if (f[1] == "dupl") {
-            parts = ustrsplit(_parqit_unhex(f[2]), "\t")
+            parts = ustrsplit(_parqit_unhex(f[2]), char(31))   /* DUPLIST-SEP-1 */
             printf("  ")
             for (i = 1; i <= cols(parts); i++) printf("%-14s", abbrev(parts[i], 13))
             printf("\n")

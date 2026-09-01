@@ -1,301 +1,249 @@
-* ============================================================================
-* parqit basics — START HERE: use / save / merge / append, two ways
-*
-* This is the first do-file to run after installing parqit. It walks the four
-* base operations twice over the same small data:
-*
-*   A. the eager way ("pq-style"): read everything into Stata's memory first,
-*      then work — the right mental model when the data is small; and
-*   B. the parqit way (lazy): open a VIEW over the file, stack verbs (nothing
-*      runs), and materialise ONLY the result — the efficient path when the
-*      data is large, because what never enters Stata is never paid for.
-*
-* Every lazy result is asserted against a native-Stata twin, so the guide is
-* also a proof; it ends in VERDICT(PARQIT_BASICS): PASS. Runtime: seconds.
-*
-* Usage:
-*   . do parqit_basics.do                       (parqit installed/adopath'd)
-*   . do parqit_basics.do <repo_root> <plugin>  (development tree)
-*
-* The full feature tour (reshape, pivot, sql, hostile files, ...) is the
-* companion examples/parqit_tour.do; `help parqit` documents everything.
-* ============================================================================
+* parqit_basics.do
+* A first, self-contained course in reading, writing and lazy Parquet work.
+* It creates a small artificial labour panel with familiar NLS-style variables.
+* All files are written under Stata's temporary directory.
+* The do-file starts with -clear all-: save any unsaved work before running it.
+version 16.0
 clear all
 set more off
+set varabbrev off
 set linesize 100
-args repo plugin
 
-if (`"`repo'"' != "") {
-    adopath ++ `"`repo'/src/ado/p"'
-    global PARQIT_PLUGIN_PATH `"`plugin'"'
-}
-else {
-    * installed mode: if parqit is not on the adopath yet, try the repo-local
-    * install tree (this file lives in <repo>/examples, the tree in ado/plus/p)
-    capture which parqit
-    if (_rc) {
-        foreach try in "../ado/plus/p" "ado/plus/p" {
-            capture confirm file "`try'/parqit.ado"
-            if (_rc == 0) {
-                adopath ++ "`try'"
-                continue, break
-            }
-        }
-    }
-    which parqit
-}
+* In GUI Stata, type -parqit menu- once. Each block below names the matching
+* User > parqit dialog. A dialog writes the same command to the Results and
+* Review windows, so point-and-click and scripted work leave the same trail.
 
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "parqit basics — section 0: setup and small example data"
-di as txt "{hline 78}"
+global PARQIT_EXAMPLE_DIR "`c(tmpdir)'/parqit_ssc_examples"
+global PARQIT_WORKERS     "$PARQIT_EXAMPLE_DIR/nlswork_like.parquet"
+global PARQIT_INDUSTRIES  "$PARQIT_EXAMPLE_DIR/industries.parquet"
+global PARQIT_EARLY       "$PARQIT_EXAMPLE_DIR/workers_early.parquet"
+global PARQIT_LATE        "$PARQIT_EXAMPLE_DIR/workers_late.parquet"
+global PARQIT_SELECTED    "$PARQIT_EXAMPLE_DIR/selected_workers.parquet"
+global PARQIT_BY_YEAR     "$PARQIT_EXAMPLE_DIR/selected_by_year"
+global PARQIT_CSV         "$PARQIT_EXAMPLE_DIR/nlswork_like.csv"
+global PARQIT_FROM_CSV    "$PARQIT_EXAMPLE_DIR/nlswork_from_csv.parquet"
+capture mkdir "$PARQIT_EXAMPLE_DIR"
 
+display as text _newline "PARQIT BASICS: CHECK THE INSTALLATION"
 parqit version
 parqit selftest
-assert "`r(selftest)'" == "ok"
 
-* Everything this guide writes lives in one disposable folder.
-capture mkdir parqit_basics_files
-local W  "parqit_basics_files/workers.parquet"
-local F  "parqit_basics_files/firms.parquet"
-local X  "parqit_basics_files/workers_extra.parquet"
-local Wd "parqit_basics_files/workers.dta"
-local Fd "parqit_basics_files/firms.dta"
-local Xd "parqit_basics_files/workers_extra.dta"
-
-* A worker panel (120 obs), a firm lookup (20 obs) and a late-arrivals file
-* (10 obs). Each is saved both as .dta (for the native-Stata oracle) and as
-* Parquet via parqit — with no view open, `parqit save` writes the dataset in
-* memory, labels and all.
+* --------------------------------------------------------------------------
+* 1. Create an NLS-style worker panel and write the data in memory to Parquet
+* Menu: User > parqit > Collect into memory or save as Parquet...
+* Select "Write the pipeline result to Parquet ... (save)", tick "Write the
+* dataset in memory instead of the view (data)" and pick zstd as Compression.
 clear
-set obs 120
-gen long   id      = _n
-gen int    firm_id = ceil(_n / 6)
-gen int    year    = 2019 + mod(_n, 5)
-gen double wage    = 900 + 7*_n + 15*mod(_n, 4)
-gen str8   region  = cond(mod(firm_id, 3) == 0, "North", ///
-                     cond(mod(firm_id, 3) == 1, "Centre", "South"))
-gen byte   female  = mod(_n, 2)
-label variable wage "monthly wage"
+set obs 1440
+generate long   idcode     = ceil(_n / 6)
+generate int    year       = 1980 + mod(_n - 1, 6)
+generate byte   age        = 18 + mod(idcode, 18) + year - 1980
+generate float  tenure     = max(year - 1980 + mod(idcode, 4) - 1, 0)
+generate float  ttl_exp    = age - 17 - mod(idcode, 3)
+generate byte   hours      = 30 + mod(idcode + year, 16)
+generate byte   union      = mod(idcode + year, 4) == 0
+generate byte   married    = mod(idcode + year, 3) != 0
+generate byte   collgrad   = mod(idcode, 5) == 0
+generate byte   race       = 1 + mod(idcode, 3)
+generate byte   industry   = 1 + mod(idcode, 8)
+generate byte   occupation = 1 + mod(2*idcode + year, 6)
+generate double ln_wage    = 1.35 + .025*age + .015*tenure +          ///
+    .090*collgrad + .055*union + .002*hours + .010*mod(idcode, 7)
+replace ln_wage = . if mod(_n, 47) == 0
+replace hours   = . if mod(_n, 89) == 0
+replace union   = . if mod(_n, 113) == 0
+sort idcode year
+isid idcode year
+
+label data "Artificial NLS-style worker panel for the parqit examples"
+label variable idcode     "Worker identifier"
+label variable year       "Survey year"
+label variable ln_wage    "Log hourly wage"
+label variable ttl_exp    "Total labour-market experience"
+label variable tenure     "Tenure with current employer"
+label variable hours      "Usual weekly hours"
+label variable union      "Union member"
+label variable married    "Married"
+label variable collgrad   "College graduate"
+label variable race       "Race"
+label variable industry   "Industry code"
+label variable occupation "Occupation code"
 label define yesno 0 "No" 1 "Yes"
-label values female yesno
-sort id
-qui save `"`Wd'"', replace
-parqit save `"`W'"', replace
+label define race_lbl 1 "White" 2 "Black" 3 "Other"
+label values union married collgrad yesno
+label values race race_lbl
+notes _dta: Artificial teaching data; no real people are represented.
 
+parqit save "$PARQIT_WORKERS", replace data compression(zstd)
+
+* --------------------------------------------------------------------------
+* 2. Inspect a file and, when it is small enough, read it eagerly into Stata
+* Menu: User > parqit > Read Parquet data (lazy view or into memory)...
+* The Describe button runs -parqit describe- on the file named in the dialog.
+parqit path "$PARQIT_WORKERS"
+parqit describe "$PARQIT_WORKERS"
+parqit glimpse "$PARQIT_WORKERS"
 clear
-set obs 20
-gen int    firm_id  = _n
-gen double tfp      = 1 + _n/10
-gen str12  industry = "ind" + string(mod(_n, 4) + 1)
-label variable tfp "total factor productivity"
-sort firm_id
-qui save `"`Fd'"', replace
-parqit save `"`F'"', replace
+parqit use "$PARQIT_WORKERS", clear
+describe
+list idcode year age ln_wage union in 1/6, noobs
 
+* Values and Stata metadata make the round trip with the Parquet file.
+assert "`: variable label ln_wage'" == "Log hourly wage"
+assert "`: value label union'" == "yesno"
+
+* --------------------------------------------------------------------------
+* 3. Open a lazy view: the source stays on disk and memory stays untouched
+* Menu: User > parqit > Read Parquet data (lazy view or into memory)...
+* Leave "Read the data into memory now ... (clear)" unticked: a view opens.
 clear
-set obs 10
-gen long   id      = 1000 + _n
-gen int    firm_id = 10 + ceil(_n / 2)
-gen int    year    = 2024
-gen double wage    = 1400 + 11*_n
-gen str8   region  = "New"
-gen byte   female  = mod(_n, 2)
-label define yesno 0 "No" 1 "Yes"
-label values female yesno
-sort id
-qui save `"`Xd'"', replace
-parqit save `"`X'"', replace
+set obs 1
+generate str40 memory_note = "This dataset remains until collect"
 
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "section 1: USE — read into memory (eager) vs open a view (lazy)"
-di as txt "{hline 78}"
+parqit use using "$PARQIT_WORKERS"
 
-* A. Eager, pq-style: the whole file lands in memory right now. Perfect for
-*    small files — this is plain, fast I/O with the full type/label map.
-parqit use `"`W'"', clear
-assert _N == 120
-local k0 = c(k)
-sort id
-tempfile eager
-qui save `"`eager'"'
-di as txt "eager: " as res _N as txt " obs are in memory (labels restored too)"
+* Menu: User > parqit > Describe and explore data...
+parqit describe
+parqit head 5
+parqit count
 
-* B. Lazy, the parqit way: `use using` opens a VIEW — a plan over the file,
-*    not data. It returns instantly whether the file has 120 rows or 2 billion,
-*    and Stata's memory stays exactly as it was.
-clear
-parqit use using `"`W'"'
-assert _N == 0                        // nothing was loaded...
-parqit describe                       // ...yet we can see the schema,
-parqit head 5                         // preview rows,
-parqit count                          // count,
-assert r(N) == 120
-parqit summarize wage                 // and summarise — all computed by the
-assert _N == 0                        // engine; memory is STILL empty.
-di as txt "lazy: explored the file with 0 obs in memory — explore first, load last"
+* Menu: User > parqit > Summary statistics, tables, and correlations...
+parqit summarize ln_wage hours
 
-* Materialise only when (and if) you actually want the rows:
+* These commands queried the view; they did not replace the dataset in memory.
+assert _N == 1
+assert memory_note[1] == "This dataset remains until collect"
+
+* Build a plan using Stata-flavoured verbs. Nothing runs yet: each verb adds
+* one stage to a single query, so the same script scales to files far larger
+* than memory.
+* Menu: User > parqit > Keep or drop observations, or draw a sample...
+parqit keep if year >= 1983 & !missing(ln_wage)
+
+* Menu: User > parqit > Keep, drop, order, sort, or rename variables...
+parqit keep idcode year age tenure hours ln_wage union collgrad industry
+
+* Menu: User > parqit > Create or change variables...
+parqit gen double wage = exp(ln_wage)
+parqit gen double hourly_wage = wage / hours
+parqit sort idcode year
+
+* Menu: User > parqit > Views, SQL, and engine settings...
+* show prints the single query the plan compiles to.
+parqit show
+
+* Menu: User > parqit > Collect into memory or save as Parquet...
+* Only now does the result replace Stata's current dataset.
 parqit collect, clear
-assert _N == 120 & c(k) == `k0'
-sort id
-cf _all using `"`eager'"'             // cell-for-cell identical to the eager read
-parqit close
-di as txt "collect: the lazy path delivered exactly the eager result"
-
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "section 2: SAVE — write memory (eager) vs Parquet -> Parquet (lazy)"
-di as txt "{hline 78}"
-
-* A. Eager: with no view open, `parqit save` writes the in-memory dataset —
-*    the pq-style export. (Data is still the 120 workers from section 1.)
-qui count if year >= 2022
-local nfilt = r(N)
-parqit save "parqit_basics_files/mem_export.parquet", replace
-di as txt "eager save: the in-memory dataset went to Parquet"
-
-* B. Lazy: transform a file into another file WITHOUT touching memory. The
-*    view runs filter + derived column inside the engine and `parqit save`
-*    streams the result straight to disk.
-parqit use using `"`W'"'
-parqit keep if year >= 2022
-parqit gen double lwage = ln(wage)
-parqit save "parqit_basics_files/filtered.parquet", replace
-assert _N == 120                      // memory untouched throughout
-parqit describe "parqit_basics_files/filtered.parquet"
-assert r(n_rows) == `nfilt'
-di as txt "lazy save: `nfilt' filtered rows written; memory never touched"
-
-* With a view open, plain `parqit save` materialises the VIEW; add `data` to
-* export the in-memory dataset instead:
-parqit save "parqit_basics_files/mem_export2.parquet", replace data
-parqit describe "parqit_basics_files/mem_export2.parquet"
-assert r(n_rows) == 120
+list idcode year wage hourly_wage in 1/6, noobs
 parqit close
 
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "section 3: MERGE — out-of-core (lazy) vs native mergein (in-memory)"
-di as txt "{hline 78}"
-
-* The native oracle, built the classic way from the .dta twins:
-use `"`Wd'"', clear
-keep if year == 2022
-qui merge m:1 firm_id using `"`Fd'"', keep(match) keepusing(tfp industry) nogenerate
-sort id
-tempfile oracle_m
-qui save `"`oracle_m'"'
-
-* A. Lazy, the parqit way for LARGE data: the master never enters Stata.
-*    Filter and join run as one engine query; only the result is collected.
-clear
-parqit use using `"`W'"'
-parqit keep if year == 2022
-parqit merge m:1 firm_id using `"`F'"', keep(match) keepusing(tfp industry) nogenerate
+* A first look at a large file: prototype on a reproducible engine-side sample
+* (a percentage by default, a number of rows with the count option).
+* Menu: User > parqit > Keep or drop observations, or draw a sample...
+parqit use using "$PARQIT_WORKERS"
+parqit sample 10, seed(20260825)
+parqit count
 parqit collect, clear
+summarize ln_wage hours
 parqit close
-sort id
-cf _all using `"`oracle_m'"'
-di as txt "lazy merge: identical to native — and the master never entered memory"
 
-* B. mergein, the pq-style shape done efficiently: your data is ALREADY in
-*    memory and the disk side is a small lookup. mergein runs a NATIVE merge,
-*    reading only the needed columns of the file — no engine round-trip.
-parqit use `"`W'"', clear
-keep if year == 2022
-parqit mergein m:1 firm_id using `"`F'"', keep(match) keepusing(tfp industry) nogenerate
-sort id
-cf _all using `"`oracle_m'"'
-di as txt "mergein: native merge against a disk lookup — same result again"
-
-* Rule of thumb: small lookup + data in memory -> mergein;
-*                big-on-big                    -> lazy merge + collect/save.
-
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "section 4: APPEND — lazy append vs native appendin"
-di as txt "{hline 78}"
-
-* Native oracle from the .dta twins:
-use `"`Wd'"', clear
-append using `"`Xd'"'
-sort id
-tempfile oracle_a
-qui save `"`oracle_a'"'
-
-* A. Lazy: stack files on the engine; collect (or save) only the union.
-clear
-parqit use using `"`W'"'
-parqit append using `"`X'"'
-parqit collect, clear
+* --------------------------------------------------------------------------
+* 4. Run the same kind of plan from Parquet straight back to Parquet
+* The selected result never needs to enter Stata's memory.
+* Menu: User > parqit > Collect into memory or save as Parquet...
+parqit use using "$PARQIT_WORKERS"
+parqit keep if year >= 1983 & !missing(ln_wage)
+parqit keep idcode year age tenure hours ln_wage union collgrad industry
+parqit gen double wage = exp(ln_wage)
+parqit save "$PARQIT_SELECTED", replace compression(zstd)
 parqit close
-sort id
-cf _all using `"`oracle_a'"'
-di as txt "lazy append: identical to native append"
+parqit describe "$PARQIT_SELECTED"
 
-* B. appendin: data already in memory, disk rows appended NATIVELY.
-parqit use `"`W'"', clear
-parqit appendin using `"`X'"'
-sort id
-cf _all using `"`oracle_a'"'
-di as txt "appendin: native append of a disk file — same result again"
+* partition_by() writes a Hive directory tree (one subdirectory per value),
+* which the same commands read back as one table.
+parqit use using "$PARQIT_SELECTED"
+parqit save "$PARQIT_BY_YEAR", replace partition_by(year)
+parqit close
+parqit use using "$PARQIT_BY_YEAR"
+parqit describe
+parqit count
+parqit close
 
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "section 5: the payoff — a whole pipeline, one engine query"
-di as txt "{hline 78}"
-
-* Filter + derive + aggregate declared lazily, executed once. On real data the
-* engine reads only the columns involved and skips row groups the filter
-* excludes — this is where the lazy philosophy pays off.
+* --------------------------------------------------------------------------
+* 5. Combine files: lazy merge and append, many files as one table, and the
+*    native route when the data are already in memory
+* First create a tiny industry lookup in memory and write it to Parquet.
 clear
-parqit use using `"`W'"'
-parqit keep if !missing(wage) & year >= 2021
-parqit gen double lwage = ln(wage)
-parqit collapse (mean) mlwage = lwage (count) n = lwage, by(firm_id year)
-parqit show                           // the single SQL query this compiled to
+set obs 8
+generate byte industry = _n
+generate str18 sector = cond(inrange(industry, 1, 2), "Manufacturing",  ///
+    cond(inrange(industry, 3, 4), "Trade",                             ///
+    cond(inrange(industry, 5, 6), "Services", "Public and other")))
+generate double productivity = 90 + 7*industry
+label variable sector "Broad industry group"
+label variable productivity "Industry productivity index"
+parqit save "$PARQIT_INDUSTRIES", replace data compression(zstd)
+
+* Menu: User > parqit > Combine datasets (merge, append, joinby)...
+parqit use using "$PARQIT_SELECTED"
+parqit merge m:1 industry using "$PARQIT_INDUSTRIES",                 ///
+    keep(match) keepusing(sector productivity) nogenerate
 parqit collect, clear
-sort firm_id year
-tempfile pipeline
-qui save `"`pipeline'"'
+list idcode year industry sector productivity in 1/8, noobs
+parqit close
 
-* Native twin of the same pipeline:
-use `"`Wd'"', clear
-keep if !missing(wage) & year >= 2021
-gen double lwage = ln(wage)
-collapse (mean) mlwage_o = lwage (count) n_o = lwage, by(firm_id year)
-sort firm_id year
-qui merge 1:1 firm_id year using `"`pipeline'"', assert(match) nogenerate
-gen double dm = reldif(mlwage, mlwage_o)
-qui summ dm
-assert r(max) < 1e-12
-assert n == n_o
-local ncells = _N
-di as txt "pipeline: every aggregated cell equals native Stata"
+* Split one source into two disk results, then append them as one lazy table.
+parqit use using "$PARQIT_WORKERS"
+parqit keep if year <= 1982
+parqit save "$PARQIT_EARLY", replace compression(zstd)
+parqit close
 
-* Same pipeline, other ending: straight to disk, memory never involved. The
-* view is still open (collect does not consume it), so just save it.
-parqit save "parqit_basics_files/firm_year.parquet", replace
-parqit describe "parqit_basics_files/firm_year.parquet"
-assert r(n_rows) == `ncells'
+parqit use using "$PARQIT_WORKERS"
+parqit keep if year >= 1983
+parqit save "$PARQIT_LATE", replace compression(zstd)
+parqit close
+
+parqit use using "$PARQIT_EARLY"
+parqit append using "$PARQIT_LATE"
+parqit count
+assert r(N) == 1440
 parqit close _all
 
-* ----------------------------------------------------------------------------
-di as txt _n "{hline 78}"
-di as txt "recap — the eager-to-lazy translation card"
-di as txt "{hline 78}"
+* Many files, one table: a glob (or a Hive directory) opens as a single view,
+* so a dataset stored as hundreds of Parquet files needs no append at all.
+parqit use using "$PARQIT_EXAMPLE_DIR/workers_*.parquet"
+parqit count
+assert r(N) == 1440
+parqit close
 
-di as txt "  read a file        parqit use f, clear          (eager, small data)"
-di as txt "                     parqit use using f  ... parqit collect, clear   (lazy)"
-di as txt "  write a file       parqit save f, replace       (memory -> Parquet)"
-di as txt "                     view + verbs + parqit save f, replace  (disk -> disk)"
-di as txt "  merge              data in memory + small lookup  -> parqit mergein"
-di as txt "                     big-on-big                     -> lazy parqit merge"
-di as txt "  append             data in memory + small file    -> parqit appendin"
-di as txt "                     files -> one result             -> lazy parqit append"
-di as txt "  golden rule        explore first, load last: describe/head/count/"
-di as txt "                     summarize run on the view without loading anything"
+* When the data are already in memory and the lookup lives on disk, keep the
+* data put: mergein and appendin run Stata's native merge and append against
+* a file that parqit reads, taking only the columns you ask for.
+* Menu: User > parqit > Combine datasets (merge, append, joinby)...
+parqit use "$PARQIT_EARLY", clear
+parqit mergein m:1 industry using "$PARQIT_INDUSTRIES",               ///
+    keep(match) keepusing(sector productivity) nogenerate
+parqit appendin using "$PARQIT_LATE"
+assert _N == 1440
+list idcode year industry sector productivity in 1/4, noobs
 
-di as result _n "VERDICT(PARQIT_BASICS): PASS — use/save/merge/append verified eager vs lazy against native Stata"
+* --------------------------------------------------------------------------
+* 6. Other inputs: a delimited text file converted to Parquet without loading it
+* parqit also opens .csv/.tsv/.txt, Stata .dta and Excel sources as lazy views.
+* Text carries no storage types or labels, so the converted file holds plain
+* numbers; the Parquet written in section 1 keeps the typed, labelled data.
+* Menu: User > parqit > Read Parquet data (lazy view or into memory)...
+parqit use "$PARQIT_WORKERS", clear
+export delimited using "$PARQIT_CSV", replace nolabel
+clear
+parqit use using "$PARQIT_CSV"
+parqit describe
+parqit count
+parqit save "$PARQIT_FROM_CSV", replace compression(zstd)
+parqit close
+parqit describe "$PARQIT_FROM_CSV"
+
+display as result _newline "parqit_basics.do complete"
+display as text "Example files are in $PARQIT_EXAMPLE_DIR"
+display as text "Next: run parqit_tour.do for lazy exploration, statistics and SQL."

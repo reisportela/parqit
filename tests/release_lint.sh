@@ -107,12 +107,21 @@ for dlg in "$REPO"/src/ado/p/parqit_*.dlg; do
 done
 
 # --- parqit.pkg manifest is coherent (a net install reads it line by line) ----
-# every 'f <file>' the package ships must exist in the source ado dir (a missing
+# every 'f <file>' the package ships must exist in the source tree (a missing
 # one aborts net install on the target — the historical .dlg-not-shipped bug).
+# Installation files live in src/ado/p; the ancillary .do crash courses in
+# examples/ — and the release workflow must copy each of them beside the
+# package files, or net install / net get fails on the target.
 while read -r _ fn _; do
     [ -n "$fn" ] || continue
-    [ -f "$REPO/src/ado/p/$fn" ] || \
-        err "parqit.pkg ships '$fn' but src/ado/p/$fn does not exist"
+    case "$fn" in
+        *.do) src="examples/$fn" ;;
+        *)    src="src/ado/p/$fn" ;;
+    esac
+    [ -f "$REPO/$src" ] || err "parqit.pkg ships '$fn' but $src does not exist"
+    grep -qF -- "$src" "$REPO/.github/workflows/build.yml" || \
+        grep -qE -- "$(dirname "$src")/parqit_\*\.${fn##*.}" "$REPO/.github/workflows/build.yml" || \
+        err "parqit.pkg ships '$fn' but the release workflow never copies $src"
 done < <(grep -E '^f ' "$REPO/src/ado/p/parqit.pkg")
 
 # every 'g <PLAT> <binary> ...' must name a per-OS binary the release workflow

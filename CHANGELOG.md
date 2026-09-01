@@ -6,6 +6,121 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.30] — 2026-09-01
+
+Remediation of the holistic adversarial audit of 2026-09-01
+(`docs/audits/AUDITORIA_ADVERSARIAL_HOLISTICA_PARQIT_2026-09-01.md`, findings
+F1–F16, tasks T1–T9): every finding is fixed or documented, each with a
+pinned test (`tests/verify_suite/v78`–`v83`, `audit_repro/`), and the two
+crash-course do-files now ship inside the package.
+
+### Changed
+- **Examples reorganised for the SSC submission (2026-08-28).**
+  `examples/parqit_basics.do` and `examples/parqit_tour.do` are now the two
+  self-contained crash courses that ship with the SSC package as ancillary
+  files (`ssc install parqit, all replace`): artificial NLS-style data under
+  `c(tmpdir)`, every block annotated with its **User > parqit** dialog, and
+  between them every public verb except `parqit open _data`. Their former
+  oracle-checked versions moved, content-preserving, into the integration
+  tests that already ran them: `tests/integration/t14_basics.do` and
+  `tests/integration/t13_tour.do` (which keeps its auxiliary dispatcher
+  checks). The help file's Examples paragraph and the README describe the new
+  layout. `parqit.pkg` now lists the two `.do` files with `f` lines and the
+  release workflow ships them beside the package files (every zip and the
+  loose release assets), so `net get parqit, from(...)` and
+  `ssc install parqit, all` deliver them and the SSC candidate needs no help
+  overlay; `tests/release_lint.sh` checks that every `f` file exists and is
+  copied by the workflow.
+- **`collapse` and `tabstat` percentiles are computed out of core
+  (PCT-WINDOW-1; F16).** `median`/`p##` were built from a per-group
+  in-memory sorted list (`list_sort(list(x))`), which the engine cannot
+  spill: under a 1 GB memory limit the old query failed with an
+  out-of-memory error on 200 million rows, with and without `by()`. They are
+  now Stata's percentile rule applied to per-group ranks (a window over the
+  nonmissing values) that spills to the temporary directory: the same
+  200-million-row collapse completes under the same limit, and the
+  20-million-row probe runs faster (24 s to 20 s). Values and arithmetic are
+  unchanged — `(x[np] + x[np+1])/2` for an integral `np`, `x[ceil(np)]`
+  otherwise — and `tests/verify_suite/v83_collapse_percentiles.do` pins them
+  against native `collapse` (`cf`) and native `tabstat, save`: odd/even/
+  one-row/all-missing groups, ties, integer and float sources, p1–p99, with
+  and without `by()`, beside `first`/`last`.
+
+### Fixed
+- **Float variables compared with decimal literals now compare in double,
+  as native Stata does (FLOAT-LIT-1; audit 2026-09-01, F2).** The engine
+  bound `x == 0.1` on a `float` column by casting the literal down to
+  single precision, so the comparison was true for a float holding 0.1 and
+  `x > 0.1` was false — the opposite of native — in `keep if`/`drop if`/
+  `count if`, `gen`/`replace` qualifiers, `inrange()`, `inlist()`, `cond()`
+  and `round()`'s unit. A non-integral literal float32 cannot represent is
+  now typed `DOUBLE` in comparisons (the engine widens the column, the
+  filter still pushes into the scan); integral literals keep their integer
+  type so integer-key filters are unchanged. Pinned by unit tests and
+  `tests/verify_suite/v79_float_literal_compare.do` (66 filters × two
+  missing modes against native).
+- **A string partition key holding the text `NULL` or
+  `__HIVE_DEFAULT_PARTITION__` is refused before the tree is published
+  (PART-STRKEY-1; F1).** The engine names the directory of a missing
+  partition that way and read the value back as missing (`""`), silently.
+  The staged tree is checked and discarded on refusal (memory and view save
+  alike); a foreign tree carrying such a directory under a string key loads
+  with a `note:` on both read paths. Every other string value (empty, `=`,
+  `/`, space, `%`, `.`, Unicode, case-distinct, numeric-looking) and a
+  missing numeric/date key round-trip exactly (`v78_partition_string_keys`).
+- **`parqit describe` of a Hive tree, or of a glob over one, paired the
+  engine types with the wrong variables (DESCRIBE-ALIGN-1; F3).** The types
+  were emitted in scan order (partition key last) and zipped positionally
+  with the manifest-ordered variable list, shifting every type after the key
+  in the printed table and in `r(type_i)`. Types are now keyed by name
+  (`v80_describe_alignment`, `audit_repro/repro_describe_hive_type_shift.do`).
+- **Delimited-text header names get the Parquet name recovery
+  (CSV-HEADER-1; F4).** A CSV whose header repeats a name, or repeats it in
+  another case (`a,a,b,A`), loaded the engine's deduplicated `a, a_1, b, A_2`
+  silently. The raw header is now read back with the sniffed dialect and
+  aligned with the scan: an exact duplicate keeps `a_1` with
+  `char a_1[src_name]`, a case-distinct name is exact in Stata (alias inside
+  the lazy view, with a note), an empty header cell becomes `v#`
+  (`v81_csv_header_names`).
+- The planner's structural notes (a Hive key directory the engine reads as
+  missing, a relaxed union folding a case-variant, metadata that could not
+  be restored) are now printed by the lazy `parqit use using` too; they used
+  to reach only the eager read.
+- `mod(x, y)` with a non-integer modulus now matches native Stata
+  (MOD-TRUNC-1; F7): `mod(7, 0.00001)` is `9.99999999911e-06`, not
+  `-8.9e-16` — native computes the truncated remainder shifted by `+y` when
+  negative, not the manual's `x - y*floor(x/y)`; operands are double so a
+  float column is not folded.
+- The old-style daily date formats `%d`, `%-d` and `%d<tokens>` (Stata's
+  documented synonyms of `%td`) are classified as dates (DFMT-1; F6): a `%d`
+  variable is written as a Parquet `DATE` (a `date32` for third parties)
+  instead of a raw INT32, and reads back with its format and values intact.
+- A `collapse (count)` of a string source (parqit's extension) no longer
+  inherits the source's `%s` display format onto the numeric count, which
+  made every collect print "skipping display format" (COUNT-FMT-1; F5);
+  numeric sources keep their format, as native does.
+- `parqit duplicates list` keeps a TAB inside a string cell in that cell
+  (DUPLIST-SEP-1; F13).
+- `tests/run_stata.sh` warns when its temporary directory is long enough
+  for Stata to wrap quoted paths past `linesize`; `v67`/`v70` compare their
+  expected phrases wrap-insensitively (HARNESS-PATH-1; F15).
+
+### Added
+- `float(x)` in lazy expressions: rounds to float precision, the native
+  idiom for comparing a float variable with a decimal literal
+  (`x == float(0.1)`); a value beyond ±1.70e38 is missing.
+- `parqit drop in f/l` (DROP-IN-1; F10): the complement of `keep in` over
+  the same order, with the same `f`/`l`/negative bounds grammar and the same
+  validation against the real count; also on the filter dialog.
+- `parqit tabulate` displays a labelled numeric variable through its value
+  labels, as native does, in the one-way and two-way forms; `nolabel` shows
+  the codes (TAB-LABEL-1; F12). `r()` results are unchanged.
+- The help documents the remaining expression-dialect differences found by
+  the audit: `ustrupper()`/`ustrlower()` simple case mapping, no multiline
+  mode in `regexm()`, unary plus accepted, values below `mindouble` missing.
+- `tests/verify_suite/v82_audit_fixes_20260901.do` pins every item above;
+  `v83_collapse_percentiles.do` pins the out-of-core percentiles.
+
 ## [0.1.29] — 2026-08-25
 
 Menu and dialog review against StataCorp's own interface guidelines

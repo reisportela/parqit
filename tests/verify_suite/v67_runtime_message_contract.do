@@ -42,6 +42,9 @@ program define _v67_grep, rclass
         }
         else {
             if (strpos(`"`macval(cur)'"', `"`needle'"')) local found 1
+            * HARNESS-PATH-1: a wrap that landed inside a word (or a wrap that
+            * Stata padded) must not hide the phrase — compare blank-free too
+            if (strpos(subinstr(`"`macval(cur)'"', " ", "", .), subinstr(`"`needle'"', " ", "", .))) local found 1
             local cur `"`macval(line)'"'
         }
         file read `fh' line

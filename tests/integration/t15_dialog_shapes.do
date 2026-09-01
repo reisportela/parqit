@@ -210,6 +210,8 @@ capture noisily parqit keep in 2/-1
 _shape `=_rc' "parqit keep in 2/-1"
 capture noisily parqit keep in f/10
 _shape `=_rc' "parqit keep in f/10"
+capture noisily parqit drop in 2/3
+_shape `=_rc' "parqit drop in 2/3"
 capture noisily parqit sample 50
 _shape `=_rc' "parqit sample #"
 capture noisily parqit sample 5, count seed(1)

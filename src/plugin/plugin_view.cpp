@@ -775,6 +775,14 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     std::string sel;
     std::vector<ViewCol> cols;
     std::vector<std::string> warns, drops;
+    /* PART-STRKEY-1 (audit 2026-09-01): the planner's structural notes (a
+     * Hive key directory the engine reads as missing, a relaxed union folding
+     * a case-variant, metadata that could not be restored) reach the lazy
+     * open too — they used to be printed only by the eager fetch. Per-column
+     * rename notes ("column … loaded as …") are restated below in the view's
+     * own words, so those are skipped here. */
+    for (const auto &wm : meta_ctx.warnings)
+        if (wm.rfind("column ", 0) != 0) warns.push_back(wm);
     std::map<std::string, std::string> original_to_live;
     /* F8: the eager loader records a sanitised column's original file name in
      * `char var[src_name]`; carry the same provenance on the lazy path through
@@ -1097,6 +1105,8 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                                       req.value("force", false));
     } else if (op == "keep_in") {
         e = candidate.keep_in(req.value("f", 0LL), req.value("l", 0LL));
+    } else if (op == "drop_in") {
+        e = candidate.drop_in(req.value("f", 0LL), req.value("l", 0LL));
     } else if (op == "sample") {
         e = candidate.sample(req.value("amount", 0.0), req.value("count", false),
                              req.value("seed", -1LL));
@@ -2933,6 +2943,26 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         cry(err);
         return kRcEngine;
     }
+    /* TAB-LABEL-1 (audit 2026-09-01, F12): the value-label entries of a
+     * tabulated variable ride along (kind|hex(value)|hex(text)) so the ado can
+     * display labels the way native tabulate does; nothing is emitted for a
+     * variable without an attached, carried label */
+    auto emit_vallab = [&](const char *kind, const std::string &var) {
+        std::string lab;
+        for (const auto &c : g_view_ref().cols())
+            if (c.name == var) lab = c.vallab;
+        if (lab.empty()) return;
+        const json &vl = g_view_ref().vallabs();
+        if (!vl.is_object() || !vl.contains(lab)) return;
+        const json &def = vl[lab];
+        if (!def.is_object() || !def.contains("entries") || !def["entries"].is_array())
+            return;
+        auto js = [](const json &x) { return x.is_string() ? x.get<std::string>() : x.dump(); };
+        for (const auto &e : def["entries"]) {
+            if (!e.is_array() || e.size() != 2) continue;
+            w.rec(kind, {}, {js(e[0]), js(e[1])});
+        }
+    };
 
     if (what == "summarize") {
         std::vector<std::string> targets;
@@ -3335,6 +3365,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
          * levels with the variable's display format, as native tabulate does;
          * the header record carries kind and format per axis */
         w.rec("t2h", {std::string(1, k1), std::string(1, k2)}, {f1, f2});
+        if (k1 == 'n') emit_vallab("tvl1", vars[0]);
+        if (k2 == 'n') emit_vallab("tvl2", vars[1]);
         std::string base2 = base;
         if (!incmiss) {
             base2 = "(SELECT * FROM " + base + " WHERE " + g1 +
@@ -3410,6 +3442,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         /* RENDER-NATIVE-1 (A3-6): the ado renders numeric levels with the
          * variable's display format, as native tabulate does */
         w.rec("tabh", {std::string(1, k1)}, {f1});
+        if (k1 == 'n') emit_vallab("tvl", vars[0]);
         std::string where = incmiss ? std::string(" ")
                                     : " WHERE " + g + " IS NOT NULL ";
         /* TAB-FLOAT-1: render integer-valued numeric levels without a trailing
@@ -3619,15 +3652,17 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit duplicates list: " + err);
                 return kRcEngine;
             }
+            /* DUPLIST-SEP-1 (audit 2026-09-01, F13): cells are joined with
+             * the ASCII unit separator, never a TAB a string value can hold */
             std::string hdr;
             for (size_t i = 0; i < cols.size(); i++)
-                hdr += (i ? "\t" : "") + cols[i].name;
+                hdr += (i ? "\x1f" : "") + cols[i].name;
             w.rec("duph", {}, {hdr});
             idx_t n = duckdb_row_count(&res);
             for (idx_t i = 0; i < n; i++) {
                 std::string row;
                 for (idx_t c = 0; c < duckdb_column_count(&res); c++) {
-                    if (c) row += "\t";
+                    if (c) row += "\x1f";
                     if (duckdb_value_is_null(&res, c, i)) row += ".";
                     else {
                         char *v = duckdb_value_varchar(&res, c, i);
@@ -3725,8 +3760,38 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 return kRcUsage;
             }
         }
+        auto pct_of = [](const std::string &st, double *p) -> bool {
+            if (st == "median") { *p = 50; return true; }
+            return st.size() > 1 && st[0] == 'p' && parqit::atod(st.substr(1), p) &&
+                   *p > 0 && *p < 100;
+        };
+        const std::string g = by.empty() ? "" : norm_view_key(by);
+        const std::string where = by.empty() ? "" : " WHERE " + g + " IS NOT NULL";
+        /* PCT-WINDOW-1: median/p## are Stata's percentile rule over per-group
+         * ranks (a spillable window), not a per-group in-memory sorted list —
+         * the same helper stage View::collapse builds. */
+        std::map<std::string, std::pair<std::string, std::string>> pct_helpers;
+        std::string winsel;
+        for (const auto &t : targets) {
+            double p;
+            bool needs = false;
+            for (const auto &st : stats) needs = needs || pct_of(st, &p);
+            if (!needs) continue;
+            const std::string prn = g_view_ref().fresh_helper("prn"),
+                              pn = g_view_ref().fresh_helper("pn");
+            const std::string ref = quote_ident(t);
+            const std::string nullpart = "(" + ref + " IS NULL)";
+            winsel += ", (CASE WHEN " + ref + " IS NULL THEN NULL ELSE row_number() OVER "
+                      "(PARTITION BY " + (g.empty() ? nullpart : g + ", " + nullpart) +
+                      " ORDER BY " + ref + ") END) AS " + quote_ident(prn);
+            winsel += ", count(" + ref + ") OVER (" +
+                      (g.empty() ? std::string() : "PARTITION BY " + g) + ") AS " +
+                      quote_ident(pn);
+            pct_helpers[t] = {prn, pn};
+        }
         auto stat_sql = [&](const std::string &st,
-                            const std::string &r) -> std::string {
+                            const std::string &t) -> std::string {
+            const std::string r = quote_ident(t);
             if (st == "n" || st == "count") return "count(" + r + ")";
             if (st == "mean") return "avg(" + r + ")";
             if (st == "sd") return "stddev_samp(" + r + ")";
@@ -3735,32 +3800,32 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             if (st == "min") return "min(" + r + ")";
             if (st == "max") return "max(" + r + ")";
             if (st == "range") return "max(" + r + ") - min(" + r + ")";
-            if (st == "median" || st == "p50") return parqit::stata_pctile_sql(r, 50);
-            if (st.size() > 1 && st[0] == 'p') {
-                double p;
-                if (parqit::atod(st.substr(1), &p) && p > 0 && p < 100)
-                    return parqit::stata_pctile_sql(r, p);
+            double p;
+            if (pct_of(st, &p)) {
+                const auto &h = pct_helpers.at(t);
+                return parqit::pct_window_sql(r, h.first, h.second, p);
             }
             return "";
         };
         std::string sel;
         for (const auto &t : targets)
             for (const auto &st : stats) {
-                std::string a = stat_sql(st, quote_ident(t));
+                std::string a = stat_sql(st, t);
                 if (a.empty()) {
                     cry("parqit tabstat: unknown statistic " + st);
                     return kRcUsage;
                 }
                 sel += (sel.empty() ? "" : ", ") + a;
             }
-        const std::string g = by.empty() ? "" : norm_view_key(by);
         std::string gsel = by.empty() ? "" : "CAST(" + g +
                                                  " AS VARCHAR) AS __parqit_g, ";
-        std::string tail = by.empty() ? "" : " WHERE " + g +
-                                                 " IS NOT NULL GROUP BY " + g +
-                                                 " ORDER BY " + g + " NULLS LAST";
+        std::string from = base;
+        std::string tail = by.empty() ? "" : " GROUP BY " + g + " ORDER BY " + g +
+                                                 " NULLS LAST";
+        if (winsel.empty()) tail = where + tail;
+        else from = "(SELECT *" + winsel + " FROM " + base + where + ")";
         duckdb_result res;
-        if (!s.query("SELECT " + gsel + sel + " FROM " + base + tail, &res, &err)) {
+        if (!s.query("SELECT " + gsel + sel + " FROM " + from + tail, &res, &err)) {
             cry("parqit tabstat: " + err);
             return kRcEngine;
         }

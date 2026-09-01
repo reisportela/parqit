@@ -381,6 +381,54 @@ static std::string glob_escape(const std::string &p) {
     return out;
 }
 
+/* PART-STRKEY-1 (audit 2026-09-01, F1): the engine's Hive writer names the
+ * directory of a string partition value "NULL" (or
+ * "__HIVE_DEFAULT_PARTITION__") exactly like the directory of a MISSING key,
+ * and its reader maps both back to SQL NULL — so a legitimate string value
+ * silently became "" on read (a numeric key is fine: its NULL directory IS
+ * the missing value). parqit never writes a NULL string (the lazy boundary
+ * and both in-memory writers fold it to ''), so under a VARCHAR key such a
+ * directory can only have come from the literal text. Checked on the staged
+ * tree before it is published; "" when clean, else the loud refusal. */
+static std::string partition_string_keys_check(Session &s, const std::string &query_sql,
+                                               const std::vector<std::string> &keys,
+                                               const std::string &staged_root) {
+    namespace fs = std::filesystem;
+    std::set<std::string> str_keys;
+    {
+        duckdb_result res;
+        std::string err;
+        if (!s.query("SELECT * FROM (" + query_sql + ") LIMIT 0", &res, &err))
+            return "could not probe the partition key types: " + err;
+        const idx_t n = duckdb_column_count(&res);
+        for (idx_t c = 0; c < n; c++) {
+            const char *nm = duckdb_column_name(&res, c);
+            if (!nm) continue;
+            if (std::find(keys.begin(), keys.end(), nm) == keys.end()) continue;
+            if (duckdb_column_type(&res, c) == DUCKDB_TYPE_VARCHAR) str_keys.insert(nm);
+        }
+        duckdb_destroy_result(&res);
+    }
+    if (str_keys.empty()) return "";
+    std::error_code ec;
+    fs::recursive_directory_iterator it(fs::u8path(staged_root), ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code ec2;
+        if (!it->is_directory(ec2)) continue;
+        const std::string leaf = it->path().filename().u8string();
+        const size_t eq = leaf.find('=');
+        if (eq == std::string::npos || eq == 0) continue;
+        const std::string key = leaf.substr(0, eq), val = leaf.substr(eq + 1);
+        if (!str_keys.count(key)) continue;
+        if (val == "NULL" || val == "__HIVE_DEFAULT_PARTITION__")
+            return "partition_by(" + key + "): the string value \"" + val +
+                   "\" cannot be written as a partition directory — the engine reads "
+                   "that directory back as a missing partition, so the value would "
+                   "load as \"\"; recode it first (parqit replace) or save a single file";
+    }
+    return "";
+}
+
 /* GLOB-2: user-facing wildcards are `*` and `?` ONLY. A `[` is always a
  * literal byte of the filename: bracket names are common (browser download
  * copies like `data[1].parquet`), bracket character-classes in a Stata
@@ -440,6 +488,9 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
          * leave paths_sql "[]" — every parquet_* metadata probe is skipped and
          * columns size from the data scan (correct for CSV). */
         s.paths_sql = "[]";
+        /* CSV-HEADER-1: the first entry, already glob-escaped like the list */
+        const size_t comma = list.find("', '");
+        s.csv_first_sql = comma == std::string::npos ? list : list.substr(0, comma + 1);
         s.scan_sql = "read_csv_auto(" + paths + opts + ")";
     } else {
         s.paths_sql = paths;
@@ -788,38 +839,40 @@ ST_retcode plan_columns(Session &s, const Source &src,
     /* true leaf names seen (the first file; every file when relaxed) — for
      * the Hive key clash check below (HIVE-CLASH-1) */
     std::vector<std::string> leaf_names_seen;
+    auto is_dedup_of = [](const std::string &scan, const std::string &leaf) {
+        if (scan.size() <= leaf.size() + 1) return false;
+        if (scan.compare(0, leaf.size(), leaf) != 0) return false;
+        size_t i = leaf.size();
+        while (i < scan.size()) {
+            if (scan[i] != '_') return false;
+            size_t j = i + 1;
+            while (j < scan.size() && scan[j] >= '0' && scan[j] <= '9') j++;
+            if (j == i + 1) return false; /* "_" with no digits */
+            i = j;
+        }
+        return true;
+    };
+    /* map scan column c back to its true leaf name when the scan name is
+     * one of the engine's rewrites of it: a dedup-suffix shape, or the
+     * binder's C<index> for an EMPTY leaf name (A2-15(1), audit
+     * 2026-08-22) — which the sanitiser then turns into v<position>. The
+     * CSV reader names an empty header cell column<index> (CSV-HEADER-1). */
+    auto recover_at = [&](size_t c, const std::string &leaf) {
+        if (c >= plans.size()) return;
+        const std::string &scan = plans[c].source_name;
+        if (scan == leaf) return;
+        if (leaf.empty()) {
+            if (scan == parqit::duckdb_empty_column_name(c) ||
+                scan == "column" + std::to_string(c))
+                ctx->parquet_names[scan] = "";
+        } else if (is_dedup_of(scan, leaf)) {
+            /* NAME-CASE-1: the true name is restored below as the Stata
+             * name (case-distinct names are distinct variables in Stata);
+             * an EXACT duplicate still surfaces as a loud sanitiser rename */
+            ctx->parquet_names[scan] = leaf;
+        }
+    };
     if (src.paths_sql != "[]" && !src.paths_sql.empty()) {
-        auto is_dedup_of = [](const std::string &scan, const std::string &leaf) {
-            if (scan.size() <= leaf.size() + 1) return false;
-            if (scan.compare(0, leaf.size(), leaf) != 0) return false;
-            size_t i = leaf.size();
-            while (i < scan.size()) {
-                if (scan[i] != '_') return false;
-                size_t j = i + 1;
-                while (j < scan.size() && scan[j] >= '0' && scan[j] <= '9') j++;
-                if (j == i + 1) return false; /* "_" with no digits */
-                i = j;
-            }
-            return true;
-        };
-        /* map scan column c back to its true leaf name when the scan name is
-         * one of the engine's rewrites of it: a dedup-suffix shape, or the
-         * binder's C<index> for an EMPTY leaf name (A2-15(1), audit
-         * 2026-08-22) — which the sanitiser then turns into v<position> */
-        auto recover_at = [&](size_t c, const std::string &leaf) {
-            if (c >= plans.size()) return;
-            const std::string &scan = plans[c].source_name;
-            if (scan == leaf) return;
-            if (leaf.empty()) {
-                if (scan == parqit::duckdb_empty_column_name(c))
-                    ctx->parquet_names[scan] = "";
-            } else if (is_dedup_of(scan, leaf)) {
-                /* NAME-CASE-1: the true name is restored below as the Stata
-                 * name (case-distinct names are distinct variables in Stata);
-                 * an EXACT duplicate still surfaces as a loud sanitiser rename */
-                ctx->parquet_names[scan] = leaf;
-            }
-        };
         auto tag_hive_by_name = [&](const std::vector<std::string> &leaves) {
             std::set<std::string> leafset(leaves.begin(), leaves.end());
             for (const auto &p : plans)
@@ -986,6 +1039,80 @@ ST_retcode plan_columns(Session &s, const Source &src,
                             "names: " + kept);
                     if (src.hive) tag_hive_by_name(leaf_names_seen);
                 }
+            }
+        }
+    } else if (!src.csv_first_sql.empty()) {
+        /* CSV-HEADER-1 (audit 2026-09-01, F4): read_csv_auto deduplicates
+         * duplicate and case-clashing header names exactly like the Parquet
+         * reader (a,a,b,A -> a, a_1, b, A_2) but, unlike Parquet, the
+         * footer-name recovery above never ran for delimited text, so the
+         * renames were SILENT (no note, no src_name, and `A` lost its exact
+         * name — charter §6.10). sniff_csv() reports the dialect but its own
+         * column list is already deduplicated, so the raw header comes from
+         * the first line read as data (header = false, all_varchar) with the
+         * sniffed dialect; a positional alignment with the scan then reuses the
+         * Parquet recovery (recover_at). Best effort: any probe failure or a
+         * width mismatch (a headerless file, a relaxed union that added
+         * columns) leaves the engine names, exactly as before. */
+        auto varchar_cell = [](duckdb_result *res, idx_t col, idx_t row) {
+            std::string v;
+            if (!duckdb_value_is_null(res, col, row)) {
+                char *x = duckdb_value_varchar(res, col, row);
+                if (x) {
+                    v = x;
+                    duckdb_free(x);
+                }
+            }
+            return v;
+        };
+        std::string first, perr;
+        {
+            duckdb_result fres;
+            if (s.query("SELECT file FROM glob(" + src.csv_first_sql +
+                            ") ORDER BY file LIMIT 1",
+                        &fres, &perr)) {
+                if (duckdb_row_count(&fres) > 0) first = varchar_cell(&fres, 0, 0);
+                duckdb_destroy_result(&fres);
+            }
+        }
+        std::string delim, quote, esc, skip, comment;
+        bool sniffed = false, hashdr = false;
+        if (!first.empty()) {
+            duckdb_result sres;
+            if (s.query("SELECT Delimiter, Quote, Escape, SkipRows, HasHeader, Comment "
+                        "FROM sniff_csv(" + quote_literal(first) + ")",
+                        &sres, &perr)) {
+                if (duckdb_row_count(&sres) == 1) {
+                    /* sniff_csv reports an unset quote/escape/comment as the
+                     * literal text "(empty)" (verified: read_csv then refuses
+                     * "The quote option cannot exceed a size of 1 byte") */
+                    auto unset = [](std::string v) { return v == "(empty)" ? std::string() : v; };
+                    delim = varchar_cell(&sres, 0, 0);
+                    quote = unset(varchar_cell(&sres, 1, 0));
+                    esc = unset(varchar_cell(&sres, 2, 0));
+                    skip = varchar_cell(&sres, 3, 0);
+                    hashdr = !duckdb_value_is_null(&sres, 4, 0) &&
+                             duckdb_value_boolean(&sres, 4, 0);
+                    comment = unset(varchar_cell(&sres, 5, 0));
+                    sniffed = true;
+                }
+                duckdb_destroy_result(&sres);
+            }
+        }
+        if (sniffed && hashdr && !delim.empty()) {
+            std::string opts = ", header = false, all_varchar = true, delim = " +
+                               quote_literal(delim) + ", quote = " + quote_literal(quote) +
+                               ", escape = " + quote_literal(esc);
+            if (!skip.empty()) opts += ", skip = " + skip;
+            if (!comment.empty()) opts += ", comment = " + quote_literal(comment);
+            duckdb_result hres;
+            if (s.query("SELECT * FROM read_csv(" + quote_literal(first) + opts + ") LIMIT 1",
+                        &hres, &perr)) {
+                const idx_t n = duckdb_column_count(&hres);
+                if (duckdb_row_count(&hres) == 1 && n == ncol) {
+                    for (idx_t c = 0; c < n; c++) recover_at(c, varchar_cell(&hres, c, 0));
+                }
+                duckdb_destroy_result(&hres);
             }
         }
     }
@@ -1175,6 +1302,42 @@ ST_retcode plan_columns(Session &s, const Source &src,
             p.meta_type = h->second.first;
             if (p.stata_format.empty()) p.stata_format = h->second.second;
             type_parity_flags(p);
+        }
+    }
+
+    /* PART-STRKEY-1 (audit 2026-09-01, F1): the engine's Hive reader maps a
+     * directory value of NULL or __HIVE_DEFAULT_PARTITION__ to SQL NULL — the
+     * right thing for a numeric key (it IS the missing partition) but, for a
+     * string key, indistinguishable from the literal text, which a foreign
+     * writer (or an older parqit) may have written. Say so once per key; the
+     * value loads as "" (parqit's string missing). Keys the manifest restores
+     * to a numeric type are not string keys any more (HIVE-TYPE-1 above). */
+    if (!ctx->files.empty() && !ctx->hive_columns.empty()) {
+        std::set<std::string> said;
+        for (const auto &f : ctx->files) {
+            size_t start = 0;
+            for (size_t c = 0; c <= f.size(); c++) {
+                if (c != f.size() && f[c] != '/' && f[c] != '\\') continue;
+                const std::string comp = f.substr(start, c - start);
+                start = c + 1;
+                const size_t eq = comp.find('=');
+                if (eq == std::string::npos || eq == 0) continue;
+                const std::string key = comp.substr(0, eq), val = comp.substr(eq + 1);
+                if (val != "NULL" && val != "__HIVE_DEFAULT_PARTITION__") continue;
+                if (!ctx->hive_columns.count(key)) continue;
+                bool is_str = false;
+                for (const auto &p : plans)
+                    if (p.source_name == key) {
+                        is_str = (p.src_type == DUCKDB_TYPE_VARCHAR && !p.dropped);
+                        break;
+                    }
+                if (!is_str || !said.insert(key + "=" + val).second) continue;
+                ctx->warnings.push_back(
+                    "Hive partition key \"" + key + "\" has a directory value \"" + val +
+                    "\", which the engine reads as a missing partition: those rows load "
+                    "with \"" + key + "\" empty (\"\"), whether the writer meant a missing "
+                    "value or that literal text");
+            }
         }
     }
 
@@ -1911,6 +2074,16 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         if (!verify(quote_literal(glob) + ", hive_partitioning = true")) {
             cleanup_tmp();
             return kRcEngine;
+        }
+        {
+            /* PART-STRKEY-1: never publish a tree a string key cannot read back */
+            const std::string kerr =
+                partition_string_keys_check(s, query_sql, partition_by, tmpdest);
+            if (!kerr.empty()) {
+                cleanup_tmp();
+                *err = kerr;
+                return kRcUsage;
+            }
         }
         if (pre_publish && !(*pre_publish)(err)) {
             cleanup_tmp();
@@ -2950,17 +3123,29 @@ ST_retcode cmd_describe(const std::vector<std::string> &args) {
         cry(err);
         return kRcEngine;
     }
+    /* DESCRIBE-ALIGN-1 (audit 2026-09-01, F3): the engine types are keyed by
+     * the SCAN name and emitted in the manifest order of the var records,
+     * carrying the Stata name — the ado used to zip the DESCRIBE rows (scan
+     * order: a Hive partition key comes last) positionally with the var
+     * records (manifest order: the key in its original place), so every type
+     * after the key was shifted by one on a partitioned tree or a glob over
+     * it. Names, never positions (charter §5). */
+    std::map<std::string, std::string> scan_types;
     duckdb_result dres;
     if (s.query("DESCRIBE SELECT * FROM " + src.scan_sql, &dres, &err)) {
         idx_t n = duckdb_row_count(&dres);
         for (idx_t r = 0; r < n; r++) {
             char *nm = duckdb_value_varchar(&dres, 0, r);
             char *ty = duckdb_value_varchar(&dres, 1, r);
-            if (nm && ty) w.rec("dtype", {}, {nm, ty});
+            if (nm && ty) scan_types[nm] = ty;
             if (nm) duckdb_free(nm);
             if (ty) duckdb_free(ty);
         }
         duckdb_destroy_result(&dres);
+    }
+    for (const auto &p : ctx.active) {
+        auto it = scan_types.find(p.source_name);
+        w.rec("dtype", {}, {p.stata_name, it == scan_types.end() ? std::string() : it->second});
     }
     write_var_records(w, ctx);
     if (!w.close(&err)) {

@@ -339,7 +339,27 @@ struct Val {
     std::string col; /* MISS-1: source column name iff this is a bare column
                       * reference (else ""); lets missing() skip the finite
                       * scan on a boundary-normalized column. */
+    /* FLOAT-LIT-1 (audit 2026-09-01, F2): true iff this value is a (possibly
+     * negated) numeric literal; litv is its binary64 value. Comparison
+     * contexts use it to force double-precision evaluation against FLOAT
+     * columns (see relational()). */
+    bool lit = false;
+    double litv = 0.0;
 };
+
+/* FLOAT-LIT-1: a numeric literal that a FLOAT column can hold exactly
+ * compares identically in single and double precision, so it needs no cast;
+ * a non-integral literal that float32 cannot represent (0.1, 0.3, 1.1, 1e-5)
+ * must be compared in DOUBLE, or the engine casts the literal DOWN to FLOAT
+ * and `x == 0.1` is true for a float x that native Stata (an all-double
+ * evaluator) says differs from 0.1. Integral literals are left alone even
+ * beyond 2^24 (they keep integer key filters exactly as before; the residual
+ * float-column-vs-huge-integer case is documented). */
+static bool needs_double_literal(const Val &v) {
+    if (!v.lit || !std::isfinite(v.litv)) return false;
+    if (v.litv == std::trunc(v.litv)) return false;
+    return static_cast<double>(static_cast<float>(v.litv)) != v.litv;
+}
 
 struct Parser {
     Lexer lex;
@@ -437,6 +457,14 @@ struct Parser {
                 return fail("internal: bad relational");
             }
         }
+        /* FLOAT-LIT-1 (audit 2026-09-01, F2): a FLOAT column compared with a
+         * literal the engine binds by casting the literal to FLOAT — `x == 0.1`
+         * was TRUE and `x > 0.1` FALSE for a float x, the opposite of native
+         * Stata, which compares in double. Typing such a literal DOUBLE makes
+         * the engine widen the column instead (the SQL rule), which is exactly
+         * Stata's arithmetic; the filter still pushes into the Parquet scan. */
+        if (needs_double_literal(l)) a = "CAST(" + a + " AS DOUBLE)";
+        if (needs_double_literal(r)) b = "CAST(" + b + " AS DOUBLE)";
         const char *o = op == Tok::Eq ? " = " : op == Tok::Ne ? " <> "
                        : op == Tok::Lt ? " < " : op == Tok::Gt ? " > "
                        : op == Tok::Le ? " <= " : " >= ";
@@ -486,7 +514,7 @@ struct Parser {
             if (!parsed || !std::isfinite(lv) ||
                 std::fabs(lv) >= kStataMissThreshold)
                 out->sql = "NULL";
-            else
+            else {
                 /* DATA-003: a Stata numeric literal is binary64 before any
                  * assignment. Sending the original decimal token to DuckDB
                  * let 9007199254740993 survive as an exact INTEGER although
@@ -496,6 +524,9 @@ struct Parser {
                  * retain/promote byte/int/long storage; View metadata forces
                  * double only where that is the declared result contract. */
                 out->sql = dtoa(lv);
+                out->lit = true; /* FLOAT-LIT-1 */
+                out->litv = lv;
+            }
             out->kind = 'n';
             advance();
             return true;
@@ -576,6 +607,10 @@ struct Parser {
             if (v.kind == 's') return fail("cannot negate a string");
             out->sql = "(-" + as_num(v) + ")";
             out->kind = 'n';
+            if (v.lit) { /* FLOAT-LIT-1: -0.1 is still a literal */
+                out->lit = true;
+                out->litv = -v.litv;
+            }
             return true;
         }
         if (cur.t == Tok::Plus) {
@@ -607,6 +642,10 @@ struct Parser {
             if (v.kind == 's') return fail("cannot negate a string");
             out->sql = "(-" + as_num(v) + ")";
             out->kind = 'n';
+            if (v.lit) { /* FLOAT-LIT-1 */
+                out->lit = true;
+                out->litv = -v.litv;
+            }
             return true;
         }
         if (cur.t == Tok::Plus) {
@@ -883,6 +922,20 @@ bool Parser::call(const std::string &fname, Val *out) {
         return true;
     }
     if (fname == "abs") return num1("abs");
+    if (fname == "float") {
+        /* FLOAT-FN-1 (audit 2026-09-01, F11): Stata's float(x) rounds x to
+         * float precision — the native idiom for comparing a float variable
+         * with a decimal literal (`x == float(0.1)`). A value outside Stata's
+         * ±1.70e38 float range is missing, as in a float assignment; the
+         * result is carried as a double (the value a float holds). */
+        if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("float() needs a numeric argument");
+        const std::string x = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
+        out->sql = "(CASE WHEN abs(" + x + ") > " + dtoa(kStataFloatMax) +
+                   " THEN NULL ELSE CAST(CAST(" + x + " AS FLOAT) AS DOUBLE) END)";
+        out->kind = 'n';
+        return true;
+    }
     if (fname == "exp") {
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail("exp() needs a numeric argument");
@@ -925,7 +978,11 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(1, 2)) return false;
         if (args[0].kind == 's' || (args.size() == 2 && args[1].kind == 's'))
             return fail("round() needs numeric arguments");
-        std::string x = as_num(args[0]);
+        /* FLOAT-LIT-1: the operands are DOUBLE, as in every other arithmetic
+         * path — a FLOAT column divided by a DECIMAL literal would otherwise
+         * be computed in single precision (round(x, 0.1) of a float x came
+         * back 0.10000000149, native gives 0.1) */
+        std::string x = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
         /* Stata round(x) = floor(x + 0.5): ties round toward +infinity, NOT
          * away from zero the way SQL round() does — round(-2.5) = -2 (not -3),
          * round(-0.5) = 0 (not -1) (NUM-2). The 2-arg form rounds to units of u
@@ -933,7 +990,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (args.size() == 1) {
             out->sql = "floor((" + x + ") + 0.5)";
         } else {
-            std::string u = as_num(args[1]);
+            std::string u = "CAST(" + as_num(args[1]) + " AS DOUBLE)";
             out->sql = "(CASE WHEN (" + u + ") = 0 THEN " + x +
                        " ELSE floor((" + x + ") / (" + u + ") + 0.5) * (" + u +
                        ") END)";
@@ -945,14 +1002,23 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(2, 2)) return false;
         if (args[0].kind == 's' || args[1].kind == 's')
             return fail("mod() needs numeric arguments");
-        std::string a = as_num(args[0]), b = as_num(args[1]);
+        const std::string a = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
+        const std::string b = "CAST(" + as_num(args[1]) + " AS DOUBLE)";
         /* Stata mod(x,y) is the nonnegative remainder, and is MISSING for a
          * nonpositive modulus (mod(7,-3)==., mod(7,0)==.) — the y=0 case
          * verified against native Stata 2026-07-02 (`di mod(7,0)` = `.`;
-         * the manual's mod(x,0)=x is stale). */
-        out->sql = "(CASE WHEN (" + b + ") <= 0 THEN NULL ELSE (" + a +
-                   ") - (" + b + ") * floor((" + a + ") / CAST(" + b +
-                   " AS DOUBLE)) END)";
+         * the manual's mod(x,0)=x is stale).
+         * MOD-TRUNC-1 (audit 2026-09-01, F7): the manual's x - y*floor(x/y)
+         * is NOT what native computes for a non-integer modulus —
+         * mod(7, 0.00001) is 9.99999999911182e-06 natively (and
+         * `di 7 - 0.00001*floor(7/0.00001)` is -8.88e-16), i.e. the
+         * truncated remainder x - y*trunc(x/y) shifted by +y when negative.
+         * That reproduces every observed value ((0.3,0.1) (1,0.1) (-5.5,2)
+         * (-7,3) (7,1e-5)); DuckDB's own fmod() is the floor form and does
+         * not. Operands are DOUBLE so a float column is not folded. */
+        const std::string r = "((" + a + ") - (" + b + ") * trunc((" + a + ") / (" + b + ")))";
+        out->sql = "(CASE WHEN (" + b + ") <= 0 THEN NULL WHEN " + r + " < 0 THEN " +
+                   r + " + (" + b + ") ELSE " + r + " END)";
         out->kind = 'n';
         return true;
     }
@@ -1012,6 +1078,10 @@ bool Parser::call(const std::string &fname, Val *out) {
             return true;
         }
         std::string x = as_num(args[0]), lo = as_num(args[1]), hi = as_num(args[2]);
+        /* FLOAT-LIT-1: bounds are comparisons too (see relational()) */
+        if (needs_double_literal(args[0])) x = "CAST(" + x + " AS DOUBLE)";
+        if (needs_double_literal(args[1])) lo = "CAST(" + lo + " AS DOUBLE)";
+        if (needs_double_literal(args[2])) hi = "CAST(" + hi + " AS DOUBLE)";
         /* Stata numeric inrange: a missing x is never in range; a missing
          * lower bound means -inf, a missing upper bound means +inf. */
         out->sql = "((" + x + " IS NOT NULL) AND (" + lo + " IS NULL OR " + x +

@@ -718,18 +718,24 @@ std::string View::sort(const std::vector<std::string> &keys,
     return "";
 }
 
-/* Stata percentile rule (summarize/_pctile): np = n*p/100 over the sorted
- * nonmissing values; integer np → mean of x[np], x[np+1]; else x[ceil(np)]. */
-std::string stata_pctile_sql(const std::string &ref, double p) {
-    std::string arr =
-        "list_sort(list(" + ref + ") FILTER (WHERE " + ref + " IS NOT NULL))";
-    std::string n = "len(" + arr + ")";
-    std::string np = "(" + n + " * " + dtoa(p) + " / 100.0)";
-    return "(CASE WHEN " + n + " = 0 THEN NULL "
-           "WHEN " + np + " = floor(" + np + ") THEN (list_extract(" + arr +
-           ", CAST(" + np + " AS BIGINT)) + list_extract(" + arr +
-           ", least(CAST(" + np + " AS BIGINT) + 1, " + n + "))) / 2.0 "
-           "ELSE list_extract(" + arr + ", CAST(ceil(" + np + ") AS BIGINT)) END)";
+/* PCT-WINDOW-1: Stata's percentile rule (summarize/_pctile) over per-group
+ * ranks. `prn` is the 1-based rank of the row's nonmissing value within its
+ * group (NULL for a missing value), `pn` the group's nonmissing count;
+ * np = pn*p/100, integral np averages x[np] and x[np+1] (x[n] when np == n),
+ * otherwise x[ceil(np)]. (v + v)/2.0 is exact in binary64, so the
+ * non-integral branch returns the element itself; an all-missing group has no
+ * matching rank and yields NULL. The rank window spills to the temp
+ * directory, which the per-group list_sort(list(x)) it replaced never did. */
+std::string pct_window_sql(const std::string &ref, const std::string &prn,
+                           const std::string &pn, double p) {
+    const std::string n = quote_ident(pn), rn = quote_ident(prn);
+    const std::string np = "(" + n + " * " + dtoa(p) + " / 100.0)";
+    const std::string integral = np + " = floor(" + np + ")";
+    const std::string k1 = "(CASE WHEN " + integral + " THEN " + np + " ELSE ceil(" + np + ") END)";
+    const std::string k2 = "(CASE WHEN " + integral + " THEN least(" + np + " + 1, " + n +
+                           ") ELSE ceil(" + np + ") END)";
+    return "((max(CASE WHEN " + rn + " = " + k1 + " THEN " + ref + " END) + max(CASE WHEN " +
+           rn + " = " + k2 + " THEN " + ref + " END)) / 2.0)";
 }
 
 std::string View::collapse(const std::vector<CollapseSpec> &specs,
@@ -763,6 +769,7 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
     const std::string prev = prev_name(stages_.size());
     std::string src = prev;
     std::string pre;
+    std::string winsel; /* window columns the aggregate stage needs */
     if (needs_rn) {
         std::string ord = order_by_sql();
         if (ord.empty()) {
@@ -777,9 +784,48 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
                        " NULLS LAST";
         }
         std::string over = "OVER (" + ord.substr(1) + ")";
-        src = "(SELECT *, row_number() " + over + " AS " + quote_ident(rn) +
-              " FROM " + prev + ")";
+        winsel += ", row_number() " + over + " AS " + quote_ident(rn);
     }
+    /* PCT-WINDOW-1 (audit 2026-09-01, T9): Stata's percentile rule needs the
+     * k-th smallest nonmissing value of each group. The former
+     * list_sort(list(x)) aggregate copied every group's values into an
+     * in-memory list (not spillable, three copies in the SQL text) — bounded
+     * by RAM on a huge group. Rank the nonmissing values per group with one
+     * window per source column (the window operator sorts and can spill),
+     * carry the group's nonmissing count alongside, and let the aggregate
+     * stage pick the ranks it needs (pct_window_sql). Same values, same
+     * arithmetic as before: (x[np] + x[np+1])/2 when np is integral, else
+     * x[ceil(np)]; NULL for an all-missing group. */
+    std::map<std::string, std::pair<std::string, std::string>> pct_helpers;
+    {
+        std::set<std::string> pct_sources;
+        for (const auto &sp : specs) {
+            double p = 0;
+            const bool is_pct = sp.stat == "median" ||
+                                (sp.stat.size() >= 2 && sp.stat[0] == 'p' &&
+                                 atod(sp.stat.substr(1), &p) && p > 0 && p < 100);
+            if (is_pct && col_index(sp.source) >= 0 &&
+                cols_[col_index(sp.source)].kind == 'n')
+                pct_sources.insert(sp.source);
+        }
+        std::string part;
+        for (size_t i = 0; i < byn.size(); i++)
+            part += (i ? ", " : "") +
+                    norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
+        for (const auto &sc : pct_sources) {
+            const std::string prn = fresh_helper("prn"), pn = fresh_helper("pn");
+            const std::string ref = quote_ident(sc);
+            const std::string nullpart = "(" + ref + " IS NULL)";
+            winsel += ", (CASE WHEN " + ref + " IS NULL THEN NULL ELSE row_number() OVER "
+                      "(PARTITION BY " + (part.empty() ? nullpart : part + ", " + nullpart) +
+                      " ORDER BY " + ref + ") END) AS " + quote_ident(prn);
+            winsel += ", count(" + ref + ") OVER (" +
+                      (part.empty() ? std::string() : "PARTITION BY " + part) + ") AS " +
+                      quote_ident(pn);
+            pct_helpers[sc] = {prn, pn};
+        }
+    }
+    if (!winsel.empty()) src = "(SELECT *" + winsel + " FROM " + prev + ")";
 
     std::vector<ViewCol> ncols;
     std::string sel;
@@ -816,12 +862,17 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
             agg = scol.kind == 's'
                       ? "count(*) FILTER (WHERE coalesce(" + ref + ", '') <> '')"
                       : "count(" + ref + ")";
-        else if (sp.stat == "median") agg = stata_pctile_sql(ref, 50);
-        else if (sp.stat.size() >= 2 && sp.stat[0] == 'p') {
-            double p;
-            if (!atod(sp.stat.substr(1), &p) || p <= 0 || p >= 100)
+        else if (sp.stat == "median" ||
+                 (sp.stat.size() >= 2 && sp.stat[0] == 'p')) {
+            double p = 50;
+            if (sp.stat != "median" &&
+                (!atod(sp.stat.substr(1), &p) || p <= 0 || p >= 100))
                 return "collapse: unknown statistic (" + sp.stat + ")";
-            agg = stata_pctile_sql(ref, p);
+            if (scol.kind != 'n')
+                return "collapse: " + sp.stat + " needs a numeric variable (" +
+                       sp.source + " is string)";
+            const auto &h = pct_helpers.at(sp.source);
+            agg = pct_window_sql(ref, h.first, h.second, p);
         } else if (sp.stat == "first" || sp.stat == "last") {
             /* include-missing first/last via a struct payload */
             const char *fn = (sp.stat == "first") ? "arg_min" : "arg_max";
@@ -859,7 +910,13 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
          * (count) is a long. first/last/firstnm/lastnm keep the value label
          * and storage type too (they carry a source value). */
         nc.varlab = "(" + sp.stat + ") " + scol.exposed();
-        nc.fmt = scol.fmt;
+        /* COUNT-FMT-1 (audit 2026-09-01, F5): native collapse keeps the
+         * source's display format on every target, count included (verified:
+         * (count) n = price keeps %12.2f) — but a count of a STRING source
+         * (parqit's extension; native refuses it) must not inherit a %s
+         * format Stata rejects on a numeric variable, which made every
+         * collect print "skipping display format %9s" */
+        nc.fmt = (sp.stat == "count" && scol.kind == 's') ? "%8.0g" : scol.fmt;
         if (sp.stat == "first" || sp.stat == "last" || sp.stat == "firstnm" ||
             sp.stat == "lastnm") {
             nc.vallab = scol.vallab;
@@ -1012,6 +1069,34 @@ std::string View::keep_in(long long f, long long l) {
                    std::to_string(l - f + 1) + " OFFSET " + std::to_string(f - 1) +
                    ")",
                "keep in " + std::to_string(f) + "/" + std::to_string(l));
+    PendingRange pr;
+    pr.stage = stages_.size() - 1; /* validate against the count BEFORE this */
+    pr.f = f;
+    pr.l = l;
+    ranges_.push_back(pr);
+    return "";
+}
+
+std::string View::drop_in(long long f, long long l) {
+    /* DROP-IN-1 (audit 2026-09-01, F10): native `drop in f/l` removes the
+     * observations f..l of the current order and keeps every other row in
+     * place. keep_in slices with LIMIT/OFFSET; the complement numbers the rows
+     * (over the declared order, or the engine order when none is declared —
+     * the same caveat as _n and keep in) and keeps the rest. The range is
+     * validated against the real count at materialisation like keep in
+     * (charter §6.13). */
+    if (f < 1 || l < f)
+        return "invalid in range: need 1 <= f <= l (negative and inverted "
+               "ranges are not supported on a lazy view)";
+    const std::string prev = prev_name(stages_.size());
+    const std::string rn = fresh_helper("rn");
+    const std::string ord = order_by_sql();
+    const std::string over = ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
+    push_stage("SELECT " + select_list() + " FROM (SELECT *, row_number() " + over +
+                   " AS " + quote_ident(rn) + " FROM " + prev + ") WHERE " +
+                   quote_ident(rn) + " < " + std::to_string(f) + " OR " +
+                   quote_ident(rn) + " > " + std::to_string(l),
+               "drop in " + std::to_string(f) + "/" + std::to_string(l));
     PendingRange pr;
     pr.stage = stages_.size() - 1; /* validate against the count BEFORE this */
     pr.f = f;

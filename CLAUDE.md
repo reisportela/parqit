@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `parqit` is a Stata package — "dbplyr's architecture with Stata's vocabulary" — that compiles lazy Stata-flavoured verbs (`keep`, `gen`, `collapse`, `merge`, …) into a single DuckDB SQL query executed out-of-core over Parquet. Its two full-result materialisers are `parqit collect`, which streams the result into Stata's current dataset atomically, and `parqit save`, which writes Parquet → Parquet without loading that result into the current dataset. It is not another Parquet reader; the product is the manipulation layer and those two data paths.
 
-Current state: **v0.1.29** (see [CMakeLists.txt](CMakeLists.txt) `project(... VERSION)`). The full command surface in `README.md` is implemented (single-table verbs, two-table verbs, reshape, pivot, sql/query, native `mergein`/`appendin`, dialogs, metadata round-trip). Milestones M0–M4 (brief §11) are in the tree; M5 is SSC-release polish. The version/date lives in synchronised CMake, ado/help/dialog, README, package-manifest, citation and contributor-guidance surfaces; `tests/release_lint.sh` fails the build if they drift. Bump them together.
+Current state: **v0.1.30** (see [CMakeLists.txt](CMakeLists.txt) `project(... VERSION)`). The full command surface in `README.md` is implemented (single-table verbs, two-table verbs, reshape, pivot, sql/query, native `mergein`/`appendin`, dialogs, metadata round-trip). Milestones M0–M4 (brief §11) are in the tree; M5 is SSC-release polish. The version/date lives in synchronised CMake, ado/help/dialog, README, package-manifest, citation and contributor-guidance surfaces; `tests/release_lint.sh` fails the build if they drift. Bump them together.
 
 **`parqit_build_prompt.md` is the authoritative build brief.** Where it states a decision ("must", "do not"), treat it as fixed — do not relitigate. Where it is silent, use judgement consistent with the thesis and record the assumption in `ASSUMPTIONS.md` instead of guessing silently. `README.md` documents the public command surface (brief §3) — stable once published, additive changes only; changes to it must be flagged in `CHANGELOG.md` and `ASSUMPTIONS.md`. Per the non-regression rule (`AGENTS.md`): never remove a feature, reduce precision, corrupt metadata, weaken an error path, or change public command semantics silently. Correctness is the first gate; performance work only after the fidelity/type/metadata/oracle checks pass.
 
@@ -86,7 +86,7 @@ When using local Stata directly, keep test state repo-local: prepend the repo ad
 
 ## Testing discipline (brief §9)
 
-- Verify tests follow the audit's `verify_suite` pattern: one self-contained do-file per invariant that generates its own synthetic data, asserts the exact failure signature, checks the on-disk payload with an **independent oracle** (pyarrow and/or duckdb CLI — never trust parqit-only round-trips), and prints `VERDICT(...): PASS/FAIL`. `examples/parqit_tour.do` is the same idea at feature-tour scale (a native twin in memory as the oracle).
+- Verify tests follow the audit's `verify_suite` pattern: one self-contained do-file per invariant that generates its own synthetic data, asserts the exact failure signature, checks the on-disk payload with an **independent oracle** (pyarrow and/or duckdb CLI — never trust parqit-only round-trips), and prints `VERDICT(...): PASS/FAIL`. `tests/integration/t13_tour.do` (the oracle-checked feature tour) is the same idea at feature-tour scale (a native twin in memory as the oracle).
 - C++ unit tests (`tests/unit/`) for: the type map, the Stata-expr→SQL translator, the identifier sanitiser, the request/response protocol, the view compiler, the hex codec.
 - Round-trip property tests: every Stata type with/without missings; 0 rows, 1 row, 1 var, 2500+ vars, multi-row-group, UTF-8/emoji, pathological column names.
 - CI (`.github/workflows/build.yml`) must be green on Linux/macOS(x86_64+arm64)/Windows before any release tag; Linux builds against old glibc (AlmaLinux 8) for EL-family HPC clusters. CI builds and runs the C++ tests but **cannot** run the Stata suites — those gate releases on a licensed machine.
@@ -111,7 +111,7 @@ src/engine/    C++ (no Stata API): session, view (verb→plan), exprtrans, typem
 vendor/        stata/stplugin.{c,h}, arrow/abi.h, json/json.hpp, doctest/, VERSIONS.md  (DuckDB NOT here — fetched)
 tests/         unit/ (doctest), verify_suite/ (audit invariants), integration/, roundtrip/, fixtures/
                run_stata.sh (Stata runner), release_lint.sh (version/date + path-leak gate)
-examples/      parqit_tour.do + make_data.py (self-verifying feature tour)
+examples/      parqit_basics.do + parqit_tour.do (self-contained crash courses, shipped with the SSC package), make_data.py (data for tests/integration/t13_tour.do)
 benchmarks/    parqit-vs-pq-vs-python harnesses (outputs git-ignored under benchmarks/_out)
 audit_repro/   minimal repros for fixed adversarial-audit findings
 docs/audits/   the audit evidence chain: reports, certification, prompts, verification kit (indexed by its README)

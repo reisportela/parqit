@@ -29,6 +29,11 @@ struct Source {
     bool relaxed = false;  /* union_by_name = true: the scan's columns are the
                             * case-insensitive union of the files' (deduped)
                             * names in DuckDB's file order (A2-2 relaxed) */
+    std::string csv_first_sql; /* CSV-HEADER-1: the first delimited-text path
+                                * or pattern as a quoted SQL literal so
+                                * plan_columns can read the raw header names
+                                * the CSV reader deduplicated; "" for
+                                * Parquet/temp-table sources */
 };
 
 /* FP-2 (audit 2026-08-22, A4-2/A4-3): the identity of a source file. size +

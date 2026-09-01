@@ -13,28 +13,30 @@ using namespace parqit;
 
 static ExprSchema test_schema() {
     ExprSchema s;
-    s.kinds = {{"x", 'n'}, {"y", 'n'}, {"s", 's'}, {"d", 'n'}};
+    s.kinds = {{"x", 'n'}, {"y", 'n'}, {"s", 's'}, {"d", 'n'}, {"f", 'n'}};
     return s;
 }
 
-/* fixture rows (id, x, y, s, d):
- *   1: 1,   10,  "a",   21915 (=td(01jan2020))
- *   2: 2,   20,  "bb",  21916
- *   3: NULL, 30, "",    NULL
- *   4: 4,  NULL, NULL,  21918
- *   5: 5,   50,  "héé🦆", 21919   */
+/* fixture rows (id, x, y, s, d, f):
+ *   1: 1,   10,  "a",   21915 (=td(01jan2020)), 0.1f
+ *   2: 2,   20,  "bb",  21916,                  0.3f
+ *   3: NULL, 30, "",    NULL,                   NULL
+ *   4: 4,  NULL, NULL,  21918,                  1.1f
+ *   5: 5,   50,  "héé🦆", 21919,                2.5f
+ * f is a FLOAT column (FLOAT-LIT-1): 0.1f/0.3f/1.1f are NOT the doubles 0.1,
+ * 0.3, 1.1 (they are slightly above them); 2.5f is exact. */
 static void make_fixture() {
     static bool done = false;
     if (done) return;
     Session &s = Session::instance();
     std::string err;
     REQUIRE_MESSAGE(s.exec("CREATE OR REPLACE TABLE __t AS SELECT * FROM (VALUES "
-                           "(1, 1::DOUBLE, 10::DOUBLE, 'a', 21915), "
-                           "(2, 2::DOUBLE, 20::DOUBLE, 'bb', 21916), "
-                           "(3, NULL::DOUBLE, 30::DOUBLE, '', NULL), "
-                           "(4, 4::DOUBLE, NULL::DOUBLE, NULL, 21918), "
-                           "(5, 5::DOUBLE, 50::DOUBLE, 'héé🦆', 21919)"
-                           ") t(id, x, y, s, d)",
+                           "(1, 1::DOUBLE, 10::DOUBLE, 'a', 21915, 0.1::FLOAT), "
+                           "(2, 2::DOUBLE, 20::DOUBLE, 'bb', 21916, 0.3::FLOAT), "
+                           "(3, NULL::DOUBLE, 30::DOUBLE, '', NULL, NULL::FLOAT), "
+                           "(4, 4::DOUBLE, NULL::DOUBLE, NULL, 21918, 1.1::FLOAT), "
+                           "(5, 5::DOUBLE, 50::DOUBLE, 'héé🦆', 21919, 2.5::FLOAT)"
+                           ") t(id, x, y, s, d, f)",
                            &err),
                     err);
     done = true;
@@ -573,4 +575,83 @@ TEST_CASE("DATE-DOMAIN-1: date functions are missing outside 01jan0100..31dec999
     /* in-domain values unchanged */
     CHECK(date_of("year(d)", "21915") == "2020");
     CHECK(date_of("dofm(d)", "720") == "21915");
+}
+
+TEST_CASE("FLOAT-LIT-1: float columns compare with decimal literals in double (audit 2026-09-01, F2)") {
+    /* f: 0.1f, 0.3f, NULL, 1.1f, 2.5f — native Stata is an all-double
+     * evaluator: float(0.1) != 0.1, float(0.1) > 0.1, float(0.3) > 0.3 … */
+    CHECK(count_where("f == 0.1") == 0);
+    CHECK(count_where("f > 0.1") == 4);   /* 0.1f, 0.3f, 1.1f, 2.5f */
+    CHECK(count_where("f >= 0.1") == 4);
+    CHECK(count_where("f < 0.3") == 1);   /* 0.1f only: 0.3f > 0.3 */
+    CHECK(count_where("f <= 0.3") == 1);
+    CHECK(count_where("f != 1.1") == 4);
+    CHECK(count_where("f == 2.5") == 1);  /* float-exact literal */
+    CHECK(count_where("f > 1.1") == 2);   /* 1.1f (> 1.1) and 2.5f */
+    CHECK(count_where("f < 1.1") == 2);
+    CHECK(count_where("inrange(f, 0.1, 0.3)") == 1);
+    CHECK(count_where("inlist(f, 0.1, 1.1)") == 0);
+    CHECK(count_where("f == float(0.1)") == 1);
+    CHECK(count_where("f == -0.1") == 0);
+    CHECK(count_where("f > -0.1") == 4);
+    CHECK(count_where("(f > 0.1) + (f > 1.1) == 2") == 2);
+    CHECK(eval_at("cond(f > 0.1, 1, 0)", 1) == "1");
+    /* the double column and integral literals are untouched */
+    CHECK(count_where("x == 1") == 1);
+    CHECK(count_where("x > 0.5") == 4);
+    /* statamissing mode uses the same operands */
+    CHECK(count_where("f > 0.1", true) == 5); /* NULL sorts high */
+    CHECK(count_where("f == 0.1", true) == 0);
+    /* generated SQL: only a non-integral literal float32 cannot hold is typed
+     * DOUBLE, so integer key filters keep their exact untyped literal */
+    ExprResult r1 = translate_filter("f == 0.1", test_schema(), false);
+    REQUIRE(r1.ok);
+    CHECK(r1.sql.find("CAST(0.10000000000000001 AS DOUBLE)") != std::string::npos);
+    ExprResult r2 = translate_filter("f == 2.5", test_schema(), false);
+    REQUIRE(r2.ok);
+    CHECK(r2.sql.find("CAST(") == std::string::npos);
+    ExprResult r3 = translate_filter("x == 123456789", test_schema(), false);
+    REQUIRE(r3.ok);
+    CHECK(r3.sql.find("CAST(") == std::string::npos);
+    ExprResult r4 = translate_filter("inrange(f, 0.1, 0.3)", test_schema(), false);
+    REQUIRE(r4.ok);
+    CHECK(r4.sql.find("CAST(0.10000000000000001 AS DOUBLE)") != std::string::npos);
+    CHECK(r4.sql.find("CAST(0.29999999999999999 AS DOUBLE)") != std::string::npos);
+    ExprResult r5 = translate_filter("f == -0.1", test_schema(), false);
+    REQUIRE(r5.ok);
+    CHECK(r5.sql.find("CAST((-0.10000000000000001) AS DOUBLE)") != std::string::npos);
+}
+
+TEST_CASE("FLOAT-FN-1: float() rounds to float precision like native (audit 2026-09-01, F11)") {
+    CHECK(eval_at("float(0.1)", 1) == "0.10000000149011612");
+    CHECK(eval_at("float(x)", 1) == "1.0");
+    CHECK(eval_at("float(x)", 3) == "");      /* missing stays missing */
+    CHECK(eval_at("float(1e39)", 1) == "");    /* beyond Stata's float range */
+    CHECK(eval_at("float(-1e39)", 1) == "");
+    CHECK(eval_at("float(1.7e38)", 1) != "");
+    CHECK(eval_at("float(f)", 2) == "0.30000001192092896");
+    /* round() computes in double for a float column too (native: 0.1, 0.3) */
+    CHECK(eval_at("round(f, 0.1)", 1) == "0.1");
+    CHECK(eval_at("round(f, 0.1)", 2) == "0.30000000000000004"); /* 3 * 0.1, as native */
+    CHECK(std::strtod(eval_at("round(f)", 5).c_str(), nullptr) == 3.0);
+    ExprResult bad = translate_expression("float(s)", test_schema(), false);
+    CHECK_FALSE(bad.ok);
+    ExprResult bad2 = translate_expression("float(x, 1)", test_schema(), false);
+    CHECK_FALSE(bad2.ok);
+}
+
+TEST_CASE("MOD-TRUNC-1: mod() with a non-integer modulus matches native (audit 2026-09-01, F7)") {
+    /* native values verified on StataNow 19.5 (2026-09-01) */
+    CHECK(std::fabs(std::strtod(eval_at("mod(7, 0.00001)", 1).c_str(), nullptr) - 9.99999999911182e-06) < 1e-20);
+    CHECK(std::strtod(eval_at("mod(0.3, 0.1)", 1).c_str(), nullptr) == 0.09999999999999998);
+    CHECK(std::strtod(eval_at("mod(1, 0.1)", 1).c_str(), nullptr) == 0.0);
+    CHECK(std::strtod(eval_at("mod(-5.5, 2)", 1).c_str(), nullptr) == 0.5);
+    CHECK(std::strtod(eval_at("mod(5.5, 2)", 1).c_str(), nullptr) == 1.5);
+    CHECK(std::strtod(eval_at("mod(-7, 3)", 1).c_str(), nullptr) == 2.0);
+    CHECK(std::strtod(eval_at("mod(7, 3)", 1).c_str(), nullptr) == 1.0);
+    CHECK(eval_at("mod(7, 0)", 1) == "");   /* nonpositive modulus: missing */
+    CHECK(eval_at("mod(7, -3)", 1) == "");
+    CHECK(eval_at("mod(x, 2)", 3) == "");   /* missing x */
+    CHECK(std::strtod(eval_at("mod(f, 0.1)", 2).c_str(), nullptr) ==
+          std::strtod(eval_at("mod(0.30000001192092896, 0.1)", 2).c_str(), nullptr)); /* float operand in double */
 }
