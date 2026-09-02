@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.31 LANGUAGES C CXX)
+project(parqit VERSION 0.1.32 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

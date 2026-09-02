@@ -16,6 +16,8 @@
 #   * every public command is reachable through a wide dialog on the User menu
 #   * the help's expression-function list and exprtrans.cpp agree both ways
 #   * every parqit## reference in the help (jump or inline link) has a marker
+#   * help lines: none over 160 bytes (the Viewer truncates at 245), braces
+#     balanced per physical line, valid UTF-8, LF-only
 #   * GUI and console selectors agree for both macOS architectures
 set -u
 
@@ -296,6 +298,26 @@ done
 smcl_open=$(grep -nE '\{(bf|it|cmd|opt):[^}]*$' \
                 "$REPO/src/ado/p/parqit.sthlp" "$REPO/src/ado/p/parqit_technical.sthlp" || true)
 [ -z "$smcl_open" ] || err "unterminated inline SMCL directive(s): $(echo "$smcl_open")"
+
+# Stata's GUI Viewer was observed (Stata 19.5, Linux) to truncate every SMCL
+# *source* line at 245 characters: a 248-char line renders its tail as
+# "{p_en"; translate's smcl2txt/smcl2pdf have no such limit and do not catch
+# it. When the cut falls inside a directive the paragraph never closes and
+# the rest of the file renders as one run-on with literal {p_end}/{pstd}
+# (v0.1.30–v0.1.31 shipped that way). Hard bound with a wide margin: 160
+# bytes per physical line (the files stay below 150). Same pass: every
+# physical line must balance its braces (a directive cannot span lines),
+# the files must be valid UTF-8 and LF-only.
+long_smcl=$(LC_ALL=C awk 'length($0) > 160 {printf "%s:%d(%d) ", FILENAME, FNR, length($0)}' \
+                "$REPO"/src/ado/p/*.sthlp)
+[ -z "$long_smcl" ] || err "SMCL source line(s) over 160 bytes (the Viewer truncates at 245): $long_smcl"
+brace_smcl=$(LC_ALL=C awk '{ o = gsub(/{/, "{"); c = gsub(/}/, "}"); if (o != c) printf "%s:%d ", FILENAME, FNR }' \
+                 "$REPO"/src/ado/p/*.sthlp)
+[ -z "$brace_smcl" ] || err "unbalanced braces on SMCL line(s): $brace_smcl"
+for f in "$REPO"/src/ado/p/*.sthlp; do
+    iconv -f UTF-8 -t UTF-8 "$f" > /dev/null 2>&1 || err "$(basename "$f") is not valid UTF-8"
+    ! LC_ALL=C grep -q $'\r' "$f" || err "$(basename "$f") has CR line endings"
+done
 
 # --- menu/dialog command coverage and geometry ------------------------------
 # Parse the dialog language rather than relying only on grep-shaped coverage:

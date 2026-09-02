@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.31 02sep2026}{...}
+{* *! version 0.1.32 02sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -87,12 +87,15 @@ for a Parquet/CSV source (read as UTF-8).
 {p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:,} {opt c:ount} {opt seed(#)}]{p_end}
 {p 8 16 2}{cmd:parqit reshape} {cmd:long}|{cmd:wide} {it:stubs}{cmd:,} {opt i(varlist)} {opt j(name)}{p_end}
 {p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
-{p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source} [{cmd:,} {opt keep(spec)} {opt keepus:ing(varlist)} {opt gen:erate(newvar)} {opt nogen:erate} {opt enc:oding(name)}]{p_end}
+{p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source}
+[{cmd:,} {opt keep(spec)} {opt keepus:ing(varlist)} {opt gen:erate(newvar)}
+{opt nogen:erate} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit append using} {it:source} [{it:source} ...] [{cmd:,} {opt gen:erate(newvar)} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source} [{cmd:,} {opt enc:oding(name)}]{p_end}
 
 {p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file} [{cmd:,} {it:merge_options}]{p_end}
-{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)} {opt force}]{space 3}({opt keep()} names variables {it:of the file}, as in native {helpb append}){p_end}
+{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)} {opt force}]{space 3}({opt keep()}
+names variables {it:of the file}, as in native {helpb append}){p_end}
 
 {pstd}{cmd:mergein}/{cmd:appendin} join the data {it:already in Stata's memory}
 with a disk {it:file} via a {it:native} {help merge} / {help append}: the
@@ -119,10 +122,14 @@ in {help parqit_technical##formats:Input formats}.
 pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 
 {p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear}]{space 8}stream the result into memory (atomically){p_end}
-{p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)} {opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
+{p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata}
+{opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)}
+{opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
-{p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col} {opt nol:abel}]{space 2}({opt row}/{opt col} apply to the two-way form; the one-way form ignores them; {opt nolabel} shows codes instead of value labels){p_end}
+{p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}
+{opt nol:abel}]{space 2}({opt row}/{opt col} apply to the two-way form; the one-way form
+ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit misstable} [{cmd:summarize}|{cmd:patterns}] [{it:varlist}]{p_end}
 {p 8 16 2}{cmd:parqit levelsof} {it:varname} [{cmd:,} {opt l:imit(#)}]{p_end}
 {p 8 16 2}{cmd:parqit count} [{cmd:if} {it:exp}]{p_end}
@@ -143,7 +150,8 @@ pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 {p 8 16 2}{cmd:parqit query} {cmd:"}{it:SQL fragment}{cmd:"}{p_end}
 {p 8 16 2}{cmd:parqit show} | {cmd:parqit explain}{p_end}
 {p 8 16 2}{cmd:parqit view} [{it:viewname}[{cmd::} {it:parqit_command}]] | {cmd:parqit views}{p_end}
-{p 8 16 2}{cmd:parqit open _data} [{cmd:,} {opt n:ame(viewname)} {opt enc:oding(name)}] | {cmd:parqit close} [{it:viewname}|{cmd:_all}] | {cmd:parqit path} {it:filename}{p_end}
+{p 8 16 2}{cmd:parqit open _data} [{cmd:,} {opt n:ame(viewname)} {opt enc:oding(name)}]
+| {cmd:parqit close} [{it:viewname}|{cmd:_all}] | {cmd:parqit path} {it:filename}{p_end}
 {p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:threads}|{cmd:memory_limit}|{cmd:tempdir} {it:value}{p_end}
 {p 8 16 2}{cmd:parqit version}{space 4}(plugin + engine versions){p_end}
 {p 8 16 2}{cmd:parqit selftest}{space 3}(end-to-end engine and codec check, useful on new installs/HPC nodes){p_end}

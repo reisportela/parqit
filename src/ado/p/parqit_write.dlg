@@ -1,7 +1,7 @@
 /*
   parqit collect - Load the pipeline result into memory, or write it to Parquet
 
-*!  VERSION 0.1.31  02sep2026
+*!  VERSION 0.1.32  02sep2026
 
   User > parqit > Collect into memory or save as Parquet...
   Launch directly with:  db parqit_write      (menu installed by: parqit menu)

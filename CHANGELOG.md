@@ -6,6 +6,28 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.32] — 2026-09-02
+
+Help-only patch release: the v0.1.30/v0.1.31 help rendered as one run-on
+paragraph in Stata's GUI Viewer. No command, data or materialisation
+semantics changed.
+
+### Fixed
+- **`help parqit` rendered as one run-on paragraph in Stata's Viewer from the
+  `parqit head` syntax line onward (HELP-LINE-1).** The GUI Viewer was
+  observed (Stata 19.5, Linux) to truncate each SMCL source line at 245
+  characters; the `parqit save` (255 characters, since v0.1.31) and
+  `parqit tabulate` (265, since v0.1.30) syntax lines were cut inside a
+  directive, so the paragraph never closed and every later `{p_end}`/`{pstd}`
+  printed literally. `translate` to text or PDF has no such limit, which is
+  why the release checks passed. The five syntax lines over 160 characters
+  are now re-flowed across several source lines (a pure re-flow: the
+  displayed text is unchanged), and `tests/release_lint.sh` refuses any help
+  line over 160 bytes, any physical line with unbalanced braces, and any
+  help file that is not valid UTF-8 or LF-only. Help text only: no command,
+  data or materialisation semantics changed; menus and dialogs were never
+  involved. Reported by the maintainer on 2026-09-02.
+
 ## [0.1.31] — 2026-09-02
 
 Two items from the first institutional feedback round (BPLIM, 2026-09-02):

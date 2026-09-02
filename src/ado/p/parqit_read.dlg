@@ -1,7 +1,7 @@
 /*
   parqit use - Read Parquet data as a lazy view or into memory
 
-*!  VERSION 0.1.31  02sep2026
+*!  VERSION 0.1.32  02sep2026
 
   User > parqit > Read Parquet data (lazy view or into memory)...
   Launch directly with:  db parqit_read      (menu installed by: parqit menu)

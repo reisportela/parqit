@@ -1628,3 +1628,24 @@ entry notes the conservative fallback if the assumption proves wrong.
     look for it there. `release_lint.sh` now checks the technical banner,
     the overclaim phrases and every `parqit_technical##` / `parqit##` link
     across the two files.
+118. **SMCL help source lines stay under 160 bytes (2026-09-02, HELP-LINE-1).**
+    Observation, not a documented Stata contract: the GUI Viewer of Stata
+    19.5 for Linux truncates each source line of a help file at 245
+    characters (probe files: a 248-char line displays its tail as `{p_en`, a
+    254-char line loses its `{p_end}`; whether the unit is bytes or code
+    points, and whether every Stata version and platform behaves the same,
+    was not established — the ASCII probes cannot tell). `translate ...
+    translator(smcl2txt|smcl2pdf)` has no such limit, and `help smcl`/`help
+    limits` do not document one. The v0.1.30 and v0.1.31
+    help carried two syntax lines over the limit (`parqit tabulate`, 265;
+    `parqit save`, 255), so the Viewer rendered everything after them as one
+    run-on paragraph with literal `{p_end}`/`{pstd}`. Decision: syntax lines
+    are re-flowed inside their `{p 8 16 2}...{p_end}` paragraph (SMCL joins
+    continuation lines with a space, so the rendering is unchanged), and
+    `release_lint.sh` fails on any `src/ado/p/*.sthlp` line over 160 bytes
+    (bytes, measured with `LC_ALL=C`, so UTF-8 counts conservatively; a wide
+    margin under the observed 245, and both files already stay below 150),
+    on any physical line whose braces do not balance (a directive cannot
+    span lines), and on a help file that is not valid UTF-8 or LF-only; the
+    SSC candidate build applies the same line gate to the staged help. The
+    GUI Viewer, not `translate`, is the release check for help layout.
