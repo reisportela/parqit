@@ -1649,10 +1649,11 @@ entry notes the conservative fallback if the assumption proves wrong.
     span lines), and on a help file that is not valid UTF-8 or LF-only; the
     SSC candidate build applies the same line gate to the staged help. The
     GUI Viewer, not `translate`, is the release check for help layout.
-119. **Author order on the package surfaces (2026-09-03).** The three BPLIM
-    co-authors of the Stata Journal paper (Rute Costa, Paulo Guimarães, Marta
-    Silva) were added to every author surface. The paper lists its authors
-    alphabetically; the package keeps Miguel Portela first, because the SSC
+119. **Author order on the package surfaces (2026-09-03).** `parqit` is
+    co-authored by Miguel Portela, Rute Costa, Paulo Guimarães and Marta
+    Silva (the same four author its Stata Journal paper); the three BPLIM
+    co-authors were added to every author surface. The paper lists its
+    authors alphabetically; the package keeps Miguel Portela first, because the SSC
     listing, the `.pkg` support contact and the ado banner treat the first
     author as the maintainer and point of contact, and lists the co-authors
     alphabetically after him. `parqit.pkg` stays ASCII (Kit Baum's SSC

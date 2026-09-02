@@ -8,15 +8,14 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [0.1.33] — 2026-09-03
 
-Authorship release: the BPLIM co-authors join every author surface of the
-package. No command, data or materialisation semantics changed.
+Authorship release: the package's co-authors appear on every author surface.
+No command, data or materialisation semantics changed.
 
 ### Changed
-- **Authors.** `parqit` is now authored by Miguel Portela (NIPE / Universidade
-  do Minho and BPLIM / Banco de Portugal) together with Rute Costa, Paulo
-  Guimarães and Marta Silva (BPLIM / Banco de Portugal), the co-authors of the
-  package's Stata Journal paper. The four names appear on every author
-  surface: `CITATION.cff`, the ado banner, the package manifest (`parqit.pkg`,
+- **Authors.** `parqit` is co-authored by Miguel Portela (NIPE / Universidade
+  do Minho and BPLIM / Banco de Portugal), Rute Costa, Paulo Guimarães and
+  Marta Silva (BPLIM / Banco de Portugal); the same four author the package's
+  Stata Journal paper. The four names appear on every author surface: `CITATION.cff`, the ado banner, the package manifest (`parqit.pkg`,
   one author/support pair each), `stata.toc`, the Authors section of both
   help entries, the README citation block and `CONTRIBUTORS.md`. Miguel
   Portela stays first as designer, maintainer and support contact; the
