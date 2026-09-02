@@ -1551,6 +1551,12 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     bool replace = req.value("replace", false);
+    std::string partition_mode; /* PART-MODE-1: hex on the wire like every text */
+    if (!parqit::req_text(req, "partition_mode", &partition_mode, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    std::string pnote; /* PART-MODE-1 */
     long long comp_level = req.value("compression_level", static_cast<long long>(-1));
     long long chunk = req.value("chunk", static_cast<long long>(-1));
     if (chunk != -1 && chunk <= 0) {
@@ -1775,11 +1781,14 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
     ST_retcode rc = copy_out_parquet(s, compile_for_save(g_view_ref()), dest, replace,
                                      compression, comp_level, partition_by, chunk,
                                      view_kv_fragment(g_view_ref()), &written, &err,
-                                     case_alias ? &leaf_names : nullptr);
+                                     case_alias ? &leaf_names : nullptr, nullptr,
+                                     partition_mode, &pnote);
     if (rc != 0) {
         cry("parqit save: " + err);
         return rc;
     }
+    while (!pnote.empty() && pnote.back() == '\n') pnote.pop_back();
+    if (!pnote.empty()) cry(pnote);
     std::error_code eca;
     std::string abs = std::filesystem::absolute(dest, eca).string();
     if (eca) abs = dest;
@@ -3172,11 +3181,18 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             if (dv[t].n <= 0) continue;
             live.push_back(t);
             const std::string r = quote_ident(targets[t]);
-            const std::string mu = parqit::dtoa(dv[t].mu);
+            /* DETAIL-DECIMAL-1: the moments are double arithmetic on both
+             * sides. A bare decimal literal binds as DECIMAL(p, scale) and
+             * drags an int/long column into DECIMAL(18, scale), which
+             * overflows once max|x| >= 10^(18-scale) ("Could not cast value
+             * 99999 to DECIMAL(18,14)"); a FLOAT column would instead bind
+             * the literal down to single precision. Native converts every
+             * operand to double, so cast the column and type the mean. */
+            const std::string dev = "(CAST(" + r + " AS DOUBLE) - CAST(" +
+                                    parqit::dtoa(dv[t].mu) + " AS DOUBLE))";
             if (!sel2.empty()) sel2 += ", ";
-            sel2 += "stddev_samp(" + r + "), var_samp(" + r + "), avg(pow(" +
-                    r + " - " + mu + ", 2)), avg(pow(" + r + " - " + mu +
-                    ", 3)), avg(pow(" + r + " - " + mu + ", 4))";
+            sel2 += "stddev_samp(" + r + "), var_samp(" + r + "), avg(pow(" + dev +
+                    ", 2)), avg(pow(" + dev + ", 3)), avg(pow(" + dev + ", 4))";
         }
         duckdb_result res2;
         bool have2 = false;

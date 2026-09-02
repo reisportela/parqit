@@ -1,7 +1,7 @@
 /*
   parqit collect - Load the pipeline result into memory, or write it to Parquet
 
-*!  VERSION 0.1.30  01sep2026
+*!  VERSION 0.1.31  02sep2026
 
   User > parqit > Collect into memory or save as Parquet...
   Launch directly with:  db parqit_write      (menu installed by: parqit menu)
@@ -15,7 +15,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 355
+DEFINE _dlght 400
 INCLUDE header
 HELP hlp1, view("help parqit##menu")
 RESET res1
@@ -102,6 +102,14 @@ BEGIN
 	contents(vv_list)						///
 	option(partition_by)						///
 	label("Partition by")
+  TEXT tx_pmode			_ilft	_ls	_ibwd	.,		///
+	label("Existing partitions when partitioning, partitions(): rewrite the whole tree (none), replace or append")
+  COMBOBOX cb_pmode		@	_ss	_vnwd	.,		///
+	dropdownlist							///
+	contents(pmode_list)						///
+	default("none")							///
+	option(partitions)						///
+	label("Existing partitions")
 
   TEXT tx_enc			_ilft	_ls	_ibwd	.,		///
 	label("Code page of legacy (non-UTF-8) text when the dataset in memory is written:")
@@ -126,6 +134,13 @@ BEGIN
 	lz4_raw
 	brotli
 	uncompressed
+END
+
+LIST pmode_list
+BEGIN
+	none
+	replace
+	append
 END
 
 LIST enc_list
@@ -154,6 +169,8 @@ BEGIN
 		call main.tx_part.disable
 		call main.bu_pop.disable
 		call main.cb_part.disable
+		call main.tx_pmode.disable
+		call main.cb_pmode.disable
 		call main.tx_enc.disable
 		call main.cb_enc.disable
 	}
@@ -172,6 +189,8 @@ BEGIN
 		call main.tx_part.enable
 		call main.bu_pop.enable
 		call main.cb_part.enable
+		call main.tx_pmode.enable
+		call main.cb_pmode.enable
 		call main.tx_enc.enable
 		call main.cb_enc.enable
 		if main.ck_data {
@@ -228,6 +247,7 @@ BEGIN
 			optionarg /hidedefault main.cb_comp
 			optionarg main.ed_level
 			optionarg main.cb_part
+			optionarg /hidedefault main.cb_pmode
 			optionarg main.ed_chunk
 			optionarg /hidedefault main.cb_enc
 			option main.ck_data

@@ -191,7 +191,14 @@ ST_retcode copy_out_parquet(parqit::Session &s, const std::string &query_sql,
                              * output is verified and BEFORE it is published;
                              * returning false (with a message) discards the
                              * staged output and fails the save loudly. */
-                            const std::function<bool(std::string *)> *pre_publish = nullptr);
+                            const std::function<bool(std::string *)> *pre_publish = nullptr,
+                            /* PART-MODE-1: "" (whole tree, today's semantics),
+                             * "replace" (each partition in the result replaces
+                             * its namesake in an existing tree, others stay) or
+                             * "append" (new files added into the partitions).
+                             * `note` receives the lines the caller prints. */
+                            const std::string &partition_mode = std::string(),
+                            std::string *note = nullptr);
 
 /* ---- subcommands ----------------------------------------------------- */
 

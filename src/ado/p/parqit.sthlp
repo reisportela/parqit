@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.30 01sep2026}{...}
+{* *! version 0.1.31 02sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -10,6 +10,7 @@
 {viewerdialog "parqit merge/append/joinby" "dialog parqit_combine"}{...}
 {viewerdialog "parqit collect/save" "dialog parqit_write"}{...}
 {viewerdialog "parqit view/sql/set" "dialog parqit_views"}{...}
+{vieweralsosee "[PARQIT] parqit_technical" "help parqit_technical"}{...}
 {vieweralsosee "[D] use" "help use"}{...}
 {vieweralsosee "[D] save" "help save"}{...}
 {vieweralsosee "[D] collapse" "help collapse"}{...}
@@ -17,15 +18,12 @@
 {viewerjumpto "Syntax" "parqit##syntax"}{...}
 {viewerjumpto "Menu" "parqit##menu"}{...}
 {viewerjumpto "Description" "parqit##description"}{...}
-{viewerjumpto "Stata metadata in Parquet" "parqit##metadata"}{...}
+{viewerjumpto "Quick start" "parqit##quickstart"}{...}
 {viewerjumpto "The lazy view" "parqit##lazy"}{...}
-{viewerjumpto "Input formats" "parqit##formats"}{...}
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
 {viewerjumpto "Materialisers" "parqit##materialisers"}{...}
-{viewerjumpto "Performance tips" "parqit##perf"}{...}
 {viewerjumpto "Exploring a view" "parqit##explore"}{...}
 {viewerjumpto "Expressions" "parqit##expressions"}{...}
-{viewerjumpto "Type mapping" "parqit##types"}{...}
 {viewerjumpto "Settings, raw SQL and diagnostics" "parqit##options"}{...}
 {viewerjumpto "Examples" "parqit##examples"}{...}
 {viewerjumpto "Limitations" "parqit##limitations"}{...}
@@ -60,7 +58,7 @@ identical — {opt clear} reads into memory, its absence opens a lazy view.
 filename that exists is always read as itself, never as a pattern),
 a Hive-partitioned directory, a delimited-text file ({cmd:.csv}, {cmd:.tsv},
 {cmd:.txt} or {cmd:.tab}), or a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file — see
-{help parqit##formats:Input formats}. Without {opt clear} a lazy view opens over
+{help parqit_technical##formats:Input formats}. Without {opt clear} a lazy view opens over
 the file(s), replaces any existing view with the same name and becomes current;
 the current in-memory dataset is unchanged. With {opt clear} the whole result is
 read into memory atomically and every open view is left untouched; {opt name()}
@@ -69,7 +67,7 @@ is then invalid.
 column names (columns absent from a file arrive missing); without it a schema
 mismatch across the matched files is a loud error. {opt encoding(name)} names
 the legacy 8-bit code page for a {cmd:.dta}/Excel source that must be bridged to
-Parquet (see {help parqit##formats:Input formats}); it is ignored, with a note,
+Parquet (see {help parqit_technical##formats:Input formats}); it is ignored, with a note,
 for a Parquet/CSV source (read as UTF-8).
 
 {pstd}Verbs on the open view (all lazy):
@@ -115,13 +113,13 @@ only the four options shown in its own syntax line; any other native
 Hive directory; delimited text; Stata; or Excel) or
 {cmd:view:}{it:viewname} — another open view whose plan is embedded without
 materialising either view. Non-Parquet file sources follow the adapter rules
-in {help parqit##formats:Input formats}.
+in {help parqit_technical##formats:Input formats}.
 
 {pstd}Materialisers and engine-side result commands (these execute against the
 pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 
 {p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear}]{space 8}stream the result into memory (atomically){p_end}
-{p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
+{p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)} {opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col} {opt nol:abel}]{space 2}({opt row}/{opt col} apply to the two-way form; the one-way form ignores them; {opt nolabel} shows codes instead of value labels){p_end}
@@ -299,56 +297,47 @@ the Stata-metadata round-trip. When reading a whole file into memory is all
 that is needed, either command serves. {cmd:parqit}'s menu and dialogs live
 under {bf:User > parqit} and never alter Stata's own menus.
 
-
-{marker metadata}{...}
-{title:Stata metadata in Parquet}
-
 {pstd}
-A file written by {cmd:parqit save} is an ordinary Parquet file: Python,
-R, Spark, DuckDB and other readers see the data columns normally. Stata-only
-metadata is stored in the Parquet footer as file-level key-value metadata.
-The keys are {cmd:parqit.schema}, {cmd:parqit.vallabs}, {cmd:parqit.chars}
-and {cmd:parqit.dtalabel}. {cmd:parqit.schema} carries Stata storage types,
-display formats, variable labels, attached value-label names, original
-source names and the dataset's sort-order marker
-({cmd:sortedby}, restored on read as far as Stata accepts it);
-{cmd:parqit.vallabs} carries the value-label definitions;
-{cmd:parqit.chars} carries characteristics and notes; and
-{cmd:parqit.dtalabel} carries the Stata data label.
+This entry is the user manual. The contracts behind it — the metadata layout
+in Parquet, the input adapters and code pages, the type mapping, atomicity
+and locks, the expression dialect, performance tips and the complete list of
+limitations — are in {help parqit_technical:the technical reference}. Nothing
+there is needed to use parqit; everything there is needed to trust, audit or
+extend it.
 
-{pstd}
-Third-party readers usually do not apply Stata labels automatically. For
-example, {cmd:pandas.read_parquet()} will read a labelled numeric variable as
-its numeric codes; the label definitions remain available in the footer. In
-Python, inspect them with {cmd:pyarrow}:
 
-{phang2}{cmd:import json, pyarrow.parquet as pq}{p_end}
-{phang2}{cmd:md = pq.read_metadata("file.parquet").metadata or dict()}{p_end}
-{phang2}{cmd:schema = json.loads(md[b"parqit.schema"].decode())}{p_end}
-{phang2}{cmd:vallabs = json.loads(md[b"parqit.vallabs"].decode())}{p_end}
-{phang2}{cmd:chars = json.loads(md[b"parqit.chars"].decode())}{p_end}
-{phang2}{cmd:dtalabel = json.loads(md[b"parqit.dtalabel"].decode())}{p_end}
+{marker quickstart}{...}
+{title:Quick start}
 
-{pstd}
-When the file is read back with {cmd:parqit use} or materialised with
-{cmd:parqit collect}, parqit restores the metadata to Stata. Extended missing
-categories {cmd:.a}-{cmd:.z} become plain missing values in Parquet, because
-Parquet has one missing concept; their value-label definitions still survive
-in {cmd:parqit.vallabs}. Value labels that are defined but attached to no
-variable ({cmd:label define} orphans) are written and restored too, like native
-{cmd:save}.
+{pstd}Explore first, load last. Open a file as a lazy view, look at it with
+engine-side commands, build the pipeline with ordinary verbs, and materialise
+only the result:
 
-{pstd}
-Restore is best-effort and loud: a metadata item Stata cannot accept is skipped
-or trimmed with a {cmd:note:} and never aborts the load — a display format Stata
-rejects, a value-label name or key that is not a legal Stata name/integer,
-value-label text over 32,000 bytes, a characteristic name that is not legal, a
-characteristic value over Stata's 67,783-byte limit (truncated), or a note/char
-whose variable is not in the result (dropped). A glob whose matched files carry
-{it:different} {cmd:parqit.*} metadata, or a malformed {cmd:parqit.*} key,
-restores no labels/formats and says so. In {cmd:merge}/{cmd:append}/{cmd:joinby}
-a value label defined differently on both sides keeps the master definition with
-a note.
+{phang2}{cmd:. parqit describe /data/big.parquet}{space 10}({it:rows, columns, types: the footer only}){p_end}
+{phang2}{cmd:. parqit use using /data/big.parquet}{space 8}({it:a lazy view; no result rows loaded}){p_end}
+{phang2}{cmd:. parqit summarize wage age}{space 17}({it:engine-side; the dataset in memory is unchanged}){p_end}
+{phang2}{cmd:. parqit keep if year >= 2019 & !missing(wage)}{p_end}
+{phang2}{cmd:. parqit gen double lwage = ln(wage)}{p_end}
+{phang2}{cmd:. parqit collapse (mean) lwage (count) n=lwage, by(firm year)}{p_end}
+{phang2}{cmd:. parqit show}{space 30}({it:the one query the plan compiles to}){p_end}
+{phang2}{cmd:. parqit collect, clear}{space 20}({it:only the result enters memory, atomically}){p_end}
+
+{pstd}When the result should stay on disk, replace the last line with
+{cmd:parqit save result.parquet, replace}: the pipeline runs and writes Parquet
+without loading the result into the current dataset. {cmd:parqit close}
+discards the view. Files written by parqit keep variable and value labels,
+notes, formats and characteristics, and stay plain Parquet for other tools.
+Two runnable courses ship with the package, {cmd:parqit_basics.do} and
+{cmd:parqit_tour.do} (see {help parqit##examples:Examples}).
+
+{pstd}Three rules of thumb: put {cmd:keep}/{cmd:keep if} early so the engine
+reads less; never expect a lazy verb to change the data in memory (only
+{cmd:collect} does, and only with a complete result); and read
+{help parqit##expressions:Expressions} once for the one difference from native
+Stata that matters in practice — under the default SQL semantics a comparison
+with a missing value is never true, so {cmd:keep if x > 5} drops a missing
+{cmd:x}, where native keeps it ({cmd:parqit set statamissing on} restores
+Stata's rule).
 
 
 {marker lazy}{...}
@@ -395,83 +384,6 @@ dataset while views are open, use {cmd:parqit save} {it:…}{cmd:, data}.
 {cmd:parqit head} previews cheaply; {cmd:parqit show} prints the generated SQL
 (a readable CTE pipeline, one stage per verb); {cmd:parqit explain} prints
 the engine's plan.
-
-
-{marker formats}{...}
-{title:Input formats}
-
-{pstd}
-The engine scans {bf:Parquet} and {bf:delimited text} ({cmd:.csv}, {cmd:.tsv},
-{cmd:.txt} or {cmd:.tab}) directly on disk when they are the main
-{cmd:parqit use} source — both are read {it:out of core}, so a file may be
-far larger than memory. Parquet can project columns and prune row groups;
-delimited text must still be parsed as a stream and has no Parquet row-group
-pruning. {bf:Stata} ({cmd:.dta}) and {bf:Excel} ({cmd:.xls}/{cmd:.xlsx}) inputs
-are {it:not} engine-scannable, so parqit imports them into a throwaway frame —
-your working dataset is left untouched — and snapshots them to a small Parquet
-{it:bridge} the engine then scans; their variable/value labels and formats ride
-along. parqit picks the path by the final file extension, case-insensitively.
-On the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, Parquet stays
-on disk, while delimited text, {cmd:.dta} and Excel are first imported to a
-package-owned Parquet bridge; this keeps the engine's two-table input contract
-uniform and is intended for a comparatively small using side.
-Delimited-text header names get the same treatment as Parquet column names
-(see {it:Column names} under {help parqit##types:Types and metadata}): a
-repeated name keeps the engine's numbered form ({cmd:a_1}, with
-{cmd:char a_1[src_name]} holding the original), a name that differs only by
-case from another is exact in Stata (an alias inside the lazy view, with a
-note), an empty header cell becomes {cmd:v}{it:#}, and a file without a header
-keeps the engine's {cmd:column0}, {cmd:column1}, … names.
-
-{pstd}
-Because a bridge {it:is} a {cmd:parqit save} of the imported frame, the
-write-side conversions apply to it and are now reported: extended missings
-{cmd:.a}-{cmd:.z} collapse to {cmd:.}, fractional date/period counts round, and
-legacy 8-bit text is transcoded from {cmd:windows-1252} (see
-{it:String encoding} under Materialisers). The command that created the bridge prints those losses through a
-{cmd:note:} naming the bridged file and returns them in
-{cmd:r(ext_missing)}/{cmd:r(frac_dates)}/{cmd:r(transcoded_vars)}/
-{cmd:r(transcoded_cells)}/{cmd:r(transcoded_meta)}/{cmd:r(encoding)} —
-{cmd:parqit use} (lazy and eager), {cmd:merge}/{cmd:joinby}/{cmd:append} and
-{cmd:open _data} alike. Choose another code page for a {cmd:.dta}/Excel bridge
-with {opt encoding(name)} on any of those commands (a Latin-9 or MacRoman
-{cmd:.dta}); a CSV main source is scanned as UTF-8 and is not transcoded.
-
-{pstd}
-{bf:When does the bridge make sense?} For a {it:small} side — a lookup
-{cmd:.dta}, a hand-made {cmd:.xlsx} — it is ideal: the cost is one quick import.
-A {it:large} {cmd:.dta} master gains nothing from it (you would have read the
-whole file into Stata either way), so for that prefer Stata's {cmd:use} followed
-by {cmd:parqit open _data}. That command writes one temporary Parquet snapshot
-of the in-memory dataset and opens a lazy view over it; it does not clear or
-otherwise change the in-memory dataset. The plugin atomically reserves every bridge, so concurrent Stata
-processes sharing a temp directory cannot choose the same path. A failed
-operation removes its package-owned bridge; after success, the bridge lives
-until the last view whose plan references it is closed or replaced.
-{cmd:parqit close _all} remains the final package-owned cleanup sweep.
-
-{pstd}
-This is exactly the shape that keeps a large master {it:out of} Stata while a
-small file joins in — only the result is collected:
-
-{phang2}{cmd:. parqit use using big.parquet}{space 22}({it:master view; schema probed, no rows loaded}){p_end}
-{phang2}{cmd:. parqit merge m:1 id using lookup.dta, keepusing(rate)}{space 3}({it:.dta bridged in}){p_end}
-{phang2}{cmd:. parqit collect, clear}{space 27}({it:only the merged result replaces the current dataset}){p_end}
-
-{pstd}
-A delimited file is scanned with DuckDB's {cmd:read_csv_auto} (schema and
-delimiter auto-detected); add {opt relaxed} to {cmd:parqit use} to union a glob
-whose files have different schemas. (SAS/SPSS are out of scope — parqit reads
-Parquet, delimited text, Stata and Excel.)
-
-{pstd}
-{cmd:parqit describe} {it:source} / {cmd:glimpse} {it:source} is deliberately a
-{bf:Parquet-only} footer inspection (file, glob or Hive directory): it does not
-invoke the CSV, Stata or Excel adapters. With no source argument it instead
-describes the open view's carried schema and pipeline depth. A mixed-schema
-Parquet glob is refused rather than displaying the first file as if it
-represented the set; open it with {cmd:parqit use ..., relaxed} to inspect the
-unioned view.
 
 
 {marker verbs}{...}
@@ -523,15 +435,6 @@ view yields zero observations rather than fabricating one aggregate row.
 no {cmd:parqit sort} was declared, the four order-sensitive statistics use a
 reproducible total order over all columns; declare the intended sort whenever
 "first" means the source's substantive order.
-
-{pstd}Result metadata follows native Stata where it is unambiguous. A
-{cmd:collapse} target is labelled {cmd:(}{it:stat}{cmd:)} {it:source} and keeps
-the source variable's display format (a {cmd:(count)} of a string source
-carries {cmd:%8.0g}); a {cmd:(count)} target is stored {cmd:long}. The {cmd:merge} marker keeps native's {cmd:%23.0g} format with its
-{cmd:_merge} value label. A {cmd:reshape wide} spread column is labelled
-{it:jvalue} {it:stub} and keeps the stub's format. Because these travel into the
-saved file's {cmd:parqit.*} metadata, third-party readers see the same
-labels/formats; the data values are unchanged.
 
 {pstd}{cmd:contract} produces one row per distinct key tuple, calls the frequency
 variable {cmd:_freq} by default, accepts another noncolliding name through
@@ -680,54 +583,25 @@ A valid destination name is accepted up to the filesystem limit
 siblings fall back to short digest-keyed names when the destination basename is
 long.
 
-{pstd}{opt copysource} is an explicit, hardened opt-in for
-{cmd:parqit save} {it:…}{cmd:, data}: instead of reading the dataset in memory,
-it copies the unchanged Parquet file loaded by the last
-{cmd:parqit use} {it:file}{cmd:, clear} — you assert nothing has changed. The
-default {cmd:parqit save} always reads memory, because Stata's
-{cmd:c(changed)} cannot prove the dataset still equals the file: it stays 0
-after {cmd:sort}/{cmd:gsort} and after Mata {cmd:st_store}/{cmd:st_sstore}/
-{cmd:st_view} writes, which reorder or edit the data. {opt copysource} therefore
-verifies, and refuses loudly when any check fails: the source's full identity
-must still match (size, mtime, ctime, inode and a Parquet-footer digest,
-re-checked immediately before and after the copy); the in-memory variable
-names/kinds, observation count and {cmd:sortedby} must equal the file's; the
-first and last 64 observations of every variable must equal the file's rows;
-and the dataset must be reproducible by copy (case-distinct names, sanitised
-names, {cmd:%tc} and binary {cmd:strL} are refused with the remedy). Those
-checks catch a {cmd:sort}, a {cmd:gsort} and any edit that touches either end of
-the data; they do {bf:not} compare the observations in between — an edit
-confined to the middle rows (a Mata {cmd:st_store} on observation 1,000 of
-2,003, say) is not detected, and the copy then carries the source file's
-content, not memory: with {opt copysource} you assert that nothing has changed.
-The copied file is the source file's content with the source file's own
-{cmd:sortedby} claim (copied as is), and {cmd:r(copysource)} reports the file
-copied. Eager {cmd:parqit use} {it:file}{cmd:, clear} records
-a private characteristic {cmd:char _dta[_parqit_fast_source_nonce]} that ties the
-dataset to that source so {opt copysource} can verify provenance; it is harmless,
-travels with a saved {cmd:.dta}, is never written into a parqit Parquet file, and
-may be removed with {cmd:char _dta[_parqit_fast_source_nonce]}.
-
-{pstd}{opt encoding(name)} names the legacy 8-bit code page used to transcode
-text that is not valid UTF-8 (see {it:String encoding} below):
-{cmd:windows-1252} (the default; aliases {cmd:cp1252}, {cmd:cp-1252},
-{cmd:windows1252}), {cmd:latin1} ({cmd:iso-8859-1}, {cmd:iso8859-1},
-{cmd:latin-1}), {cmd:latin9} ({cmd:iso-8859-15}, {cmd:iso8859-15}) or
-{cmd:macroman} ({cmd:mac-roman}, {cmd:macintosh}). {cmd:r(encoding)} reports the
-canonical name ({cmd:windows-1252}, {cmd:latin1}, {cmd:latin9},
-{cmd:macroman}) whatever spelling was typed. Any other name is refused before
-anything is written — on {bf:both} the memory-save and the lazy view-save
-paths. It has an effect only for a save of the dataset in memory; a lazy
-Parquet-to-Parquet save carries UTF-8 already, so a valid name is accepted with
-no effect there.
-
-{pstd}
-Writers for the same destination are serialized by
-{it:filename}{cmd:.parqit_lock}. parqit removes that lock only when the current
-process created it. A pre-existing or crash-stale lock therefore causes a loud,
-fail-closed refusal; after confirming that no writer is alive, the user may
-remove that stale lock explicitly. Historical sibling names such as
-{cmd:.parqit_tmp}/{cmd:.parqit_old} are never treated as package-owned.
+{pstd}{opt partitions(replace)} and {opt partitions(append)} update an
+{it:existing} partitioned tree partition by partition instead of rewriting it
+(they need {opt partition_by()} and exclude {opt replace}). With
+{cmd:replace}, every partition present in the result replaces its namesake in
+the tree — staged, verified, then swapped directory by directory, the old
+directory set aside until the new one is in place — while the partitions
+absent from the result stay byte-identical and a partition the tree does not
+have yet is added: the monthly "add or replace one month" update. With
+{cmd:append}, the result's files are added into the partitions under unique
+names and nothing is removed. The tree must be a Hive tree over the same keys
+in the same order, and the result must read as one dataset with it: the same
+columns and engine types, and the same {cmd:parqit.*} metadata (labels,
+formats, value labels, notes) — a difference is refused before anything is
+published, with the tree untouched, because files that disagree lose their
+labels on read. A tree written by another tool, without {cmd:parqit.*}
+metadata, receives its new partitions without it, with a {cmd:note:}; a tree
+whose files store the partition key inside is refused. A zero-row result
+touches nothing. A note reports how many partitions were replaced and added;
+a failed publish restores every partition it had touched.
 
 {pstd}With a view open, {cmd:parqit save} materialises that view and leaves the
 current Stata dataset untouched; {opt data} instead writes the in-memory
@@ -742,112 +616,10 @@ recently changed.
 and disk-to-disk path remain valid: filter or aggregate first, or write the
 large result with {cmd:parqit save}.
 
-{pstd}
-{it:String encoding.} Parquet/Arrow strings must be valid UTF-8. Text that is
-already valid UTF-8 (ASCII, accented text, emoji, {cmd:strL}) is written
-byte-exact. A string cell, variable or data label, value-label text, note or
-characteristic that carries raw Latin-1/Windows-1252/MacRoman bytes (common in
-administrative data saved by Stata 13 and earlier, or loaded into a Unicode
-Stata without {helpb unicode:unicode translate}) is
-{bf:transcoded to UTF-8 on the way out}, item by item — what
-{cmd:unicode translate} would do, with no
-translate step on your side and without touching the dataset in memory. The
-source code page defaults to {cmd:windows-1252} (identical to Latin-1 for the
-accented letters, and covering the euro sign and typographic quotes in
-0x80-0x9F); {opt encoding()} selects {cmd:latin1}, {cmd:latin9} or
-{cmd:macroman}. A {cmd:str#} whose transcoded values are longer is recorded
-wider, exactly as {cmd:unicode translate} widens it, and past 2,045 bytes the
-recorded type becomes {cmd:strL} (the {cmd:parqit.*} metadata is built after the
-data pass, so the recorded type always matches the written values). Every save
-that transcodes anything prints a {cmd:note:} with counts and returns
-{cmd:r(transcoded_cells)}, {cmd:r(transcoded_meta)}, {cmd:r(transcoded_vars)}
-and {cmd:r(encoding)}. One limitation, shared with {cmd:unicode translate}: a
-legacy string that happens to be well-formed UTF-8 cannot be told apart and is
-kept as is. On read, parqit never transcodes: a foreign Parquet file whose
-string payload is not valid UTF-8 is refused by the engine with a loud error
-naming the column — rewrite it as UTF-8 at the source. A binary {cmd:strL} containing an embedded NUL cannot be represented
-through the Stata plugin's text interface, so a direct memory-to-Parquet save
-refuses the offending cell before publishing any output. A lazy
-Parquet-to-Parquet save does not cross that interface and preserves the bytes.
-
-
-{marker perf}{...}
-{title:Performance tips}
-
-{pstd}
-parqit is fastest when data stays on disk and only the final result moves into
-Stata. The biggest single cost in any Stata↔columnar bridge is moving rows in
-and out of Stata's memory through the plugin interface, so the patterns below
-pay off most on large data. parqit prints a one-line {it:tip} when it detects one
-of these (e.g. a large {cmd:mergein}); {cmd:global PARQIT_NOTIPS 1} silences them.
-
-{dlgtab:Joining in-memory data with a disk file}
-
-{pstd}
-If your data is already in Stata's memory and you want to merge or append a
-{it:small} lookup that lives on disk, keep your data put: {cmd:parqit mergein} /
-{cmd:parqit appendin} run a {it:native} {help merge} / {help append}, reading only
-the columns you ask for from the disk side. The engine still reads that disk
-side, but your in-memory data never crosses into DuckDB and back.
-
-{phang2}{cmd:. parqit mergein m:1 firm_id using firms.parquet, keepusing(tfp)}{p_end}
-{phang2}{cmd:. parqit appendin using more_rows.parquet}{p_end}
-
-{pstd}
-When {it:both} sides are large, it is often faster to let DuckDB do the join
-out of core and bring back only the result. DuckDB's hash join avoids sorting
-either dataset, so on big-on-big it can beat Stata's native sort-merge even
-after the cost of moving the in-memory side across. If both files are on disk:
-
-{phang2}{cmd:. parqit use using big_master.parquet}{p_end}
-{phang2}{cmd:. parqit merge m:1 id using big_using.parquet, keepusing(...)}{p_end}
-{phang2}{cmd:. parqit collect, clear}{space 20}({it:only the joined result enters Stata}){p_end}
-
-{pstd}
-If the large side you want to join is in Stata's memory (not on disk), promote
-it once with {cmd:parqit open _data} and join out of core, then collect:
-
-{phang2}{cmd:. parqit open _data}{space 27}({it:snapshots the in-memory data to a view}){p_end}
-{phang2}{cmd:. parqit merge m:1 id using big_using.parquet, keepusing(...)}{p_end}
-{phang2}{cmd:. parqit collect, clear}{p_end}
-
-{pstd}
-The trade-off: {cmd:parqit open _data} writes a temporary bridge first (about the
-cost of one {cmd:parqit save}), so for a {it:small} lookup the native
-{cmd:parqit mergein} is usually faster, while for {it:big-on-big} the out-of-core
-join usually wins.
-
-{dlgtab:Other patterns}
-
-{phang}o {bf:Write without loading.} With a view open, {cmd:parqit save} runs the
-pipeline and writes Parquet directly without loading the result into the current
-dataset. Use it instead of
-{cmd:parqit collect} followed by a native {cmd:save}/export when you only need the
-file on disk.{p_end}
-
-{phang}o {bf:Filter and project early.} Put {cmd:parqit keep}/{cmd:parqit keep if}
-before a {cmd:collect}/{cmd:save} so the engine reads fewer columns and rows —
-the pipeline is lazy, so order is just a hint to push work toward the scan.{p_end}
-
-{phang}o {bf:Read into memory once.} If a workflow collects the same view more
-than once, collect it once and work on the result; each {cmd:parqit collect}
-re-executes the pipeline.{p_end}
-
-{phang}o {bf:Set a shared-machine memory budget.} The pinned DuckDB engine's
-default memory limit is 80% of available system memory. On a shared server or
-scheduler allocation, set an explicit per-process ceiling with
-{cmd:parqit set memory_limit} (for example {cmd:8GB}) and, when useful, a spill
-location with {cmd:parqit set tempdir}.{p_end}
-
-{phang}o {bf:Force a serial fill if you need to.} Reads of 50,000+ rows fill
-Stata's memory using up to {cmd:min(cores, 8)} worker threads (the per-cell
-fill dominates the cost). To force the single-threaded path — for example on a
-platform you have not yet verified — set the {it:operating-system} environment
-variable {cmd:PARQIT_FILL_THREADS=0} {it:before launching Stata} (e.g.
-{cmd:export PARQIT_FILL_THREADS=0} in your shell); {cmd:PARQIT_FILL_THREADS=}{it:n}
-pins {it:n} workers for atypical very wide or string-heavy reads. It is read by
-the plugin via {cmd:getenv}, so a Stata {cmd:global} does not reach it. The
-parallel and serial fills are byte-identical.{p_end}
+{pstd}The contracts behind {cmd:collect} and {cmd:save} — the {opt copysource}
+opt-in, {opt encoding()} and the transcoding of legacy text, the lock file that
+serializes writers, and the full string-encoding rules — are in
+{help parqit_technical##materialisers:the technical reference}.
 
 
 {marker explore}{...}
@@ -980,21 +752,6 @@ loudly. {cmd:tC()} yields the same count as {cmd:tc()}: parqit does not add
 leap seconds.
 
 {pstd}
-The numeric edge contracts follow Stata rather than DuckDB defaults. Division
-by zero, an invalid power, overflow, {cmd:ln()}/{cmd:log10()} of a nonpositive
-value and {cmd:sqrt()} of a negative value produce missing. {cmd:round(x)} and
-{cmd:round(x,u)} break exact halves toward +infinity (so
-{cmd:round(-2.5)=-2}); {cmd:u=0} returns {cmd:x}. {cmd:mod(x,y)} is the
-nonnegative remainder and is missing when {cmd:y<=0}. {cmd:min()}/{cmd:max()}
-take 2–64 numeric arguments, ignore missing arguments and return missing only
-when all are missing. {cmd:missing()}/{cmd:mi()} accept one or more arguments;
-{cmd:inlist()} accepts 2–255 same-family arguments. Numeric
-{cmd:inrange(x,lo,hi)} treats missing {cmd:x} as outside the range and missing
-bounds as unbounded. Three-argument {cmd:cond()} treats a missing numeric
-condition as true; its four-argument form selects the fourth branch instead.
-Branches must be all numeric or all string.
-
-{pstd}
 {cmd:_n}/{cmd:_N} are supported in {cmd:keep if}/{cmd:drop if} and in the
 main expression of {cmd:parqit gen}; they are windows over the declared
 {cmd:parqit sort} order (or engine scan order when no sort was declared, which
@@ -1004,71 +761,6 @@ them inside its {cmd:if} qualifier (the {it:main} expression of
 {cmd:gen ... if} may still use them), and the read-only
 {cmd:count if}/{cmd:list if} filters do not implement them at all. Every one of
 those forms fails loudly and leaves the view unchanged.
-
-{pstd}
-An order with tied keys is not a total order. Because a lazy plan is
-re-executed, {cmd:keep in}, {cmd:list in} and other sliced previews may select
-different members of a tied group across engine plans or platforms. When the
-identity of those rows matters, include an explicit unique tiebreaker in
-{cmd:parqit sort}/{cmd:gsort} before slicing.
-
-{pstd}
-{cmd:string()} and {cmd:strofreal()} accept one numeric argument and use
-Stata's default {cmd:%9.0g} format. {cmd:strlen()}/{cmd:length()} are string
-byte lengths here, whereas {cmd:ustrlen()} counts Unicode characters; unlike
-native Stata's {cmd:length()}, the numeric-display-width form is not
-implemented. {cmd:real()} returns missing for invalid or nonfinite text.
-{cmd:upper()}/{cmd:lower()} and their
-{cmd:strupper()}/{cmd:strlower()} aliases fold ASCII only, while
-{cmd:ustrupper()}/{cmd:ustrlower()} are Unicode-aware. {cmd:subinstr()} supports
-the replace-all form whose fourth argument is {cmd:.}. {cmd:substr()} and
-{cmd:strpos()} index bytes, like Stata; if a
-{cmd:substr()} slice splits a UTF-8 codepoint, parqit returns the replacement
-character because DuckDB/Arrow strings must remain valid UTF-8.
-Unicode-indexed {cmd:usubstr()} and {cmd:ustrpos()} are not implemented and
-fail loudly rather than silently using byte positions.
-{cmd:ustrupper()}/{cmd:ustrlower()} apply the engine's simple one-to-one
-Unicode case mapping, not ICU's full mapping: {cmd:ustrupper("straße")} is
-{cmd:STRAẞE} where native gives {cmd:STRASSE}, and {cmd:ustrlower("İ")} is
-a plain {cmd:i} where native keeps a combining dot. {cmd:regexm()} has no
-multiline mode: {cmd:^} and {cmd:$} anchor only at the ends of the whole
-value and {cmd:.} does not match a newline, whereas native matches
-{cmd:"^line1$"} and {cmd:"1.l"} inside {cmd:"line1"+char(10)+"line2"}.
-{cmd:mod(x,y)} follows native's arithmetic for a non-integer modulus
-({cmd:mod(7, 0.00001)} is {cmd:9.99999999911e-06}, as in Stata, not the
-manual's {cmd:x - y*floor(x/y)}).
-
-{pstd}
-Extended-missing literals {cmd:.a}-{cmd:.z} are rejected in lazy expressions.
-At the Parquet boundary their category identity has already collapsed to the
-single ordinary missing value, so accepting them would fabricate a distinction
-the view cannot observe. Use {cmd:missing(x)} or compare with {cmd:.}.
-
-{pstd}
-Expressions compute in double precision, exactly like Stata's expression
-evaluator, and every value Stata cannot hold is missing: an overflowing
-result ({cmd:exp(800)}, {cmd:1e300*1e300}) or an out-of-range literal
-({cmd:1e309}) is {cmd:.} in filters, assignments and aggregates alike —
-never an IEEE infinity. Because untyped results are double, control the
-storage of a generated column with a typed {cmd:parqit gen} (e.g.
-{cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
-is {cmd:float}. For an explicit {cmd:float} target, a finite value outside
-Stata's ±1.70e38 storage range becomes missing, as in native assignment.
-A {cmd:float} variable compared with a decimal literal ({cmd:x == 0.1},
-{cmd:x > 0.1}, and inside {cmd:inrange()}, {cmd:inlist()}, {cmd:cond()},
-{cmd:round()}) is compared in double, exactly as native Stata does:
-{cmd:x == 0.1} is false for a float {cmd:x} holding 0.1, and
-{cmd:x == float(0.1)} is the native idiom. {cmd:float(x)} rounds {cmd:x} to
-float precision (a value beyond ±1.70e38 is missing). One residual: an
-integral literal beyond 2^24 ({cmd:x == 16777217}) keeps its integer type,
-so against a float variable that comparison still runs in single precision.
-Date functions floor a fractional day count (like Stata:
-{cmd:day(-0.5)} is 31) and an out-of-range argument is row-local missing.
-One documented dialect difference: {cmd:regexm()} runs on DuckDB's RE2
-engine, which understands {cmd:\d \w \s}, {cmd:{c -(}n,m{c )-}} and
-non-greedy quantifiers that Stata's own {cmd:regexm} treats as literals —
-patterns using only POSIX classes and {cmd:* + ? . [] ^ $} behave
-identically.
 
 {pstd}
 {it:Missing-value semantics.} By default expressions use SQL semantics:
@@ -1110,102 +802,9 @@ stages already appended retain the SQL semantics under which they were built;
 change the setting before adding the relevant filter or assignment if the
 pipeline must use Stata missing ordering throughout.
 
-
-{marker types}{...}
-{title:Type mapping}
-
-{pstd}{it:Integers and floating point.} At the Stata-memory boundary,
-{cmd:BOOLEAN} becomes {cmd:byte} 0/1. Signed and unsigned integers use the
-smallest exact Stata integer storage that contains the observed range and
-otherwise {cmd:double}; an all-missing integer column becomes an all-missing
-{cmd:byte} with a note. {cmd:UINT32} values above Stata {cmd:long}'s ceiling
-survive as {cmd:double}. {cmd:UINT64}/{cmd:HUGEINT}/{cmd:UHUGEINT} values beyond
-2^53 and wide {cmd:DECIMAL} values may round in binary64, so parqit loads them
-as {cmd:double} with an explicit precision note, never as silent missing.
-A lazy plan keeps these source numerics in DuckDB until a Stata boundary is
-actually crossed.
-
-{pstd}{it:Round-trip storage.} When a file was written by parqit, its metadata
-preserves the original storage floor (a {cmd:byte} comes back {cmd:byte}, a
-{cmd:long} comes back {cmd:long}, and a {cmd:str8} keeps width 8) unless the
-observed values require a wider safe type. A plain display format
-({cmd:%9.2f}, {cmd:%8.0g}) never widens storage; only a genuine date/period
-format keeps integer storage at {cmd:int} or wider so its count fits.
-Foreign strings are sized by maximum UTF-8 byte length: up to 2,045 bytes use
-{cmd:str#}, longer values use {cmd:strL}, and empty/all-null columns use
-{cmd:str1}. {cmd:ENUM}, {cmd:UUID} and logical {cmd:JSON} load as text.
-
-{pstd}{it:Dates and times.} {cmd:%td} variables (and the old-style {cmd:%d}
-synonyms) are {cmd:DATE} on disk,
-{cmd:%tc} variables are {cmd:TIMESTAMP}, and {cmd:%tm %tq %th %tw %ty %tb}
-stay integer period counts — never mis-scaled calendar dates. A parqit-written
-{cmd:%td} or {cmd:%tc} column restores its recorded storage type on both the
-eager and lazy paths (an {cmd:int} {cmd:%td} comes back {cmd:int}; a {cmd:float}
-{cmd:%tc} comes back {cmd:float} when a scan proves every value exactly
-representable as a float — on eager, lazy and view-save reads — and
-{cmd:double} otherwise) unless the observed values require wider. Foreign
-{cmd:TIME} values become milliseconds since midnight with
-{cmd:%tcHH:MM:SS}; nanosecond time/timestamps are truncated (toward the earlier
-millisecond, including before 1970) with a note. A timezone-aware timestamp keeps its UTC instant;
-a time-of-day offset is discarded with a note. Inside a pipeline dates are
-their Stata day or millisecond counts, so date arithmetic is ordinary
-arithmetic. Saving a fractional day, millisecond or period count rounds to the
-nearest integer using native Stata's exact-half rule (toward +infinity), on
-both memory and lazy paths, and names the affected column.
-
-{pstd}{it:Special and unsupported values.} IEEE NaN loads as missing;
-{cmd:±Inf}, and any finite magnitude at or above Stata's missing sentinel
-(≈ 8.99e307), load as missing with a per-column note. A foreign float32 column
-whose finite range exceeds Stata float's ±1.70e38 ceiling widens to
-{cmd:double}. String values containing NUL are truncated at the first NUL when
-loaded into Stata, with a per-column note; a lazy Parquet-to-Parquet save does
-not cross that boundary. Types with no Stata representation — {cmd:NULL},
-{cmd:BLOB}, {cmd:BIT}, {cmd:INTERVAL}, {cmd:LIST}/{cmd:ARRAY},
-{cmd:STRUCT}/{cmd:MAP}/{cmd:UNION}, {cmd:BIGNUM}, {cmd:GEOMETRY} and
-{cmd:VARIANT} — are dropped with a reason; a result containing no loadable
-columns is refused.
-
-{pstd}{it:Column names.} At the Stata boundary, invalid name characters become
-underscores, a leading digit or reserved word gains an underscore (only
-{cmd:strL} and the {cmd:str#} family are reserved — a plain {cmd:str} is a legal
-name), names are
-limited to 32 Unicode code points, empty names become {cmd:v}{it:position}
-(with a note; there is no source name to keep), and collisions gain
-deterministic numbered suffixes. The original file name is
-retained in {cmd:char var[src_name]} and in the {cmd:parqit.*} metadata; a later
-{cmd:parqit save} writes the Stata names (the original stays recoverable from
-{cmd:parqit.chars}). This recovery works for a single file, a glob, a Hive tree
-and a {opt relaxed} union (parqit predicts the engine's union of the files'
-columns exactly and maps every engine name back to the true one), and for
-DuckDB's nested dedup shapes (a file carrying {cmd:a}, {cmd:a_1} and {cmd:A} is
-read back as those three names). Under {opt relaxed} the engine matches the
-files' column names case-insensitively: a later file's column that differs
-only by case from an earlier file's ({cmd:NUEMP} after {cmd:nuemp}) is unioned
-into that column and a {cmd:note:} says so; when such a match would split one
-name across two columns (one file carrying both {cmd:nuemp} and {cmd:NUEMP},
-another only {cmd:NUEMP}) the read is refused — read the files separately or
-rename the columns upstream. A Hive tree whose partition key differs only by
-case from a column inside the files ({cmd:g=} directories over a file column
-{cmd:G}) is refused on every path, because the engine would replace that
-column's values with the key; a key that exactly duplicates a file column is
-read with a {cmd:note:} (the directory value is used).
-Names that differ only by case ({cmd:nuemp} and {cmd:NUEMP}) are distinct
-variables in Stata and distinct columns in Parquet, but not in the engine, whose
-identifiers are case-insensitive: parqit keeps them exact at both boundaries —
-a save writes both names into the file, {cmd:parqit use ..., clear} and
-{cmd:parqit collect} restore both — while inside a lazy view the second is
-addressed by a numbered alias ({cmd:NUEMP_1}, reported when the view opens and
-by {cmd:parqit describe}) that {cmd:collect} and {cmd:save} translate back — a
-selection varlist ({cmd:parqit use} {it:varlist}, {cmd:keep}/{cmd:drop}/
-{cmd:order}, {opt partition_by()}) accepts either the alias or the exact name.
-Creating a lazy name that differs only by case from a live one is refused, and
-{opt partition_by()} is not available for such datasets. A {cmd:parqit sql}
-result with case-clashing output names ({cmd:SELECT 1 AS a, 2 AS A}) is handled
-the same way and reported with a {cmd:note:}; a raw {cmd:SELECT *} over a
-case-clashing file arrives with DuckDB's own dedup names (a note flags them) —
-open the file with {cmd:parqit use} to keep the exact names.
-A source column name containing a NUL byte is refused on every input surface;
-truncating it could select the wrong column and is never allowed.
+{pstd}The rest of the dialect — the numeric edge contracts, string-function
+details, ties in sort keys, extended missings and double-precision evaluation
+— is in {help parqit_technical##expressions:the technical reference}.
 
 
 {marker options}{...}
@@ -1228,14 +827,6 @@ The four settings apply to this loaded plugin session and survive view changes;
 {cmd:discard} unloads the plugin and resets them. A nonexistent temp directory
 is warned about immediately but not forbidden, because it may be created before
 the first spill.
-
-{pstd}
-Three knobs live outside {cmd:parqit set}. The Stata global
-{cmd:PARQIT_PLUGIN_PATH} points the loader at a locally built plugin and
-takes precedence over the adopath search for {cmd:parqit.plugin};
-{cmd:global PARQIT_NOTIPS 1} mutes the one-line performance tips; and the
-operating-system environment variable {cmd:PARQIT_FILL_THREADS} controls
-the parallel memory fill (see {help parqit##perf:Performance tips}).
 
 {pstd}{bf:Raw SQL.} {cmd:parqit sql} accepts a DuckDB {it:query} that returns a
 table; it is nested as a subquery, so DDL/DML statements are not this command's
@@ -1265,6 +856,10 @@ and writes/reads a small metadata-bearing Parquet file in process.
 {cmd:menu} adds the reproducible dialogs to {bf:User > parqit} once per GUI
 session and refuses console/batch sessions.
 
+{pstd}The environment knobs outside {cmd:parqit set} ({cmd:PARQIT_PLUGIN_PATH},
+{cmd:PARQIT_NOTIPS}, {cmd:PARQIT_FILL_THREADS}) are described in
+{help parqit_technical##environment:the technical reference}.
+
 
 {marker examples}{...}
 {title:Examples}
@@ -1288,7 +883,7 @@ dataset:{p_end}
 {pstd}{bf:Whole-file I/O and the metadata round-trip.} Labels, value labels,
 notes, formats and storage types survive save → use exactly; the file stays
 plain Parquet for Python/R/Spark (see
-{help parqit##metadata:Stata metadata in Parquet}):{p_end}
+{help parqit_technical##metadata:Stata metadata in Parquet}):{p_end}
 {phang2}{cmd:. sysuse auto, clear}{p_end}
 {phang2}{cmd:. parqit save auto.parquet, replace}{p_end}
 {phang2}{cmd:. parqit use using auto.parquet, clear}{p_end}
@@ -1446,65 +1041,32 @@ dialogs; neither file is exhaustive.{p_end}
 {marker limitations}{...}
 {title:Limitations}
 
-{pstd}{cmd:•} Views are plans over live sources, not snapshots: re-collecting
-re-executes the pipeline and can observe a source file that changed meanwhile.
-Results are not cached. A {cmd:view:}{it:name} input captures that view's plan at
-the time it is embedded, but its underlying files remain live.{p_end}
-{pstd}{cmd:•} A source file that changes {it:while} it is being read is refused,
-never mixed: every matched file's identity (size, mtime, ctime, inode) is
-captured before planning and re-checked before and after the fetch, and the
-fetched column types are compared with the plan; a change fails with
-{cmd:r(920)} and the dataset in memory is untouched — retry when the file is
-stable. This guards eager {cmd:use, clear} and a direct {cmd:collect}; a
-pipeline's whole result is built by one engine query over the files as they
-are at execution time.{p_end}
-{pstd}{cmd:•} {cmd:parqit save ..., data copysource} verifies identity, names,
-kinds, count, {cmd:sortedby} and the first and last 64 observations only; an
-edit confined to the middle rows is not detected and the copy carries the
-source file's content (see {help parqit##materialisers:Materialisers}).{p_end}
-{pstd}{cmd:•} {cmd:reshape wide}/{cmd:pivot} refuse a generated name that
-differs only by case from a live or another generated name ({cmd:x1} beside
-{cmd:X1}); a {opt relaxed} union refuses a name the engine's case-insensitive
-union would split across two columns, and a Hive tree whose partition key
-differs only by case from a file column is refused (see {it:Column names} under
-{help parqit##types:Types and metadata}).{p_end}
-{pstd}{cmd:•} Stata's plugin observation index is signed 32-bit. Eager
-{cmd:use ..., clear} and {cmd:collect} refuse more than 2,147,483,647 rows with
-error 901; filter, aggregate or {cmd:save} the lazy result instead.{p_end}
-{pstd}{cmd:•} Main-source Parquet and delimited text are engine-scanned, but
-{cmd:.dta}/{cmd:.xls}/{cmd:.xlsx} require a full temporary Parquet bridge.
-Delimited text on a two-table {cmd:using} side is bridged too.
-{cmd:describe} with a source argument is Parquet-only.{p_end}
+{pstd}{cmd:•} A view is a plan over live files, not a snapshot: collecting
+again re-executes it, and a source file that changes while it is being read is
+refused, never mixed.{p_end}
+{pstd}{cmd:•} Expressions use SQL missing-value semantics unless
+{cmd:parqit set statamissing on}; {cmd:_n}/{cmd:_N} work in {cmd:keep if},
+{cmd:drop if} and in the main expression of {cmd:gen} only.{p_end}
+{pstd}{cmd:•} Lazy {cmd:merge m:m} is refused ({cmd:joinby} or
+{cmd:mergein m:m} instead); {cmd:collapse}/{cmd:pivot} take no weights;
+{cmd:reshape wide}/{cmd:pivot} spread at most 2,000 values.{p_end}
+{pstd}{cmd:•} Eager {cmd:use, clear} and {cmd:collect} refuse more than
+2,147,483,647 observations; the lazy path and {cmd:save} are not so
+bounded.{p_end}
 {pstd}{cmd:•} Extended missings {cmd:.a}-{cmd:.z} become plain missing in
-Parquet (the format has one missing concept); parqit warns when they are
-written. Their literals are therefore rejected in lazy expressions; use
-{cmd:missing()} or the ordinary {cmd:.} value.{p_end}
-{pstd}{cmd:•} A slice over tied sort keys has no defined within-tie order.
-Add a unique key to {cmd:sort}/{cmd:gsort} before {cmd:keep in} or a sliced
-preview when row identity must be reproducible.{p_end}
-{pstd}{cmd:•} A direct memory-to-Parquet save refuses a binary {cmd:strL}
-containing NUL; a lazy Parquet-to-Parquet save preserves it, and text
-{cmd:strL}s round-trip. Unsupported DuckDB types are dropped with a reason,
-and an input with no representable columns is refused. A NUL in a source
-column name is always refused; a NUL in a string value is truncated only when
-crossing into Stata, with a note.{p_end}
-{pstd}{cmd:•} Lazy {cmd:parqit merge m:m} is refused before adapter import or
-view mutation because a lazy plan lacks native physical within-key order. Use
-{cmd:joinby} for Cartesian matches or native {cmd:mergein m:m} for Stata's
-sequential behaviour.{p_end}
-{pstd}{cmd:•} {cmd:reshape wide} and {cmd:pivot} cap the spread dimension at
-2,000 values. {cmd:collapse}/{cmd:pivot} do not implement weights. Lazy
-expressions are the documented subset, not arbitrary Stata syntax; in
-particular {cmd:_n}/{cmd:_N} are unavailable in {cmd:replace}, in the
-{cmd:if} qualifier of {cmd:gen}, and in the read-only {cmd:count if} and
-{cmd:list if} filters.{p_end}
-{pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
-their format in metadata; third-party readers see the raw counts.{p_end}
-{pstd}{cmd:•} {cmd:discard} unloads the plugin and forgets an un-collected
-view (data on disk is never affected).{p_end}
-{pstd}{cmd:•} A loaded result reports {cmd:c(filename)} empty and
-{cmd:c(changed)} 0 — like an import, the data is not backed by a
-.dta.{p_end}
+Parquet (their labels survive); their literals are refused in lazy
+expressions.{p_end}
+{pstd}{cmd:•} Stata {cmd:.dta} and Excel inputs are bridged through memory;
+Parquet and delimited text are scanned out of core. {cmd:describe} with a file
+argument is Parquet-only.{p_end}
+{pstd}{cmd:•} Names that differ only by case are kept exact, but a lazy name
+the engine could not tell apart from a live one is refused (a generated
+{cmd:x1} beside {cmd:X1}, some {opt relaxed} unions, a Hive key clashing with a
+column).{p_end}
+{pstd}{cmd:•} {cmd:discard} forgets uncollected views; a collected result
+reports {cmd:c(filename)} empty and {cmd:c(changed)} 0. The complete list, with
+the contract behind each item, is in
+{help parqit_technical##limitations:the technical reference}.{p_end}
 
 
 {marker results}{...}

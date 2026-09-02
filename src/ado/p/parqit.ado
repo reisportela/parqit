@@ -1,4 +1,4 @@
-*! version 0.1.30 01sep2026
+*! version 0.1.31 02sep2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Author: Miguel Portela, Universidade do Minho & NIPE
 *! License: MIT (see LICENSE in the parqit repository)
@@ -253,7 +253,7 @@ program define _parqit_tip
     version 16.0
     args msg
     if ("${PARQIT_NOTIPS}" != "") exit
-    di as txt `"(tip: `msg' — see {help parqit##perf:performance tips}; "' ///
+    di as txt `"(tip: `msg' — see {help parqit_technical##perf:performance tips}; "' ///
         as txt `"{bf:global PARQIT_NOTIPS 1} mutes these)"'
 end
 
@@ -1660,9 +1660,29 @@ program define _parqit_save, rclass
     version 16.0
     syntax anything(name=target id="filename") [, replace Data ///
         COMPression(string) compression_level(integer -1) PARTition_by(string) ///
-        Chunk(integer -1) ENCoding(string) COPYsource]
+        Chunk(integer -1) ENCoding(string) COPYsource partitions(string)]
 
     local dest `target'
+    * PART-MODE-1: partitions(replace|append) updates an existing Hive tree
+    * partition by partition; it needs partition_by() and excludes replace
+    local partitions = strlower(strtrim("`partitions'"))
+    if ("`partitions'" != "" & !inlist("`partitions'", "replace", "append")) {
+        di as err "parqit save: partitions() must be replace or append"
+        exit 198
+    }
+    if ("`partitions'" != "" & "`partition_by'" == "") {
+        di as err "parqit save: partitions(`partitions') needs partition_by()"
+        exit 198
+    }
+    if ("`partitions'" != "" & "`replace'" != "") {
+        di as err "parqit save: partitions(`partitions') and replace are mutually exclusive;" ///
+            " replace rewrites the whole tree, partitions() touches only the partitions in the result"
+        exit 198
+    }
+    if ("`partitions'" != "" & "`copysource'" != "") {
+        di as err "parqit save: copysource copies one file; partitions() is not available with it"
+        exit 198
+    }
     _parqit_ensure_plugin
     plugin call parqit_plugin, view_alive
 
@@ -1682,6 +1702,7 @@ program define _parqit_save, rclass
         local _sq_comp `"`compression'"'
         local _sq_complevel = `compression_level'
         local _sq_partition `"`partition_by'"'
+        local _sq_pmode "`partitions'"
         local _sq_chunk = `chunk'
         local _sq_encoding `"`encoding'"'
         mata: _parqit_wr_view_save_request("`req'")
@@ -1716,6 +1737,7 @@ program define _parqit_save, rclass
     local _sq_comp `"`compression'"'
     local _sq_complevel = `compression_level'
     local _sq_partition `"`partition_by'"'
+    local _sq_pmode "`partitions'"
     local _sq_chunk = `chunk'
     local _sq_encoding `"`encoding'"'
     local _sq_dtalabel `: data label'
@@ -2952,6 +2974,7 @@ void _parqit_wr_view_save_request(string scalar req)
         _parqit_jpair("compression_level", st_local("_sq_complevel")),
         _parqit_jpair("chunk", st_local("_sq_chunk")),
         _parqit_jtext("encoding", strlower(strtrim(st_local("_sq_encoding")))),
+        _parqit_jtext("partition_mode", st_local("_sq_pmode")),
         _parqit_jpair("partition_by", _parqit_jlist(tokens(st_local("_sq_partition")))))))
 }
 
@@ -2990,6 +3013,7 @@ void _parqit_wr_save_request(string scalar req)
     partv = (strtrim(st_local("_sq_partition")) == "" ? J(1, 0, "")
              : tokens(st_local("_sq_partition")))
     j = j + "," + _parqit_jpair("partition_by", _parqit_jlist(partv))
+    j = j + "," + _parqit_jtext("partition_mode", st_local("_sq_pmode"))
 
     j = j + "," + _parqit_jq("vars") + ":["
     labnames = J(0, 1, "")

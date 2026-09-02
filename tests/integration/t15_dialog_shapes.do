@@ -359,6 +359,10 @@ capture noisily parqit save `"`out'"', replace compression(zstd) compression_lev
 _shape `=_rc' "parqit save file, replace compression() compression_level() chunk() encoding()"
 capture noisily parqit save `"`part'"', replace partition_by(foreign)
 _shape `=_rc' "parqit save dir, replace partition_by()"
+capture noisily parqit save `"`part'"', partition_by(foreign) partitions(replace)
+_shape `=_rc' "parqit save dir, partition_by() partitions(replace)"
+capture noisily parqit save `"`part'"', partition_by(foreign) partitions(append)
+_shape `=_rc' "parqit save dir, partition_by() partitions(append)"
 capture noisily parqit save `"`out2'"', replace data
 _shape `=_rc' "parqit save file, replace data (memory while a view is open)"
 parqit close _all

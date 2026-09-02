@@ -1819,6 +1819,259 @@ void set_prepared_read(const std::string &source_scan_sql,
     *tag_out = g_prepared.tag;
 }
 
+/* ------------------------------------------ partition modes (PART-MODE-1) */
+namespace {
+
+std::string join_keys(const std::vector<std::string> &keys) {
+    std::string out;
+    for (size_t i = 0; i < keys.size(); i++) out += (i ? " " : "") + keys[i];
+    return out;
+}
+
+/* The existing destination must be a Hive tree over exactly `keys`, in that
+ * order: every non-hidden entry at level d is a directory named
+ * "<keys[d]>=..."; below the last key only files. Descends the first branch
+ * to find a sample Parquet file (the schema/metadata reference). An empty
+ * level is accepted (nothing to compare). */
+bool hive_tree_probe(const std::filesystem::path &dir,
+                     const std::vector<std::string> &keys, size_t depth,
+                     std::filesystem::path *sample, std::string *err) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path first_sub;
+    for (const auto &e : fs::directory_iterator(dir, ec)) {
+        const std::string name = e.path().filename().u8string();
+        if (name.empty() || name[0] == '.') continue;
+        std::error_code ecd;
+        const bool is_dir = e.is_directory(ecd);
+        if (depth < keys.size()) {
+            const std::string prefix = keys[depth] + "=";
+            if (!is_dir || name.compare(0, prefix.size(), prefix) != 0) {
+                *err = "partitions(): " + e.path().u8string() +
+                       " is not a partition directory of key " + keys[depth] +
+                       "; the existing tree must be a Hive tree over " +
+                       join_keys(keys) + " in that order";
+                return false;
+            }
+            if (first_sub.empty()) first_sub = e.path();
+        } else {
+            if (is_dir) {
+                *err = "partitions(): " + e.path().u8string() +
+                       " is a directory below the last partition key " + keys.back();
+                return false;
+            }
+            if (sample->empty() && name.size() > 8 &&
+                name.compare(name.size() - 8, 8, ".parquet") == 0)
+                *sample = e.path();
+        }
+    }
+    if (ec) {
+        *err = "partitions(): could not read " + dir.u8string() + ": " + ec.message();
+        return false;
+    }
+    if (depth < keys.size() && !first_sub.empty())
+        return hive_tree_probe(first_sub, keys, depth + 1, sample, err);
+    return true;
+}
+
+/* parqit.* key-value metadata of one file, keyed exactly as the reader
+ * compares files of a glob (plan_columns): raw key -> raw value. */
+bool parqit_kv_of(Session &s, const std::string &file,
+                  std::map<std::string, std::string> *out, std::string *err) {
+    duckdb_result res;
+    if (!s.query("SELECT try(decode(key)) AS k, try(decode(value)) AS v FROM "
+                 "parquet_kv_metadata(" + quote_literal(glob_escape(file)) +
+                 ") WHERE try(decode(key)) LIKE 'parqit.%'",
+                 &res, err))
+        return false;
+    const idx_t n = duckdb_row_count(&res);
+    for (idx_t r = 0; r < n; r++) {
+        char *k = duckdb_value_varchar(&res, 0, r);
+        char *v = duckdb_value_varchar(&res, 1, r);
+        if (k && v) (*out)[k] = v;
+        if (k) duckdb_free(k);
+        if (v) duckdb_free(v);
+    }
+    duckdb_destroy_result(&res);
+    return true;
+}
+
+/* column names and engine types stored in one file (partition keys are
+ * directories, not columns, in a parqit-written tree) */
+bool parquet_columns_of(Session &s, const std::string &file,
+                        std::vector<std::pair<std::string, std::string>> *out,
+                        std::string *err) {
+    duckdb_result res;
+    if (!s.query("DESCRIBE SELECT * FROM read_parquet(" +
+                     quote_literal(glob_escape(file)) + ", hive_partitioning = false)",
+                 &res, err))
+        return false;
+    const idx_t n = duckdb_row_count(&res);
+    for (idx_t r = 0; r < n; r++) {
+        char *c = duckdb_value_varchar(&res, 0, r);
+        char *t = duckdb_value_varchar(&res, 1, r);
+        out->emplace_back(c ? c : "", t ? t : "");
+        if (c) duckdb_free(c);
+        if (t) duckdb_free(t);
+    }
+    duckdb_destroy_result(&res);
+    return true;
+}
+
+std::string describe_column_diff(const std::vector<std::pair<std::string, std::string>> &a,
+                                 const std::vector<std::pair<std::string, std::string>> &b) {
+    for (size_t i = 0; i < a.size() && i < b.size(); i++)
+        if (a[i] != b[i])
+            return "column " + std::to_string(i + 1) + ": tree has " + a[i].first + " " +
+                   a[i].second + ", result has " + b[i].first + " " + b[i].second;
+    return "tree has " + std::to_string(a.size()) + " columns, result has " +
+           std::to_string(b.size());
+}
+
+void collect_leaf_dirs(const std::filesystem::path &root, const std::filesystem::path &rel,
+                       size_t depth, size_t nkeys, std::vector<std::filesystem::path> *out) {
+    namespace fs = std::filesystem;
+    if (depth == nkeys) {
+        out->push_back(rel);
+        return;
+    }
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(rel.empty() ? root : root / rel, ec)) {
+        std::error_code ecd;
+        if (!e.is_directory(ecd)) continue;
+        collect_leaf_dirs(root, rel.empty() ? fs::path(e.path().filename())
+                                            : rel / e.path().filename(),
+                          depth + 1, nkeys, out);
+    }
+}
+
+std::string random_hex16() {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016" PRIx64, static_cast<uint64_t>(gen()));
+    return buf;
+}
+
+/* Publish the staged tree into an existing one, partition by partition:
+ * replace swaps each leaf directory present in the result (the old leaf set
+ * aside first, restored on failure); append moves the staged files into the
+ * existing leaf under unique names, or moves the whole leaf when it is new.
+ * Every step is undone in reverse on failure; a failed rollback retains the
+ * aside copies under the transaction root and says so. */
+ST_retcode publish_partitions(const std::filesystem::path &dest,
+                              const std::filesystem::path &staged,
+                              OutputTransaction &tx, size_t nkeys,
+                              const std::string &mode, long long *n_replaced,
+                              long long *n_added, std::string *err) {
+    namespace fs = std::filesystem;
+    struct LeafMove {
+        fs::path target, aside;
+        bool had_old = false, moved_dir = false;
+        std::vector<fs::path> added;
+    };
+    std::vector<fs::path> leaves;
+    collect_leaf_dirs(staged, fs::path(), 0, nkeys, &leaves);
+    const fs::path asideroot = tx.root / "aside";
+    std::vector<LeafMove> moves;
+    std::string failure;
+    for (size_t i = 0; i < leaves.size(); i++) {
+        const fs::path from = staged / leaves[i];
+        LeafMove m;
+        m.target = dest / leaves[i];
+        std::error_code ec;
+        const bool target_exists = fs::exists(m.target, ec);
+        if (mode == "replace" || !target_exists) {
+            if (target_exists) {
+                m.aside = asideroot / leaves[i];
+                fs::create_directories(m.aside.parent_path(), ec);
+                if (!ec) fs::rename(m.target, m.aside, ec);
+                if (ec) {
+                    failure = "could not set aside partition " + m.target.u8string() +
+                              ": " + ec.message();
+                    moves.push_back(m);
+                    break;
+                }
+                m.had_old = true;
+            }
+            fs::create_directories(m.target.parent_path(), ec);
+            if (!ec) {
+                if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH") && i + 1 == leaves.size())
+                    ec = std::make_error_code(std::errc::io_error);
+                else
+                    fs::rename(from, m.target, ec);
+            }
+            if (ec) {
+                failure = "could not publish partition " + m.target.u8string() + ": " +
+                          ec.message();
+                moves.push_back(m);
+                break;
+            }
+            m.moved_dir = true;
+            if (target_exists) ++*n_replaced; else ++*n_added;
+        } else {
+            const std::string token = random_hex16();
+            for (const auto &e : fs::directory_iterator(from, ec)) {
+                std::error_code ecf;
+                if (!e.is_regular_file(ecf)) continue;
+                const fs::path to = m.target / (e.path().stem().u8string() + "_" + token +
+                                                e.path().extension().u8string());
+                std::error_code ecm;
+                if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH") && i + 1 == leaves.size())
+                    ecm = std::make_error_code(std::errc::io_error);
+                else
+                    fs::rename(e.path(), to, ecm);
+                if (ecm) {
+                    failure = "could not add " + to.u8string() + ": " + ecm.message();
+                    break;
+                }
+                m.added.push_back(to);
+            }
+            if (!failure.empty()) {
+                moves.push_back(m);
+                break;
+            }
+            ++*n_added;
+        }
+        moves.push_back(m);
+    }
+    if (failure.empty()) {
+        std::error_code ecr;
+        fs::remove_all(asideroot, ecr);
+        return 0;
+    }
+    /* rollback, newest first */
+    bool rollback_failed = false;
+    for (auto it = moves.rbegin(); it != moves.rend(); ++it) {
+        std::error_code ec;
+        if (it->moved_dir) fs::remove_all(it->target, ec);
+        for (const auto &f : it->added) fs::remove(f, ec);
+        if (it->had_old) {
+            std::error_code ecb;
+            if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_ROLLBACK"))
+                ecb = std::make_error_code(std::errc::io_error);
+            else {
+                fs::create_directories(it->target.parent_path(), ecb);
+                if (!ecb) fs::rename(it->aside, it->target, ecb);
+            }
+            if (ecb) rollback_failed = true;
+        }
+    }
+    *err = failure;
+    if (rollback_failed) {
+        tx.retain_root = true;
+        *err += "; rollback also failed: the previous partition(s) were NOT deleted and "
+                "are retained for recovery under " + asideroot.u8string();
+    } else {
+        std::error_code ecr;
+        fs::remove_all(asideroot, ecr);
+        *err += "; the existing tree was left as it was";
+    }
+    return kRcEngine;
+}
+
+} // namespace
+
 /* ----------------------------------------------- verified parquet writer */
 
 ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
@@ -1829,13 +2082,29 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                             const std::string &kv_metadata_sql_fragment,
                             long long *written, std::string *err,
                             const std::vector<std::string> *leaf_names,
-                            const std::function<bool(std::string *)> *pre_publish) {
+                            const std::function<bool(std::string *)> *pre_publish,
+                            const std::string &partition_mode, std::string *note) {
     namespace fs = std::filesystem;
     static const std::set<std::string> kCodecs = {
         "snappy", "zstd", "gzip", "uncompressed", "lz4", "lz4_raw", "brotli"};
     if (!compression.empty() && !kCodecs.count(compression)) {
         *err = "unknown compression codec '" + compression +
                "' (snappy zstd gzip lz4 lz4_raw brotli uncompressed)";
+        return kRcUsage;
+    }
+    /* PART-MODE-1 */
+    if (!partition_mode.empty() && partition_mode != "replace" && partition_mode != "append") {
+        *err = "partitions() must be replace or append; got '" + partition_mode + "'";
+        return kRcUsage;
+    }
+    if (!partition_mode.empty() && partition_by.empty()) {
+        *err = "partitions(" + partition_mode + ") needs partition_by()";
+        return kRcUsage;
+    }
+    if (!partition_mode.empty() && replace) {
+        *err = "partitions(" + partition_mode + ") and replace are mutually exclusive: "
+               "replace rewrites the whole tree, partitions() touches only the "
+               "partitions present in the result";
         return kRcUsage;
     }
     if (leaf_names && !partition_by.empty()) {
@@ -1857,6 +2126,9 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         if (!ec2 && !resolved.empty()) dest = resolved.u8string();
     }
     const bool exists = fs::exists(dest, ec);
+    fs::path tree_sample;                              /* PART-MODE-1 */
+    std::map<std::string, std::string> tree_meta;
+    bool tree_has_meta = false;
     if (partition_by.empty()) {
         if (exists && !replace) {
             *err = "file " + user_dest + " already exists; specify replace";
@@ -1877,23 +2149,68 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         }
 #endif
     } else if (exists) {
-        if (!replace) {
-            *err = "partitioned target " + dest + " already exists; specify "
-                   "replace, or remove it yourself";
-            return kRcFileExists;
-        }
         if (!fs::is_directory(dest, ec)) {
             *err = "partitioned target " + dest + " already exists as a file; "
                    "remove it yourself or write elsewhere";
             return kRcFileExists;
         }
-        /* an existing partition-tree directory with replace is removed just
-         * before the rename below, after the new tree is built and verified
-         * (IO-3); parqit never removes a non-directory it might not own. */
+        if (partition_mode.empty()) {
+            if (!replace) {
+                *err = "partitioned target " + dest + " already exists; specify "
+                       "replace to rewrite it, partitions(replace) or "
+                       "partitions(append) to touch only the partitions in the "
+                       "result, or remove it yourself";
+                return kRcFileExists;
+            }
+            /* an existing partition-tree directory with replace is removed just
+             * before the rename below, after the new tree is built and verified
+             * (IO-3); parqit never removes a non-directory it might not own. */
+        } else {
+            /* PART-MODE-1: the tree we are about to update must be a Hive tree
+             * over the same keys; its first file is the schema/metadata
+             * reference every new partition must agree with */
+            std::string perr;
+            if (!hive_tree_probe(fs::path(dest), partition_by, 0, &tree_sample, &perr)) {
+                *err = perr;
+                return kRcUsage;
+            }
+            if (!tree_sample.empty()) {
+                if (!parqit_kv_of(s, tree_sample.u8string(), &tree_meta, err))
+                    return kRcEngine;
+                tree_has_meta = !tree_meta.empty();
+                std::vector<std::pair<std::string, std::string>> cols;
+                if (!parquet_columns_of(s, tree_sample.u8string(), &cols, err))
+                    return kRcEngine;
+                for (const auto &c : cols)
+                    for (const auto &k : partition_by)
+                        if (c.first == k) {
+                            *err = "partitions(): the existing tree stores the partition "
+                                   "key " + k + " inside its files; parqit writes keys "
+                                   "only as directories, so the trees would not read as "
+                                   "one dataset. Rewrite it with replace, or write "
+                                   "elsewhere";
+                            return kRcUsage;
+                        }
+            }
+        }
     }
+    const bool per_leaf = exists && !partition_mode.empty();
+    const bool tree_live = per_leaf && !tree_sample.empty();
 
     std::string copts = "FORMAT PARQUET";
-    if (!kv_metadata_sql_fragment.empty()) copts += ", " + kv_metadata_sql_fragment;
+    if (!kv_metadata_sql_fragment.empty()) {
+        if (tree_live && !tree_has_meta) {
+            /* the tree has no parqit metadata (written by another tool): new
+             * files with it would make the files disagree, and the reader then
+             * restores nothing — write them the way the tree is */
+            if (note)
+                *note += "note: the existing partition tree carries no parqit metadata "
+                         "(labels, formats, notes); the new partitions are written "
+                         "without it so the tree still reads as one dataset\n";
+        } else {
+            copts += ", " + kv_metadata_sql_fragment;
+        }
+    }
     if (!compression.empty()) copts += ", COMPRESSION " + quote_literal(compression);
     if (comp_level >= 0) copts += ", COMPRESSION_LEVEL " + std::to_string(comp_level);
     if (row_group_size > 0)
@@ -2050,6 +2367,14 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
          * full schema (partition keys included as ordinary columns) and the
          * parqit metadata — so a later read returns 0 observations with every
          * variable, exactly like a flat save of an empty dataset. */
+        if (*written == 0 && per_leaf) {
+            /* nothing to publish; the existing tree is untouched */
+            cleanup_tmp();
+            if (note)
+                *note += "note: 0 observations to write; no partition was touched in " +
+                         dest + "\n";
+            return 0;
+        }
         if (*written == 0) {
             std::error_code ecm;
             fs::create_directories(tmpdest, ecm);
@@ -2088,6 +2413,70 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         if (pre_publish && !(*pre_publish)(err)) {
             cleanup_tmp();
             return kRcEngine;
+        }
+        if (per_leaf) {
+            /* PART-MODE-1: the new partitions must read as one table with the
+             * tree — same columns and types, same parqit.* metadata */
+            if (tree_live) {
+                fs::path staged_sample;
+                std::string perr;
+                if (!hive_tree_probe(fs::path(tmpdest), partition_by, 0, &staged_sample,
+                                     &perr) ||
+                    staged_sample.empty()) {
+                    cleanup_tmp();
+                    *err = perr.empty() ? "internal: no staged partition file to compare"
+                                        : perr;
+                    return kRcEngine;
+                }
+                std::vector<std::pair<std::string, std::string>> a, b;
+                if (!parquet_columns_of(s, tree_sample.u8string(), &a, err) ||
+                    !parquet_columns_of(s, staged_sample.u8string(), &b, err)) {
+                    cleanup_tmp();
+                    return kRcEngine;
+                }
+                if (a != b) {
+                    cleanup_tmp();
+                    *err = "partitions(): the result's columns differ from the existing "
+                           "tree's (" + describe_column_diff(a, b) +
+                           "); the tree must stay readable as one dataset. Rewrite it "
+                           "with replace, or write elsewhere";
+                    return kRcUsage;
+                }
+                if (tree_has_meta) {
+                    std::map<std::string, std::string> staged_meta;
+                    if (!parqit_kv_of(s, staged_sample.u8string(), &staged_meta, err)) {
+                        cleanup_tmp();
+                        return kRcEngine;
+                    }
+                    if (staged_meta != tree_meta) {
+                        std::string keys;
+                        for (const auto &kv : tree_meta)
+                            if (!staged_meta.count(kv.first) || staged_meta[kv.first] != kv.second)
+                                keys += (keys.empty() ? "" : ", ") + kv.first;
+                        for (const auto &kv : staged_meta)
+                            if (!tree_meta.count(kv.first))
+                                keys += (keys.empty() ? "" : ", ") + kv.first;
+                        cleanup_tmp();
+                        *err = "partitions(): the result's Stata metadata differs from "
+                               "the existing tree's (" + keys +
+                               "); a tree whose files disagree loses its labels and "
+                               "formats on read. Rewrite it with replace, or write "
+                               "elsewhere";
+                        return kRcUsage;
+                    }
+                }
+            }
+            long long n_replaced = 0, n_added = 0;
+            ST_retcode prc = publish_partitions(fs::path(dest), fs::path(tmpdest), tx,
+                                                partition_by.size(), partition_mode,
+                                                &n_replaced, &n_added, err);
+            cleanup_tmp();
+            if (prc != 0) return prc;
+            if (note)
+                *note += "(" + std::to_string(n_replaced) + " partition" +
+                         (n_replaced == 1 ? "" : "s") + " replaced, " +
+                         std::to_string(n_added) + " added under " + dest + ")\n";
+            return 0;
         }
         /* honour replace, but rename the old tree ASIDE rather than deleting it
          * before the swap: a crash or rename failure in the gap between a
@@ -3508,7 +3897,7 @@ ST_retcode save_assemble_arrow(
     long long chunk, const std::function<bool(std::string *)> &make_kv,
     SaveTranscode &tr, long long *written_out, long long *appended_out,
     std::vector<std::string> &frac_warned, std::vector<std::string> &ext_missing,
-    std::string *err) {
+    std::string *err, const std::string &partition_mode, std::string *note) {
     constexpr int64_t kArrowFlagNullable = 2;
     const int k = static_cast<int>(vars.size());
     /* NAME-CASE-1: the exact Stata names the written footer must carry when
@@ -3731,7 +4120,8 @@ ST_retcode save_assemble_arrow(
     ST_retcode crc = copy_out_parquet(s, "SELECT * FROM " + quote_ident(view),
                                       dest, replace, compression, comp_level,
                                       partition_by, chunk, kv, &written, err,
-                                      case_alias ? &leaf : nullptr);
+                                      case_alias ? &leaf : nullptr, nullptr,
+                                      partition_mode, note);
     if (stream) duckdb_destroy_arrow_stream(&stream);
     {
         std::string e2;
@@ -3765,6 +4155,12 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     bool replace = req.value("replace", false);
+    std::string partition_mode; /* PART-MODE-1: hex on the wire like every text */
+    if (!parqit::req_text(req, "partition_mode", &partition_mode, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    std::string pnote; /* PART-MODE-1 notes, printed after the write */
     long long comp_level = req.value("compression_level", static_cast<long long>(-1));
     long long chunk = req.value("chunk", static_cast<long long>(-1));
     if (chunk != -1 && chunk <= 0) {
@@ -3901,7 +4297,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         rc = save_assemble_arrow(s, vars, wk, engine_names, dest, replace, compression,
                                  comp_level, partition_by, chunk, make_kv, tr,
                                  &written, &appended, frac_warned, ext_missing,
-                                 &err);
+                                 &err, partition_mode, &pnote);
         if (rc == kRcRetryStaged) {
             use_staged = true;
             rc = 0;
@@ -4113,7 +4509,8 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
     ST_retcode crc = copy_out_parquet(s, "SELECT * FROM " + quote_ident(stage),
                                       dest, replace, compression, comp_level,
                                       partition_by, chunk, kv, &written, &err,
-                                      case_alias ? &names : nullptr);
+                                      case_alias ? &names : nullptr, nullptr,
+                                      partition_mode, &pnote);
     if (crc != 0) {
         cry("parqit save: " + err);
         return crc;
@@ -4124,6 +4521,9 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         return kRcEngine;
     }
     } /* end staged (PARQIT_SAVE_NOARROW) fallback */
+
+    while (!pnote.empty() && pnote.back() == '\n') pnote.pop_back();
+    if (!pnote.empty()) cry(pnote);
 
     std::error_code eca;
     std::string abs = std::filesystem::absolute(dest, eca).string();
@@ -4193,6 +4593,11 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
     long long comp_level = req.value("compression_level", static_cast<long long>(-1));
     long long chunk = req.value("chunk", static_cast<long long>(-1));
     long long expect_n = req.value("nobs", static_cast<long long>(-1));
+    if (!req.value("partition_mode", std::string()).empty()) {
+        cry("parqit save: copysource copies one file; partitions() applies to a "
+            "partitioned save of the view or of the dataset in memory");
+        return kRcUsage;
+    }
     if (chunk != -1 && chunk <= 0) {
         cry("parqit save: chunk() must be a positive number of rows per row group");
         return kRcUsage;

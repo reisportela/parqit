@@ -126,7 +126,7 @@ jobs:
           # Every file parqit.pkg names with an `f` line must ship too (net
           # install aborts on the first missing file) — hence the .dlg glob and
           # the two ancillary crash-course do-files (net get / ssc install, all).
-          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_*.dlg examples/parqit_basics.do examples/parqit_tour.do"
+          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_technical.sthlp src/ado/p/parqit_*.dlg examples/parqit_basics.do examples/parqit_tour.do"
           mkdir -p dist/parqit_all_platforms
           for plat in linux_x86_64 macos_x86_64 macos_arm64 windows_x86_64; do
             case $plat in
@@ -167,6 +167,7 @@ jobs:
             dist/parqit_all_platforms/stata.toc
             dist/parqit_all_platforms/parqit.ado
             dist/parqit_all_platforms/parqit.sthlp
+            dist/parqit_all_platforms/parqit_technical.sthlp
             dist/parqit_all_platforms/parqit_*.dlg
             dist/parqit_all_platforms/parqit_basics.do
             dist/parqit_all_platforms/parqit_tour.do

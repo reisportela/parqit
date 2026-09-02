@@ -1,7 +1,7 @@
 /*
   parqit keep - Keep or drop observations, or draw a random sample
 
-*!  VERSION 0.1.30  01sep2026
+*!  VERSION 0.1.31  02sep2026
 
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)

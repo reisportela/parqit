@@ -6,6 +6,66 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.31] — 2026-09-02
+
+Two items from the first institutional feedback round (BPLIM, 2026-09-02):
+partition-level updates of a Hive tree for periodic data processes, and a
+help split into a user manual and a technical reference; plus the
+`summarize, detail` fix on skewed integer variables.
+
+### Added
+- **`parqit save ..., partition_by() partitions(replace|append)` updates an
+  existing partitioned tree partition by partition (PART-MODE-1).** `replace`
+  swaps only the partitions present in the result (each staged, verified and
+  exchanged directory by directory with the old one set aside until the new
+  one is in place) and adds the partitions the tree does not have yet;
+  `append` adds the result's files into the partitions under unique names.
+  The other partitions stay byte-identical. The tree must be a Hive tree over
+  the same keys, and the result must read as one dataset with it — same
+  columns and engine types, same `parqit.*` metadata — or the save is refused
+  with the tree untouched; a tree without `parqit.*` metadata (written by
+  another tool) receives its new partitions without it, with a note; a tree
+  whose files store the key inside is refused; a publish failure rolls every
+  touched partition back. Both save paths (`data` and a lazy view), the
+  write dialog and the help carry the option. Requested by BPLIM for the
+  monthly "add or replace one month" process. Pinned by
+  `tests/verify_suite/v85_partition_modes.do` (pyarrow oracle: per-file
+  SHA-256, per-partition payload, footer metadata) and the dialog-shape
+  test.
+
+### Changed
+- **The help is now two entries (HELP-SPLIT-1).** `help parqit` is the user
+  manual: syntax, menu, description, a new Quick start, the lazy view, the
+  verbs, the materialisers, the exploration commands, the essential
+  expression rules, settings, examples, a short list of limitations and the
+  stored results. `help parqit_technical` is the technical reference and
+  holds, verbatim, every paragraph that explained the machinery rather than
+  the use: the metadata layout in Parquet, the input adapters and code
+  pages, the verb-result metadata contract, atomicity, `copysource`,
+  `encoding()` and locks, the performance tips, the expression dialect
+  details, the type mapping and column-name rules, the environment knobs and
+  the complete limitations list. No text was dropped; the two files link
+  into each other, the dialogs keep their Help targets, and
+  `tests/release_lint.sh` checks both banners and every cross-file link.
+  Prompted by early users who found the single entry too detailed to start
+  from. The package (`parqit.pkg`), the build's install tree and the release
+  workflow ship the new file.
+
+### Fixed
+- **`parqit summarize, detail` no longer fails on an integer variable whose
+  values run far above its mean (DETAIL-DECIMAL-1).** The central moments
+  were computed as `x - <mean literal>`; DuckDB types that literal
+  `DECIMAL(p, scale)` and converts an `int`/`long`/`byte` column to
+  `DECIMAL(18, scale)`, which overflows once a value reaches
+  10^(18−scale) — with a mean such as 255.48894316712128 any value of
+  10,000 or more aborted the command with "Could not cast value 99999 to
+  DECIMAL(18,14)" (rc 920). The moments are now double arithmetic on both
+  sides, which also evaluates a `float` variable's moments in double, as
+  native does (the same literal rule bound them to single precision).
+  Pinned by `tests/verify_suite/v84_detail_integer_moments.do` (skewed
+  `byte`/`int`/`long`/`float`/`double` columns against native
+  `summarize, detail`, every `r()` scalar).
+
 ## [0.1.30] — 2026-09-01
 
 Remediation of the holistic adversarial audit of 2026-09-01

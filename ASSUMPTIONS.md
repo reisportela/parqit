@@ -1554,3 +1554,77 @@ entry notes the conservative fallback if the assumption proves wrong.
     otherwise, NULL for an all-missing group; `summarize, detail` already used
     an order-based path and is unchanged. `v83` pins collapse against native
     `collapse` (`cf`) and tabstat against native `tabstat, save`.
+115. **Numbers the plugin splices into engine SQL are typed DOUBLE, and the
+    column beside them is cast (2026-09-02, DETAIL-DECIMAL-1).** DuckDB types
+    a bare decimal literal `DECIMAL(p, scale)` and, in arithmetic with an
+    INT8/16/32 column, converts the column to `DECIMAL(18, scale)`: a mean
+    with a small integer part uses most of the 18 digits as scale, so any
+    value at or above 10^(18−scale) fails the cast ("Could not cast value
+    99999 to DECIMAL(18,14)"). `summarize, detail`'s second pass hit it on
+    skewed identifier-like columns (`nuest`); `v44` never did because its
+    uniform `long` has a 6-digit mean. A FLOAT column takes the opposite
+    path (the literal is bound down to FLOAT, as in FLOAT-LIT-1). The detail
+    moments now read `CAST(x AS DOUBLE) - CAST(<mean> AS DOUBLE)`;
+    `CAST(<17-digit literal> AS DOUBLE)` was checked to yield the same
+    double as the value that printed it. The translator already computes
+    user arithmetic in double (INF-1, v0.1.14) and `histogram`'s
+    `(x - lo) / width` binds DOUBLE because the division does, so neither
+    was changed; a FLOAT column's `x - lo` there still binds in single
+    precision when `lo` is fractional (bin edges only), noted for a later
+    pass. Two ulp-level observations surfaced while pinning this (`v84`
+    tolerates them at 1e-15 relative; `v44` always did at 1e-8): a
+    percentile that averages two order statistics can differ from native by
+    one ulp, since native does not round `(a+b)/2` the IEEE way; and
+    `min`/`max`/`mean` travel as the engine's text rendering of the double,
+    which is not always the shortest round-trip form (`0.057518312144544399`
+    arrived as `…392`) — emitting them through `dtoa` would make them
+    exact, also for a later pass.
+116. **Partition modes swap leaf directories and demand a homogeneous tree
+    (2026-09-02, PART-MODE-1, BPLIM request).** `partitions(replace|append)`
+    stages the result as a whole tree (the existing COPY ... PARTITION_BY,
+    verified by a scan and by the string-key check), then publishes it leaf
+    by leaf under the transaction lock: the swap unit is the full key chain
+    (`year=…/month=…`), never a top-level directory, so a sibling month is
+    never touched; the old leaf is renamed aside first and restored on any
+    failure, newest first, and a failed restore retains the aside copies
+    under the transaction root and says so. Before anything is staged the
+    destination is probed as a Hive tree over exactly the requested keys in
+    order (every non-hidden entry at each level must be `key=` of that
+    level's key; the first branch is descended to a sample file), and the
+    sample file decides the contract: its non-key columns and engine types
+    must equal the result's (a `DESCRIBE` of one staged file), and its
+    `parqit.*` key–value pairs must equal the result's byte for byte — the
+    same rule `plan_columns` applies when reading a glob, where any
+    disagreement drops every label. A tree with no `parqit.*` keys is taken
+    as written by another tool: the new partitions are written without the
+    metadata fragment so the files keep agreeing (a note says so), rather
+    than making the tree inconsistent or refusing. A tree whose files carry
+    the partition key as a column is refused, because parqit writes keys
+    only as directories and a union read would misalign. DuckDB's own
+    `OVERWRITE_OR_IGNORE`/`APPEND` COPY modes were not used: they write
+    straight into the destination and cannot be verified before publishing
+    or rolled back. `replace` (whole tree) and `partitions()` are mutually
+    exclusive by design; `copysource` copies one file and refuses the
+    option. Open question left to the field: whether BPLIM keys its trees by
+    month (replace) or stores months as files inside a year partition
+    (append) — both are covered.
+117. **User manual and technical reference are two help entries
+    (2026-09-02, HELP-SPLIT-1).** Early institutional users found the single
+    entry "too detailed to start from": it explained the machinery before
+    the use. The split keeps every paragraph (a script moved sections and
+    named paragraphs verbatim and a check counted them: 150 before, 0 lost)
+    and puts the line where a reader's need changes: `parqit.sthlp` answers
+    "how do I do X" (Quick start, verbs, materialisers, exploration, the one
+    missing-value rule, examples, eight limitations, stored results);
+    `parqit_technical.sthlp` answers "why is the result what it is" (Stata
+    metadata in Parquet, input formats and bridges, verb-result metadata,
+    atomicity/copysource/encoding/locks, performance tips, the expression
+    dialect, type mapping and column names, environment variables, the
+    complete limitations). Markers were preserved so existing links work:
+    the dialogs' `parqit##menu`, the ado's performance tip (now
+    `parqit_technical##perf`); moved sections keep their marker names in the
+    technical file and cross-file links were rewritten. The function-list
+    block stays in the user manual because the lint reads it there and users
+    look for it there. `release_lint.sh` now checks the technical banner,
+    the overclaim phrases and every `parqit_technical##` / `parqit##` link
+    across the two files.

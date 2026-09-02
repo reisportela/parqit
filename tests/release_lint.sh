@@ -84,6 +84,11 @@ done
 [ -n "$pkg_d" ]   || err "could not read Distribution-Date from parqit.pkg"
 [ -n "$cff_d" ]   || err "could not read date-released from CITATION.cff"
 [ "$ado_d" = "$sthlp_d" ] || err "ado banner date $ado_d != sthlp banner date $sthlp_d"
+tech_line=$(grep -m1 -E "version $semver" "$REPO/src/ado/p/parqit_technical.sthlp")
+[ "$(printf '%s' "$tech_line" | grep -oE "version $semver" | grep -oE "$semver")" = "$ado_v" ] || \
+    err "parqit_technical.sthlp banner version != ado version $ado_v"
+[ "$(printf '%s' "$tech_line" | grep -oE "$banner_date")" = "$ado_d" ] || \
+    err "parqit_technical.sthlp banner date != ado banner date $ado_d"
 if [ -n "$ado_d" ]; then
     iso=$(banner_to_iso "$ado_d")
     [ "$iso" = "$pkg_d" ] || err "banner date $ado_d ($iso) != parqit.pkg Distribution-Date $pkg_d"
@@ -193,6 +198,7 @@ lazy_overclaim=$(grep -niE \
     "$REPO/README.md" \
     "$REPO/src/ado/p/parqit.ado" \
     "$REPO/src/ado/p/parqit.sthlp" \
+    "$REPO/src/ado/p/parqit_technical.sthlp" \
     "$REPO"/src/ado/p/parqit_*.dlg \
     "$REPO/benchmarks/profile_parqit.ado" 2>/dev/null || true)
 [ -z "$lazy_overclaim" ] || \
@@ -272,11 +278,23 @@ for target in $jump_targets; do
     grep -Fq "{marker $target}" "$REPO/src/ado/p/parqit.sthlp" || \
         err "help jump target 'parqit##$target' has no marker"
 done
+# the two help files link into each other: every cross-file target must exist
+for target in $(grep -ohE 'parqit_technical##[A-Za-z0-9_]+' "$REPO/src/ado/p/parqit.sthlp" \
+                    "$REPO/src/ado/p/parqit_technical.sthlp" "$REPO/src/ado/p/parqit.ado" \
+                | sed 's/^parqit_technical##//' | sort -u); do
+    grep -Fq "{marker $target}" "$REPO/src/ado/p/parqit_technical.sthlp" || \
+        err "help jump target 'parqit_technical##$target' has no marker"
+done
+for target in $(grep -ohE '[^_]parqit##[A-Za-z0-9_]+' "$REPO/src/ado/p/parqit_technical.sthlp" \
+                | sed 's/^.parqit##//' | sort -u); do
+    grep -Fq "{marker $target}" "$REPO/src/ado/p/parqit.sthlp" || \
+        err "technical help links to 'parqit##$target', which the user manual does not define"
+done
 
 # Inline SMCL directives cannot span physical lines: Stata otherwise prints
 # the opening token literally (for example "{bf:") instead of styling it.
 smcl_open=$(grep -nE '\{(bf|it|cmd|opt):[^}]*$' \
-                "$REPO/src/ado/p/parqit.sthlp" || true)
+                "$REPO/src/ado/p/parqit.sthlp" "$REPO/src/ado/p/parqit_technical.sthlp" || true)
 [ -z "$smcl_open" ] || err "unterminated inline SMCL directive(s): $(echo "$smcl_open")"
 
 # --- menu/dialog command coverage and geometry ------------------------------

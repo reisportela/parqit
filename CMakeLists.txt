@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.30 LANGUAGES C CXX)
+project(parqit VERSION 0.1.31 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -189,7 +189,7 @@ file(MAKE_DIRECTORY "${PARQIT_LOCAL_ADO_DIR}")
 # Stata-side files: synced whenever they change; building parqit_plugin (or
 # anything that depends on it) triggers the sync via add_dependencies.
 set(_parqit_ado_synced)
-foreach(f parqit.ado parqit.sthlp parqit.pkg parqit_read.dlg
+foreach(f parqit.ado parqit.sthlp parqit_technical.sthlp parqit.pkg parqit_read.dlg
           parqit_explore.dlg parqit_stats.dlg parqit_filter.dlg
           parqit_vars.dlg parqit_gen.dlg parqit_pivot.dlg
           parqit_combine.dlg parqit_write.dlg parqit_views.dlg stata.toc)

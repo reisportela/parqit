@@ -99,6 +99,9 @@ CLAUDE.local.md
 /local/
 # Talk material: slide drafts, speaker notes and review transcripts stay local.
 /Conference_Presentation/
+# Design essay and the Stata Journal manuscript stay local until published.
+/DESIGN.md
+/paper/
 .env
 .env.*
 scripts/run-stata.local.*
