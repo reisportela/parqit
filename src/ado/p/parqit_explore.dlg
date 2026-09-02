@@ -1,7 +1,7 @@
 /*
   parqit describe - Describe and explore a view or a Parquet file
 
-*!  VERSION 0.1.32  02sep2026
+*!  VERSION 0.1.33  03sep2026
 
   User > parqit > Describe and explore data...
   Launch directly with:  db parqit_explore      (menu installed by: parqit menu)

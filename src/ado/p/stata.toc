@@ -1,6 +1,6 @@
 v 3
 d parqit — a grammar of data manipulation for Parquet on an embedded DuckDB engine
-d Miguel Portela, Universidade do Minho & NIPE
+d Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 d
 d Reads, joins and manipulates columnar Parquet with ordinary Stata verbs that
 d run out-of-core on an embedded DuckDB engine, materialising one result at a

@@ -7,10 +7,22 @@ authors:
     affiliation: "NIPE / Universidade do Minho and BPLIM / Banco de Portugal"
     email: "miguel.portela@eeg.uminho.pt"
     website: "https://reisportela.github.io"
-version: "0.1.32"
-date-released: 2026-09-02
+  - family-names: "Costa"
+    given-names: "Rute"
+    affiliation: "BPLIM / Banco de Portugal"
+    email: "ricosta@bportugal.pt"
+  - family-names: "Guimarães"
+    given-names: "Paulo"
+    affiliation: "BPLIM / Banco de Portugal"
+    email: "pfguimaraes@bportugal.pt"
+  - family-names: "Silva"
+    given-names: "Marta"
+    affiliation: "BPLIM / Banco de Portugal"
+    email: "msilva@bportugal.pt"
+version: "0.1.33"
+date-released: 2026-09-03
 url: "https://github.com/reisportela/parqit"
 license: MIT
 # Built with the assistance of two AI coding agents used in tandem — Anthropic's
-# Claude (via Claude Code) and OpenAI's Codex — under the author's direction and
-# review. They are acknowledged as development tools, not as citation authors.
+# Claude (via Claude Code) and OpenAI's Codex — under the maintainer's direction
+# and review. They are acknowledged as development tools, not as citation authors.

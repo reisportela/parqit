@@ -1,16 +1,18 @@
 # Contributors
 
-`parqit` is authored and maintained by **Miguel Portela** (NIPE / Universidade do
-Minho and BPLIM / Banco de Portugal), who designed the package — taking
+`parqit` is authored by **Miguel Portela** (NIPE / Universidade do Minho and
+BPLIM / Banco de Portugal), who designed the package — taking
 [`pq`](https://github.com/jrothbaum/stata_parquet_io) by **Jon Rothbaum** as the
 starting point and re-basing the manipulation layer on an embedded DuckDB engine
-through a C++ plugin.
+through a C++ plugin — and maintains it, together with its co-authors
+**Rute Costa**, **Paulo Guimarães** and **Marta Silva** (BPLIM / Banco de
+Portugal).
 
 ## Implementation (AI coding agents)
 
 The C++/DuckDB plugin and the ado layer were programmed, adversarially
 cross-audited and prepared for cross-platform release by two AI coding agents
-working in tandem, under the author's direction and review. Both contributed
+working in tandem, under the maintainer's direction and review. Both contributed
 substantially to the making of `parqit`:
 
 - **OpenAI Codex**

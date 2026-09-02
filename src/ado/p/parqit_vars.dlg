@@ -1,7 +1,7 @@
 /*
   parqit keep - Keep, drop, order, sort, or rename variables; drop duplicates
 
-*!  VERSION 0.1.32  02sep2026
+*!  VERSION 0.1.33  03sep2026
 
   User > parqit > Keep, drop, order, sort, or rename variables...
   Launch directly with:  db parqit_vars      (menu installed by: parqit menu)

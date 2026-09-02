@@ -1649,3 +1649,14 @@ entry notes the conservative fallback if the assumption proves wrong.
     span lines), and on a help file that is not valid UTF-8 or LF-only; the
     SSC candidate build applies the same line gate to the staged help. The
     GUI Viewer, not `translate`, is the release check for help layout.
+119. **Author order on the package surfaces (2026-09-03).** The three BPLIM
+    co-authors of the Stata Journal paper (Rute Costa, Paulo Guimarães, Marta
+    Silva) were added to every author surface. The paper lists its authors
+    alphabetically; the package keeps Miguel Portela first, because the SSC
+    listing, the `.pkg` support contact and the ado banner treat the first
+    author as the maintainer and point of contact, and lists the co-authors
+    alphabetically after him. `parqit.pkg` stays ASCII (Kit Baum's SSC
+    tooling and RePEc metadata), so it spells "Guimaraes" there; every UTF-8
+    surface (help, README, CITATION.cff, stata.toc, ado banner) carries the
+    accent. The MIT copyright holder line was not changed: copyright is a
+    legal statement the maintainer must make explicitly.

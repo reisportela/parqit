@@ -21,10 +21,16 @@ d KW: data management
 d
 d Requires: Stata version 16
 d
-d Distribution-Date: 20260902
+d Distribution-Date: 20260903
 d
 d Author: Miguel Portela, Universidade do Minho & NIPE
 d Support: email miguel.portela@@eeg.uminho.pt
+d Author: Rute Costa, BPLIM / Banco de Portugal
+d Support: email ricosta@@bportugal.pt
+d Author: Paulo Guimaraes, BPLIM / Banco de Portugal
+d Support: email pfguimaraes@@bportugal.pt
+d Author: Marta Silva, BPLIM / Banco de Portugal
+d Support: email msilva@@bportugal.pt
 d
 f parqit.ado
 f parqit.sthlp

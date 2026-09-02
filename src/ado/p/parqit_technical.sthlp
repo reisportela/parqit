@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.32 02sep2026}{...}
+{* *! version 0.1.33 03sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -11,7 +11,7 @@
 {viewerjumpto "Type mapping" "parqit_technical##types"}{...}
 {viewerjumpto "Environment" "parqit_technical##environment"}{...}
 {viewerjumpto "Limitations" "parqit_technical##limitations"}{...}
-{viewerjumpto "Author" "parqit_technical##author"}{...}
+{viewerjumpto "Authors" "parqit_technical##author"}{...}
 {title:Title}
 
 {phang}
@@ -593,11 +593,26 @@ view (data on disk is never affected).{p_end}
 
 
 {marker author}{...}
-{title:Author}
+{title:Authors}
 
 {pstd}Miguel Portela{break}
 NIPE / Universidade do Minho and BPLIM / Banco de Portugal{break}
 Email: {browse "mailto:miguel.portela@eeg.uminho.pt":miguel.portela@eeg.uminho.pt}{p_end}
+
+{pstd}Rute Costa{break}
+BPLIM / Banco de Portugal{break}
+Email: {browse "mailto:ricosta@bportugal.pt":ricosta@bportugal.pt}{p_end}
+
+{pstd}Paulo Guimarães{break}
+BPLIM / Banco de Portugal{break}
+Email: {browse "mailto:pfguimaraes@bportugal.pt":pfguimaraes@bportugal.pt}{p_end}
+
+{pstd}Marta Silva{break}
+BPLIM / Banco de Portugal{break}
+Email: {browse "mailto:msilva@bportugal.pt":msilva@bportugal.pt}{p_end}
+
+{pstd}Only the listed human authors are authors or co-authors of {cmd:parqit}. No
+software tool or AI system is credited as an author or co-author.{p_end}
 
 {pstd}Issues and source:
 {browse "https://github.com/reisportela/parqit":github.com/reisportela/parqit}.{p_end}

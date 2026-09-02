@@ -2,7 +2,7 @@
   parqit collapse - Make a dataset of summary statistics, frequencies, or a
   pivot table; convert between wide and long
 
-*!  VERSION 0.1.32  02sep2026
+*!  VERSION 0.1.33  03sep2026
 
   User > parqit > Collapse, contract, pivot table, or reshape...
   Launch directly with:  db parqit_pivot      (menu installed by: parqit menu)
