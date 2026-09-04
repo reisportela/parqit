@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.33 03sep2026}{...}
+{* *! version 0.1.34 04sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -19,6 +19,7 @@
 {viewerjumpto "Menu" "parqit##menu"}{...}
 {viewerjumpto "Description" "parqit##description"}{...}
 {viewerjumpto "Quick start" "parqit##quickstart"}{...}
+{viewerjumpto "The view at a glance" "parqit##map"}{...}
 {viewerjumpto "The lazy view" "parqit##lazy"}{...}
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
 {viewerjumpto "Materialisers" "parqit##materialisers"}{...}
@@ -347,6 +348,72 @@ with a missing value is never true, so {cmd:keep if x > 5} drops a missing
 {cmd:x}, where native keeps it ({cmd:parqit set statamissing on} restores
 Stata's rule).
 
+
+{marker map}{...}
+{title:The view at a glance}
+
+{pstd}
+A parqit session has four moves: {bf:open} a view, {bf:shape} it with lazy
+verbs, {bf:look} at it engine-side, and {bf:land} the result. Only the last
+move puts data into Stata's dataset or writes a file {c -} everything between
+{cmd:open} and {cmd:collect}/{cmd:save} changes the {it:plan}, not your data.
+
+   {c TLC}{c -} {bf:1  OPEN} {c -} start a view {c -} {help parqit##lazy:[more]}
+   {c |}
+   {c |}{space 4}{cmd:parqit use} {it:file}{space 11}a Parquet file, glob or Hive directory,
+   {c |}{space 30}or {cmd:.csv} {cmd:.tsv} {cmd:.txt} {cmd:.tab} {cmd:.dta} {cmd:.xls} {cmd:.xlsx}
+   {c |}{space 4}{cmd:parqit open _data}{space 9}the dataset already in Stata's memory
+   {c |}{space 4}{cmd:parqit sql} {cmd:"}{it:SELECT ...}{cmd:"}{space 3}any DuckDB query
+   {c |}
+   {c LT}{c -} {bf:2  SHAPE} {c -} lazy verbs; each one extends the plan {c -} {help parqit##verbs:[more]}
+   {c |}
+   {c |}{space 4}rows{space 9}{cmd:keep} {cmd:drop} {cmd:sample} {cmd:duplicates drop}
+   {c |}{space 4}columns{space 6}{cmd:gen} {cmd:egen} {cmd:replace} {cmd:rename} {cmd:order}
+   {c |}{space 4}order{space 8}{cmd:sort} {cmd:gsort}
+   {c |}{space 4}aggregate{space 4}{cmd:collapse} {cmd:contract} {cmd:pivot}
+   {c |}{space 4}restructure{space 2}{cmd:reshape long} {cmd:reshape wide}
+   {c |}{space 4}two tables{space 3}{cmd:merge} {cmd:append} {cmd:joinby}
+   {c |}
+   {c LT}{c -} {bf:3  LOOK} {c -} runs the plan, shows a summary {c -} {help parqit##explore:[more]}
+   {c |}
+   {c |}{space 4}shape{space 8}{cmd:describe} {cmd:glimpse} {cmd:ds} {cmd:lookfor} {cmd:codebook}
+   {c |}{space 4}rows{space 9}{cmd:count} {cmd:head} {cmd:list} {cmd:levelsof} {cmd:distinct}
+   {c |}{space 4}statistics{space 3}{cmd:summarize} {cmd:tabstat} {cmd:tabulate} {cmd:histogram}
+   {c |}{space 17}{cmd:correlate} {cmd:pwcorr}
+   {c |}{space 4}quality{space 6}{cmd:misstable} {cmd:duplicates report} {cmd:duplicates list}
+   {c |}
+   {c BLC}{c -} {bf:4  LAND} {c -} produce the full result {c -} {help parqit##materialisers:[more]}
+
+   {space 5}{cmd:parqit collect}{space 12}stream the result into Stata's dataset,
+   {space 31}atomically, and leave the view open
+   {space 5}{cmd:parqit save} {it:file}{space 10}write Parquet; the dataset in memory is
+   {space 31}untouched
+
+{pstd}
+The order is a habit, not a rule: look whenever you like, shape again after
+looking, and collect or save as often as you need {c -} the view stays open and
+re-executes each time.
+
+{pstd}
+Alongside the four moves, at any point in the session:
+
+   {space 5}the plan{space 5}{cmd:parqit show} {cmd:parqit explain}
+   {space 5}views{space 8}{cmd:parqit views} {cmd:parqit view} {cmd:parqit close}
+   {space 5}engine{space 7}{cmd:parqit set} {cmd:parqit path}
+   {space 5}install{space 6}{cmd:parqit version} {cmd:parqit selftest} {cmd:parqit menu}
+
+{pstd}
+Views are named ({cmd:default} unless {opt name()} says otherwise) and several
+can be open at once, like frames. Verbs act on the {it:current} view;
+{cmd:parqit view} {it:name} switches, and {cmd:parqit view} {it:name}{cmd::}
+{it:command} runs one command against another view and switches back.
+
+{pstd}
+Two commands are deliberately {it:not} view verbs: {cmd:parqit mergein} and
+{cmd:parqit appendin} join the dataset {it:already in Stata's memory} with a disk
+file through a {it:native} {helpb merge} / {helpb append}, reading only the
+columns of the file they need. Use them when the disk side is a small lookup;
+use {cmd:parqit use} + {cmd:parqit merge} when both sides are big.
 
 {marker lazy}{...}
 {title:The lazy view}

@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.33 — the full surface below is implemented and covered by a
+> **Status:** v0.1.34 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -151,7 +151,7 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.1.33`).
+  `download/vX.Y.Z` (for example, `download/v0.1.34`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -317,6 +317,72 @@ Mutation verbs append to the **current view** (an implicit lazy table, just
 like Stata's implicit current dataset). Opening probes schema and metadata,
 every candidate plan is bind-validated, and contract-sensitive verbs may run
 validation queries. Only a *materialiser* executes the full result plan.
+
+### The view at a glance
+
+A parqit session has four moves: **open** a view, **shape** it with lazy verbs,
+**look** at it engine-side, and **land** the result. Only the last move puts
+data into Stata's dataset or writes a file — everything between `open` and
+`collect`/`save` changes the *plan*, not your data.
+
+```
+┌─ 1  OPEN ─ start a view
+│
+│    parqit use <file>        a Parquet file, glob or Hive directory,
+│                             or .csv .tsv .txt .tab .dta .xls .xlsx
+│    parqit open _data        the dataset already in Stata's memory
+│    parqit sql "SELECT ..."  any DuckDB query
+│
+├─ 2  SHAPE ─ lazy verbs; each one extends the plan
+│
+│    rows         keep  drop  sample  duplicates drop
+│    columns      gen  egen  replace  rename  order
+│    order        sort  gsort
+│    aggregate    collapse  contract  pivot
+│    restructure  reshape long   reshape wide
+│    two tables   merge  append  joinby
+│
+├─ 3  LOOK ─ runs the plan, shows a summary
+│
+│    shape        describe  glimpse  ds  lookfor  codebook
+│    rows         count  head  list  levelsof  distinct
+│    statistics   summarize  tabstat  tabulate  histogram
+│                 correlate  pwcorr
+│    quality      misstable  duplicates report  duplicates list
+│
+└─ 4  LAND ─ produce the full result
+
+     parqit collect           stream the result into Stata's dataset, atomically
+     parqit save <file>       write Parquet; the dataset in memory is untouched
+```
+
+Each band is documented below: [Open / source](#open--source),
+[Single-table verbs](#single-table-verbs-lazy) and
+[Two-table verbs](#two-table-verbs-lazy),
+[Explore the view](#explore-the-view-engine-side-current-dataset-unchanged),
+[Materialisers](#materialisers-and-engine-side-result-commands).
+
+The order is a habit, not a rule: look whenever you like, shape again after
+looking, and collect or save as often as you need — the view stays open and
+re-executes each time. Alongside the four moves, at any point in the session:
+
+| | |
+|---|---|
+| the plan | `parqit show` `parqit explain` |
+| views | `parqit views` `parqit view` `parqit close` |
+| engine | `parqit set` `parqit path` |
+| install | `parqit version` `parqit selftest` `parqit menu` |
+
+Views are named (`default` unless `name()` says otherwise) and several can be
+open at once, like frames. Verbs act on the *current* view; `parqit view <name>`
+switches, and `parqit view <name>: <command>` runs one command against another
+view and switches back.
+
+Two commands are deliberately *not* view verbs: `parqit mergein` and
+`parqit appendin` join the dataset *already in Stata's memory* with a disk file
+through a **native** `merge`/`append`, reading only the columns of the file they
+need. Use them when the disk side is a small lookup; use `parqit use` +
+`parqit merge` when both sides are big.
 
 ### Open / source
 

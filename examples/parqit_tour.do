@@ -22,6 +22,8 @@ capture mkdir "$PARQIT_TOUR_DIR"
 display as text _newline "PARQIT TOUR: BUILD THE TEACHING FILE"
 parqit version
 parqit selftest
+* GUI only: adds User > parqit. A console/batch run says so and carries on.
+capture noisily parqit menu
 
 clear
 set obs 2400
@@ -165,6 +167,7 @@ parqit close
 * A pivot performs the aggregation and the wide reshape as one lazy verb.
 parqit use using "$PARQIT_TOUR_WORKERS"
 parqit keep if !missing(ln_wage, union)
+parqit list
 parqit pivot (mean) mean_lnwage=ln_wage (count) n=ln_wage,             ///
     rows(year) cols(union)
 parqit collect, clear

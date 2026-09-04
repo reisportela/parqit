@@ -6,6 +6,29 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.34] — 2026-09-04
+
+Documentation release: one new orientation section in the main help entry.
+No command, data or materialisation semantics changed.
+
+### Added
+- **Help: "The view at a glance".** A new orientation section in `help parqit`
+  (anchor `parqit##map`, listed in the Jump-to menu) maps the whole view
+  surface as a four-band diagram drawn with SMCL line characters — **open**
+  (`use`, `open _data`, `sql`), **shape** (the lazy verbs, grouped as rows /
+  columns / order / aggregate / restructure / two tables), **look** (the
+  engine-side reports, grouped as shape / rows / statistics / quality) and
+  **land** (`collect`, `save`) — each band linking to the section that
+  documents it, followed by the session-management commands, the view-naming
+  rule and the note that `mergein`/`appendin` are deliberately not view verbs.
+  Documentation only: no command, data or materialisation semantics changed.
+- **README: the same map.** `README.md` gains a matching *The view at a glance*
+  subsection at the head of *The verb grammar*, with the four-band diagram as a
+  fenced block, links into the per-band reference tables that follow, and the
+  session-management, view-naming and `mergein`/`appendin` notes. Additive
+  documentation: no command was added, removed or changed
+  (`ASSUMPTIONS.md` #120).
+
 ## [0.1.33] — 2026-09-03
 
 Authorship release: the package's co-authors appear on every author surface.

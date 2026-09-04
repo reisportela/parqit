@@ -1661,3 +1661,18 @@ entry notes the conservative fallback if the assumption proves wrong.
     surface (help, README, CITATION.cff, stata.toc, ado banner) carries the
     accent. The MIT copyright holder line was not changed: copyright is a
     legal statement the maintainer must make explicitly.
+120. **An orientation map precedes the reference tables (2026-09-04).** The
+    brief fixes the public command surface but says nothing about how the
+    surface should be *presented*. Both `help parqit` and `README.md` now open
+    their reference material with the same four-band map — open / shape / look
+    / land — because users repeatedly asked what they could do with a view, a
+    question neither the alphabetical syntax list nor the per-verb tables
+    answer at a glance. The map is drawn with SMCL line characters
+    (`{c TLC}`, `{c LT}`, `{c BLC}`, `{c |}`, `{c -}`) in the help so it
+    renders as line-drawing in the Viewer and as ASCII in a console log, and
+    as a fenced block in the README. It documents only commands that already
+    exist: no command was added, removed or renamed, and the syntax section
+    remains the normative surface — the map deliberately shows verb *names*
+    without their options so it stays one screen. Verified in the GUI Viewer,
+    which is the release check for help layout (see #118).
+

@@ -27,6 +27,8 @@ capture mkdir "$PARQIT_EXAMPLE_DIR"
 display as text _newline "PARQIT BASICS: CHECK THE INSTALLATION"
 parqit version
 parqit selftest
+* GUI only: adds User > parqit. A console/batch run says so and carries on.
+capture noisily parqit menu
 
 * --------------------------------------------------------------------------
 * 1. Create an NLS-style worker panel and write the data in memory to Parquet
