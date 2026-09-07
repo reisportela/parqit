@@ -1,6 +1,8 @@
 // Run the exact plugin's OpenMP code without linking this verifier to OpenMP.
 #include "stplugin.h"
 #include <cstdlib>
+#include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <string>
@@ -23,8 +25,8 @@ int report_error(char *message) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        std::cerr << "usage: parqit_openmp_probe /absolute/path/parqit.plugin\n";
+    if (argc < 2 || argc > 3 || (argc == 3 && std::string(argv[2]) != "--distribution")) {
+        std::cerr << "usage: parqit_openmp_probe /absolute/path/parqit.plugin [--distribution]\n";
         return 2;
     }
 #ifdef _WIN32
@@ -49,6 +51,17 @@ int main(int argc, char **argv) {
     const auto initialize = reinterpret_cast<ST_retcode (*)(ST_plugin *)>(symbol("pginit"));
     const auto call = reinterpret_cast<ST_retcode (*)(int, char **)>(symbol("stata_call"));
     if (!initialize || !call) return 1;
+#ifdef __APPLE__
+    if (argc == 3) {
+        for (const char *name : {"__emutls_get_address", "__emutls_register_common",
+                                 "__gcc_nested_func_ptr_created", "__gcc_nested_func_ptr_deleted"}) {
+            if (symbol(name)) {
+                std::cerr << "Private GCC helper remains dynamically exported: " << name << '\n';
+                return 1;
+            }
+        }
+    }
+#endif
     ST_plugin stata{};
     stata.macresave = save_macro;
     stata.spouterr = report_error;
@@ -67,9 +80,25 @@ int main(int argc, char **argv) {
                   << locals["_parqit_openmp_checksum"] << '\n';
         return 1;
     }
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto temporary = std::filesystem::temp_directory_path() /
+                           ("parqit-plugin-probe-" + std::to_string(nonce));
+    if (!std::filesystem::create_directory(temporary)) return 1;
+    std::string hex;
+    constexpr char digits[] = "0123456789abcdef";
+    for (unsigned char ch : temporary.string()) {
+        hex.push_back(digits[ch >> 4]);
+        hex.push_back(digits[ch & 15]);
+    }
+    char selftest[] = "selftest";
+    char *selftest_args[] = {selftest, hex.data()};
+    const bool engine_ok = call(2, selftest_args) == 0 && locals["_parqit_selftest"] == "ok";
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary, cleanup_error);
+    if (!engine_ok || cleanup_error) return 1;
     std::cout << "PLUGIN_OPENMP_PASS version=" << locals["_parqit_plugin_version"]
               << " standard=" << locals["_parqit_openmp_version"]
-              << " threads=2 checksum=3\n";
+              << " threads=2 checksum=3 engine=PASS\n";
     // Keep the runtime resident until process exit, as Stata normally does.
     return 0;
 }

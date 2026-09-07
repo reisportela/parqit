@@ -15,6 +15,8 @@ End users do not need a compiler or a separate runtime installer.
 - Network access on the first configure (CMake fetches pinned sources and
   verifies their SHA256), **or** pre-downloaded archives. DuckDB uses
   `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.3.tar.gz`.
+  Use a UTF-8 locale when configuring: the GCC source archive includes Unicode
+  test filenames, even though only its OpenMP runtime is built.
 - Linux/macOS build GNU libgomp 14.3.0 from source as a PIC static library.
   Its internal per-thread state uses pthread keys (`--disable-tls`), so loading
   the plugin does not depend on spare initial-exec TLS space in the Stata process.
@@ -151,12 +153,14 @@ PARQIT_OPENMP_PROBE=build/linux/parqit_openmp_probe \
 
 The Linux check requires ELF64, exported `stata_call`/`pginit`, no ordinary
 `.symtab` or debug sections, and no dynamic C++ or OpenMP runtime dependency.
-The macOS check recognises Mach-O and the required exports after `strip -x`;
+The macOS build uses a two-symbol strip keep-list and ad-hoc signing. Its check
+recognises Mach-O, verifies the signature and rejects leaked runtime exports;
 the Windows check recognises PE/COFF, the required exports and the bundled
 `parqit_vcomp140.dll`. Set the verifier path to `build/<preset>/parqit_openmp_probe`
 on macOS, or `build/windows/Release/parqit_openmp_probe.exe` on Windows.
 The verifier links no OpenMP runtime itself: it loads the exact collected plugin,
-checks the compiled OpenMP capability and executes a two-worker region inside it.
+checks the compiled OpenMP capability, executes a two-worker region inside it
+and runs the engine's Parquet/metadata selftest after stripping.
 Missing OpenMP, ignored pragmas or a missing packaged DLL fail that check.
 These checks do not substitute for running Stata on each platform.
 

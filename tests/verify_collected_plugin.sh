@@ -32,7 +32,7 @@ case "$PLATFORM" in
     macos)
         command -v nm >/dev/null 2>&1 || die "nm is required"
         file "$FILE_PATH" | grep -q 'Mach-O 64-bit' || die "artifact is not a 64-bit Mach-O plugin"
-        # CMake uses `strip -x`: local symbols disappear, while the two globals
+        # CMake uses an explicit strip keep-list: the two globals
         # Stata needs remain.  Mach-O keeps an export symbol table by design, so
         # the Linux .symtab rule is intentionally not asserted here.
         # Apple nm's -g output includes undefined imports as well as symbols
@@ -46,6 +46,7 @@ case "$PLATFORM" in
         if otool -L "$FILE_PATH" | grep -Eq '(libomp|libgomp|/opt/homebrew/|/usr/local/opt/)'; then
             die "macOS artifact must embed OpenMP and have no Homebrew runtime path"
         fi
+        codesign --verify --strict "$FILE_PATH" || die "macOS signature verification failed"
         ;;
     windows)
         command -v objdump >/dev/null 2>&1 || die "objdump is required"
@@ -71,7 +72,7 @@ esac
 # This executable links no OpenMP runtime itself. The two workers must come
 # from the exact plugin under inspection, after its package has been copied.
 if [ -n "${PARQIT_OPENMP_PROBE:-}" ]; then
-    OMP_DYNAMIC=FALSE OMP_THREAD_LIMIT=2 "$PARQIT_OPENMP_PROBE" "$FILE_PATH" || \
+    OMP_DYNAMIC=FALSE OMP_THREAD_LIMIT=2 "$PARQIT_OPENMP_PROBE" "$FILE_PATH" --distribution || \
         die "the collected plugin did not execute two OpenMP workers"
 else
     die "PARQIT_OPENMP_PROBE must name the built parqit_openmp_probe verifier"

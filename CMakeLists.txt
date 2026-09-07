@@ -236,8 +236,15 @@ endif()
 # below (covers a fresh checkout where the plugin is up to date but the
 # tree copy is missing).
 if(APPLE)
-    set(_parqit_plugin_install ${CMAKE_STRIP} -x -o "${PARQIT_LOCAL_ADO_DIR}/parqit.plugin"
-        "$<TARGET_FILE:parqit_plugin>")
+    set(_parqit_plugin_install ${CMAKE_COMMAND}
+        "-DSTRIP=${CMAKE_STRIP}"
+        "-DINPUT=$<TARGET_FILE:parqit_plugin>"
+        "-DOUTPUT=${PARQIT_LOCAL_ADO_DIR}/parqit.plugin"
+        "-DEXPORTS=${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/plugin.exports"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageMacPlugin.cmake")
+    set_property(TARGET parqit_plugin APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/plugin.exports"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageMacPlugin.cmake")
 elseif(UNIX AND CMAKE_STRIP)
     set(_parqit_plugin_install ${CMAKE_STRIP} -o "${PARQIT_LOCAL_ADO_DIR}/parqit.plugin"
         "$<TARGET_FILE:parqit_plugin>")
