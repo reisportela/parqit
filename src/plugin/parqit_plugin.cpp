@@ -22,6 +22,11 @@
 #include "engine/session.hpp"
 #include "plugin/plugin_io.hpp"
 #include "plugin/plugin_view.hpp"
+#include "plugin/openmp_runtime.hpp"
+
+#ifndef _OPENMP
+#error "Every parqit plugin must be compiled with OpenMP enabled"
+#endif
 
 #ifndef PARQIT_VERSION
 #define PARQIT_VERSION "0.0.0-dev"
@@ -54,8 +59,13 @@ bool arg_text(const std::vector<std::string> &args, size_t i, std::string *out) 
 
 /* --- subcommands ------------------------------------------------------- */
 
-ST_retcode cmd_ping(const std::vector<std::string> &) {
+ST_retcode cmd_ping(const std::vector<std::string> &args) {
+    if (args.size() != 2 || args[1] != "03") {
+        cry("parqit: ado and plugin numerical revisions do not match; install matching files and restart Stata");
+        return kRcUsage;
+    }
     save_local("_parqit_pong", "1");
+    save_local("_parqit_numeric_contract", "3");
     return 0;
 }
 
@@ -75,6 +85,16 @@ ST_retcode cmd_version(const std::vector<std::string> &) {
     save_local("_parqit_plugin_version", PARQIT_VERSION);
     save_local("_parqit_duckdb_version", duckdb_library_version());
     save_local("_parqit_spi_version", "3.0");
+    save_local("_parqit_openmp", "1");
+    save_local("_parqit_openmp_version", std::to_string(parqit_plugin::openmp_version()));
+    save_local("_parqit_openmp_max_threads", std::to_string(parqit_plugin::openmp_max_threads()));
+    return 0;
+}
+
+ST_retcode cmd_openmp_probe(const std::vector<std::string> &) {
+    const auto result = parqit_plugin::openmp_probe();
+    save_local("_parqit_openmp_threads", std::to_string(result.threads));
+    save_local("_parqit_openmp_checksum", std::to_string(result.checksum));
     return 0;
 }
 
@@ -91,6 +111,7 @@ ST_retcode cmd_selftest(const std::vector<std::string> &args) {
         cry("parqit selftest: missing tmpdir argument");
         return kRcUsage;
     }
+    cmd_openmp_probe(args);
     parqit::Session &s = parqit::Session::instance();
     s.set_default_temp_dir(tmpdir);
 
@@ -148,6 +169,7 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "ping") return cmd_ping(args);
     if (cmd == "echo") return cmd_echo(args);
     if (cmd == "version") return cmd_version(args);
+    if (cmd == "openmp_probe") return cmd_openmp_probe(args);
     if (cmd == "selftest") return cmd_selftest(args);
     if (cmd == "use_prepare") return parqit_plugin::cmd_use_prepare(args);
     if (cmd == "use_fetch") return parqit_plugin::cmd_use_fetch(args);

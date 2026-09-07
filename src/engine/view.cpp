@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <random>
 #include <set>
 
 #include "engine/exprtrans.hpp"
@@ -52,7 +53,7 @@ static std::string coerce_storage(const std::string &v,
         return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN "
                "abs(CAST((" + v + ") AS DOUBLE)) > " + dtoa(kStataFloatMax) +
                " THEN NULL ELSE CAST((" + v + ") AS FLOAT) END)";
-    case StType::Double: return "CAST(" + v + " AS DOUBLE)";
+    case StType::Double: return "parqit_finite(__parqit_double(" + v + "))";
     default: return v; /* string-typed numeric targets are rejected by caller */
     }
     return "(CASE WHEN (" + v + ") IS NULL THEN NULL WHEN trunc(" + v + ") < " +
@@ -93,6 +94,7 @@ std::string View::coerce_numeric_column(const std::string &name,
             sel += ref;
     }
     cols_[static_cast<size_t>(idx)].meta_type = type;
+    cols_[static_cast<size_t>(idx)].physical_type = type == "float" ? "FLOAT" : "DOUBLE";
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
                "commit " + name + " as " + type + " storage");
     return "";
@@ -131,10 +133,27 @@ static bool ci_clash(const std::string &a, const std::string &b) {
     return true;
 }
 
+/* An engine alias is not a column identity across independently opened views.
+ * Refuse ambiguous mappings before a join/union can combine different columns
+ * or duplicate one column under two names. Aligned aliases remain valid. */
+static std::string alias_identity_error(const std::vector<ViewCol> &cols,
+                                         const ViewCol &incoming) {
+    for (const auto &c : cols) {
+        if ((c.name == incoming.name) != (c.exposed() == incoming.exposed()))
+            return "column " + incoming.exposed() + " has an incompatible engine alias (" +
+                   incoming.name + ") beside column " + c.exposed() + " (" + c.name +
+                   "); rename the columns consistently in the source views before combining";
+    }
+    return "";
+}
+
 std::string View::ci_guard(const std::string &name,
                            const std::set<std::string> &ignore) const {
     for (const auto &c : cols_) {
         if (ignore.count(c.name)) continue;
+        if (c.name != name && c.exposed() == name)
+            return "variable " + name + " already exists under engine alias " +
+                   c.name + "; use that alias or rename it first";
         if (ci_clash(c.name, name))
             return "variable " + name + " differs only by case from " + c.name +
                    ", which the engine cannot hold in one view (DuckDB column names "
@@ -293,10 +312,20 @@ static void move_chars(nlohmann::json *chars, const ViewCol &old_col,
     if (!merged.empty()) (*chars)[newn] = merged;
 }
 
+void View::set_numeric_types(const std::vector<std::string> &types) {
+    for (size_t i = 0; i < cols_.size() && i < types.size(); ++i) {
+        cols_[i].physical_type = types[i];
+        if (types[i] == "DOUBLE" && cols_[i].meta_type == "float")
+            cols_[i].meta_type = "double";
+    }
+}
+
 static ExprSchema schema_of(const std::vector<ViewCol> &cols) {
     ExprSchema s;
     for (const auto &c : cols) {
         s.kinds[c.name] = c.kind;
+        s.numeric_types[c.name] = c.physical_type;
+        if (c.is_float()) s.float_columns.insert(c.name);
         if (c.normalized) s.normalized.insert(c.name); /* MISS-1 */
     }
     return s;
@@ -478,6 +507,7 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     nc.name = name;
     nc.kind = (r.kind == 's' ? 's' : 'n');
     nc.meta_type = effective_type; /* untyped numeric gen is contractual double */
+    nc.normalized = nc.kind == 'n'; /* coerce_storage already normalizes numeric results */
     cols_.push_back(nc);
     push_stage(body, "gen " + name + " = " + expr +
                          (if_expr.empty() ? "" : " if " + if_expr));
@@ -722,20 +752,28 @@ std::string View::sort(const std::vector<std::string> &keys,
  * ranks. `prn` is the 1-based rank of the row's nonmissing value within its
  * group (NULL for a missing value), `pn` the group's nonmissing count;
  * np = pn*p/100, integral np averages x[np] and x[np+1] (x[n] when np == n),
- * otherwise x[ceil(np)]. (v + v)/2.0 is exact in binary64, so the
- * non-integral branch returns the element itself; an all-missing group has no
+ * otherwise x[ceil(np)]. A typed midpoint rounds once, so the non-integral
+ * branch returns the element itself; an all-missing group has no
  * matching rank and yields NULL. The rank window spills to the temp
  * directory, which the per-group list_sort(list(x)) it replaced never did. */
 std::string pct_window_sql(const std::string &ref, const std::string &prn,
                            const std::string &pn, double p) {
     const std::string n = quote_ident(pn), rn = quote_ident(prn);
+    if (p == std::trunc(p)) {
+        const std::string product = "(CAST(" + n + " AS HUGEINT) * " + std::to_string(static_cast<int>(p)) + ")";
+        const std::string quotient = "(" + product + " // 100)", remainder = "(" + product + " % 100)";
+        const std::string first = "greatest(1, " + quotient + " + CASE WHEN " + remainder + " = 0 THEN 0 ELSE 1 END)";
+        const std::string second = "greatest(1, least(" + quotient + " + 1, " + n + "))";
+        return "__parqit_midpoint(max(CASE WHEN " + rn + " = " + first + " THEN " + ref +
+               " END), max(CASE WHEN " + rn + " = " + second + " THEN " + ref + " END))";
+    }
     const std::string np = "(" + n + " * " + dtoa(p) + " / 100.0)";
     const std::string integral = np + " = floor(" + np + ")";
-    const std::string k1 = "(CASE WHEN " + integral + " THEN " + np + " ELSE ceil(" + np + ") END)";
+    const std::string k1 = "greatest(1, CASE WHEN " + integral + " THEN " + np + " ELSE ceil(" + np + ") END)";
     const std::string k2 = "(CASE WHEN " + integral + " THEN least(" + np + " + 1, " + n +
                            ") ELSE ceil(" + np + ") END)";
-    return "((max(CASE WHEN " + rn + " = " + k1 + " THEN " + ref + " END) + max(CASE WHEN " +
-           rn + " = " + k2 + " THEN " + ref + " END)) / 2.0)";
+    return "__parqit_midpoint(max(CASE WHEN " + rn + " = " + k1 + " THEN " + ref +
+           " END), max(CASE WHEN " + rn + " = greatest(1, " + k2 + ") THEN " + ref + " END))";
 }
 
 std::string View::collapse(const std::vector<CollapseSpec> &specs,
@@ -838,7 +876,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
                " AS " + quote_ident(b);
         ncols.push_back(cols_[col_index(b)]);
     }
-    std::set<std::string> outnames(byn.begin(), byn.end());
+    std::set<std::string> outnames(byn.begin(), byn.end()), dispersion;
+    for (const auto &sp : specs) if (sp.stat == "sd") dispersion.insert(sp.source);
     for (const auto &sp : specs) {
         int sidx = col_index(sp.source);
         if (sidx < 0) return "variable " + sp.source + " not found in the view";
@@ -849,9 +888,13 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         const std::string ref = quote_ident(sp.source);
         std::string agg;
         char kind = 'n';
-        if (sp.stat == "mean") agg = "avg(" + ref + ")";
-        else if (sp.stat == "sum") agg = "coalesce(sum(" + ref + "), 0)";
-        else if (sp.stat == "sd") agg = "stddev_samp(" + ref + ")";
+        const std::string stat = std::string("(") + (dispersion.count(sp.source) ?
+                                  "__parqit_stats(" : "__parqit_total(") + ref + "))";
+        const bool floating = scol.physical_type == "FLOAT" || scol.physical_type == "DOUBLE" ||
+                              (scol.physical_type.empty() && (scol.meta_type == "float" || scol.meta_type == "double"));
+        if (sp.stat == "mean") agg = stat + ".mean";
+        else if (sp.stat == "sum") agg = floating ? stat + ".sum" : "coalesce(sum(" + ref + "), 0)";
+        else if (sp.stat == "sd") agg = stat + ".sd";
         else if (sp.stat == "min") agg = "min(" + ref + ")";
         else if (sp.stat == "max") agg = "max(" + ref + ")";
         else if (sp.stat == "count")
@@ -873,6 +916,11 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
                        sp.source + " is string)";
             const auto &h = pct_helpers.at(sp.source);
             agg = pct_window_sql(ref, h.first, h.second, p);
+            /* Native collapse stores a float source's percentile as float;
+             * tabstat uses the unrounded double statistic. typeof is resolved
+             * by the binder, including for a foreign FLOAT without metadata. */
+            agg = "(CASE WHEN typeof(max(" + ref + ")) = 'FLOAT' THEN CAST(" +
+                  agg + " AS FLOAT) ELSE " + agg + " END)";
         } else if (sp.stat == "first" || sp.stat == "last") {
             /* include-missing first/last via a struct payload */
             const char *fn = (sp.stat == "first") ? "arg_min" : "arg_max";
@@ -923,6 +971,17 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
             nc.meta_type = scol.meta_type;
         } else if (sp.stat == "count") {
             nc.meta_type = "long";
+        }
+        if (sp.stat == "mean" || sp.stat == "sd" || (sp.stat == "sum" && floating)) {
+            nc.physical_type = "DOUBLE";
+            nc.normalized = true;
+        } else if (sp.stat == "count") {
+            nc.physical_type = "BIGINT";
+            nc.normalized = true;
+        } else if (sp.stat == "min" || sp.stat == "max" || sp.stat == "first" ||
+                   sp.stat == "last" || sp.stat == "firstnm" || sp.stat == "lastnm") {
+            nc.physical_type = scol.physical_type;
+            nc.normalized = scol.normalized;
         }
         ncols.push_back(nc);
     }
@@ -1106,18 +1165,38 @@ std::string View::drop_in(long long f, long long l) {
 }
 
 std::string View::sample(double amount, bool is_count, long long seed) {
+    if (!std::isfinite(amount)) return "sample amount must be finite";
     const std::string prev = prev_name(stages_.size());
     std::string clause;
     if (is_count) {
-        if (amount < 0 || amount != std::floor(amount))
-            return "sample, count needs a nonnegative integer";
+        if (amount < 0 || amount >= 0x1p63 || amount != std::floor(amount))
+            return "sample, count needs a nonnegative integer below 2^63";
         clause = "reservoir(" + std::to_string(static_cast<long long>(amount)) +
                  " ROWS)";
     } else {
         if (amount <= 0 || amount > 100) return "sample percentage out of range";
-        clause = "reservoir(" + dtoa(amount) + "%)";
     }
-    if (seed >= 0) clause += " REPEATABLE (" + std::to_string(seed) + ")";
+    if (seed < 0) {
+        static std::mt19937 seeds(std::random_device{}());
+        seed = seeds() & 0x7fffffffU;
+    }
+    if (!is_count) {
+        if (amount == 100) return "";
+        const std::string data = quote_ident(fresh_helper("sample_source"));
+        const std::string row = quote_ident(fresh_helper("sample_row"));
+        const std::string order = order_by_sql();
+        const std::string over = order.empty() ? "" : order.substr(1);
+        // Capture once; round the global count once. Block percentage reservoirs
+        // floor their per-block counts and can reach an invalid zero-size state.
+        push_stage("WITH " + data + " AS MATERIALIZED (SELECT " + select_list() +
+            ", row_number() OVER (" + over + ") AS " + row + " FROM " + prev +
+            ") SELECT " + select_list() + " FROM " + data +
+            " ORDER BY hash(hash(" + row + ", " + std::to_string(seed) + ")), " + row +
+            " LIMIT (SELECT __parqit_sample_count(CAST(count(*) AS UBIGINT), CAST(" +
+            quote_literal(dtoa(amount)) + " AS DOUBLE)) FROM " + data + ")", "sample");
+        return "";
+    }
+    clause += " REPEATABLE (" + std::to_string(seed) + ")";
     push_stage("SELECT " + select_list() + " FROM " + prev + " USING SAMPLE " +
                    clause,
                "sample");
@@ -1127,7 +1206,7 @@ std::string View::sample(double amount, bool is_count, long long seed) {
 std::string View::egen(const std::string &name, const std::string &fcn,
                        const std::string &arg_expr,
                        const std::vector<std::string> &by, bool statamissing,
-                       const std::string &type_req) {
+                       const std::string &type_req, const std::string &arg_type) {
     if (col_index(name) >= 0) return "variable " + name + " already defined";
     {
         const std::string cig = ci_guard(name);
@@ -1135,6 +1214,8 @@ std::string View::egen(const std::string &name, const std::string &fcn,
     }
     ExprResult a = translate_expression(arg_expr, schema_of(cols_), statamissing);
     if (!a.ok) return a.error;
+    if (a.uses_rowctx)
+        return "_n/_N are not supported in egen; generate a row variable first";
     if (a.kind == 's') return "egen " + fcn + "() needs a numeric expression";
     std::string part;
     if (!by.empty()) {
@@ -1149,9 +1230,14 @@ std::string View::egen(const std::string &name, const std::string &fcn,
     }
     std::string over = part.empty() ? "OVER ()" : "OVER (PARTITION BY " + part + ")";
     std::string agg;
-    if (fcn == "total") agg = "coalesce(sum(" + a.sql + ") " + over + ", 0)";
-    else if (fcn == "mean") agg = "avg(" + a.sql + ") " + over;
-    else if (fcn == "sd") agg = "stddev_samp(" + a.sql + ") " + over;
+    if (fcn == "total") {
+        const bool exact_storage = type_req.empty() && !arg_type.empty() &&
+                                   arg_type != "FLOAT" && arg_type != "DOUBLE";
+        agg = exact_storage ? "coalesce(sum(" + a.sql + ") " + over + ", 0)"
+                            : "(__parqit_total(" + a.sql + ") " + over + ").sum";
+    }
+    else if (fcn == "mean") agg = "(__parqit_total(" + a.sql + ") " + over + ").mean";
+    else if (fcn == "sd") agg = "(__parqit_stats(" + a.sql + ") " + over + ").sd";
     else if (fcn == "min") agg = "min(" + a.sql + ") " + over;
     else if (fcn == "max") agg = "max(" + a.sql + ") " + over;
     else if (fcn == "count") agg = "count(" + a.sql + ") " + over;
@@ -1173,7 +1259,8 @@ std::string View::egen(const std::string &name, const std::string &fcn,
             return "type mismatch: egen " + fcn +
                    "() produces a numeric result, not " + type_req;
     }
-    std::string stored = coerce_storage(agg, type_req, 'n');
+    const bool finite_double = fcn == "total" || fcn == "mean" || fcn == "sd";
+    std::string stored = type_req == "double" && finite_double ? agg : coerce_storage(agg, type_req, 'n');
     push_stage("SELECT " + select_list() + ", " + stored + " AS " +
                    quote_ident(name) + " FROM " + prev_name(stages_.size()),
                "egen " + name + " = " + fcn + "(...)" +
@@ -1182,6 +1269,8 @@ std::string View::egen(const std::string &name, const std::string &fcn,
     nc.name = name;
     nc.kind = 'n';
     nc.meta_type = type_req;
+    nc.normalized = fcn == "total" || fcn == "mean" || fcn == "sd" ||
+                    fcn == "count" || !type_req.empty();
     cols_.push_back(nc);
     return "";
 }
@@ -1191,6 +1280,96 @@ std::string View::egen(const std::string &name, const std::string &fcn,
 namespace parqit {
 
 /* ----------------------------------------------------- two-table verbs --- */
+
+static std::string numeric_type(const ViewCol &c) {
+    if (!c.physical_type.empty()) return c.physical_type;
+    if (c.meta_type == "float") return "FLOAT";
+    if (c.meta_type == "double") return "DOUBLE";
+    if (c.meta_type == "byte") return "TINYINT";
+    if (c.meta_type == "int") return "SMALLINT";
+    if (c.meta_type == "long") return "INTEGER";
+    return "";
+}
+
+static int decimal_scale(const std::string &type) {
+    if (type.rfind("DECIMAL(", 0) != 0) return -1;
+    return std::stoi(type.substr(type.find(',') + 1));
+}
+
+static bool wide_numeric(const std::string &type) {
+    return type == "BIGINT" || type == "UBIGINT" || type == "HUGEINT" ||
+           type == "UHUGEINT" || decimal_scale(type) >= 0;
+}
+
+static std::string common_numeric_type(const std::vector<const ViewCol *> &columns) {
+    bool floating = false, real = false, needs_double = false, uhuge = false;
+    int scale = -1;
+    std::set<std::string> types;
+    for (const auto *c : columns) {
+        const std::string type = numeric_type(*c);
+        types.insert(type);
+        floating |= type == "FLOAT";
+        real |= type == "DOUBLE";
+        uhuge |= type == "UHUGEINT";
+        needs_double |= type != "FLOAT" && type != "TINYINT" && type != "SMALLINT";
+        scale = std::max(scale, decimal_scale(type));
+    }
+    if (real || (floating && needs_double)) return "DOUBLE";
+    if (floating) return "FLOAT";
+    if (types.size() <= 1) return "";
+    if (scale >= 0) return "DECIMAL(38," + std::to_string(scale) + ")";
+    if (uhuge) return "HUGEINT";
+    return ""; // DuckDB's common signed/unsigned <=64-bit integer type is exact.
+}
+
+static std::string numeric_output(const std::string &ref, const ViewCol &c,
+                                  const std::string &target, const std::string &operation) {
+    if (target.empty() || numeric_type(c) == target) return ref;
+    const std::string converted = target == "DOUBLE" ? "__parqit_double(" + ref + ")"
+        : "TRY_CAST(" + ref + " AS " + target + ")";
+    if (target == "FLOAT" || (target == "DOUBLE" && !wide_numeric(numeric_type(c))))
+        return converted;
+    const std::string exact = target == "DOUBLE" ? "__parqit_compare(" + ref + ", " + converted + ") = 0"
+        : converted + " IS NOT NULL";
+    return "(CASE WHEN " + ref + " IS NULL THEN NULL WHEN " + exact + " THEN " + converted +
+           " ELSE error(" + quote_literal(operation + ": " + c.exposed() +
+           " cannot be combined without losing precision; cast explicitly first") + ") END)";
+}
+
+static std::string key_value(const std::string &ref, const ViewCol &c) {
+    if (c.kind == 's') return "nullif(" + ref + ", '')";
+    if (c.normalized) return ref;
+    const std::string number = "__parqit_double(" + ref + ")";
+    return "(CASE WHEN isfinite(" + number + ") AND abs(" + number + ") < " +
+           dtoa(kStataMissThreshold) + " THEN " + ref + " ELSE NULL END)";
+}
+
+static std::string key_equality(const std::string &left, const ViewCol &lc,
+                                const std::string &right, const ViewCol &rc) {
+    const std::string a = key_value(left, lc), b = key_value(right, rc);
+    const std::string lt = numeric_type(lc), rt = numeric_type(rc);
+    if (lc.kind == 's' || lt == rt)
+        return a + " IS NOT DISTINCT FROM " + b;
+    const bool lf = lt == "FLOAT" || lt == "DOUBLE", rf = rt == "FLOAT" || rt == "DOUBLE";
+    std::string x = a, y = b, guards;
+    auto checked = [&](const std::string &value, const std::string &converted) {
+        guards += " AND (" + value + " IS NULL OR " + converted + " IS NOT NULL)";
+        return converted;
+    };
+    if (lf || rf) {
+        x = lf ? "__parqit_double(" + a + ")" : checked(a, "__parqit_exact_double_key(" + a + ")");
+        y = rf ? "__parqit_double(" + b + ")" : checked(b, "__parqit_exact_double_key(" + b + ")");
+    } else if (decimal_scale(lt) >= 0 || decimal_scale(rt) >= 0) {
+        const std::string type = "DECIMAL(38," + std::to_string(std::max(decimal_scale(lt), decimal_scale(rt))) + ")";
+        x = checked(a, "TRY_CAST(" + a + " AS " + type + ")");
+        y = checked(b, "TRY_CAST(" + b + " AS " + type + ")");
+    } else if (lt == "UHUGEINT" || rt == "UHUGEINT") {
+        x = checked(a, "TRY_CAST(" + a + " AS UHUGEINT)");
+        y = checked(b, "TRY_CAST(" + b + " AS UHUGEINT)");
+    }
+    // Equality remains between unary expressions, so DuckDB can use a hash join.
+    return "(" + x + " IS NOT DISTINCT FROM " + y + guards + ")";
+}
 
 /* MISS-1 after a two-table verb: the combine introduces SQL NULLs into carried
  * string columns — merge's FULL/LEFT JOIN nulls the other side's strings on
@@ -1243,6 +1422,10 @@ std::string View::join_keys_error(const std::string &op,
         auto it = ucols.find(k);
         if (it == ucols.end())
             return op + ": key " + k + " not found in the using data";
+        if (cols_[mi].exposed() != it->second->exposed())
+            return op + ": key " + k + " identifies different columns in master (" +
+                   cols_[mi].exposed() + ") and using (" + it->second->exposed() +
+                   "); rename the keys consistently before combining";
         if (cols_[mi].kind != it->second->kind) {
             if (type_mismatch) *type_mismatch = true;
             return op + ": key " + k + " is " +
@@ -1267,24 +1450,8 @@ std::string View::merge_with(const std::string &kind,
     std::string kerr = join_keys_error("merge", keys, u);
     if (!kerr.empty()) return kerr;
     std::set<std::string> keyset(keys.begin(), keys.end());
-
-    /* Normalise a join key to Stata's missing/empty equivalence INSIDE the join
-     * comparison (output key values are left untouched). Stata has no string
-     * NULL and no NaN: a missing string is "" and a missing numeric is .  — so
-     * a key that is "" / NULL / NaN on one side must match the parqit form on the
-     * other. Without this, an out-of-core `parqit merge` of a third-party (esp.
-     * pandas/pyarrow, which encodes a missing float as NaN) Parquet would give
-     * different matches than native Stata, parqit mergein, and parqit collect. */
-    auto key_norm = [&](const char *side, const std::string &k) -> std::string {
-        std::string ref = std::string(side) + "." + quote_ident(k);
-        int mi = col_index(k);
-        if (mi >= 0 && cols_[mi].kind == 's') return "nullif(" + ref + ", '')";
-        /* numeric: NaN ≡ missing. The CASE returns the original ref in the ELSE
-         * branch, so an integer key keeps its exact type/value (no precision
-         * loss); only an actual NaN (float/double) becomes NULL. */
-        return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " +
-               ref + " END)";
-    };
+    std::map<std::string, const ViewCol *> ucols;
+    for (const auto &c : u.cols) ucols[c.name] = &c;
 
     /* which using columns come across: keepusing ∩ (not in master unless key) */
     std::set<std::string> wanted;
@@ -1312,6 +1479,8 @@ std::string View::merge_with(const std::string &kind,
     for (const auto &c : u.cols) {
         if (keyset.count(c.name)) continue;
         if (!keepusing.empty() && !wanted.count(c.name)) continue;
+        const std::string identity = alias_identity_error(cols_, c);
+        if (!identity.empty()) return "merge: " + identity;
         int mi = col_index(c.name);
         if (mi >= 0) {
             /* native merge stops with r(106) when a common variable is string
@@ -1333,6 +1502,22 @@ std::string View::merge_with(const std::string &kind,
         }
         brought.push_back(&c);
     }
+
+    std::map<std::string, std::string> output_types;
+    for (const auto &c : cols_)
+        if (c.kind == 'n' && (keyset.count(c.name) || common.count(c.name)))
+            output_types[c.name] = common_numeric_type({&c, ucols.at(c.name)});
+    auto output_value = [&](const std::string &side, const ViewCol &c) {
+        const auto target = output_types.find(c.name);
+        const std::string ref = side + "." + quote_ident(c.name);
+        return target == output_types.end() ? ref : numeric_output(ref, c, target->second, "merge");
+    };
+    auto spine_column = [&](const std::string &key) {
+        ViewCol c = cols_[col_index(key)];
+        if (!output_types[key].empty()) c.physical_type = output_types[key];
+        c.normalized = true;
+        return c;
+    };
 
     /* _merge name: never collide silently (charter §6.12) */
     std::string mname = gen_name.empty() ? "_merge" : gen_name;
@@ -1386,16 +1571,16 @@ std::string View::merge_with(const std::string &kind,
          * spine UNION and the joins all see one missing group; key_norm is
          * idempotent on an already-normalized value, and the output coalesce of
          * the normalized key renders missing exactly as Stata does. */
-        std::string krepl = " REPLACE (";
-        for (size_t i = 0; i < keys.size(); i++) {
-            const std::string ref = quote_ident(keys[i]);
-            std::string nk = (cols_[col_index(keys[i])].kind == 's')
-                ? "nullif(" + ref + ", '')"
-                : "(CASE WHEN isnan(CAST(" + ref +
-                      " AS DOUBLE)) THEN NULL ELSE " + ref + " END)";
-            krepl += (i ? ", " : "") + nk + " AS " + ref;
-        }
-        krepl += ")";
+        auto normalized_source = [&](const std::string &source, bool master) {
+            std::string replace;
+            for (const auto &key : keys) {
+                const ViewCol &c = master ? cols_[col_index(key)] : *ucols.at(key);
+                const std::string ref = quote_ident(key);
+                const std::string value = numeric_output(key_value(ref, c), c, output_types[key], "merge m:m");
+                replace += (replace.empty() ? "" : ", ") + value + " AS " + ref;
+            }
+            return "(SELECT * REPLACE (" + replace + ") FROM " + source + ")";
+        };
         /* TT-A1: the master within-key i-index must be reproducible. An empty
          * or key-only view sort would leave row_number() OVER (PARTITION BY key)
          * with no/partial ORDER BY -> engine-defined pairing. Honour any user
@@ -1409,10 +1594,10 @@ std::string View::merge_with(const std::string &kind,
             m_order += (m_order.empty() ? "ORDER BY " : ", ");
             m_order += quote_ident(cols_[i].name) + " NULLS LAST";
         }
-        mrel = "(SELECT *" + krepl + ", TRUE AS " + quote_ident(mm) + ", row_number() OVER (PARTITION BY " +
+        mrel = "(SELECT *, TRUE AS " + quote_ident(mm) + ", row_number() OVER (PARTITION BY " +
                keypart + " " + m_order + ") AS " + quote_ident(rnm) +
                ", count(*) OVER (PARTITION BY " + keypart + ") AS " + quote_ident(nmx) +
-               " FROM " + prev + ")";
+               " FROM " + normalized_source(prev, true) + ")";
         /* Deterministic using-side pairing: order the row_number window by all
          * using columns so m:m pairing is reproducible (not engine-defined).
          * A lazy file/view does not carry physical within-key row identity, so
@@ -1421,9 +1606,9 @@ std::string View::merge_with(const std::string &kind,
         std::string u_order;
         for (size_t i = 0; i < u.cols.size(); i++)
             u_order += (i ? ", " : " ORDER BY ") + quote_ident(u.cols[i].name);
-        urel = "(SELECT *" + krepl + ", TRUE AS " + quote_ident(um) + ", row_number() OVER (PARTITION BY " +
+        urel = "(SELECT *, TRUE AS " + quote_ident(um) + ", row_number() OVER (PARTITION BY " +
                keypart + u_order + ") AS " + quote_ident(rnu) + ", count(*) OVER (PARTITION BY " +
-               keypart + ") AS " + quote_ident(nux) + " FROM (" + u.select_sql + "))";
+               keypart + ") AS " + quote_ident(nux) + " FROM " + normalized_source("(" + u.select_sql + ")", false) + ")";
     } else {
         mrel = "(SELECT *, TRUE AS " + quote_ident(mm) + " FROM " + prev + ")";
         urel = "(SELECT *, TRUE AS " + quote_ident(um) + " FROM (" + u.select_sql + "))";
@@ -1431,8 +1616,8 @@ std::string View::merge_with(const std::string &kind,
     for (size_t i = 0; i < keys.size(); i++) {
         if (i) joincond += " AND ";
         /* Stata semantics: missing keys match missing keys (incl. ""≡NULL≡NaN) */
-        joincond += key_norm("__m", keys[i]) + " IS NOT DISTINCT FROM " +
-                    key_norm("__u", keys[i]);
+        joincond += key_equality("__m." + quote_ident(keys[i]), cols_[col_index(keys[i])],
+                                 "__u." + quote_ident(keys[i]), *ucols.at(keys[i]));
     }
 
     /* output projection: master cols (coalesced keys), brought using cols,
@@ -1448,12 +1633,14 @@ std::string View::merge_with(const std::string &kind,
             const std::string q = quote_ident(c.name);
             if (keyset.count(c.name)) {
                 out += std::string(keysrc) == "__m"
-                           ? "coalesce(__m." + q + ", __u." + q + ") AS " + q
+                           ? "coalesce(" + output_value("__m", c) + ", " +
+                             output_value("__u", *ucols.at(c.name)) + ") AS " + q
                            : std::string(keysrc) + "." + q + " AS " + q;
             } else if (common.count(c.name)) {
                 /* MERGE-COMMON-1: using-only row -> using value */
-                out += "(CASE WHEN __m." + quote_ident(mm) + " IS NULL THEN __u." + q +
-                       " ELSE __m." + q + " END) AS " + q;
+                out += "(CASE WHEN __m." + quote_ident(mm) + " IS NULL THEN " +
+                       output_value("__u", *common.at(c.name)) + " ELSE " +
+                       output_value("__m", c) + " END) AS " + q;
             } else {
                 out += "__m." + q + " AS " + q;
             }
@@ -1463,6 +1650,11 @@ std::string View::merge_with(const std::string &kind,
     std::vector<ViewCol> ncols;
     for (const auto &c : cols_) {
         ncols.push_back(c);
+        if (!output_types[c.name].empty()) {
+            ncols.back().physical_type = output_types[c.name];
+            ncols.back().meta_type = output_types[c.name] == "DOUBLE" ? "double" :
+                                    output_types[c.name] == "FLOAT" ? "float" : "";
+        }
         /* MISS-1: a common column may now carry a using-side value; it stays
          * normalized only when the using column is normalized too */
         auto it = common.find(c.name);
@@ -1494,10 +1686,9 @@ std::string View::merge_with(const std::string &kind,
         std::string jm, ju;
         for (size_t i = 0; i < keys.size(); i++) {
             if (i) { jm += " AND "; ju += " AND "; }
-            jm += key_norm("__s", keys[i]) + " IS NOT DISTINCT FROM " +
-                  key_norm("__m", keys[i]);
-            ju += key_norm("__s", keys[i]) + " IS NOT DISTINCT FROM " +
-                  key_norm("__u", keys[i]);
+            const auto c = spine_column(keys[i]);
+            jm += key_equality("__s." + quote_ident(keys[i]), c, "__m." + quote_ident(keys[i]), c);
+            ju += key_equality("__s." + quote_ident(keys[i]), c, "__u." + quote_ident(keys[i]), c);
         }
         jm += " AND __m." + quote_ident(rnm) + " = least(__s." + quote_ident(spine_i) +
               ", __m." + quote_ident(nmx) + ")";
@@ -1601,6 +1792,13 @@ std::string View::append_with(std::vector<UsingSide> sources,
     };
     for (size_t s = 0; s < sources.size(); s++) {
         for (const auto &c : sources[s].cols) {
+            const std::string identity = alias_identity_error(ncols, c);
+            if (!identity.empty()) return "append: " + identity;
+            for (const auto &existing : ncols)
+                if (ci_clash(existing.name, c.name))
+                    return "append: variable " + c.exposed() + " differs only by case from " +
+                           existing.exposed() + "; rename the columns consistently in the "
+                           "source views before appending";
             int idx = find_in(c.name);
             if (idx < 0) {
                 ncols.push_back(c);
@@ -1612,6 +1810,39 @@ std::string View::append_with(std::vector<UsingSide> sources,
             }
         }
     }
+    std::map<std::string, std::string> casts;
+    for (auto &out : ncols) {
+        if (out.kind != 'n') continue;
+        std::vector<const ViewCol *> inputs;
+        auto inspect = [&](const std::vector<ViewCol> &columns) {
+            for (const auto &c : columns) {
+                if (c.name != out.name) continue;
+                inputs.push_back(&c);
+            }
+        };
+        inspect(cols_);
+        for (const auto &side : sources) inspect(side.cols);
+        const std::string type = common_numeric_type(inputs);
+        if (!type.empty()) {
+            casts[out.name] = type;
+            out.meta_type = type == "DOUBLE" ? "double" : type == "FLOAT" ? "float" : "";
+            out.physical_type = type;
+        }
+        /* Every non-normalized numeric input is guarded in its projection. */
+        out.normalized = true;
+    }
+    auto projection = [&](const std::vector<ViewCol> &columns) {
+        std::string select;
+        for (const auto &c : columns) {
+            const std::string ref = quote_ident(c.name);
+            std::string value = c.kind == 'n' ? key_value(ref, c) : ref;
+            auto cast = casts.find(c.name);
+            if (cast != casts.end()) value = numeric_output(value, c, cast->second, "append");
+            if (!select.empty()) select += ", ";
+            select += value + " AS " + ref;
+        }
+        return select;
+    };
     /* validate-then-mutate (charter §6): merge the sources' value-label
      * definitions only after EVERY source passed the kind checks above — a
      * conflict in source 2 must not leave source 1's labels already merged
@@ -1622,12 +1853,12 @@ std::string View::append_with(std::vector<UsingSide> sources,
     std::string prev = prev_name(stages_.size());
     if (!sort_.empty())
         prev = "(SELECT * FROM " + prev + order_by_sql() + ")";
-    std::string body = "SELECT *" +
+    std::string body = "SELECT " + projection(cols_) +
                        (gen_name.empty() ? std::string()
                                          : ", 0 AS " + quote_ident(gen_name)) +
                        " FROM " + prev;
     for (size_t s = 0; s < sources.size(); s++) {
-        body += " UNION ALL BY NAME SELECT *";
+        body += " UNION ALL BY NAME SELECT " + projection(sources[s].cols);
         if (!gen_name.empty())
             body += ", " + std::to_string(s + 1) + " AS " + quote_ident(gen_name);
         body += " FROM (" + sources[s].select_sql + ")";
@@ -1669,6 +1900,8 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
     std::vector<const ViewCol *> brought;
     for (const auto &c : u.cols) {
         if (keyset.count(c.name)) continue;
+        const std::string identity = alias_identity_error(cols_, c);
+        if (!identity.empty()) return "joinby: " + identity;
         if (col_index(c.name) >= 0) {
             warnings->push_back("variable " + c.name +
                                 " exists in master and using; master values kept");
@@ -1683,23 +1916,13 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
     }
 
     const std::string prev = prev_name(stages_.size());
-    /* normalise join keys to Stata's missing/empty equivalence ("" ≡ NULL,
-     * NaN ≡ NULL) so joinby matches the same rows as native Stata (see the
-     * matching helper in merge_with). */
-    auto key_norm = [&](const char *side, const std::string &k) -> std::string {
-        std::string ref = std::string(side) + "." + quote_ident(k);
-        int mi = col_index(k);
-        if (mi >= 0 && cols_[mi].kind == 's') return "nullif(" + ref + ", '')";
-        /* TT-A3: use the same NaN-folding idiom as merge_with/the uniqueness
-         * guard (isnan(CAST(... AS DOUBLE))) so the three never diverge. */
-        return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " +
-               ref + " END)";
-    };
+    std::map<std::string, const ViewCol *> ucols;
+    for (const auto &c : u.cols) ucols[c.name] = &c;
     std::string joincond;
     for (size_t i = 0; i < keys.size(); i++) {
         if (i) joincond += " AND ";
-        joincond += key_norm("__m", keys[i]) + " IS NOT DISTINCT FROM " +
-                    key_norm("__u", keys[i]);
+        joincond += key_equality("__m." + quote_ident(keys[i]), cols_[col_index(keys[i])],
+                                 "__u." + quote_ident(keys[i]), *ucols.at(keys[i]));
     }
     std::string sel;
     for (const auto &c : cols_) {
@@ -1826,6 +2049,14 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
         stubkind[st] = k0;
     }
 
+    std::map<std::string, std::string> stubtypes;
+    for (const auto &st : stubs) {
+        if (stubkind[st] != 'n') continue;
+        std::vector<const ViewCol *> inputs;
+        for (const auto &kv : by_stub_suffix[st]) inputs.push_back(kv.second);
+        stubtypes[st] = common_numeric_type(inputs);
+    }
+
     /* carried columns: everything that is not a stub column; i vars first */
     std::vector<const ViewCol *> carried;
     for (const auto &c : cols_)
@@ -1865,6 +2096,8 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
             std::string val;
             if (it != by_stub_suffix[st].end()) {
                 val = quote_ident(it->second->name);
+                if (stubkind[st] == 'n')
+                    val = numeric_output(val, *it->second, stubtypes[st], "reshape long");
             } else {
                 val = stubkind[st] == 's' ? "CAST(NULL AS VARCHAR)"
                                           : "CAST(NULL AS DOUBLE)";
@@ -1901,6 +2134,10 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
             sc.fmt = c0->fmt;
             sc.vallab = c0->vallab;
             sc.meta_type = c0->meta_type;
+        }
+        if (!stubtypes[st].empty()) {
+            sc.physical_type = stubtypes[st];
+            sc.meta_type = stubtypes[st] == "DOUBLE" ? "double" : stubtypes[st] == "FLOAT" ? "float" : "";
         }
         ncols.push_back(sc);
     }

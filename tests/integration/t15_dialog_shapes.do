@@ -59,7 +59,7 @@ gen byte yr = 1 + mod(_n, 2)
 gen double inc = _n * 10
 parqit save `"`long'"', replace
 
-* --- Read Parquet data (db parqit_read) ---------------------------------------
+* --- Read data (db parqit_read) -----------------------------------------------
 di as txt _n "db parqit_read"
 capture noisily parqit use using `"`auto'"'
 _shape `=_rc' "parqit use using file"
@@ -178,10 +178,16 @@ capture noisily parqit tabulate foreign
 _shape `=_rc' "parqit tabulate var"
 capture noisily parqit tabulate foreign rep78, missing row col
 _shape `=_rc' "parqit tabulate var1 var2, missing row col"
+capture noisily parqit tabulate foreign, nolabel
+_shape `=_rc' "parqit tabulate var, nolabel"
+capture noisily parqit tabulate foreign rep78, nolabel row col
+_shape `=_rc' "parqit tabulate var1 var2, nolabel row col"
 capture noisily parqit tabstat price mpg
 _shape `=_rc' "parqit tabstat varlist (no statistics(): default mean)"
 capture noisily parqit tabstat price mpg, statistics(n mean sd min max median sum var p90 range) by(foreign)
 _shape `=_rc' "parqit tabstat varlist, statistics(...) by()"
+capture noisily parqit tabstat price mpg, statistics(mean sd) by(foreign) save
+_shape `=_rc' "parqit tabstat, save returns the displayed tables"
 capture noisily parqit correlate price mpg weight
 _shape `=_rc' "parqit correlate varlist"
 capture noisily parqit pwcorr price mpg weight, obs sig
@@ -346,7 +352,7 @@ use `"`autodta'"', clear
 capture noisily parqit appendin using `"`auto'"', keep(make price) force
 _shape `=_rc' "parqit appendin using file, keep() force"
 
-* --- Collect into memory or save as Parquet (db parqit_write) -----------------
+* --- Save as Parquet or collect into memory (db parqit_write) -----------------
 di as txt _n "db parqit_write"
 parqit use using `"`auto'"'
 parqit keep if foreign == 1

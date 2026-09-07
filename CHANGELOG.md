@@ -6,6 +6,127 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.35] — 2026-09-07
+
+### Fixed
+- Dispersion, skewness, kurtosis and correlation now use exact integer power
+  sums/cross-products and certified binary64 rounding. Subnormal shape survives
+  extreme scaling; rounded zero sd no longer implies constancy. Correlation
+  significance retains a separately computed complement and recovers valid
+  subnormal tails that the native exponential path would flush to zero.
+  Mathematical invariant failures stop the query. A numerical-protocol check
+  rejects mismatched ado/plugin files before operating.
+- The additional numerical audit replaces floating sum/mean accumulation by
+  exact fixed-point states and correctly rounds integer/decimal ratios. Typed
+  percentile endpoints and ranges no longer round before arithmetic; collect
+  and statistical extrema share the corrected conversion.
+- Mixed numeric joins no longer fabricate matches by narrowing a key. Merge
+  output, append and reshape share safe coercion rules, including FLOAT/LONG
+  widening and explicit errors for incompatible wide-number values.
+- `round()` and `mod()` compute from the actual binary64 inputs without an
+  overflowing or prematurely rounded quotient. These mathematical corrections
+  can differ from native Stata, including `round(.25,.1)` and `mod(1,.1)`.
+  Numeric literals avoid an intermediate SQL DECIMAL conversion; `substr()`
+  bounds large positions/lengths before integer conversion.
+- Percentage samples use a globally rounded count, avoiding block-rounding
+  bias and a zero-reservoir crash for tiny percentages. Histogram classes use
+  exact endpoint comparisons; indistinguishable graph centers are refused.
+- `summarize` returns its computed `r(sum)` and `r(Var)`; detail also returns
+  the computed sum. Native output layouts remain unchanged.
+- Grouped/window calculations share the exact summary states. Correlations
+  remain symmetric and in range; sample sd is recovered independently of an
+  overflowing/underflowing variance. Integer and decimal inputs accumulate
+  before double conversion.
+- Sampling uses uniform reservoir inclusion across the whole population, and a
+  lazy sample retains one seed. Multi-pass statistics use one input realization.
+  Fractional sample amounts serialize as valid JSON. The pinned engine receives
+  two hash-guarded fixes for its sampler and C aggregate window-state bridge.
+- FLOAT comparisons and numeric function alternatives preserve double semantics,
+  including integer columns and literals above 2^24. Integer-only predicates
+  remain exact. `round`/`mod` and double assignments normalize non-finite values
+  before later expressions can use them.
+- Append reconciles physical numeric types and storage metadata, preserving the
+  same values in collect and save. Unsafe wide-number conversions are refused;
+  appended derived values cannot inherit an incorrect normalized flag.
+- Histogram widths outside Stata's numeric range fail clearly; bin centers are
+  computed before crossing the Stata numeric boundary.
+- Dialogs expose `tabulate, nolabel`, separate the row/column variables and
+  enable percentage options only for two-way tables. Numeric calculations
+  populate numeric variable pickers; tabulations and by() retain strings.
+  Failed population clears old entries instead of leaving stale choices.
+- Dialog context/source checks are queued during initialization, avoiding
+  Stata's busy-state error, and preserve existing r() results. Footer-inspection
+  buttons are disabled for recognized non-Parquet input formats.
+- Statistical results are parsed as numbers, so non-finite text cannot resolve
+  to a user's scalar or abbreviated variable. FLOAT extrema retain their exact
+  binary64 promotion.
+- Statistical text records cross 32 KiB intact, duplicate-preview cells are
+  encoded independently, and embedded NUL keys remain distinct through the
+  engine's length-bearing BLOB result transport. Two-way tables sort each axis
+  by its type, including numeric missing last and numeric-looking strings in
+  text order. Data braces are escaped in previews and schema displays.
+- Statistics and tabstat grouping accept exact exposed names as well as the
+  reported engine aliases. `generate` is a synonym for `gen`. Histograms draw
+  a visible bar for a constant variable and reject negative bin requests.
+- Statistical displays now use Stata numeric formats instead of truncating
+  decimal strings, which could remove an exponent and misrepresent a small or
+  large value. `summarize, detail` uses the native percentile/extreme-value
+  layout and the view's variable label. Summaries, tabulations, tabstat,
+  correlations and duplicate reports follow native table conventions;
+  codebook and missing-data diagnostics keep their documented information in
+  consistent panels. Perfect correlations with sufficient observations show
+  the native zero p-value instead of an undefined expression.
+- Refuse ambiguous column identities when combining named views: a case-only
+  name clash in `append`, or an engine alias naming different Stata columns in
+  `append`/`merge`/`joinby`, can no longer duplicate, misassign or omit values.
+  Already aligned aliases and the existing file-input alignment remain valid.
+  A projected view's exposed column name also remains occupied when adding a
+  variable. Refusals leave the previous plan intact.
+- All engine-side statistics now validate deferred `keep in`/`drop in` ranges.
+  `codebook` and both `misstable` forms reject any nonexistent explicit variable,
+  rather than silently reporting on only the valid names. `egen` refuses `_n`
+  and `_N` with a package-level message before internal placeholders reach SQL.
+- Percentile interpolation, `tabstat` range and histogram bin arithmetic keep
+  typed operands and use bounded exact arithmetic, avoiding integer overflow.
+  `collapse` retains native value rounding for float percentiles. Tabulation
+  fetches at most 10,001 aggregate rows before enforcing its 10,000-cell cap.
+
+### Changed
+- OpenMP is required in all Linux, Windows and macOS plugin builds. A
+  compile-time guard rejects disabled builds, and CI runs a two-worker check
+  through the exact collected plugin. Linux and both macOS architectures
+  embed pinned PIC GNU libgomp, which coexists with Stata's Intel runtime.
+  macOS builds use GCC 14. The Windows package includes the
+  matching MSVC OpenMP runtime, resolved beside the plugin. Version/selftest
+  expose the compiled capability and exercise its runtime. DuckDB's SQL
+  scheduler remains responsible for data-query parallelism.
+- Menus say Read data and Save as Parquet or collect into memory, offer the
+  technical reference directly, and link Help to each dialog's subject.
+  All ten dialogs show a view/source context and offer Refresh. The write
+  dialog separates view save (initial choice), memory save and collect; view
+  operations emit an explicit named-view prefix so a closed view cannot turn
+  an intended view save into a memory save. Help and tutorial menu paths agree.
+- Help and README clarify explicit statistical varlists, unsupported native
+  qualifiers, the 14-variable missing-pattern selection, empty grouped returns,
+  numerical boundaries and the precise scope of file-identity checks. Memory
+  export examples specify `data`; a second named view illustrates a filtered
+  comparison without changing the full-population plan.
+- `tabstat, save` returns the existing computed tables in `r(StatTotal)` or
+  `r(Stat#)`/`r(name#)` for grouped output; the statistics dialog exposes it.
+  Correlations return `r(C)`, and pwcorr also returns `r(Nobs)` and, with sig,
+  `r(sig)`, while retaining the existing scalar conventions. Summarize adds
+  unweighted `r(sum_w)`. Missing-pattern tables display frequencies and shares
+  of the full view, including when the display is capped, and return `r(N)`.
+  These changes reuse engine results and do not collect the source into Stata.
+- Both help entries explain the practical advantage and resource bounds of lazy
+  views, the two save paths, repeated execution, conditional filter pushdown,
+  input adapters, strict partition-update metadata, output publication scope,
+  and the actual memory-save stored results. The technical entry documents the
+  batched memory writer and distinguishes value precision from storage parity.
+- Build documentation reflects the four CI targets and the separate licensed
+  Stata gate. The supplied version-3 CMake presets now correctly declare 3.21
+  as their minimum; the underlying non-preset project minimum is unchanged.
+
 ## [0.1.34] — 2026-09-04
 
 Documentation release: one new orientation section in the main help entry.

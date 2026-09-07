@@ -118,7 +118,8 @@ parqit tabulate g y, row col
 log close `lg'
 mata: st_local("tabtxt", invtokens(cat(st_local("plog"))', char(10)))
 * row a: 2 of 3 -> 66.67%; col y=1: 2 of 2 -> 100.00%
-if (strpos(`"`tabtxt'"', "66.67%") == 0 | strpos(`"`tabtxt'"', "100.00%") == 0) {
+if (strpos(`"`tabtxt'"', "66.67") == 0 | strpos(`"`tabtxt'"', "100.00") == 0 | ///
+    strpos(`"`tabtxt'"', "row percentage") == 0 | strpos(`"`tabtxt'"', "column percentage") == 0) {
     di as err "FAIL 04: percentage panels missing from tabulate, row col"
     local ++fails
 }

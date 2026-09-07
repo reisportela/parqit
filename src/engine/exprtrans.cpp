@@ -3,8 +3,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <vector>
 
 #include "engine/session.hpp" /* quote_ident / quote_literal / dtoa */
@@ -339,6 +343,7 @@ struct Val {
     std::string col; /* MISS-1: source column name iff this is a bare column
                       * reference (else ""); lets missing() skip the finite
                       * scan on a boundary-normalized column. */
+    bool float32 = false;
     /* FLOAT-LIT-1 (audit 2026-09-01, F2): true iff this value is a (possibly
      * negated) numeric literal; litv is its binary64 value. Comparison
      * contexts use it to force double-precision evaluation against FLOAT
@@ -355,10 +360,16 @@ struct Val {
  * evaluator) says differs from 0.1. Integral literals are left alone even
  * beyond 2^24 (they keep integer key filters exactly as before; the residual
  * float-column-vs-huge-integer case is documented). */
-static bool needs_double_literal(const Val &v) {
-    if (!v.lit || !std::isfinite(v.litv)) return false;
-    if (v.litv == std::trunc(v.litv)) return false;
-    return static_cast<double>(static_cast<float>(v.litv)) != v.litv;
+static std::string numeric_literal(double value) {
+    if (value == std::trunc(value) && value >= -0x1p127 && value < 0x1p128) {
+        std::ostringstream text;
+        text.imbue(std::locale::classic());
+        text << std::fixed << std::setprecision(0) << value;
+        if (value >= 0x1p127) return "CAST(" + quote_literal(text.str()) + " AS UHUGEINT)";
+        return text.str();
+    }
+    // A decimal SQL token may pass through DECIMAL before becoming DOUBLE.
+    return "CAST(" + quote_literal(dtoa(value)) + " AS DOUBLE)";
 }
 
 struct Parser {
@@ -399,7 +410,13 @@ struct Parser {
     std::string as_num(const Val &v) {
         if (v.kind == 'b') return "(CASE WHEN " + v.sql + " THEN 1 WHEN NOT (" +
                                   v.sql + ") THEN 0 ELSE NULL END)";
-        return v.sql;
+        return v.float32 ? "CAST(" + v.sql + " AS DOUBLE)" : v.sql;
+    }
+    std::string as_real(const Val &v) { return "__parqit_double(" + as_num(v) + ")"; }
+    static void computed(Val *v) {
+        v->col.clear();
+        v->float32 = false;
+        v->lit = false;
     }
     std::string as_bool(const Val &v) {
         if (v.kind == 'b') return v.sql;
@@ -425,6 +442,18 @@ struct Parser {
             return true;
         }
         std::string a = as_num(l), b = as_num(r);
+        auto float_exact = [](const Val &v) {
+            return v.lit && std::fabs(v.litv) <= std::numeric_limits<float>::max() &&
+                   static_cast<double>(static_cast<float>(v.litv)) == v.litv;
+        };
+        if (l.float32 && float_exact(r)) {
+            a = l.sql;
+            b = "CAST(" + quote_literal(dtoa(r.litv)) + " AS FLOAT)";
+        }
+        if (r.float32 && float_exact(l)) {
+            b = r.sql;
+            a = "CAST(" + quote_literal(dtoa(l.litv)) + " AS FLOAT)";
+        }
         const bool lmiss = (l.sql == "NULL"), rmiss = (r.sql == "NULL");
         auto wrap = [&](const std::string &cmp) {
             out->sql = cmp;
@@ -463,37 +492,50 @@ struct Parser {
          * Stata, which compares in double. Typing such a literal DOUBLE makes
          * the engine widen the column instead (the SQL rule), which is exactly
          * Stata's arithmetic; the filter still pushes into the Parquet scan. */
-        if (needs_double_literal(l)) a = "CAST(" + a + " AS DOUBLE)";
-        if (needs_double_literal(r)) b = "CAST(" + b + " AS DOUBLE)";
         const char *o = op == Tok::Eq ? " = " : op == Tok::Ne ? " <> "
                        : op == Tok::Lt ? " < " : op == Tok::Gt ? " > "
                        : op == Tok::Le ? " <= " : " >= ";
-        if (!stmiss) return wrap("(" + a + o + b + ")");
+        auto exact_comparison = [&](const Val &x, const Val &y) {
+            auto type = schema.numeric_types.find(x.col);
+            if (x.col.empty() || type == schema.numeric_types.end()) return false;
+            const bool decimal = type->second.rfind("DECIMAL(", 0) == 0;
+            const bool wide = decimal || type->second == "BIGINT" || type->second == "UBIGINT" ||
+                              type->second == "HUGEINT" || type->second == "UHUGEINT";
+            if (!wide) return false;
+            auto other = schema.numeric_types.find(y.col);
+            if (other != schema.numeric_types.end() && other->second == type->second) return false;
+            return decimal || !y.lit || y.litv != std::trunc(y.litv) ||
+                   std::fabs(y.litv) >= 0x1p127 || (type->second == "UHUGEINT" && y.litv < 0);
+        };
+        const bool exact = exact_comparison(l, r) || exact_comparison(r, l);
+        const std::string left = exact ? "__parqit_compare(" + a + ", " + b + ")" : a;
+        const std::string right = exact ? "0" : b;
+        if (!stmiss) return wrap("(" + left + o + right + ")");
         /* statamissing: missing sorts ABOVE every number and comparisons are
          * TOTAL (Stata comparisons never yield missing). Treat NULL as +inf. */
         switch (op) {
         case Tok::Eq:
             return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
-                        " IS NOT NULL AND " + b + " IS NOT NULL AND " + a +
-                        " = " + b + "))");
+                        " IS NOT NULL AND " + b + " IS NOT NULL AND " + left +
+                        " = " + right + "))");
         case Tok::Ne:
             return wrap("(NOT ((" + a + " IS NULL AND " + b + " IS NULL) OR (" +
-                        a + " IS NOT NULL AND " + b + " IS NOT NULL AND " + a +
-                        " = " + b + ")))");
+                        a + " IS NOT NULL AND " + b + " IS NOT NULL AND " + left +
+                        " = " + right + ")))");
         case Tok::Lt:
-            return wrap("(" + a + " IS NOT NULL AND (" + b + " IS NULL OR " + a +
-                        " < " + b + "))");
+            return wrap("(" + a + " IS NOT NULL AND (" + b + " IS NULL OR " + left +
+                        " < " + right + "))");
         case Tok::Le:
             return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
-                        " IS NOT NULL AND (" + b + " IS NULL OR " + a + " <= " +
-                        b + ")))");
+                        " IS NOT NULL AND (" + b + " IS NULL OR " + left + " <= " +
+                        right + ")))");
         case Tok::Gt:
-            return wrap("(" + b + " IS NOT NULL AND (" + a + " IS NULL OR " + a +
-                        " > " + b + "))");
+            return wrap("(" + b + " IS NOT NULL AND (" + a + " IS NULL OR " + left +
+                        " > " + right + "))");
         case Tok::Ge:
             return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + b +
-                        " IS NOT NULL AND (" + a + " IS NULL OR " + a + " >= " +
-                        b + ")))");
+                        " IS NOT NULL AND (" + a + " IS NULL OR " + left + " >= " +
+                        right + ")))");
         default:
             return fail("internal: bad relational");
         }
@@ -523,7 +565,7 @@ struct Parser {
                  * DOUBLE here: native replace uses its integral range to
                  * retain/promote byte/int/long storage; View metadata forces
                  * double only where that is the declared result contract. */
-                out->sql = dtoa(lv);
+                out->sql = numeric_literal(lv);
                 out->lit = true; /* FLOAT-LIT-1 */
                 out->litv = lv;
             }
@@ -592,6 +634,7 @@ struct Parser {
             out->sql = quote_ident(name);
             out->kind = it->second == 's' ? 's' : 'n';
             out->col = name; /* MISS-1: remember this is a bare column ref */
+            out->float32 = schema.float_columns.count(name) != 0;
             return true;
         }
         default:
@@ -605,11 +648,12 @@ struct Parser {
             Val v;
             if (!unary(&v)) return false;
             if (v.kind == 's') return fail("cannot negate a string");
-            out->sql = "(-" + as_num(v) + ")";
+            out->sql = "(-" + as_real(v) + ")";
             out->kind = 'n';
             if (v.lit) { /* FLOAT-LIT-1: -0.1 is still a literal */
                 out->lit = true;
                 out->litv = -v.litv;
+                out->sql = numeric_literal(out->litv);
             }
             return true;
         }
@@ -640,11 +684,12 @@ struct Parser {
             Val v;
             if (!signed_primary(&v)) return false;
             if (v.kind == 's') return fail("cannot negate a string");
-            out->sql = "(-" + as_num(v) + ")";
+            out->sql = "(-" + as_real(v) + ")";
             out->kind = 'n';
             if (v.lit) { /* FLOAT-LIT-1 */
                 out->lit = true;
                 out->litv = -v.litv;
+                out->sql = numeric_literal(out->litv);
             }
             return true;
         }
@@ -670,9 +715,10 @@ struct Parser {
             /* Stata returns missing for a non-real or overflowing power, e.g.
              * (-8)^0.5 = . ; DuckDB pow() yields nan/inf. Guard to missing so
              * collect and save agree (NUM-1). */
-            base.sql = "parqit_finite(pow(" + as_num(base) + ", " +
-                       as_num(expo) + "))";
+            base.sql = "parqit_finite(pow(" + as_real(base) + ", " +
+                       as_real(expo) + "))";
             base.kind = 'n';
+            computed(&base);
         }
         *out = base;
         return true;
@@ -692,8 +738,7 @@ struct Parser {
                  * double division yields inf/nan. Guard so a finite quotient
                  * passes through and any non-finite result (incl. 0/0) becomes
                  * missing — keeping collect and save in agreement (NUM-1). */
-                out->sql = "parqit_finite(" + as_num(*out) + " / CAST(" +
-                           as_num(r) + " AS DOUBLE))";
+                out->sql = "parqit_finite(" + as_real(*out) + " / " + as_real(r) + ")";
             } else {
                 /* INF-1: 1e300*1e300 overflows to +Inf in DuckDB; native
                  * Stata reports missing (`di 1e300*1e300` = `.`). Unguarded,
@@ -702,10 +747,10 @@ struct Parser {
                  * operand casts make the multiply itself DOUBLE — Stata's
                  * evaluator is all-double, and a raw INT32*INT32 near 2^31
                  * would abort the whole query in DuckDB instead. */
-                out->sql = "parqit_finite(CAST(" + as_num(*out) +
-                           " AS DOUBLE) * CAST(" + as_num(r) + " AS DOUBLE))";
+                out->sql = "parqit_finite(" + as_real(*out) + " * " + as_real(r) + ")";
             }
             out->kind = 'n';
+            computed(out);
         }
         return true;
     }
@@ -723,6 +768,7 @@ struct Parser {
                     out->sql = "(coalesce(" + out->sql + ",'') || coalesce(" +
                                r.sql + ",''))";
                     out->kind = 's';
+                    computed(out);
                     continue;
                 }
                 return fail("+/- need matching operand types");
@@ -730,10 +776,10 @@ struct Parser {
             /* INF-1: guard like * — 8e307 + 8e307 must be missing, not +Inf;
              * DOUBLE operands so INT32 sums near 2^31 compute like Stata
              * (all-double) instead of aborting on integer overflow */
-            out->sql = "parqit_finite(CAST(" + as_num(*out) +
-                       " AS DOUBLE)" + (op == Tok::Plus ? " + " : " - ") +
-                       "CAST(" + as_num(r) + " AS DOUBLE))";
+            out->sql = "parqit_finite(" + as_real(*out) +
+                       (op == Tok::Plus ? " + " : " - ") + as_real(r) + ")";
             out->kind = 'n';
+            computed(out);
         }
         return true;
     }
@@ -767,6 +813,7 @@ struct Parser {
             if (a.empty() || b.empty()) return fail("& needs boolean operands");
             out->sql = "(" + a + " AND " + b + ")";
             out->kind = 'b';
+            computed(out);
         }
         return true;
     }
@@ -781,12 +828,14 @@ struct Parser {
             if (a.empty() || b.empty()) return fail("| needs boolean operands");
             out->sql = "(" + a + " OR " + b + ")";
             out->kind = 'b';
+            computed(out);
         }
         return true;
     }
 };
 
 bool Parser::call(const std::string &fname, Val *out) {
+    *out = Val{};
     /* ---- date/time literal pseudofunctions: consume raw text to ')' ---- */
     if (fname == "td" || fname == "tm" || fname == "tq" || fname == "th" ||
         fname == "tw" || fname == "ty" || fname == "tc" || fname == "tC") {
@@ -921,7 +970,12 @@ bool Parser::call(const std::string &fname, Val *out) {
         out->kind = 'b';
         return true;
     }
-    if (fname == "abs") return num1("abs");
+    if (fname == "abs") {
+        if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail("abs() needs a numeric argument");
+        out->sql = "abs(" + as_real(args[0]) + ")";
+        return true;
+    }
     if (fname == "float") {
         /* FLOAT-FN-1 (audit 2026-09-01, F11): Stata's float(x) rounds x to
          * float precision — the native idiom for comparing a float variable
@@ -930,7 +984,7 @@ bool Parser::call(const std::string &fname, Val *out) {
          * result is carried as a double (the value a float holds). */
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail("float() needs a numeric argument");
-        const std::string x = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
+        const std::string x = as_real(args[0]);
         out->sql = "(CASE WHEN abs(" + x + ") > " + dtoa(kStataFloatMax) +
                    " THEN NULL ELSE CAST(CAST(" + x + " AS FLOAT) AS DOUBLE) END)";
         out->kind = 'n';
@@ -942,7 +996,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         /* INF-1: exp(800) is +Inf in DuckDB but missing in Stata (verified
          * natively: `di exp(710)` = `.`, `exp(710) < .` = 0). Unguarded, the
          * Inf passed `< .` filters and poisoned collapse/summarize. */
-        out->sql = "parqit_finite(exp(" + as_num(args[0]) + "))";
+        out->sql = "parqit_finite(exp(" + as_real(args[0]) + "))";
         out->kind = 'n';
         return true;
     }
@@ -951,7 +1005,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (args[0].kind == 's') return fail(fname + "() needs a numeric argument");
         /* Stata: ln(x<=0) is missing; DuckDB ln(0)=-inf, ln(<0) NaN/error */
         out->sql = "(CASE WHEN " + as_num(args[0]) + " > 0 THEN ln(" +
-                   as_num(args[0]) + ") ELSE NULL END)";
+                   as_real(args[0]) + ") ELSE NULL END)";
         out->kind = 'n';
         return true;
     }
@@ -959,7 +1013,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail("log10() needs a numeric argument");
         out->sql = "(CASE WHEN " + as_num(args[0]) + " > 0 THEN log10(" +
-                   as_num(args[0]) + ") ELSE NULL END)";
+                   as_real(args[0]) + ") ELSE NULL END)";
         out->kind = 'n';
         return true;
     }
@@ -967,7 +1021,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(1, 1)) return false;
         if (args[0].kind == 's') return fail("sqrt() needs a numeric argument");
         out->sql = "(CASE WHEN " + as_num(args[0]) + " >= 0 THEN sqrt(" +
-                   as_num(args[0]) + ") ELSE NULL END)";
+                   as_real(args[0]) + ") ELSE NULL END)";
         out->kind = 'n';
         return true;
     }
@@ -978,23 +1032,8 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(1, 2)) return false;
         if (args[0].kind == 's' || (args.size() == 2 && args[1].kind == 's'))
             return fail("round() needs numeric arguments");
-        /* FLOAT-LIT-1: the operands are DOUBLE, as in every other arithmetic
-         * path — a FLOAT column divided by a DECIMAL literal would otherwise
-         * be computed in single precision (round(x, 0.1) of a float x came
-         * back 0.10000000149, native gives 0.1) */
-        std::string x = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
-        /* Stata round(x) = floor(x + 0.5): ties round toward +infinity, NOT
-         * away from zero the way SQL round() does — round(-2.5) = -2 (not -3),
-         * round(-0.5) = 0 (not -1) (NUM-2). The 2-arg form rounds to units of u
-         * the same way, with u = 0 a documented pass-through. */
-        if (args.size() == 1) {
-            out->sql = "floor((" + x + ") + 0.5)";
-        } else {
-            std::string u = "CAST(" + as_num(args[1]) + " AS DOUBLE)";
-            out->sql = "(CASE WHEN (" + u + ") = 0 THEN " + x +
-                       " ELSE floor((" + x + ") / (" + u + ") + 0.5) * (" + u +
-                       ") END)";
-        }
+        out->sql = "__parqit_round(" + as_num(args[0]) + ", " +
+                   (args.size() == 1 ? "1" : as_num(args[1])) + ")";
         out->kind = 'n';
         return true;
     }
@@ -1002,23 +1041,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(2, 2)) return false;
         if (args[0].kind == 's' || args[1].kind == 's')
             return fail("mod() needs numeric arguments");
-        const std::string a = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
-        const std::string b = "CAST(" + as_num(args[1]) + " AS DOUBLE)";
-        /* Stata mod(x,y) is the nonnegative remainder, and is MISSING for a
-         * nonpositive modulus (mod(7,-3)==., mod(7,0)==.) — the y=0 case
-         * verified against native Stata 2026-07-02 (`di mod(7,0)` = `.`;
-         * the manual's mod(x,0)=x is stale).
-         * MOD-TRUNC-1 (audit 2026-09-01, F7): the manual's x - y*floor(x/y)
-         * is NOT what native computes for a non-integer modulus —
-         * mod(7, 0.00001) is 9.99999999911182e-06 natively (and
-         * `di 7 - 0.00001*floor(7/0.00001)` is -8.88e-16), i.e. the
-         * truncated remainder x - y*trunc(x/y) shifted by +y when negative.
-         * That reproduces every observed value ((0.3,0.1) (1,0.1) (-5.5,2)
-         * (-7,3) (7,1e-5)); DuckDB's own fmod() is the floor form and does
-         * not. Operands are DOUBLE so a float column is not folded. */
-        const std::string r = "((" + a + ") - (" + b + ") * trunc((" + a + ") / (" + b + ")))";
-        out->sql = "(CASE WHEN (" + b + ") <= 0 THEN NULL WHEN " + r + " < 0 THEN " +
-                   r + " + (" + b + ") ELSE " + r + " END)";
+        out->sql = "__parqit_mod(" + as_num(args[0]) + ", " + as_num(args[1]) + ")";
         out->kind = 'n';
         return true;
     }
@@ -1028,7 +1051,7 @@ bool Parser::call(const std::string &fname, Val *out) {
         for (size_t k = 0; k < args.size(); k++) {
             if (args[k].kind == 's') return fail(fname + "() needs numbers");
             if (k) sql += ", ";
-            sql += as_num(args[k]);
+            sql += as_real(args[k]);
         }
         out->sql = sql + ")";
         out->kind = 'n';
@@ -1046,10 +1069,10 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (args.size() == 4 &&
             (args[3].kind == 's') != (args[1].kind == 's'))
             return fail("cond(): branches must have the same type");
-        std::string a = args[1].kind == 'b' ? as_num(args[1]) : args[1].sql;
-        std::string b = args[2].kind == 'b' ? as_num(args[2]) : args[2].sql;
+        std::string a = args[1].kind == 's' ? args[1].sql : as_real(args[1]);
+        std::string b = args[2].kind == 's' ? args[2].sql : as_real(args[2]);
         if (args.size() == 4) {
-            std::string d = args[3].kind == 'b' ? as_num(args[3]) : args[3].sql;
+            std::string d = args[3].kind == 's' ? args[3].sql : as_real(args[3]);
             /* 4-arg: a MISSING condition selects the 4th branch. A boolean
              * (comparison) condition is never missing in Stata, so only a
              * numeric condition can take the missing branch. */
@@ -1078,15 +1101,13 @@ bool Parser::call(const std::string &fname, Val *out) {
             return true;
         }
         std::string x = as_num(args[0]), lo = as_num(args[1]), hi = as_num(args[2]);
-        /* FLOAT-LIT-1: bounds are comparisons too (see relational()) */
-        if (needs_double_literal(args[0])) x = "CAST(" + x + " AS DOUBLE)";
-        if (needs_double_literal(args[1])) lo = "CAST(" + lo + " AS DOUBLE)";
-        if (needs_double_literal(args[2])) hi = "CAST(" + hi + " AS DOUBLE)";
+        Val lower, upper;
+        if (!relational(args[0], Tok::Ge, args[1], &lower) ||
+            !relational(args[0], Tok::Le, args[2], &upper)) return false;
         /* Stata numeric inrange: a missing x is never in range; a missing
          * lower bound means -inf, a missing upper bound means +inf. */
-        out->sql = "((" + x + " IS NOT NULL) AND (" + lo + " IS NULL OR " + x +
-                   " >= " + lo + ") AND (" + hi + " IS NULL OR " + x + " <= " +
-                   hi + "))";
+        out->sql = "((" + x + " IS NOT NULL) AND (" + lo + " IS NULL OR " + lower.sql +
+                   ") AND (" + hi + " IS NULL OR " + upper.sql + "))";
         out->kind = 'b';
         return true;
     }
@@ -1169,11 +1190,11 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (!need(3, 3)) return false;
         if (args[0].kind != 's') return fail("substr() needs a string");
         std::string s = "coalesce(" + args[0].sql + ", '')";
-        std::string p = as_num(args[1]);
+        std::string p = as_real(args[1]);
         /* Stata substr() indexes by BYTE and can return invalid UTF-8 byte
          * fragments. DuckDB's SQL substring is character-based, so use parqit's
          * internal C scalar over the raw string bytes. */
-        std::string n = args[2].sql == "NULL" ? "CAST(NULL AS DOUBLE)" : as_num(args[2]);
+        std::string n = as_real(args[2]);
         out->sql = "parqit_substr_bytes(" + s + ", " + p + ", " + n + ")";
         out->kind = 's';
         return true;
@@ -1222,7 +1243,7 @@ bool Parser::call(const std::string &fname, Val *out) {
          * general format rather than a fixed significant-digit printf. The
          * internal scalar mirrors Stata's decimal/scientific switch and
          * mantissa width, while NULL numerics still become ".". */
-        std::string x = "CAST(" + as_num(args[0]) + " AS DOUBLE)";
+        std::string x = as_real(args[0]);
         out->sql = "parqit_stata_string(" + x + ")";
         out->kind = 's';
         return true;

@@ -1,6 +1,5 @@
 * V82 — audit 2026-09-01 remediation, T5/T6:
-*   MOD-TRUNC-1  mod() with a non-integer modulus matches native
-*                (x - y*trunc(x/y), shifted by +y when negative);
+*   MOD-TRUNC-1  mod() uses the exact remainder of the stored binary64 inputs;
 *   DFMT-1       the old-style %d/%-d daily date formats are written as DATE
 *                (a date32 for third parties) and restored exactly;
 *   COUNT-FMT-1  a (count) of a string source carries %8.0g, not the %s
@@ -10,7 +9,7 @@
 *   TAB-LABEL-1  tabulate displays value labels like native, nolabel shows
 *                the codes, r() unchanged;
 *   DUPLIST-SEP-1 a duplicates list cell holding a TAB stays one cell.
-* Oracles: native Stata (mod values, drop in row sets, tabulate rendering),
+* Oracles: Fraction (mod), native Stata (drop in row sets, tabulate rendering),
 * pyarrow (date32 physical type), cf on the round-trips.
 clear all
 set more off
@@ -49,9 +48,15 @@ parqit use using `"`dir'/mod.parquet"'
 parqit gen double pq = mod(x, y)
 parqit collect, clear
 sort id
-forvalues i = 1/14 {
-    assert (nat[`i'] == . & pq[`i'] == .) | (nat[`i'] == pq[`i'])
-}
+python:
+from fractions import Fraction
+from sfi import Data, Missing
+for x, y, actual in Data.get(var=['x', 'y', 'pq']):
+    if Missing.isMissing(x) or Missing.isMissing(y) or y <= 0:
+        assert Missing.isMissing(actual)
+    else:
+        assert actual == float(Fraction(x) % Fraction(y))
+end
 parqit close _all
 
 * ---------- DFMT-1 -----------------------------------------------------------------
@@ -202,7 +207,7 @@ import os, re
 txt = open(os.path.join(Macro.getLocal("dir"), "v82t.log"), encoding="utf-8", errors="replace").read()
 # one-way: labels shown, then codes with nolabel
 ok = txt.count("zero") >= 2 and txt.count("two") >= 2      # one-way + two-way rows
-ok = ok and re.search(r"^\s+0\s+2\s+33\.33%", txt, re.M) is not None   # nolabel one-way
+ok = ok and re.search(r"^\s+0\s+\|\s+2\s+33\.33\s+33\.33\s*$", txt, re.M) is not None
 ok = ok and "low" in txt and "high" in txt                  # two-way column labels
 Macro.setLocal("tab_ok", "1" if ok else "0")
 end
@@ -229,4 +234,4 @@ Macro.setLocal("dup_ok", "1" if re.search(r"^\s+a\s+b\s+1\s*$", txt, re.M) else 
 end
 assert "`dup_ok'" == "1"
 
-di "VERDICT(V82_AUDIT_FIXES_20260901): PASS - mod() non-integer modulus native, %d written as DATE and restored, string (count) carries %8.0g without a note, drop in matches native (f/l, negatives, refusals, composition), tabulate shows value labels with nolabel for codes, duplicates list keeps a TAB inside its cell"
+di "VERDICT(V82_AUDIT_FIXES_20260901): PASS - exact mod(), %d DATE round-trip, string count format, drop in, value labels, embedded TAB"

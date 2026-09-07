@@ -105,7 +105,7 @@ TEST_CASE("decimal becomes double, never dropped or missing (charter 6.11)") {
     duckdb_destroy_logical_type(&lt);
     CHECK_FALSE(p.dropped);
     CHECK(p.stata_type == StType::Double);
-    CHECK(p.cast_sql.find("AS DOUBLE") != std::string::npos);
+    CHECK(p.transfer == Transfer::Float64);
 }
 
 TEST_CASE("time-of-day maps to ms-since-midnight, never an all-null column (charter 6.5)") {

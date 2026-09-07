@@ -32,6 +32,8 @@ struct ExprSchema {
     /* column name → kind: 'n' numeric (includes all date/period counts),
      * 's' string */
     std::map<std::string, char> kinds;
+    std::set<std::string> float_columns;
+    std::map<std::string, std::string> numeric_types;
     /* MISS-1: columns already guaranteed free of IEEE specials (NaN/±Inf/
      * out-of-Stata-range) — the lazy boundary normalized them. missing()/mi()
      * on a bare reference to such a column needs only the cheap `IS NULL` test,

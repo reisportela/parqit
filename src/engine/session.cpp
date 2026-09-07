@@ -1,4 +1,6 @@
 #include "engine/session.hpp"
+#include "engine/stats_overflow.hpp"
+#include "engine/statistics.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -186,16 +188,20 @@ static void parqit_substr_bytes_fn(duckdb_function_info, duckdb_data_chunk input
         std::string src = valid_row(svalid, r) ? duck_string_to_std(&sdata[r]) : "";
         std::string out;
         if (valid_row(pvalid, r) && std::isfinite(pdata[r])) {
-            long long p = static_cast<long long>(pdata[r]); /* Stata truncates */
-            if (p != 0) {
-                long long len = static_cast<long long>(src.size());
+            const double position = std::trunc(pdata[r]);
+            const long long len = static_cast<long long>(src.size());
+            if (position != 0 && position >= -double(len) && position <= double(len)) {
+                const long long p = static_cast<long long>(position);
                 long long start = p > 0 ? p - 1 : len + p;
                 if (start >= 0 && start < len) {
                     long long take = 0;
                     if (!valid_row(lvalid, r) || !std::isfinite(ldata[r])) {
                         take = len - start; /* substr(s, p, .) */
                     } else {
-                        take = static_cast<long long>(ldata[r]);
+                        const double length = std::trunc(ldata[r]);
+                        if (length > 0)
+                            take = length >= double(len - start) ? len - start
+                                : static_cast<long long>(length);
                     }
                     if (take > 0) {
                         long long avail = len - start;
@@ -276,7 +282,8 @@ static bool register_internal_functions(duckdb_connection con, std::string *err)
                             DUCKDB_TYPE_DOUBLE},
                            DUCKDB_TYPE_VARCHAR, parqit_substr_bytes_fn, err) &&
            register_scalar(con, "parqit_finite", {DUCKDB_TYPE_DOUBLE},
-                           DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err);
+                           DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err) &&
+           statistics::register_functions(con, err);
 }
 
 } // namespace
@@ -289,6 +296,7 @@ Session &Session::instance() {
 Session::~Session() { close(); }
 
 void Session::close() {
+    stats_fallback_ready_ = false;
     if (con_) {
         duckdb_disconnect(&con_);
         con_ = nullptr;
@@ -408,6 +416,16 @@ bool Session::query_scalar(const std::string &sql, std::string *value, std::stri
     if (v) duckdb_free(v);
     duckdb_destroy_result(&res);
     return true;
+}
+
+bool Session::prepare_stats_fallback(std::string *err) {
+    if (!ensure_open()) {
+        if (err) *err = last_error_;
+        return false;
+    }
+    if (!stats_fallback_ready_)
+        stats_fallback_ready_ = stats_overflow::register_functions(con_, err);
+    return stats_fallback_ready_;
 }
 
 std::string quote_literal(const std::string &s) {

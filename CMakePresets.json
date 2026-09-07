@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 16, "patch": 0 },
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
   "configurePresets": [
     {
       "name": "base",
@@ -13,19 +13,24 @@
       "name": "macos",
       "inherits": "base",
       "displayName": "macOS (Release, current arch)",
-      "cacheVariables": { "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0" }
+      "cacheVariables": {
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "CMAKE_C_COMPILER": "gcc-14",
+        "CMAKE_CXX_COMPILER": "g++-14",
+        "CMAKE_OSX_ARCHITECTURES": ""
+      }
     },
     {
       "name": "macos-x86_64",
       "inherits": "macos",
       "displayName": "macOS x86_64 (Release)",
-      "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "x86_64" }
+      "cacheVariables": { "PARQIT_TARGET_ARCH": "x86_64" }
     },
     {
       "name": "macos-arm64",
       "inherits": "macos",
       "displayName": "macOS arm64 (Release)",
-      "cacheVariables": { "CMAKE_OSX_ARCHITECTURES": "arm64" }
+      "cacheVariables": { "PARQIT_TARGET_ARCH": "arm64" }
     },
     { "name": "windows", "inherits": "base", "displayName": "Windows x86_64 (MSVC Release)" },
     {

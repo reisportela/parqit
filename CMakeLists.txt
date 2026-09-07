@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.34 LANGUAGES C CXX)
+project(parqit VERSION 0.1.35 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif()
 include(FetchContent)
+include(cmake/ParqitOpenMP.cmake)
 
 if(PARQIT_DUCKDB_ARCHIVE)
     set(_parqit_duckdb_url "${PARQIT_DUCKDB_ARCHIVE}")
@@ -67,6 +68,8 @@ FetchContent_Declare(duckdb
     URL_HASH SHA256=${PARQIT_DUCKDB_SHA256}
 )
 FetchContent_MakeAvailable(duckdb)
+include(cmake/PatchDuckDBSampling.cmake)
+include(cmake/PatchDuckDBCapi.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 
@@ -79,6 +82,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/legacy_encoding.cpp
     src/engine/parquet_footer.cpp
     src/engine/session.cpp
+    src/engine/statistics.cpp
     src/engine/typemap.cpp
     src/engine/sanitize.cpp
     src/engine/request.cpp
@@ -86,6 +90,12 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/view.cpp
 )
 add_library(parqit_engine STATIC ${PARQIT_ENGINE_SOURCES})
+# The aggregate callbacks run for every row. Keep their optimized builds at
+# the engine's optimization level; IEEE arithmetic and generic CPUs still apply.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(src/engine/statistics.cpp PROPERTIES
+        COMPILE_OPTIONS "$<$<CONFIG:Release,RelWithDebInfo>:-O3>")
+endif()
 target_include_directories(parqit_engine PUBLIC
     src
     "${PARQIT_DUCKDB_INCLUDE}"
@@ -105,7 +115,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
 else()
     target_link_libraries(parqit_engine PUBLIC ${PARQIT_DUCKDB_LIBS})
 endif()
-target_link_libraries(parqit_engine PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(parqit_engine PUBLIC parqit_openmp Threads::Threads ${CMAKE_DL_LIBS})
 # parqit's own translation units include duckdb.h and link the STATIC DuckDB, so
 # DUCKDB_C_API must be empty (not __declspec(dllimport)) on Windows — otherwise
 # the linker looks for __imp_duckdb_* DLL stubs the static lib never provides.
@@ -123,6 +133,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(parqit_plugin SHARED
     src/plugin/parqit_plugin.cpp
+    src/plugin/openmp_runtime.cpp
     src/plugin/plugin_io.cpp
     src/plugin/plugin_view.cpp
     "${PARQIT_VENDOR_DIR}/stata/stplugin.c"
@@ -140,6 +151,11 @@ target_include_directories(parqit_plugin PRIVATE
     "${PARQIT_VENDOR_DIR}/json"
 )
 target_link_libraries(parqit_plugin PRIVATE parqit_engine Threads::Threads ${CMAKE_DL_LIBS})
+if(MSVC)
+    target_link_libraries(parqit_plugin PRIVATE delayimp)
+    target_link_options(parqit_plugin PRIVATE
+        "$<IF:$<CONFIG:Debug>,/DELAYLOAD:vcomp140d.dll,/DELAYLOAD:vcomp140.dll>")
+endif()
 set_target_properties(parqit_plugin PROPERTIES OUTPUT_NAME "parqit" PREFIX "" SUFFIX ".plugin")
 target_compile_definitions(parqit_plugin PRIVATE PARQIT_VERSION="${PROJECT_VERSION}")
 if(NOT WIN32)
@@ -155,6 +171,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(APPLE)
     target_link_options(parqit_plugin PRIVATE
+        -static-libstdc++ -static-libgcc
         "-Wl,-exported_symbol,_stata_call"
         "-Wl,-exported_symbol,_pginit")
 elseif(UNIX)
@@ -183,13 +200,14 @@ endif()
 # whenever it relinks, the Stata-side files whenever they change. Point
 # Stata at it once:   adopath ++ "<repo>/ado/plus/p"
 # ---------------------------------------------------------------------------
-set(PARQIT_LOCAL_ADO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ado/plus/p")
+set(PARQIT_LOCAL_ADO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ado/plus/p" CACHE PATH
+    "Local ado install surface; override to validate an isolated staged install")
 file(MAKE_DIRECTORY "${PARQIT_LOCAL_ADO_DIR}")
 
 # Stata-side files: synced whenever they change; building parqit_plugin (or
 # anything that depends on it) triggers the sync via add_dependencies.
 set(_parqit_ado_synced)
-foreach(f parqit.ado parqit.sthlp parqit_technical.sthlp parqit.pkg parqit_read.dlg
+foreach(f parqit.ado parqit.sthlp parqit_technical.sthlp parqit_openmp_license.txt parqit.pkg parqit_read.dlg
           parqit_explore.dlg parqit_stats.dlg parqit_filter.dlg
           parqit_vars.dlg parqit_gen.dlg parqit_pivot.dlg
           parqit_combine.dlg parqit_write.dlg parqit_views.dlg stata.toc)
@@ -204,6 +222,14 @@ foreach(f parqit.ado parqit.sthlp parqit_technical.sthlp parqit.pkg parqit_read.
 endforeach()
 add_custom_target(parqit_ado_sync DEPENDS ${_parqit_ado_synced})
 add_dependencies(parqit_plugin parqit_ado_sync)
+if(MSVC)
+    add_custom_command(TARGET parqit_plugin POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PARQIT_OPENMP_DLL_SOURCE}" "${PARQIT_LOCAL_ADO_DIR}/parqit_vcomp140.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PARQIT_OPENMP_DLL_SOURCE}" "$<TARGET_FILE_DIR:parqit_plugin>/parqit_vcomp140.dll"
+        COMMENT "Stage the matching OpenMP runtime")
+endif()
 
 # The binary: stripped into the tree after every relink (POST_BUILD), and
 # also reconciled on plain `cmake --build build/dev` via the ALL target
@@ -236,12 +262,24 @@ add_custom_target(parqit_local_ado ALL
 # ---------------------------------------------------------------------------
 if(PARQIT_BUILD_TESTS)
     enable_testing()
+    add_executable(parqit_openmp_probe tests/plugin_openmp_probe.cpp)
+    target_include_directories(parqit_openmp_probe PRIVATE "${PARQIT_VENDOR_DIR}/stata")
+    target_link_libraries(parqit_openmp_probe PRIVATE ${CMAKE_DL_LIBS})
+    if(NOT WIN32)
+        target_compile_definitions(parqit_openmp_probe PRIVATE SYSTEM=OPUNIX)
+    endif()
+    add_dependencies(parqit_openmp_probe parqit_plugin)
+    add_test(NAME plugin_openmp
+        COMMAND parqit_openmp_probe "$<TARGET_FILE:parqit_plugin>")
+    set_tests_properties(plugin_openmp PROPERTIES
+        ENVIRONMENT "OMP_DYNAMIC=FALSE;OMP_THREAD_LIMIT=2")
     add_executable(parqit_tests
         tests/unit/test_main.cpp
         tests/unit/test_hexcodec.cpp
         tests/unit/test_legacy_encoding.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
+        tests/unit/test_statistics.cpp
         tests/unit/test_typemap.cpp
         tests/unit/test_sanitize.cpp
         tests/unit/test_request.cpp

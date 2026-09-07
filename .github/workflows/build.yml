@@ -56,6 +56,14 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Install the macOS OpenMP compiler
+        if: startsWith(matrix.label, 'macos-')
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install gcc@14
+          echo "$(brew --prefix gcc@14)/bin" >> $GITHUB_PATH
+
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
@@ -74,21 +82,24 @@ jobs:
           # Windows has copied the proper MSVC Release target here.  Never
           # bypass it by uploading the raw build-tree target.
           cp ado/plus/p/parqit.plugin out/parqit.plugin
+          if [ "${{ matrix.label }}" = windows-x86_64 ]; then
+            cp ado/plus/p/parqit_vcomp140.dll out/parqit_vcomp140.dll
+          fi
 
       - name: Verify exact collected plugin
         shell: bash
         run: |
           case "${{ matrix.label }}" in
-            linux-x86_64)   platform=linux ;;
-            macos-*)        platform=macos ;;
-            windows-x86_64) platform=windows ;;
+            linux-x86_64)   platform=linux; probe="build/${{ matrix.preset }}/parqit_openmp_probe" ;;
+            macos-*)        platform=macos; probe="build/${{ matrix.preset }}/parqit_openmp_probe" ;;
+            windows-x86_64) platform=windows; probe="build/${{ matrix.preset }}/Release/parqit_openmp_probe.exe" ;;
           esac
-          bash tests/verify_collected_plugin.sh out/parqit.plugin "$platform"
+          PARQIT_OPENMP_PROBE="$probe" bash tests/verify_collected_plugin.sh "$PWD/out/parqit.plugin" "$platform"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: out/parqit.plugin
+          path: out/*
           if-no-files-found: error
 
   release:
@@ -126,7 +137,7 @@ jobs:
           # Every file parqit.pkg names with an `f` line must ship too (net
           # install aborts on the first missing file) — hence the .dlg glob and
           # the two ancillary crash-course do-files (net get / ssc install, all).
-          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_technical.sthlp src/ado/p/parqit_*.dlg examples/parqit_basics.do examples/parqit_tour.do"
+          STATA_FILES="src/ado/p/stata.toc src/ado/p/parqit.pkg src/ado/p/parqit.ado src/ado/p/parqit.sthlp src/ado/p/parqit_technical.sthlp src/ado/p/parqit_openmp_license.txt src/ado/p/parqit_*.dlg examples/parqit_basics.do examples/parqit_tour.do"
           mkdir -p dist/parqit_all_platforms
           for plat in linux_x86_64 macos_x86_64 macos_arm64 windows_x86_64; do
             case $plat in
@@ -138,6 +149,9 @@ jobs:
             mkdir -p "dist/$plat"
             cp $STATA_FILES "dist/$plat/"
             cp "artifacts/parqit_$plat/parqit.plugin" "dist/$plat/$bin"
+            if [ "$plat" = windows_x86_64 ]; then
+              cp artifacts/parqit_windows_x86_64/parqit_vcomp140.dll "dist/$plat/"
+            fi
             (cd "dist/$plat" && zip -r "../parqit_${plat}.zip" .)
           done
           # one all-platforms package: every binary under its pkg source name, so
@@ -147,12 +161,16 @@ jobs:
           cp artifacts/parqit_macos_x86_64/parqit.plugin   dist/parqit_all_platforms/parqit_macintel64.plugin
           cp artifacts/parqit_macos_arm64/parqit.plugin    dist/parqit_all_platforms/parqit_macarm64.plugin
           cp artifacts/parqit_windows_x86_64/parqit.plugin dist/parqit_all_platforms/parqit_win64.plugin
+          cp artifacts/parqit_windows_x86_64/parqit_vcomp140.dll dist/parqit_all_platforms/
           (cd dist/parqit_all_platforms && zip -r ../parqit_all_platforms.zip .)
+          (cd dist && sha256sum *.zip > SHA256SUMS.txt)
+          (cd dist/parqit_all_platforms && sha256sum * >> ../SHA256SUMS.txt)
           ls -la dist/*.zip
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           # Two install routes from the same release:
           #  * the per-platform / all-platforms ZIPs for offline download-then-install;
           #  * the LOOSE package files (parqit.pkg, stata.toc, the .ado/.sthlp/.dlg,
@@ -168,6 +186,7 @@ jobs:
             dist/parqit_all_platforms/parqit.ado
             dist/parqit_all_platforms/parqit.sthlp
             dist/parqit_all_platforms/parqit_technical.sthlp
+            dist/parqit_all_platforms/parqit_openmp_license.txt
             dist/parqit_all_platforms/parqit_*.dlg
             dist/parqit_all_platforms/parqit_basics.do
             dist/parqit_all_platforms/parqit_tour.do
@@ -175,4 +194,6 @@ jobs:
             dist/parqit_all_platforms/parqit_macintel64.plugin
             dist/parqit_all_platforms/parqit_macarm64.plugin
             dist/parqit_all_platforms/parqit_win64.plugin
+            dist/parqit_all_platforms/parqit_vcomp140.dll
+            dist/SHA256SUMS.txt
           generate_release_notes: true

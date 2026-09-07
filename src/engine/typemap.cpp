@@ -146,7 +146,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
     case DUCKDB_TYPE_UBIGINT:
     case DUCKDB_TYPE_HUGEINT:
     case DUCKDB_TYPE_UHUGEINT:
-        p.cast_sql = "CAST(" + ref + " AS DOUBLE)";
+        p.cast_sql = "__parqit_double(" + ref + ")";
         p.transfer = Transfer::Float64;
         p.stata_type = StType::Double;
         p.needs_big53 = true; /* loud when > 2^53 rounds */
@@ -164,7 +164,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         break;
     case DUCKDB_TYPE_DECIMAL:
         /* charter §6.11: warehouse money loads as numbers, never missing */
-        p.cast_sql = "CAST(" + ref + " AS DOUBLE)";
+        p.cast_sql = "__parqit_double(" + ref + ")";
         p.transfer = Transfer::Float64;
         p.stata_type = StType::Double;
         p.note = "decimal converted to double";

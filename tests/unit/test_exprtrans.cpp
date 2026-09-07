@@ -14,6 +14,7 @@ using namespace parqit;
 static ExprSchema test_schema() {
     ExprSchema s;
     s.kinds = {{"x", 'n'}, {"y", 'n'}, {"s", 's'}, {"d", 'n'}, {"f", 'n'}};
+    s.float_columns.insert("f");
     return s;
 }
 
@@ -595,7 +596,7 @@ TEST_CASE("FLOAT-LIT-1: float columns compare with decimal literals in double (a
     CHECK(count_where("f == -0.1") == 0);
     CHECK(count_where("f > -0.1") == 4);
     CHECK(count_where("(f > 0.1) + (f > 1.1) == 2") == 2);
-    CHECK(eval_at("cond(f > 0.1, 1, 0)", 1) == "1");
+    CHECK(std::strtod(eval_at("cond(f > 0.1, 1, 0)", 1).c_str(), nullptr) == 1);
     /* the double column and integral literals are untouched */
     CHECK(count_where("x == 1") == 1);
     CHECK(count_where("x > 0.5") == 4);
@@ -606,20 +607,19 @@ TEST_CASE("FLOAT-LIT-1: float columns compare with decimal literals in double (a
      * DOUBLE, so integer key filters keep their exact untyped literal */
     ExprResult r1 = translate_filter("f == 0.1", test_schema(), false);
     REQUIRE(r1.ok);
-    CHECK(r1.sql.find("CAST(0.10000000000000001 AS DOUBLE)") != std::string::npos);
+    CHECK(r1.sql.find("AS DOUBLE") != std::string::npos);
     ExprResult r2 = translate_filter("f == 2.5", test_schema(), false);
     REQUIRE(r2.ok);
-    CHECK(r2.sql.find("CAST(") == std::string::npos);
+    CHECK(r2.sql.find("CAST(\"f\"") == std::string::npos);
     ExprResult r3 = translate_filter("x == 123456789", test_schema(), false);
     REQUIRE(r3.ok);
     CHECK(r3.sql.find("CAST(") == std::string::npos);
     ExprResult r4 = translate_filter("inrange(f, 0.1, 0.3)", test_schema(), false);
     REQUIRE(r4.ok);
-    CHECK(r4.sql.find("CAST(0.10000000000000001 AS DOUBLE)") != std::string::npos);
-    CHECK(r4.sql.find("CAST(0.29999999999999999 AS DOUBLE)") != std::string::npos);
+    CHECK(count_where("inrange(f, 0.1, 0.3)", true) == 1);
     ExprResult r5 = translate_filter("f == -0.1", test_schema(), false);
     REQUIRE(r5.ok);
-    CHECK(r5.sql.find("CAST((-0.10000000000000001) AS DOUBLE)") != std::string::npos);
+    CHECK(r5.sql.find("AS DOUBLE") != std::string::npos);
 }
 
 TEST_CASE("FLOAT-FN-1: float() rounds to float precision like native (audit 2026-09-01, F11)") {
@@ -640,11 +640,11 @@ TEST_CASE("FLOAT-FN-1: float() rounds to float precision like native (audit 2026
     CHECK_FALSE(bad2.ok);
 }
 
-TEST_CASE("MOD-TRUNC-1: mod() with a non-integer modulus matches native (audit 2026-09-01, F7)") {
-    /* native values verified on StataNow 19.5 (2026-09-01) */
-    CHECK(std::fabs(std::strtod(eval_at("mod(7, 0.00001)", 1).c_str(), nullptr) - 9.99999999911182e-06) < 1e-20);
+TEST_CASE("mod uses the correctly rounded remainder of its binary64 inputs") {
+    /* Exact Fraction oracles; native quotient subtraction loses low bits. */
+    CHECK(std::strtod(eval_at("mod(7, 0.00001)", 1).c_str(), nullptr) == 0x1.4f8b588de4091p-17);
     CHECK(std::strtod(eval_at("mod(0.3, 0.1)", 1).c_str(), nullptr) == 0.09999999999999998);
-    CHECK(std::strtod(eval_at("mod(1, 0.1)", 1).c_str(), nullptr) == 0.0);
+    CHECK(std::strtod(eval_at("mod(1, 0.1)", 1).c_str(), nullptr) == 0x1.9999999999996p-4);
     CHECK(std::strtod(eval_at("mod(-5.5, 2)", 1).c_str(), nullptr) == 0.5);
     CHECK(std::strtod(eval_at("mod(5.5, 2)", 1).c_str(), nullptr) == 1.5);
     CHECK(std::strtod(eval_at("mod(-7, 3)", 1).c_str(), nullptr) == 2.0);

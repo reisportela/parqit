@@ -3,15 +3,33 @@
 `parqit` ships as two artifacts: the platform-independent Stata files
 (`parqit.ado`, `parqit.sthlp`, `parqit.pkg`) and one compiled plugin per platform
 (`parqit.plugin`). The plugin statically embeds DuckDB (with its parquet and
-core_functions extensions) — end users install nothing else.
+core_functions extensions) and has OpenMP enabled on every platform. Linux
+and macOS also embed the OpenMP runtime. The Windows package supplies
+`parqit_vcomp140.dll` beside the plugin; standard `net install` installs both.
+End users do not need a compiler or a separate runtime installer.
 
 ## Prerequisites
 
-- CMake ≥ 3.16 and a C++17 compiler (GCC ≥ 10, AppleClang, or MSVC 2019+).
-- Network access on the first configure (CMake fetches the pinned DuckDB
-  source tarball and verifies its SHA256), **or** a pre-downloaded tarball
-  passed via `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.3.tar.gz`.
-- No other dependencies: the Stata Plugin Interface, the Arrow C Data
+- CMake ≥ 3.21 for the supplied version-3 presets and a C++17 compiler
+  (GCC ≥ 10 on Linux, GCC 14 on macOS, or MSVC 2019+).
+- Network access on the first configure (CMake fetches pinned sources and
+  verifies their SHA256), **or** pre-downloaded archives. DuckDB uses
+  `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.3.tar.gz`.
+- Linux/macOS build GNU libgomp 14.3.0 from source as a PIC static library.
+  Its internal per-thread state uses pthread keys (`--disable-tls`), so loading
+  the plugin does not depend on spare initial-exec TLS space in the Stata process.
+  Offline builds also set `PARQIT_GCC_RUNTIME_ARCHIVE` to `gcc-14.3.0.tar.xz`.
+  The compiler itself is not built from that archive. The pin is in
+  [ParqitOpenMP.cmake](cmake/ParqitOpenMP.cmake).
+- macOS uses Homebrew `gcc@14`; put its `bin` directory on PATH. Build each
+  architecture on its corresponding host. The preset rejects a compiler
+  targeting the wrong architecture. GNU OpenMP avoids the duplicate-runtime
+  failure reproduced when LLVM OpenMP initializes beside Stata's private Intel runtime.
+- Windows uses MSVC `/openmp`. CMake locates the installed x64 redistributable
+  `vcomp140.dll`; `PARQIT_WINDOWS_OPENMP_DLL` can supply its explicit path.
+  Debug configurations use the matching nonredistributable debug runtime and
+  are never packaged as releases.
+- The Stata Plugin Interface, the Arrow C Data
   Interface header, nlohmann/json and doctest are vendored in `vendor/`.
 
 ## One-command builds
@@ -30,7 +48,17 @@ cmake --preset windows && cmake --build --preset windows
 
 The plugin lands at `build/<preset>/parqit.plugin`. The first build compiles
 DuckDB from source and takes several minutes; afterwards only parqit's own
-files recompile.
+files recompile. The pinned engine also receives two hash-checked local fixes:
+uniform SQL reservoir sampling and C-API aggregate state flattening for windows.
+See [PatchDuckDBSampling.cmake](cmake/PatchDuckDBSampling.cmake) and
+[PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake). Configure refuses an
+unexpected edited dependency file instead of overwriting it.
+
+The statistics implementation requires IEEE binary64 evaluation without
+fast-math reassociation. Its compile-time checks reject incompatible options.
+Optimized builds compile its row callbacks at `-O3`. GCC on ELF x86-64 emits
+both generic and FMA callbacks, selected by runtime CPU detection; the plugin
+does not require an FMA-capable CPU. Other toolchains retain the generic path.
 
 ## Developer build + tests
 
@@ -39,6 +67,10 @@ cmake --preset dev
 cmake --build build/dev --target parqit_plugin parqit_tests -j
 ctest --preset dev          # C++ unit tests (doctest)
 ```
+
+`PARQIT_LOCAL_ADO_DIR` can point to a separate staging directory while validating
+a change. Its default is the repo's `ado/plus/p`; restore that location after
+the staged build passes the relevant checks.
 
 ## Using parqit from the repo (recommended)
 
@@ -94,14 +126,16 @@ runtime coverage.
 
 ## Release packaging
 
-Pushing a `v*` tag runs `.github/workflows/build.yml`, which builds three
-binaries (Linux x86_64 against glibc 2.28 in an AlmaLinux 8 container, macOS
-arm64 with deployment target 11.0, and Windows x86_64 with MSVC). The workflow
-publishes one net-installable zip per platform plus
+Pushing a `v*` tag runs `.github/workflows/build.yml`, which builds
+binaries for four targets (Linux x86_64 in an AlmaLinux 8 container, macOS
+x86_64 and arm64 with deployment target 11.0, and Windows x86_64 with MSVC). The workflow
+prepares a draft release with one net-installable zip per platform plus
 `parqit_all_platforms.zip`, and uploads the loose Stata files and per-platform
-plugins needed for direct `net install` from the GitHub release URL. macOS
-Intel is intentionally omitted until a reliable hosted runner is available,
-as documented in the README and the workflow matrix.
+plugins needed for direct `net install` from the GitHub release URL. The
+workflow uses `macos-15-intel` for the Intel build. Licensed Stata integration
+tests remain a separate local gate, rather than a GitHub-hosted CI check.
+The draft is published after those licensed checks pass against a staged
+install and the collected artifacts have been verified.
 
 The upload workflow collects `ado/plus/p/parqit.plugin`, the repo-local
 distribution surface produced by CMake, rather than the raw
@@ -111,11 +145,22 @@ after collection, the workflow verifies the exact `out/parqit.plugin` it will
 upload:
 
 ```bash
-bash tests/verify_collected_plugin.sh out/parqit.plugin linux   # or macos/windows
+PARQIT_OPENMP_PROBE=build/linux/parqit_openmp_probe \
+  bash tests/verify_collected_plugin.sh "$PWD/out/parqit.plugin" linux
 ```
 
 The Linux check requires ELF64, exported `stata_call`/`pginit`, no ordinary
-`.symtab` or debug sections, and no runtime `libstdc++`/`libgcc_s` dependency.
+`.symtab` or debug sections, and no dynamic C++ or OpenMP runtime dependency.
 The macOS check recognises Mach-O and the required exports after `strip -x`;
-the Windows check recognises PE/COFF and the required exports. Those structural
-checks do not substitute for running Stata on each platform.
+the Windows check recognises PE/COFF, the required exports and the bundled
+`parqit_vcomp140.dll`. Set the verifier path to `build/<preset>/parqit_openmp_probe`
+on macOS, or `build/windows/Release/parqit_openmp_probe.exe` on Windows.
+The verifier links no OpenMP runtime itself: it loads the exact collected plugin,
+checks the compiled OpenMP capability and executes a two-worker region inside it.
+Missing OpenMP, ignored pragmas or a missing packaged DLL fail that check.
+These checks do not substitute for running Stata on each platform.
+
+OpenMP does not replace DuckDB's scheduler. SQL still uses `parqit set threads`,
+and audited sums/moments are not converted into floating OpenMP reductions.
+`parqit version` reports OpenMP support; `parqit selftest` exercises it in Stata.
+The release includes SHA-256 checksums for its ZIPs and package files.

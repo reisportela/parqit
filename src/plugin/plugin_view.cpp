@@ -34,6 +34,7 @@
 #include "engine/request.hpp"
 #include "engine/sanitize.hpp"
 #include "engine/session.hpp"
+#include "engine/statistics.hpp"
 #include "engine/typemap.hpp"
 #include "engine/view.hpp"
 #include "plugin/plugin_io.hpp"
@@ -65,6 +66,39 @@ void cry(const std::string &s) {
 }
 void save_local(const char *name, const std::string &v) {
     SF_macro_save(const_cast<char *>(name), const_cast<char *>(v.c_str()));
+}
+
+/* Statistical results cross a binary64 Stata boundary, including FLOAT
+ * extrema. Never send nan/inf as an expression or round a float through its
+ * short FLOAT-to-VARCHAR spelling before promoting it to double. */
+bool stata_stat_finite(double value) {
+    return std::isfinite(value) && std::fabs(value) < 8.988465674311579e307;
+}
+
+std::string stat_number(double value) {
+    return stata_stat_finite(value) ? parqit::dtoa(value) : ".";
+}
+
+std::string stat_cell(duckdb_result &res, idx_t col, idx_t row = 0) {
+    return stat_number(parqit::statistics::result_number(res, col, row).as_double());
+}
+
+std::string text_cell(duckdb_result &res, idx_t col, idx_t row = 0,
+                      const std::string &missing = ".") {
+    if (duckdb_value_is_null(&res, col, row)) return missing;
+    /* The legacy C result stores VARCHAR as C strings. ENCODE at the SQL
+     * result boundary retains embedded NUL through its length-bearing BLOB. */
+    if (duckdb_column_type(&res, col) == DUCKDB_TYPE_BLOB) {
+        duckdb_blob value = duckdb_value_blob(&res, col, row);
+        std::string out = value.data
+                              ? std::string(static_cast<char *>(value.data), value.size) : "";
+        if (value.data) duckdb_free(value.data);
+        return out;
+    }
+    duckdb_string value = duckdb_value_string(&res, col, row);
+    std::string out = value.data ? std::string(value.data, value.size) : missing;
+    if (value.data) duckdb_free(value.data);
+    return out;
 }
 
 std::map<std::string, View> g_views;
@@ -232,7 +266,47 @@ struct BoundaryCol {
     char kind = 'n';
     std::string fmt;
     std::string note;
+    std::string physical_type;
 };
+
+std::string numeric_sql_type(duckdb_logical_type type) {
+    switch (duckdb_get_type_id(type)) {
+    case DUCKDB_TYPE_TINYINT: return "TINYINT";
+    case DUCKDB_TYPE_SMALLINT: return "SMALLINT";
+    case DUCKDB_TYPE_INTEGER: return "INTEGER";
+    case DUCKDB_TYPE_BIGINT: return "BIGINT";
+    case DUCKDB_TYPE_UTINYINT: return "UTINYINT";
+    case DUCKDB_TYPE_USMALLINT: return "USMALLINT";
+    case DUCKDB_TYPE_UINTEGER: return "UINTEGER";
+    case DUCKDB_TYPE_UBIGINT: return "UBIGINT";
+    case DUCKDB_TYPE_HUGEINT: return "HUGEINT";
+    case DUCKDB_TYPE_UHUGEINT: return "UHUGEINT";
+    case DUCKDB_TYPE_FLOAT: return "FLOAT";
+    case DUCKDB_TYPE_DOUBLE: return "DOUBLE";
+    case DUCKDB_TYPE_DECIMAL:
+        return "DECIMAL(" + std::to_string(duckdb_decimal_width(type)) + "," +
+               std::to_string(duckdb_decimal_scale(type)) + ")";
+    default: return "";
+    }
+}
+
+void refresh_numeric_types(View &view, duckdb_result &result) {
+    std::vector<std::string> types;
+    for (idx_t i = 0; i < duckdb_column_count(&result); ++i) {
+        auto type = duckdb_column_logical_type(&result, i);
+        types.push_back(numeric_sql_type(type));
+        duckdb_destroy_logical_type(&type);
+    }
+    view.set_numeric_types(types);
+}
+
+bool bind_numeric_types(Session &session, View &view, std::string *error) {
+    duckdb_result result;
+    if (!session.query("SELECT * FROM (" + view.compile(false) + ") LIMIT 0", &result, error)) return false;
+    refresh_numeric_types(view, result);
+    duckdb_destroy_result(&result);
+    return true;
+}
 
 /* The exact float/double -> Stata-missing guard the eager fill (plugin_io
  * fill_column) and the direct in-memory save path already apply: a value that is
@@ -272,9 +346,13 @@ std::string norm_view_key(const std::string &name) {
 
 BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
     BoundaryCol b;
+    b.physical_type = numeric_sql_type(lt);
     const std::string ref = quote_ident(name);
     switch (duckdb_get_type_id(lt)) {
-    case DUCKDB_TYPE_BOOLEAN: b.sql = "CAST(" + ref + " AS TINYINT)"; break;
+    case DUCKDB_TYPE_BOOLEAN:
+        b.sql = "CAST(" + ref + " AS TINYINT)";
+        b.physical_type = "TINYINT";
+        break;
     case DUCKDB_TYPE_TINYINT:
     case DUCKDB_TYPE_SMALLINT:
     case DUCKDB_TYPE_INTEGER:
@@ -290,9 +368,12 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
          * IEEE special, so they pay nothing. */
         b.sql = float_missing_guard(ref, ref);
         break;
-    case DUCKDB_TYPE_UTINYINT: b.sql = "CAST(" + ref + " AS SMALLINT)"; break;
-    case DUCKDB_TYPE_USMALLINT: b.sql = "CAST(" + ref + " AS INTEGER)"; break;
-    case DUCKDB_TYPE_UINTEGER: b.sql = "CAST(" + ref + " AS BIGINT)"; break;
+    case DUCKDB_TYPE_UTINYINT:
+        b.sql = "CAST(" + ref + " AS SMALLINT)"; b.physical_type = "SMALLINT"; break;
+    case DUCKDB_TYPE_USMALLINT:
+        b.sql = "CAST(" + ref + " AS INTEGER)"; b.physical_type = "INTEGER"; break;
+    case DUCKDB_TYPE_UINTEGER:
+        b.sql = "CAST(" + ref + " AS BIGINT)"; b.physical_type = "BIGINT"; break;
     case DUCKDB_TYPE_UBIGINT:
     case DUCKDB_TYPE_HUGEINT:
     case DUCKDB_TYPE_UHUGEINT:
@@ -452,8 +533,8 @@ std::string compile_for_save(const View &v) {
             int mb = 0;
             if (parqit::sttype_parse(c.meta_type, &mt, &mb) &&
                 (mt == parqit::StType::Float || mt == parqit::StType::Double))
-                expr = "CAST(" + expr + " AS " +
-                       parqit::duck_type_for(mt, parqit::FmtClass::None) + ")";
+                expr = mt == parqit::StType::Double ? "__parqit_double(" + expr + ")"
+                       : "CAST(" + expr + " AS FLOAT)";
         }
         if (i) sel += ", ";
         sel += expr + " AS " + ref;
@@ -834,6 +915,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         if (aliases[c] != stata_names[c]) vc.stata = stata_names[c]; /* NAME-CASE-1 */
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
+        vc.physical_type = bounds[c].physical_type;
         vc.note = bounds[c].note;
         /* MISS-1: every boundary column is normalized — float/double specials
          * are nulled and string NULLs are folded to "" by boundary_for(). */
@@ -997,6 +1079,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             }
             if (!range_safe) committed_type = "double";
         }
+        refresh_numeric_types(candidate, probe);
         duckdb_destroy_result(&probe);
         if (!replace_storage_name.empty()) {
             std::string cerr = candidate.coerce_numeric_column(
@@ -1011,6 +1094,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                                            &probe, &berr))
                 return "view storage commit did not produce a valid typed plan: " +
                        berr;
+            refresh_numeric_types(candidate, probe);
             duckdb_destroy_result(&probe);
         }
         g_view_ref() = std::move(candidate);
@@ -1119,8 +1203,32 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
+        std::string arg_type;
+        if (fcn == "total" && ty.empty()) {
+            parqit::ExprSchema schema;
+            for (const auto &c : candidate.cols()) {
+                schema.kinds[c.name] = c.kind;
+                schema.numeric_types[c.name] = c.physical_type;
+                if (c.is_float()) schema.float_columns.insert(c.name);
+                if (c.normalized) schema.normalized.insert(c.name);
+            }
+            const auto expression = parqit::translate_expression(ex, schema, g_statamissing);
+            if (expression.ok && !expression.uses_rowctx && expression.kind != 's') {
+                duckdb_result probe;
+                if (!Session::instance().query("SELECT " + expression.sql + " FROM (" +
+                    candidate.compile(false) + ") LIMIT 0", &probe, &err)) {
+                    cry("parqit egen: " + err);
+                    return kRcEngine;
+                }
+                auto type = duckdb_column_logical_type(&probe, 0);
+                arg_type = numeric_sql_type(type);
+                if (duckdb_get_type_id(type) == DUCKDB_TYPE_BOOLEAN) arg_type = "BOOLEAN";
+                duckdb_destroy_logical_type(&type);
+                duckdb_destroy_result(&probe);
+            }
+        }
         e = candidate.egen(name, fcn, ex, req_list_or_empty(req, "by"),
-                           g_statamissing, ty);
+                           g_statamissing, ty, arg_type);
     } else {
         cry("parqit: unknown view operation '" + op + "'");
         return kRcUsage;
@@ -1296,7 +1404,11 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     }
     if (!pfilter.empty()) {
         parqit::ExprSchema sch;
-        for (const auto &c : g_view_ref().cols()) sch.kinds[c.name] = c.kind;
+        for (const auto &c : g_view_ref().cols()) {
+            sch.kinds[c.name] = c.kind;
+            sch.numeric_types[c.name] = c.physical_type;
+            if (c.is_float()) sch.float_columns.insert(c.name);
+        }
         parqit::ExprResult tr = parqit::translate_filter(pfilter, sch, g_statamissing);
         if (!tr.ok) {
             cry(who + tr.error);
@@ -2146,6 +2258,7 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
         if (aliases[c] != stata_names[c]) vc.stata = stata_names[c]; /* NAME-CASE-1 */
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
+        vc.physical_type = bounds[c].physical_type;
         vc.normalized = true; /* MISS-1: boundary-normalized using column */
         const json *jm = nullptr;
         auto it = meta_by_src.find(raw_names[c]);
@@ -2279,6 +2392,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
 
     std::vector<std::string> drops, warns;
     ST_retcode rc;
+    View candidate = g_view_ref();
 
     if (op == "append") {
         std::string gen;
@@ -2296,12 +2410,19 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             }
             sources.push_back(std::move(u));
         }
-        std::string e = g_view_ref().append_with(std::move(sources), gen, &warns);
+        std::string e = candidate.append_with(std::move(sources), gen, &warns);
         if (!e.empty()) {
             /* the engine verbs prefix their own message with the verb name */
             cry("parqit " + e);
             return kRcUsage;
         }
+        duckdb_result probe;
+        if (!s.query("SELECT * FROM (" + candidate.compile(false) + ") LIMIT 0", &probe, &err)) {
+            cry("parqit append: " + err);
+            return kRcEngine;
+        }
+        refresh_numeric_types(candidate, probe);
+        duckdb_destroy_result(&probe);
     } else if (op == "merge" || op == "joinby") {
         std::vector<std::string> keys, keepusing;
         if (!parqit::req_text_list(req, "keys", &keys, &err)) {
@@ -2335,7 +2456,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             return key_type_mismatch ? kRcTypeMismatch : kRcVarNotFound;
         }
         if (op == "joinby") {
-            std::string e = g_view_ref().joinby_with(keys, std::move(u), &warns);
+            std::string e = candidate.joinby_with(keys, std::move(u), &warns);
             if (!e.empty()) {
                 cry("parqit " + e);
                 return kRcUsage;
@@ -2382,7 +2503,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                     return rc;
                 }
             }
-            std::string e = g_view_ref().merge_with(merge_kind, keys, std::move(u), keepusing,
+            std::string e = candidate.merge_with(merge_kind, keys, std::move(u), keepusing,
                                               keep_mask, gen, nogen, &warns);
             if (!e.empty()) {
                 cry("parqit " + e);
@@ -2394,6 +2515,11 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
         return kRcUsage;
     }
 
+    if (op != "append" && !bind_numeric_types(s, candidate, &err)) {
+        cry("parqit " + op + ": " + err);
+        return kRcEngine;
+    }
+    g_view_ref() = std::move(candidate);
     for (const auto &d : drops) cry("warning: " + d);
     for (const auto &w : warns) cry("note: " + w);
     claim_pending(g_current, owned_files);
@@ -2594,11 +2720,17 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
                 return kRcUsage;
             }
         }
-        std::string e = g_view_ref().reshape_long(stubs, ivars, jname);
+        View candidate = g_view_ref();
+        std::string e = candidate.reshape_long(stubs, ivars, jname);
         if (!e.empty()) {
             cry("parqit reshape: " + e);
             return kRcUsage;
         }
+        if (!bind_numeric_types(Session::instance(), candidate, &err)) {
+            cry("parqit reshape: " + err);
+            return kRcEngine;
+        }
+        g_view_ref() = std::move(candidate);
         save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
         return 0;
     }
@@ -2636,11 +2768,17 @@ ST_retcode cmd_view_reshape(const std::vector<std::string> &args) {
         wide_j_scan(jname, ivars, /*check_dup=*/true, "reshape", "reshape wide",
                     "j values", "; collapse first", &jvals, &j_is_string);
     if (jrc != 0) return jrc;
-    std::string e = g_view_ref().reshape_wide(stubs, ivars, jname, jvals, j_is_string);
+    View candidate = g_view_ref();
+    std::string e = candidate.reshape_wide(stubs, ivars, jname, jvals, j_is_string);
     if (!e.empty()) {
         cry("parqit reshape: " + e);
         return kRcUsage;
     }
+    if (!bind_numeric_types(Session::instance(), candidate, &err)) {
+        cry("parqit reshape: " + err);
+        return kRcEngine;
+    }
+    g_view_ref() = std::move(candidate);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }
@@ -2742,6 +2880,11 @@ ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
         g_view_ref() = saved;
         cry("parqit pivot: " + e);
         return kRcUsage;
+    }
+    if (!bind_numeric_types(Session::instance(), g_view_ref(), &err)) {
+        g_view_ref() = saved;
+        cry("parqit pivot: " + err);
+        return kRcEngine;
     }
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
@@ -2862,6 +3005,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         }
         vc.kind = bounds[c].kind;
         vc.fmt = bounds[c].fmt;
+        vc.physical_type = bounds[c].physical_type;
         vc.note = bounds[c].note;
         vc.normalized = true; /* MISS-1: boundary-normalized query/sql column */
         if (!sel.empty()) sel += ", ";
@@ -2920,11 +3064,31 @@ ST_retcode cmd_view_query(const std::vector<std::string> &args) {
         cry("parqit query: the fragment does not compile: " + verr);
         return kRcUsage;
     }
+    refresh_numeric_types(candidate, res);
     duckdb_destroy_result(&res);
     g_view_ref() = std::move(candidate);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }
+
+class StatsTable {
+    Session &session_;
+    std::string name_;
+  public:
+    explicit StatsTable(Session &session) : session_(session) {}
+    ~StatsTable() {
+        if (!name_.empty()) {
+            std::string ignored;
+            session_.exec("DROP TABLE " + quote_ident(name_), &ignored);
+        }
+    }
+    bool create(const std::string &name, const std::string &select, std::string *error) {
+        if (!session_.exec("CREATE TEMP TABLE " + quote_ident(name) + " AS " + select, error)) return false;
+        name_ = name;
+        return true;
+    }
+    std::string reference() const { return quote_ident(name_); }
+};
 
 ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
     std::string err;
@@ -2945,7 +3109,38 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
+    auto resolve_name = [&](const std::string &name) {
+        std::vector<std::string> resolved;
+        if (!name.empty() && name.find_first_of("*?") == std::string::npos &&
+            g_view_ref().expand_patterns({name}, &resolved).empty() && resolved.size() == 1)
+            return resolved[0];
+        return name;  // command-specific validation retains its error contract
+    };
+    std::string resolved_vars;
+    for (auto &v : vars) {
+        v = resolve_name(v);
+        resolved_vars += (resolved_vars.empty() ? "" : " ") + v;
+    }
+    save_local("__sq_vars", resolved_vars);
     Session &s = Session::instance();
+    /* A deferred keep/drop in must fail on every execution surface, including
+     * statistics and count if, just as it does on count/collect/save. */
+    ST_retcode rrc = validate_ranges(s, g_view_ref(), &err);
+    if (rrc != 0) {
+        cry("parqit: " + err);
+        return rrc;
+    }
+    if (what == "misstable" || what == "misspatterns" || what == "codebook") {
+        for (const auto &v : vars) {
+            const auto &cols = g_view_ref().cols();
+            if (std::none_of(cols.begin(), cols.end(),
+                             [&](const auto &c) { return c.name == v; })) {
+                cry("parqit " + (what == "misspatterns" ? "misstable patterns" : what) +
+                    ": variable " + v + " not found in the view");
+                return kRcVarNotFound;
+            }
+        }
+    }
     const std::string base = "(" + g_view_ref().compile(false) + ")";
     parqit::ResponseWriter w;
     if (!w.open(respfile, &err)) {
@@ -2973,6 +3168,25 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         }
     };
 
+    /* Display metadata belongs to the view, not to the unrelated dataset
+     * currently in Stata. Keep it separate from the numeric result records. */
+    std::string display_by;
+    if (!parqit::req_text(req, "by", &display_by, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    display_by = resolve_name(display_by);
+    save_local("__sq_by", display_by);
+    if (what != "countif" && what != "levelsof") {
+        for (const auto &c : g_view_ref().cols()) {
+            if (what != "duplist" && !vars.empty() && c.name != display_by &&
+                std::find(vars.begin(), vars.end(), c.name) == vars.end()) continue;
+            w.rec("smeta", {std::string(1, c.kind)},
+                  {c.name, c.exposed(), c.varlab, c.fmt, c.meta_type});
+        }
+    }
+    if (what == "tabstat" && !display_by.empty()) emit_vallab("tsvl", display_by);
+
     if (what == "summarize") {
         std::vector<std::string> targets;
         if (vars.empty()) {
@@ -2993,32 +3207,33 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 if (isnum) targets.push_back(v);
             }
         }
-        std::string sel;
-        for (const auto &t : targets) {
-            const std::string r = quote_ident(t);
-            if (!sel.empty()) sel += ", ";
-            sel += "count(" + r + "), avg(" + r + "), stddev_samp(" + r +
-                   "), min(" + r + "), max(" + r + ")";
-        }
         if (targets.empty()) {
             cry("parqit summarize: no numeric variables to summarize");
             return kRcUsage;
         }
+        auto sql = [&](bool) {
+            std::string sel;
+            for (const auto &t : targets) {
+                const std::string r = quote_ident(t);
+                if (!sel.empty()) sel += ", ";
+                const std::string st = "(__parqit_stats(" + r + "))";
+                sel += st + ".n, " + st + ".mean, " + st + ".sd, min(" + r + "), max(" + r +
+                       "), " + st + ".sum, " + st + ".variance";
+            }
+            return "SELECT " + sel + " FROM " + base;
+        };
         duckdb_result res;
-        if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
+        if (!s.query(sql(false), &res, &err)) {
             cry("parqit summarize: " + err);
             return kRcEngine;
         }
         for (size_t t = 0; t < targets.size(); t++) {
             auto cell = [&](idx_t c) -> std::string {
-                if (duckdb_value_is_null(&res, t * 5 + c, 0)) return ".";
-                char *v = duckdb_value_varchar(&res, t * 5 + c, 0);
-                std::string out = v ? v : ".";
-                if (v) duckdb_free(v);
-                return out;
+                return stat_cell(res, t * 7 + c);
             };
             w.rec("stat", {cell(0), cell(1), cell(2), cell(3), cell(4)},
                   {targets[t]});
+            w.rec("sumextra", {cell(5), cell(6)}, {targets[t]});
         }
         duckdb_destroy_result(&res);
     } else if (what == "misstable") {
@@ -3071,9 +3286,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         save_local("_parqit_n", std::to_string(total));
         save_local("_parqit_n_complete", std::to_string(ncomplete));
     } else if (what == "detail") {
-        /* summarize, detail: Stata's exact percentile rule plus central
-         * moments computed against a per-variable mean subquery (no
-         * catastrophic cancellation from raw-moment expansion) */
+        /* Stable moments and Stata's exact rank rule share one input realization. */
         std::vector<std::string> targets;
         if (vars.empty()) {
             for (const auto &c : g_view_ref().cols())
@@ -3102,71 +3315,78 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         static const int kPcts[] = {1, 5, 10, 25, 50, 75, 90, 95, 99};
-        /* PERF-DET-1: two scans TOTAL for all variables, was 1+ scans per
-         * variable with a per-variable mean subquery and NINE single-threaded
-         * list_sort(list(x)) materialisations. Pass 1 gets count/mean/min/max
-         * for every variable in one scan; pass 2 computes the central moments
-         * with the mean injected as an exact dtoa literal (identical two-pass
-         * math, no cancellation) and the Stata percentiles as exact order
-         * statistics via quantile_disc — verified against the pinned DuckDB
-         * source (quantile_sort_tree.hpp): the discrete index is
-         * n - floor(n - n*q), so q = (k - 0.5)/n selects exactly the k-th
-         * smallest with a 0.5 float-safety margin, computed by a parallel
-         * nth_element instead of a full sort. Values are byte-identical to
-         * the list_sort form: the same data elements, and the Stata rule
-         * (np = n*p/100; integral -> mean of neighbours, else ceil) is applied
-         * in exact integer arithmetic below. CAST to DOUBLE loses nothing
-         * observable: every summarize result lands in a double r() scalar. */
+        StatsTable source(s);
+        std::string data = base;
+        if (g_view_ref().n_stages() > 0 || g_view_ref().source_paths_sql().empty()) {
+            std::string projection;
+            for (const auto &t : targets) projection += (projection.empty() ? "" : ", ") + quote_ident(t);
+            if (!source.create(g_view_ref().fresh_helper("detail_source"),
+                               "SELECT " + projection + " FROM " + base, &err)) {
+                cry("parqit summarize: " + err);
+                return kRcEngine;
+            }
+            data = source.reference();
+        }
         std::string sel1;
         for (const auto &t : targets) {
             const std::string r = quote_ident(t);
+            const std::string st = "(__parqit_detail(" + r + "))";
             if (!sel1.empty()) sel1 += ", ";
-            sel1 += "count(" + r + "), avg(" + r + "), min(" + r + "), max(" +
-                    r + ")";
+            sel1 += st + ".n, " + st + ".mean, min(" + r + "), max(" + r +
+                    "), " + st + ".sd, " + st + ".variance, " + st +
+                    ".skewness, " + st + ".kurtosis, " + st + ".sum";
         }
         duckdb_result res1;
-        if (!s.query("SELECT " + sel1 + " FROM " + base, &res1, &err)) {
+        if (!s.query("SELECT " + sel1 + " FROM " + data, &res1, &err)) {
             cry("parqit summarize: " + err);
             return kRcEngine;
         }
         struct DetVar {
             long long n = 0;
             std::string cnt = ".", mean = ".", mn = ".", mx = ".";
-            double mu = 0;
+            std::string sd = ".", var = ".", skew = ".", kurt = ".";
+            std::string sum = "0";
             /* per percentile: the 1-based ranks the Stata rule needs */
             std::vector<std::pair<long long, long long>> ranks; /* k1,k2 (k2=0: single) */
             std::vector<long long> want;                        /* deduped rank list */
         };
         std::vector<DetVar> dv(targets.size());
         auto txt1 = [&](idx_t c) -> std::string {
-            if (duckdb_value_is_null(&res1, c, 0)) return ".";
-            char *v = duckdb_value_varchar(&res1, c, 0);
-            std::string out = v ? v : ".";
-            if (v) duckdb_free(v);
-            return out;
+            return stat_cell(res1, c);
         };
         for (size_t t = 0; t < targets.size(); t++) {
-            dv[t].n = duckdb_value_int64(&res1, t * 4, 0);
-            dv[t].cnt = txt1(t * 4);
-            dv[t].mean = txt1(t * 4 + 1);
-            dv[t].mn = txt1(t * 4 + 2);
-            dv[t].mx = txt1(t * 4 + 3);
-            dv[t].mu = duckdb_value_double(&res1, t * 4 + 1, 0);
+            dv[t].n = duckdb_value_int64(&res1, t * 9, 0);
+            dv[t].cnt = txt1(t * 9);
+            dv[t].mean = txt1(t * 9 + 1);
+            dv[t].mn = txt1(t * 9 + 2);
+            dv[t].mx = txt1(t * 9 + 3);
+            dv[t].sd = txt1(t * 9 + 4);
+            dv[t].var = txt1(t * 9 + 5);
+            dv[t].skew = txt1(t * 9 + 6);
+            dv[t].kurt = txt1(t * 9 + 7);
+            dv[t].sum = txt1(t * 9 + 8);
             const long long n = dv[t].n;
             if (n <= 0) continue;
             for (int p : kPcts) {
-                const long long np100 = n * p; /* exact: n*99 < 2^63 for any real n */
+                const long long quotient = (n / 100) * p + ((n % 100) * p) / 100;
+                const long long remainder = ((n % 100) * p) % 100;
                 long long k1, k2 = 0;
-                if (np100 % 100 == 0) {
-                    k1 = np100 / 100;
+                if (remainder == 0) {
+                    k1 = quotient;
                     k2 = k1 + 1 > n ? k1 : k1 + 1;
                     if (k2 == k1) k2 = 0;
                 } else {
-                    k1 = np100 / 100 + 1; /* ceil */
+                    k1 = quotient + 1; /* ceil */
                 }
                 dv[t].ranks.push_back({k1, k2});
                 dv[t].want.push_back(k1);
                 if (k2) dv[t].want.push_back(k2);
+            }
+            /* Native summarize, detail displays four smallest/largest values.
+             * Pick them from the sort already needed for the percentiles. */
+            for (long long k = 1; k <= std::min(4LL, n); ++k) {
+                dv[t].want.push_back(k);
+                dv[t].want.push_back(n - k + 1);
             }
             std::sort(dv[t].want.begin(), dv[t].want.end());
             dv[t].want.erase(std::unique(dv[t].want.begin(), dv[t].want.end()),
@@ -3174,71 +3394,19 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         }
         duckdb_destroy_result(&res1);
 
-        /* pass 2: central moments for every variable with data, one scan */
         std::vector<size_t> live;
-        std::string sel2;
         for (size_t t = 0; t < targets.size(); t++) {
-            if (dv[t].n <= 0) continue;
-            live.push_back(t);
-            const std::string r = quote_ident(targets[t]);
-            /* DETAIL-DECIMAL-1: the moments are double arithmetic on both
-             * sides. A bare decimal literal binds as DECIMAL(p, scale) and
-             * drags an int/long column into DECIMAL(18, scale), which
-             * overflows once max|x| >= 10^(18-scale) ("Could not cast value
-             * 99999 to DECIMAL(18,14)"); a FLOAT column would instead bind
-             * the literal down to single precision. Native converts every
-             * operand to double, so cast the column and type the mean. */
-            const std::string dev = "(CAST(" + r + " AS DOUBLE) - CAST(" +
-                                    parqit::dtoa(dv[t].mu) + " AS DOUBLE))";
-            if (!sel2.empty()) sel2 += ", ";
-            sel2 += "stddev_samp(" + r + "), var_samp(" + r + "), avg(pow(" + dev +
-                    ", 2)), avg(pow(" + dev + ", 3)), avg(pow(" + dev + ", 4))";
+            if (dv[t].n > 0) live.push_back(t);
         }
-        duckdb_result res2;
-        bool have2 = false;
-        if (!live.empty()) {
-            if (!s.query("SELECT " + sel2 + " FROM " + base, &res2, &err)) {
-                cry("parqit summarize: " + err);
-                return kRcEngine;
-            }
-            have2 = true;
-        }
-
-        /* order statistics per variable: a CTAS through the PARALLEL sort
-         * operator plus O(1) rowid point-picks — measured ~6x faster than a
-         * quantile_disc/list_sort aggregate, whose finalize is effectively
-         * single-threaded on 10M rows. rowid on a fresh CTAS is insertion
-         * order, and preserve_insertion_order (engine default, untouched)
-         * makes insertion order the ORDER BY order. A multi-stage pipeline is
-         * materialised ONCE into a scratch projection so k variables do not
-         * re-run the whole pipeline k times. */
-        std::string psrc = base;
-        const bool staged = g_view_ref().n_stages() > 0;
-        if (staged && !live.empty()) {
-            std::string cols;
-            for (size_t t : live) {
-                if (!cols.empty()) cols += ", ";
-                cols += quote_ident(targets[t]);
-            }
-            std::string derr;
-            s.exec("DROP TABLE IF EXISTS __parqit_sumdet_src", &derr);
-            if (!s.exec("CREATE TEMP TABLE __parqit_sumdet_src AS SELECT " +
-                            cols + " FROM " + base,
-                        &err)) {
-                cry("parqit summarize: " + err);
-                return kRcEngine;
-            }
-            psrc = "__parqit_sumdet_src";
-        }
-        std::map<size_t, std::map<long long, double>> osall;
+        /* The parallel sort is spillable; private CTAS rowids identify ranks. */
+        std::map<size_t, std::map<long long, parqit::statistics::Number>> osall;
         for (size_t t : live) {
             const std::string r = quote_ident(targets[t]);
-            std::string derr;
-            s.exec("DROP TABLE IF EXISTS __parqit_sumdet_srt", &derr);
-            if (!s.exec("CREATE TEMP TABLE __parqit_sumdet_srt AS SELECT " + r +
-                            " AS x FROM " + psrc + " WHERE " + r +
-                            " IS NOT NULL ORDER BY " + r,
-                        &err)) {
+            const std::string value = quote_ident(g_view_ref().fresh_helper("rank_value"));
+            StatsTable sorted(s);
+            if (!sorted.create(g_view_ref().fresh_helper("detail_sort"), "SELECT " + r +
+                               " AS " + value + " FROM " + data + " WHERE " + r +
+                               " IS NOT NULL ORDER BY " + r, &err)) {
                 cry("parqit summarize: " + err);
                 return kRcEngine;
             }
@@ -3248,8 +3416,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 ids += std::to_string(k - 1); /* rowid is 0-based */
             }
             duckdb_result pres;
-            if (!s.query("SELECT rowid, x FROM __parqit_sumdet_srt WHERE "
-                         "rowid IN (" + ids + ")",
+            if (!s.query("SELECT rowid, " + value + " FROM " + sorted.reference() +
+                         " WHERE rowid IN (" + ids + ")",
                          &pres, &err)) {
                 cry("parqit summarize: " + err);
                 return kRcEngine;
@@ -3257,24 +3425,25 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             idx_t pn = duckdb_row_count(&pres);
             for (idx_t i = 0; i < pn; i++)
                 osall[t][duckdb_value_int64(&pres, 0, i) + 1] =
-                    duckdb_value_double(&pres, 1, i);
+                    parqit::statistics::result_number(pres, 1, i);
             duckdb_destroy_result(&pres);
-            s.exec("DROP TABLE IF EXISTS __parqit_sumdet_srt", &derr);
+            if (osall[t].size() != dv[t].want.size()) {
+                cry("parqit summarize: inconsistent order-statistic ranks");
+                return kRcEngine;
+            }
         }
-        if (staged && !live.empty()) {
-            std::string derr;
-            s.exec("DROP TABLE IF EXISTS __parqit_sumdet_src", &derr);
-        }
-
-        idx_t col2 = 0;
-        auto txt2 = [&](idx_t c) -> std::string {
-            if (duckdb_value_is_null(&res2, c, 0)) return ".";
-            char *v = duckdb_value_varchar(&res2, c, 0);
-            std::string out = v ? v : ".";
-            if (v) duckdb_free(v);
-            return out;
-        };
         for (size_t t = 0; t < targets.size(); t++) {
+            w.rec("dtotal", {dv[t].sum}, {targets[t]});
+            std::vector<std::string> extremes(8, ".");
+            if (dv[t].n > 0) {
+                const auto &os = osall.at(t);
+                for (long long k = 1; k <= std::min(4LL, dv[t].n); ++k) {
+                    extremes[static_cast<size_t>(k - 1)] = stat_number(os.at(k).as_double());
+                    extremes[static_cast<size_t>(8 - k)] =
+                        stat_number(os.at(dv[t].n - k + 1).as_double());
+                }
+            }
+            w.rec("dext", extremes, {targets[t]});
             if (dv[t].n <= 0) {
                 /* all-missing variable: everything but the zero count is . */
                 std::vector<std::string> plain = {dv[t].cnt, ".", ".", ".",
@@ -3283,31 +3452,17 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 w.rec("det", plain, {targets[t]});
                 continue;
             }
-            const std::string sd = txt2(col2 + 0), var = txt2(col2 + 1);
-            double m2 = duckdb_value_double(&res2, col2 + 2, 0);
-            bool m2null = duckdb_value_is_null(&res2, col2 + 2, 0);
-            double m3 = duckdb_value_double(&res2, col2 + 3, 0);
-            double m4 = duckdb_value_double(&res2, col2 + 4, 0);
-            /* locale-independent: a comma-decimal locale would otherwise
-             * break the Stata-side strtoreal of these returned statistics */
-            std::string skew = ".", kurt = ".";
-            if (!m2null && m2 > 0) {
-                skew = parqit::dtoa(m3 / std::pow(m2, 1.5));
-                kurt = parqit::dtoa(m4 / (m2 * m2));
-            }
-            std::map<long long, double> &os = osall[t];
-            std::vector<std::string> plain = {dv[t].cnt, dv[t].mean, sd,
-                                              var,       skew,      kurt,
+            const auto &os = osall.at(t);
+            std::vector<std::string> plain = {dv[t].cnt, dv[t].mean, dv[t].sd,
+                                              dv[t].var, dv[t].skew, dv[t].kurt,
                                               dv[t].mn,  dv[t].mx};
             for (const auto &rk : dv[t].ranks) {
-                double v = rk.second ? (os[rk.first] + os[rk.second]) / 2.0
-                                     : os[rk.first];
-                plain.push_back(parqit::dtoa(v));
+                double v = rk.second ? parqit::statistics::midpoint(os.at(rk.first), os.at(rk.second))
+                                     : os.at(rk.first).as_double();
+                plain.push_back(stat_number(v));
             }
             w.rec("det", plain, {targets[t]});
-            col2 += 5;
         }
-        if (have2) duckdb_destroy_result(&res2);
     } else if (what == "levelsof") {
         if (vars.size() != 1) {
             cry("parqit levelsof: exactly one variable");
@@ -3332,7 +3487,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
          * to the query's own VARCHAR alias whenever the variable itself was
          * named v, and numeric levels came back in text order. */
         duckdb_result res;
-        if (!s.query("SELECT __parqit_lvl FROM (SELECT DISTINCT " + expr +
+        if (!s.query("SELECT encode(__parqit_lvl) FROM (SELECT DISTINCT " + expr +
                          " AS __parqit_lvl, " + r + " AS __parqit_key FROM " + base +
                          " WHERE " + where + ") ORDER BY __parqit_key LIMIT " +
                          std::to_string(limit + 1),
@@ -3348,9 +3503,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
-            char *v = duckdb_value_varchar(&res, 0, i);
-            w.rec("lvl", {}, {v ? v : ""});
-            if (v) duckdb_free(v);
+            w.rec("lvl", {}, {text_cell(res, 0, i, "")});
         }
         duckdb_destroy_result(&res);
         save_local("_parqit_n_levels", std::to_string(n));
@@ -3394,10 +3547,10 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         const std::string v2 =
             (k2 == 's') ? "coalesce(" + g2 + ", '')" : stata_num_varchar(g2);
         duckdb_result res;
-        if (!s.query("SELECT " + v1 + ", " + v2 +
-                         ", count(*) FROM " + base2 + " GROUP BY " + g1 +
+        if (!s.query("SELECT encode(" + v1 + "), encode(" + v2 +
+                         "), count(*) FROM " + base2 + " GROUP BY " + g1 +
                          ", " + g2 + " ORDER BY " + g1 + " NULLS LAST, " + g2 +
-                         " NULLS LAST",
+                         " NULLS LAST LIMIT 10001",
                      &res, &err)) {
             cry("parqit tabulate: " + err);
             return kRcEngine;
@@ -3411,8 +3564,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             std::set<std::string> distinct_c;
             for (idx_t i = 0; i < n; i++) {
                 if (duckdb_value_is_null(&res, 1, i)) continue;
-                char *v = duckdb_value_varchar(&res, 1, i);
-                if (v) { distinct_c.insert(v); duckdb_free(v); }
+                distinct_c.insert(text_cell(res, 1, i));
             }
             if (distinct_c.size() > 30) {
                 cry("parqit tabulate: " + vars[1] + " has more than 30 distinct values; "
@@ -3427,15 +3579,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
-            auto sv = [&](idx_t c) -> std::string {
-                if (duckdb_value_is_null(&res, c, i)) return ".";
-                char *v = duckdb_value_varchar(&res, c, i);
-                std::string out = v ? v : ".";
-                if (v) duckdb_free(v);
-                return out;
-            };
             w.rec("t2", {std::to_string(duckdb_value_int64(&res, 2, i))},
-                  {sv(0), sv(1)});
+                  {text_cell(res, 0, i), text_cell(res, 1, i)});
         }
         duckdb_destroy_result(&res);
     } else if (what == "tabulate") {
@@ -3468,9 +3613,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         duckdb_result res;
         /* helper aliases (A3-5 audit): never a bare name a user column could
          * shadow in GROUP BY / ORDER BY */
-        if (!s.query("SELECT " + vexpr + " AS __parqit_v, count(*) AS __parqit_n FROM " +
+        if (!s.query("SELECT encode(" + vexpr + ") AS __parqit_v, count(*) AS __parqit_n FROM " +
                          base + where + " GROUP BY " + g + " ORDER BY " + g +
-                         " NULLS LAST",
+                         " NULLS LAST LIMIT 10001",
                      &res, &err)) {
             cry("parqit tabulate: " + err);
             return kRcEngine;
@@ -3482,13 +3627,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
-            std::string val = ".";
-            if (!duckdb_value_is_null(&res, 0, i)) {
-                char *v = duckdb_value_varchar(&res, 0, i);
-                val = v ? v : ".";
-                if (v) duckdb_free(v);
-            }
-            w.rec("tab", {std::to_string(duckdb_value_int64(&res, 1, i))}, {val});
+            w.rec("tab", {std::to_string(duckdb_value_int64(&res, 1, i))},
+                  {text_cell(res, 0, i)});
         }
         duckdb_destroy_result(&res);
     } else if (what == "countif") {
@@ -3498,7 +3638,11 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         parqit::ExprSchema sch;
-        for (const auto &c : g_view_ref().cols()) sch.kinds[c.name] = c.kind;
+        for (const auto &c : g_view_ref().cols()) {
+            sch.kinds[c.name] = c.kind;
+            sch.numeric_types[c.name] = c.physical_type;
+            if (c.is_float()) sch.float_columns.insert(c.name);
+        }
         parqit::ExprResult tr = parqit::translate_filter(expr, sch, g_statamissing);
         if (!tr.ok) {
             cry("parqit count: " + tr.error);
@@ -3543,8 +3687,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                                    ? "count(*) FILTER (WHERE " + r +
                                          " IS NULL OR " + r + " = '')"
                                    : "count(*) - count(" + v + ")";
-            sel += ", " + miss + ", count(DISTINCT " + v + "), CAST(min(" + v +
-                   ") AS VARCHAR), CAST(max(" + v + ") AS VARCHAR)";
+            sel += ", " + miss + ", count(DISTINCT " + v + "), encode(CAST(min(" + v +
+                   ") AS VARCHAR)), encode(CAST(max(" + v + ") AS VARCHAR))";
         }
         duckdb_result res;
         if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
@@ -3552,11 +3696,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcEngine;
         }
         auto cell = [&](idx_t c) -> std::string {
-            if (duckdb_value_is_null(&res, c, 0)) return ".";
-            char *v = duckdb_value_varchar(&res, c, 0);
-            std::string out = v ? v : ".";
-            if (v) duckdb_free(v);
-            return out;
+            return text_cell(res, c);
         };
         const std::string ntot = cell(0);
         for (size_t ti = 0; ti < targets.size(); ti++) {
@@ -3655,9 +3795,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             for (size_t i = 0; i < cols.size(); i++) {
                 const std::string casted = "CAST(" + quote_ident(cols[i].name) +
                                            " AS VARCHAR)";
-                sel += (i ? ", " : "") +
+                sel += (i ? ", " : "") + std::string("encode(") +
                        (cols[i].kind == 's' ? "coalesce(" + casted + ", '')"
-                                            : casted);
+                                            : casted) + ")";
             }
             duckdb_result res;
             if (!s.query("SELECT " + sel + " FROM " + base +
@@ -3668,25 +3808,18 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit duplicates list: " + err);
                 return kRcEngine;
             }
-            /* DUPLIST-SEP-1 (audit 2026-09-01, F13): cells are joined with
-             * the ASCII unit separator, never a TAB a string value can hold */
-            std::string hdr;
-            for (size_t i = 0; i < cols.size(); i++)
-                hdr += (i ? "\x1f" : "") + cols[i].name;
-            w.rec("duph", {}, {hdr});
+            /* Encode each cell independently: every byte, including a unit
+             * separator inside a string, belongs to that cell alone. */
+            std::vector<std::string> hdr;
+            for (const auto &col : cols) hdr.push_back(col.name);
+            w.rec("duph2", {std::to_string(hdr.size())}, hdr);
             idx_t n = duckdb_row_count(&res);
             for (idx_t i = 0; i < n; i++) {
-                std::string row;
+                std::vector<std::string> row;
                 for (idx_t c = 0; c < duckdb_column_count(&res); c++) {
-                    if (c) row += "\x1f";
-                    if (duckdb_value_is_null(&res, c, i)) row += ".";
-                    else {
-                        char *v = duckdb_value_varchar(&res, c, i);
-                        row += v ? v : ".";
-                        if (v) duckdb_free(v);
-                    }
+                    row.push_back(text_cell(res, c, i));
                 }
-                w.rec("dupl", {}, {row});
+                w.rec("dupl2", {}, row);
             }
             duckdb_destroy_result(&res);
         }
@@ -3714,7 +3847,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             names += (i ? " " : "") + targets[i].first;
         }
         duckdb_result res;
-        if (!s.query("SELECT " + inds + " AS __parqit_pat, count(*) FROM " + base +
+        if (!s.query("SELECT " + inds + " AS __parqit_pat, count(*), sum(count(*)) OVER () FROM " + base +
                          " GROUP BY __parqit_pat ORDER BY count(*) DESC, __parqit_pat "
                          "LIMIT 100",
                      &res, &err)) {
@@ -3723,6 +3856,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         }
         w.rec("mph", {}, {names});
         idx_t n = duckdb_row_count(&res);
+        w.rec("mptotal", {std::to_string(n ? duckdb_value_int64(&res, 2, 0) : 0)}, {});
         for (idx_t i = 0; i < n; i++) {
             char *p = duckdb_value_varchar(&res, 0, i);
             w.rec("mpat", {std::to_string(duckdb_value_int64(&res, 1, i))},
@@ -3737,11 +3871,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         if (stats.empty()) stats = {"mean"};
-        std::string by;
-        if (!parqit::req_text(req, "by", &by, &err, false)) {
-            cry(err);
-            return kRcUsage;
-        }
+        const std::string by = display_by;
         std::vector<std::string> targets;
         for (const auto &v : vars) {
             bool found = false, isnum = false;
@@ -3760,6 +3890,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit tabstat: a numeric varlist is required");
             return kRcUsage;
         }
+        StatsTable source(s);
+        std::string data = base;
         if (!by.empty()) {
             bool found = false;
             for (const auto &c : g_view_ref().cols()) found = found || c.name == by;
@@ -3767,9 +3899,20 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit tabstat: by() variable " + by + " not found");
                 return kRcVarNotFound;
             }
+            if (g_view_ref().n_stages() > 0 || g_view_ref().source_paths_sql().empty()) {
+                std::string projection;
+                for (const auto &t : targets) projection += (projection.empty() ? "" : ", ") + quote_ident(t);
+                if (std::find(targets.begin(), targets.end(), by) == targets.end()) projection += ", " + quote_ident(by);
+                if (!source.create(g_view_ref().fresh_helper("tabstat_source"),
+                                   "SELECT " + projection + " FROM " + base, &err)) {
+                    cry("parqit tabstat: " + err);
+                    return kRcEngine;
+                }
+                data = source.reference();
+            }
             std::string ng;
             if (!s.query_scalar("SELECT count(DISTINCT " + norm_view_key(by) +
-                                    ") FROM " + base,
+                                    ") FROM " + data,
                                 &ng, &err) ||
                 std::strtoll(ng.c_str(), nullptr, 10) > 200) {
                 cry("parqit tabstat: by() has too many groups (max 200); collapse instead");
@@ -3805,17 +3948,22 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                       quote_ident(pn);
             pct_helpers[t] = {prn, pn};
         }
+        const bool dispersion = std::find(stats.begin(), stats.end(), "sd") != stats.end() ||
+                                std::find(stats.begin(), stats.end(), "var") != stats.end();
+        const bool totals = dispersion || std::find(stats.begin(), stats.end(), "mean") != stats.end() ||
+                            std::find(stats.begin(), stats.end(), "sum") != stats.end();
         auto stat_sql = [&](const std::string &st,
                             const std::string &t) -> std::string {
             const std::string r = quote_ident(t);
-            if (st == "n" || st == "count") return "count(" + r + ")";
-            if (st == "mean") return "avg(" + r + ")";
-            if (st == "sd") return "stddev_samp(" + r + ")";
-            if (st == "var") return "var_samp(" + r + ")";
-            if (st == "sum") return "coalesce(sum(" + r + "), 0)";
+            const std::string agg = std::string("(") + (dispersion ? "__parqit_stats(" : "__parqit_total(") + r + "))";
+            if (st == "n" || st == "count") return totals ? agg + ".n" : "count(" + r + ")";
+            if (st == "mean") return agg + ".mean";
+            if (st == "sd") return agg + ".sd";
+            if (st == "var") return agg + ".variance";
+            if (st == "sum") return agg + ".sum";
             if (st == "min") return "min(" + r + ")";
             if (st == "max") return "max(" + r + ")";
-            if (st == "range") return "max(" + r + ") - min(" + r + ")";
+            if (st == "range") return "__parqit_difference(max(" + r + "), min(" + r + "))";
             double p;
             if (pct_of(st, &p)) {
                 const auto &h = pct_helpers.at(t);
@@ -3833,13 +3981,13 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 }
                 sel += (sel.empty() ? "" : ", ") + a;
             }
-        std::string gsel = by.empty() ? "" : "CAST(" + g +
-                                                 " AS VARCHAR) AS __parqit_g, ";
-        std::string from = base;
+        std::string gsel = by.empty() ? "" : "encode(CAST(" + g +
+                                                 " AS VARCHAR)) AS __parqit_g, ";
+        std::string from = data;
         std::string tail = by.empty() ? "" : " GROUP BY " + g + " ORDER BY " + g +
                                                  " NULLS LAST";
         if (winsel.empty()) tail = where + tail;
-        else from = "(SELECT *" + winsel + " FROM " + base + where + ")";
+        else from = "(SELECT *" + winsel + " FROM " + data + where + ")";
         duckdb_result res;
         if (!s.query("SELECT " + gsel + sel + " FROM " + from + tail, &res, &err)) {
             cry("parqit tabstat: " + err);
@@ -3850,23 +3998,13 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         for (idx_t g = 0; g < nrows; g++) {
             std::string gv = "";
             if (!by.empty()) {
-                if (duckdb_value_is_null(&res, 0, g)) gv = ".";
-                else {
-                    char *v = duckdb_value_varchar(&res, 0, g);
-                    gv = v ? v : ".";
-                    if (v) duckdb_free(v);
-                }
+                gv = text_cell(res, 0, g);
             }
             for (size_t t = 0; t < targets.size(); t++) {
                 std::vector<std::string> plain;
                 for (size_t st = 0; st < stats.size(); st++) {
                     idx_t c = off + t * stats.size() + st;
-                    if (duckdb_value_is_null(&res, c, g)) plain.push_back(".");
-                    else {
-                        char *v = duckdb_value_varchar(&res, c, g);
-                        plain.push_back(v ? v : ".");
-                        if (v) duckdb_free(v);
-                    }
+                    plain.push_back(stat_cell(res, c, g));
                 }
                 w.rec("ts", plain, {targets[t], gv});
             }
@@ -3874,19 +4012,22 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         duckdb_destroy_result(&res);
     } else if (what == "corr") {
         bool pairwise = req.value("pairwise", false);
-        std::vector<std::string> targets;
+        std::vector<std::string> targets, display_targets;
         for (const auto &v : vars) {
             bool found = false, isnum = false;
+            std::string display;
             for (const auto &c : g_view_ref().cols())
                 if (c.name == v) {
                     found = true;
                     isnum = (c.kind == 'n');
+                    display = c.exposed();
                 }
             if (!found || !isnum) {
                 cry("parqit correlate: " + v + " is not a numeric view variable");
                 return kRcUsage;
             }
             targets.push_back(v);
+            display_targets.push_back(display);
         }
         if (targets.size() < 2) {
             cry("parqit correlate: at least two numeric variables");
@@ -3899,37 +4040,40 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 wh += (i ? " AND " : "") + quote_ident(targets[i]) + " IS NOT NULL";
             base3 = "(SELECT * FROM " + base + " WHERE " + wh + ")";
         }
-        std::string sel;
-        for (size_t i = 0; i < targets.size(); i++)
-            for (size_t j = 0; j <= i; j++) {
-                const std::string a = quote_ident(targets[i]),
-                                  b = quote_ident(targets[j]);
-                sel += (sel.empty() ? "" : ", ") + std::string("corr(") + a + ", " +
-                       b + ")";
-                sel += ", count(*) FILTER (WHERE " + a + " IS NOT NULL AND " + b +
-                       " IS NOT NULL)";
-            }
+        auto sql = [&](bool) {
+            std::string sel;
+            for (size_t i = 0; i < targets.size(); i++)
+                for (size_t j = 0; j <= i; j++) {
+                    const std::string a = quote_ident(targets[i]),
+                                      b = quote_ident(targets[j]);
+                    const std::string corr = "(__parqit_corr(" + a + ", " + b + "))";
+                    sel += (sel.empty() ? "" : ", ") + corr + ".rho, " + corr + ".n, " +
+                           corr + ".unstable, " + corr + ".sine, " + corr + ".perfect";
+                }
+            return "SELECT " + sel + " FROM " + base3;
+        };
         duckdb_result res;
-        if (!s.query("SELECT " + sel + " FROM " + base3, &res, &err)) {
+        if (!s.query(sql(false), &res, &err)) {
             cry("parqit correlate: " + err);
             return kRcEngine;
         }
         idx_t c = 0;
+        bool unstable = false;
         for (size_t i = 0; i < targets.size(); i++)
             for (size_t j = 0; j <= i; j++) {
-                std::string rv = ".";
-                if (!duckdb_value_is_null(&res, c, 0)) {
-                    char *v = duckdb_value_varchar(&res, c, 0);
-                    rv = v ? v : ".";
-                    if (v) duckdb_free(v);
-                }
-                long long nn = duckdb_value_int64(&res, c + 1, 0);
+                std::string rv = stat_cell(res, c);
+                uint64_t nn = duckdb_value_uint64(&res, c + 1, 0);
                 w.rec("cor", {std::to_string(i + 1), std::to_string(j + 1), rv,
                               std::to_string(nn)},
-                      {targets[i], targets[j]});
-                c += 2;
+                      {display_targets[i], display_targets[j]});
+                w.rec("cgeom", {std::to_string(i + 1), std::to_string(j + 1), stat_cell(res, c + 3),
+                                 duckdb_value_boolean(&res, c + 4, 0) ? "1" : "0",
+                                 nn <= 200000000000000002ULL ? "1" : "0"}, {});
+                unstable |= duckdb_value_boolean(&res, c + 2, 0);
+                c += 5;
             }
         duckdb_destroy_result(&res);
+        if (unstable) cry("note: a numerically unstable correlation was returned as missing");
     } else if (what == "hist") {
         if (vars.size() != 1) {
             cry("parqit histogram: exactly one numeric variable");
@@ -3943,9 +4087,19 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         const std::string r = quote_ident(vars[0]);
+        StatsTable source(s);
+        std::string data = base;
+        if (g_view_ref().n_stages() > 0 || g_view_ref().source_paths_sql().empty()) {
+            if (!source.create(g_view_ref().fresh_helper("hist_source"),
+                               "SELECT " + r + " FROM " + base, &err)) {
+                cry("parqit histogram: " + err);
+                return kRcEngine;
+            }
+            data = source.reference();
+        }
         duckdb_result mres;
-        if (!s.query("SELECT min(" + r + ")::DOUBLE, max(" + r +
-                         ")::DOUBLE, count(" + r + ") FROM " + base,
+        if (!s.query("SELECT min(" + r + "), max(" + r +
+                         "), count(" + r + "), typeof(min(" + r + ")) FROM " + data,
                      &mres, &err)) {
             cry("parqit histogram: " + err);
             return kRcEngine;
@@ -3955,11 +4109,19 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit histogram: no nonmissing values");
             return kRcUsage;
         }
-        double lo = duckdb_value_double(&mres, 0, 0);
-        double hi = duckdb_value_double(&mres, 1, 0);
+        const auto low = parqit::statistics::result_number(mres, 0);
+        const auto high = parqit::statistics::result_number(mres, 1);
+        const double lo = low.as_double();
+        const std::string type = text_cell(mres, 3);
+        const std::string lo_sql = "CAST(" + quote_literal(text_cell(mres, 0)) + " AS " + type + ")";
+        const std::string hi_sql = "CAST(" + quote_literal(text_cell(mres, 1)) + " AS " + type + ")";
         long long nn = duckdb_value_int64(&mres, 2, 0);
         duckdb_destroy_result(&mres);
         long long bins = req.value("bins", 0LL);
+        if (bins < 0) {
+            cry("parqit histogram: bins() must be nonnegative (0 selects automatic bins)");
+            return kRcUsage;
+        }
         if (bins <= 0) {
             bins = static_cast<long long>(std::ceil(std::sqrt(
                 static_cast<double>(nn))));
@@ -3967,21 +4129,30 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             if (bins < 1) bins = 1;
         }
         if (bins > 1000) bins = 1000;
-        if (hi <= lo) bins = 1;
-        double width = (hi - lo) / static_cast<double>(bins);
+        const bool constant = parqit::statistics::compare(low, high) == 0;
+        if (constant) bins = 1;
+        double width = parqit::statistics::difference(high, low, static_cast<uint64_t>(bins));
+        if (!stata_stat_finite(width) || (!constant && width <= 0)) {
+            cry("parqit histogram: bin width is outside Stata's numeric range; change bins() or rescale the variable");
+            return kRcUsage;
+        }
+        std::vector<double> centers;
+        for (long long bin = 0; bin < bins; ++bin) {
+            const double center = parqit::statistics::midpoint(low, high, 2 * bin + 1, 2 * bins);
+            if (!stata_stat_finite(center) || (!centers.empty() && center <= centers.back())) {
+                cry("parqit histogram: bin positions cannot be distinguished at Stata's precision; reduce bins() or center/rescale the variable");
+                return kRcUsage;
+            }
+            centers.push_back(center);
+        }
         /* full-precision literals: std::to_string is %.6f and can round lo
          * past the true minimum, producing bin -1 */
-        /* full-precision, locale-independent literals (dtoa = shortest exact
-         * round-trip; printf/%g would round and honour LC_NUMERIC) */
+        /* Locale-independent, 17-digit values for the Stata response. */
         std::string lobuf = parqit::dtoa(lo), wbuf = parqit::dtoa(width);
-        std::string bexpr =
-            (bins == 1)
-                ? "0"
-                : "greatest(least(CAST(floor((" + r + " - (" + lobuf + ")) / (" +
-                      wbuf + ")) AS BIGINT), " + std::to_string(bins - 1) +
-                      "), 0)";
+        const std::string bexpr = bins == 1 ? "0" : "__parqit_histbin(" + r + ", " +
+            lo_sql + ", " + hi_sql + ", CAST(" + std::to_string(bins) + " AS UBIGINT))";
         duckdb_result res;
-        if (!s.query("SELECT " + bexpr + " AS __parqit_b, count(*) FROM " + base +
+        if (!s.query("SELECT " + bexpr + " AS __parqit_b, count(*) FROM " + data +
                          " WHERE " + r + " IS NOT NULL GROUP BY __parqit_b ORDER BY "
                          "__parqit_b",
                      &res, &err)) {
@@ -3989,11 +4160,16 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcEngine;
         }
         idx_t n = duckdb_row_count(&res);
-        for (idx_t i = 0; i < n; i++)
+        idx_t row = 0;
+        for (long long bin = 0; bin < bins; ++bin) {
+            long long frequency = 0;
+            if (row < n && duckdb_value_int64(&res, 0, row) == bin)
+                frequency = duckdb_value_int64(&res, 1, row++);
             w.rec("hb",
-                  {std::to_string(duckdb_value_int64(&res, 0, i)),
-                   std::to_string(duckdb_value_int64(&res, 1, i))},
+                  {std::to_string(bin), std::to_string(frequency),
+                   stat_number(centers[static_cast<size_t>(bin)])},
                   {});
+        }
         duckdb_destroy_result(&res);
         save_local("_parqit_hist_lo", lobuf);
         save_local("_parqit_hist_width", wbuf);

@@ -1,4 +1,4 @@
-*! version 0.1.34 04sep2026
+*! version 0.1.35 07sep2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -6,6 +6,7 @@
 program define parqit, rclass
     version 16.0
     gettoken todo 0 : 0, parse(" ,")
+    if (`"`todo'"' == "generate") local todo "gen"
     if `"`todo'"' == "" {
         di as err "parqit: subcommand required; see {help parqit}"
         exit 198
@@ -16,7 +17,8 @@ program define parqit, rclass
         contract duplicates sample collect count head list show explain    ///
         set merge append joinby reshape pivot sql query summarize tabulate ///
         path view views misstable levelsof ds lookfor codebook distinct    ///
-        tabstat correlate pwcorr histogram mergein appendin menu _dlgvars
+        tabstat correlate pwcorr histogram mergein appendin menu _dlgvars  ///
+        _dlgcontext _dlgsource
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -32,8 +34,11 @@ end
 
 program define _parqit_ensure_plugin
     version 16.0
-    capture plugin call parqit_plugin, ping
-    if (_rc == 0) exit
+    capture plugin call parqit_plugin, ping 03
+    if (_rc == 0) {
+        _parqit_check_numeric_contract "`parqit_numeric_contract'"
+        exit
+    }
 
     local pp
     if `"$PARQIT_PLUGIN_PATH"' != "" {
@@ -69,7 +74,17 @@ program define _parqit_ensure_plugin
         exit 498
     }
 
-    plugin call parqit_plugin, ping
+    plugin call parqit_plugin, ping 03
+    _parqit_check_numeric_contract "`parqit_numeric_contract'"
+end
+
+program define _parqit_check_numeric_contract
+    version 16.0
+    args contract
+    if ("`contract'" == "3") exit
+    di as err "parqit: ado and plugin numerical revisions do not match"
+    di as err "restart Stata after installing the matching files; check PARQIT_PLUGIN_PATH if set"
+    exit 198
 end
 
 * ----------------------------------------------------------------------------
@@ -81,11 +96,19 @@ program define _parqit_version, rclass
     syntax
     _parqit_ensure_plugin
     plugin call parqit_plugin, version
+    if ("`parqit_openmp'" != "1") {
+        di as err "parqit: install the matching OpenMP plugin and restart Stata"
+        exit 498
+    }
     di as txt "parqit version " as res "`parqit_plugin_version'" ///
         as txt "  (engine: DuckDB " as res "`parqit_duckdb_version'" ///
-        as txt ", Stata Plugin Interface " as res "`parqit_spi_version'" as txt ")"
+        as txt ", Stata Plugin Interface " as res "`parqit_spi_version'" ///
+        as txt ", OpenMP enabled)"
     return local parqit_version `"`parqit_plugin_version'"'
     return local duckdb_version `"`parqit_duckdb_version'"'
+    return scalar openmp = 1
+    return scalar openmp_version = real("`parqit_openmp_version'")
+    return scalar openmp_max_threads = real("`parqit_openmp_max_threads'")
 end
 
 program define _parqit_selftest, rclass
@@ -113,8 +136,9 @@ program define _parqit_selftest, rclass
         exit 920
     }
     di as txt "parqit selftest: " as res "ok" ///
-        as txt "  (codecs agree; engine opened; Parquet write/read and parqit metadata verified in-process)"
+        as txt "  (OpenMP runtime, codecs, engine, Parquet write/read and metadata verified in-process)"
     return local selftest "ok"
+    return scalar openmp_threads = real("`parqit_openmp_threads'")
 end
 
 program define _parqit_menu
@@ -132,7 +156,7 @@ program define _parqit_menu
     * Mnemonics (&) are unique within the submenu.
     capture {
         window menu append submenu "stUser" "&parqit"
-        window menu append item "&parqit" "&Read Parquet data (lazy view or into memory)..." "db parqit_read"
+        window menu append item "&parqit" "&Read data (lazy view or into memory)..." "db parqit_read"
         window menu append item "&parqit" "&Describe and explore data..." "db parqit_explore"
         window menu append item "&parqit" "Summary &statistics, tables, and correlations..." "db parqit_stats"
         window menu append separator "&parqit"
@@ -142,12 +166,13 @@ program define _parqit_menu
         window menu append item "&parqit" "Colla&pse, contract, pivot table, or reshape..." "db parqit_pivot"
         window menu append item "&parqit" "Combine datasets (&merge, append, joinby)..." "db parqit_combine"
         window menu append separator "&parqit"
-        window menu append item "&parqit" "Co&llect into memory or save as Parquet..." "db parqit_write"
+        window menu append item "&parqit" "Save as Parquet or co&llect into memory..." "db parqit_write"
         window menu append item "&parqit" "Views, SQL, and &engine settings..." "db parqit_views"
         window menu append separator "&parqit"
         window menu append item "&parqit" "Vers&ion" "parqit version"
         window menu append item "&parqit" "Self-&test" "parqit selftest"
         window menu append item "&parqit" "&Help on parqit" "help parqit"
+        window menu append item "&parqit" "Technical re&ference" "help parqit_technical"
         window menu refresh
     }
     if (_rc) {
@@ -187,7 +212,7 @@ end
 * Interactive-only glue — intentionally undocumented in the help.
 program define _parqit__dlgvars, rclass
     version 16.0
-    syntax [anything] [using/] [, Data]
+    syntax [anything] [using/] [, Data Numeric(name)]
     gettoken dlgname anything : anything
     gettoken listname anything : anything
     return local varlist ""
@@ -198,15 +223,22 @@ program define _parqit__dlgvars, rclass
     capture confirm name `listname'
     if (_rc) exit
     capture .`dlgname'.pq_populate_error.setvalue 0
+    capture .`dlgname'.`listname'.Arrdropall
+    if ("`numeric'" != "") capture .`dlgname'.`numeric'.Arrdropall
     if (`"`using'"' != "" & "`data'" != "") {
         capture .`dlgname'.pq_populate_error.setvalue 1
         exit
     }
     local vars
+    local numvars
     capture {
         if ("`data'" != "") {
             quietly ds
             local vars `"`r(varlist)'"'
+            if ("`numeric'" != "") {
+                quietly ds, has(type numeric)
+                local numvars `"`r(varlist)'"'
+            }
         }
         else if (`"`using'"' != "") {
             quietly _parqit_describe `"`using'"'
@@ -218,8 +250,17 @@ program define _parqit__dlgvars, rclass
             }
         }
         else {
-            quietly _parqit_ds
-            local vars `"`r(varlist)'"'
+            _parqit_ensure_plugin
+            tempfile resp
+            mata: st_local("whathex", _parqit_hex("describe"))
+            mata: st_local("resphex", _parqit_hex(st_local("resp")))
+            plugin call parqit_plugin, view_info `whathex' `resphex'
+            mata: _parqit_collect_names("`resp'", "")
+            local vars `"`parqit_dsnames'"'
+            if ("`numeric'" != "") {
+                mata: _parqit_collect_names("`resp'", "n")
+                local numvars `"`parqit_dsnames'"'
+            }
         }
     }
     if (_rc) {
@@ -232,18 +273,82 @@ program define _parqit__dlgvars, rclass
     return scalar k = `nvars'
     * A later Populate may have fewer variables than the previous source.
     * Clear the class array first so stale tail entries cannot survive.
-    capture .`dlgname'.`listname'.Arrdropall
     local i 1
     foreach v of local vars {
         capture .`dlgname'.`listname'[`i'] = "`v'"
         if (_rc) continue, break
         local ++i
     }
+    if ("`numeric'" != "") {
+        local i 1
+        foreach v of local numvars {
+            capture .`dlgname'.`numeric'[`i'] = "`v'"
+            if (_rc) continue, break
+            local ++i
+        }
+    }
     * Class writes above may themselves set/clear r(); publish the helper's
     * contract only after all best-effort dialog interaction is complete.
     capture confirm name `dlgname'   /* leave the private helper's _rc at zero */
     return local varlist `"`vars'"'
     return scalar k = `nvars'
+    return local numeric `"`numvars'"'
+end
+
+* GUI context queries use the view registry, never source rows.
+program define _parqit__dlgcontext, rclass
+    version 16.0
+    syntax namelist(min=1 max=1 name=dlg) [, Data Target REPORT]
+    tempname prior
+    _return hold `prior'
+    local view ""
+    local context "Current view: none"
+    capture {
+        _parqit_ensure_plugin
+        plugin call parqit_plugin, view_alive
+        mata: st_local("view", _parqit_unhex(st_local("parqit_view_current")))
+    }
+    if (_rc) local context "Current view: unavailable"
+    else if ("`view'" != "") local context "Current view: `view'"
+    if ("`target'" != "") local context = "Selected view: " + cond("`view'"=="", "none", "`view'")
+    if ("`data'" != "") local context "Source: dataset in Stata memory"
+    capture .`dlg'.main.tx_context.setlabel `"`context'"'
+    capture .`dlg'.pq_view_live.setvalue `=("`view'"!="")'
+    capture .`dlg'.pq_view_name.setvalue "`view'"
+    _return restore `prior'
+    return add
+    if ("`report'" != "") {
+        return local view "`view'"
+        return local context `"`context'"'
+    }
+end
+
+* File inspection controls apply only to Parquet sources; no adapter is run.
+program define _parqit__dlgsource, rclass
+    version 16.0
+    syntax namelist(min=1 max=1 name=dlg) [using/] [, REPORT]
+    tempname prior
+    _return hold `prior'
+    local base = substr(`"`using'"', strrpos(`"`using'"', "/")+1, .)
+    local ext ""
+    if (strpos(`"`base'"', ".")) local ext = lower(substr(`"`base'"', strrpos(`"`base'"', ".")+1, .))
+    local footer = (`"`using'"' != "" & !inlist("`ext'", "csv", "tsv", "txt", "tab", "dta", "xls", "xlsx"))
+    local legacy = inlist("`ext'", "dta", "xls", "xlsx")
+    local usemode 1
+    capture local usemode = .`dlg'.main.rb_use.value
+    if (!`usemode') {
+        local footer 0
+        capture local legacy = .`dlg'.main.rb_open.value
+    }
+    local action = cond(`footer', "enable", "disable")
+    capture .`dlg'.main.bu_desc.`action'
+    capture .`dlg'.main.bu_pop.`action'
+    local action = cond(`legacy', "enable", "disable")
+    capture .`dlg'.main.tx_enc.`action'
+    capture .`dlg'.main.cb_enc.`action'
+    _return restore `prior'
+    return add
+    if ("`report'" != "") return scalar footer = `footer'
 end
 
 * One-line, truthful performance hint shown when parqit spots a faster path for a
@@ -1166,9 +1271,13 @@ program define _parqit_sample
     version 16.0
     syntax anything(name=amount) [, Count seed(integer -1)]
     confirm number `amount'
+    if missing(`amount') {
+        di as err "parqit sample: amount must be a finite number"
+        exit 198
+    }
     _parqit_ensure_plugin
     tempfile req
-    local _sq_amount `amount'
+    local _sq_amount : display %24.17e (`amount')
     local _sq_count = cond("`count'" != "", "true", "false")
     local _sq_seed `seed'
     mata: _parqit_wr_op_sample_request("`req'")
@@ -1422,7 +1531,7 @@ program define _parqit_tabstat, rclass
         di as err "parqit tabstat: a numeric varlist is required"
         exit 198
     }
-    syntax [, Statistics(string) by(name)]
+    syntax [, Statistics(string) by(name) SAVE]
     if (`"`statistics'"' == "") local statistics "mean"
     _parqit_ensure_plugin
     tempfile req resp
@@ -1430,10 +1539,20 @@ program define _parqit_tabstat, rclass
     local _sq_vars `"`vars'"'
     local _sq_stats = strlower(`"`statistics'"')
     local _sq_by "`by'"
+    local _sq_save "`save'"
     mata: _parqit_wr_stats_request("`req'", "`resp'")
     capture noisily plugin call parqit_plugin, view_stats `reqhex'
     if (_rc) exit _rc
     mata: _parqit_print_tabstat("`resp'")
+    if ("`save'" != "") {
+        if ("`by'" == "") return matrix StatTotal = `parqit_ts_mat1'
+        else {
+            forvalues i = 1/`parqit_ts_groups' {
+                return matrix Stat`i' = `parqit_ts_mat`i''
+                return local name`i' `"`parqit_ts_name`i''"'
+            }
+        }
+    }
 end
 
 program define _parqit_correlate, rclass
@@ -1449,7 +1568,10 @@ program define _parqit_correlate, rclass
     if (_rc) exit _rc
     local _sq_sig ""
     local _sq_obs ""
+    tempname C
+    local _sq_corr_matrix "`C'"
     mata: _parqit_print_corr("`resp'")
+    if ("`parqit_corr_matrices'" == "1") return matrix C = `C'
     return scalar N = `parqit_corr_n'
     return scalar rho = `parqit_corr_last'
 end
@@ -1469,7 +1591,16 @@ program define _parqit_pwcorr, rclass
     if (_rc) exit _rc
     local _sq_sig "`sig'"
     local _sq_obs "`obs'"
+    tempname C Nobs P
+    local _sq_corr_matrix "`C'"
+    local _sq_count_matrix "`Nobs'"
+    local _sq_p_matrix "`P'"
     mata: _parqit_print_corr("`resp'")
+    if ("`parqit_corr_matrices'" == "1") {
+        return matrix C = `C'
+        return matrix Nobs = `Nobs'
+        if ("`sig'" != "") return matrix sig = `P'
+    }
     return scalar N = `parqit_corr_n'
     return scalar rho = `parqit_corr_last'
 end
@@ -1477,6 +1608,10 @@ end
 program define _parqit_histogram, rclass
     version 16.0
     syntax anything(name=var) [, Bins(integer 0) NODRAW]
+    if (`bins' < 0) {
+        di as err "parqit histogram: bins() must be nonnegative (0 selects automatic bins)"
+        exit 198
+    }
     _parqit_ensure_plugin
     tempfile req resp
     local _sq_what "hist"
@@ -1492,11 +1627,12 @@ program define _parqit_histogram, rclass
     frame create `hf'
     frame `hf' {
         qui set obs `nb'
-        qui gen double __mid = `parqit_hist_lo' + (_n - 0.5) * `parqit_hist_width'
+        qui gen double __mid = .
         qui gen double __freq = 0
         mata: _parqit_fill_hist("`resp'")
         if ("`nodraw'" == "") {
-            twoway bar __freq __mid, barwidth(`parqit_hist_width') ///
+            local draw_width = cond(`parqit_hist_width' > 0, `parqit_hist_width', 1)
+            twoway bar __freq __mid, barwidth(`draw_width') ///
                 xtitle(`"`var'"') ytitle("frequency") name(parqit_hist, replace)
         }
     }
@@ -2481,24 +2617,29 @@ program define _parqit_summarize, rclass
     if (_rc) exit _rc
     if ("`detail'" == "") {
         mata: _parqit_print_summarize("`resp'")
-        return scalar N    = `parqit_sum_n'
-        return scalar mean = `parqit_sum_mean'
-        return scalar sd   = `parqit_sum_sd'
-        return scalar min  = `parqit_sum_min'
-        return scalar max  = `parqit_sum_max'
+        return scalar N    = real("`parqit_sum_n'")
+        return scalar sum_w = real("`parqit_sum_n'")
+        return scalar mean = real("`parqit_sum_mean'")
+        return scalar sd   = real("`parqit_sum_sd'")
+        return scalar min  = real("`parqit_sum_min'")
+        return scalar max  = real("`parqit_sum_max'")
+        return scalar sum  = real("`parqit_sum_sum'")
+        return scalar Var  = real("`parqit_sum_var'")
         exit
     }
     mata: _parqit_print_detail("`resp'")
-    return scalar N        = `parqit_det_n'
-    return scalar mean     = `parqit_det_mean'
-    return scalar sd       = `parqit_det_sd'
-    return scalar Var      = `parqit_det_var'
-    return scalar skewness = `parqit_det_skew'
-    return scalar kurtosis = `parqit_det_kurt'
-    return scalar min      = `parqit_det_min'
-    return scalar max      = `parqit_det_max'
+    return scalar N        = real("`parqit_det_n'")
+    return scalar sum_w    = real("`parqit_det_n'")
+    return scalar sum      = real("`parqit_det_sum'")
+    return scalar mean     = real("`parqit_det_mean'")
+    return scalar sd       = real("`parqit_det_sd'")
+    return scalar Var      = real("`parqit_det_var'")
+    return scalar skewness = real("`parqit_det_skew'")
+    return scalar kurtosis = real("`parqit_det_kurt'")
+    return scalar min      = real("`parqit_det_min'")
+    return scalar max      = real("`parqit_det_max'")
     foreach p in 1 5 10 25 50 75 90 95 99 {
-        return scalar p`p' = `parqit_det_p`p''
+        return scalar p`p' = real("`parqit_det_p`p''")
     }
 end
 
@@ -2557,6 +2698,7 @@ program define _parqit_misstable, rclass
     if ("`what'" == "misspatterns") {
         mata: _parqit_print_misspatterns("`resp'")
         return scalar r = `parqit_mp_r'
+        return scalar N = `parqit_mp_n'
         exit
     }
     mata: _parqit_print_misstable("`resp'")
@@ -2576,7 +2718,7 @@ program define _parqit_levelsof, rclass
     capture noisily plugin call parqit_plugin, view_stats `reqhex'
     if (_rc) exit _rc
     mata: _parqit_build_levels("`resp'")
-    di as txt `"`parqit_levels'"'
+    mata: printf("{txt}%s\n",_parqit_text(st_local("parqit_levels")))
     return local levels `"`parqit_levels'"'
     return scalar r = `parqit_n_levels'
 end
@@ -3125,6 +3267,23 @@ string rowvector _parqit_fields(string scalar line, real scalar n)
     return(out)
 }
 
+/* Stream complete hex records, including those above fget's 32 KiB limit. */
+string matrix _parqit_fget(real scalar fh)
+{
+    string matrix line, chunk
+    line = fgetnl(fh)
+    if (line == J(0,0,"")) return(line)
+    while (substr(line,strlen(line),1) != char(10)) {
+        chunk = fgetnl(fh)
+        if (chunk == J(0,0,"")) return(line)
+        line = line + chunk
+    }
+    line = substr(line,1,strlen(line)-1)
+    if (substr(line,strlen(line),1) == char(13))
+        line = substr(line,1,strlen(line)-1)
+    return(line)
+}
+
 /* Read the whole response file and split into records on the newline. Mata's
  * fget() caps a line at 32768 bytes and continues the remainder as a bogus
  * record, which truncates/corrupts a long hex field (a 32000-byte value label,
@@ -3459,16 +3618,16 @@ void _parqit_print_view_describe(string scalar resp)
     displayas("text")
     printf("  %-32s %-8s %-12s %s\n", "variable", "kind", "format", "label")
     printf("  %s\n", 72 * "-")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 7)
         if (f[1] != "vcol") continue
         kind = (_parqit_unhex(f[4]) == "s" ? "string" : "numeric")
-        printf("  %-32s %-8s %-12s %s\n", _parqit_unhex(f[3]), kind,
-               _parqit_unhex(f[5]), _parqit_unhex(f[6]))
+        printf("  %-32s %-8s %-12s %s\n", _parqit_text(_parqit_unhex(f[3])), kind,
+               _parqit_text(_parqit_unhex(f[5])), _parqit_text(_parqit_unhex(f[6])))
         if (f[7] != "") {
             /* NAME-CASE-1: alias inside the view; exact Stata name on collect/save */
             printf("  %-32s (Stata name %s: differs only by case from another variable)\n",
-                   "", _parqit_unhex(f[7]))
+                   "", _parqit_text(_parqit_unhex(f[7])))
         }
     }
     fclose(fh)
@@ -3610,25 +3769,105 @@ void _parqit_wr_stats_request(string scalar req, string scalar resp)
     _parqit_emit(req, _parqit_jobj(p))
 }
 
+string scalar _parqit_controls(string scalar src)
+{
+    string scalar s
+    s = src
+    s = subinstr(s,char(0),"\0")
+    s = subinstr(s,char(10),"\n")
+    s = subinstr(s,char(13),"\r")
+    return(subinstr(s,char(31),"\x1f"))
+}
+
+string scalar _parqit_text(string scalar src)
+{
+    real scalar i
+    string scalar out, c, s
+    s = _parqit_controls(src)
+    out = ""
+    for (i = 1; i <= strlen(s); i++) {
+        c = substr(s, i, 1)
+        out = out + (c == "{" ? "{c -(}" : (c == "}" ? "{c )-}" : c))
+    }
+    return(out)
+}
+
+string scalar _parqit_num(string scalar s, string scalar fmt)
+{
+    return(strofreal(strtoreal(s), fmt))
+}
+
+string scalar _parqit_rtext(string scalar src, real scalar width)
+{
+    string scalar s
+    s = _parqit_controls(src)
+    return(max((0,width-udstrlen(s))) * " " + _parqit_text(s))
+}
+
+string scalar _parqit_clip(string scalar src, real scalar width)
+{
+    string scalar s
+    s = src
+    if (udstrlen(s)>width) s = udsubstr(s,1,width-1)+"~"
+    s = _parqit_controls(s)
+    if (udstrlen(s)<=width) return(s)
+    return(udsubstr(s,1,width-1)+"~")
+}
+
+transmorphic scalar _parqit_statsmeta(string scalar resp)
+{
+    real scalar fh
+    string scalar line
+    string rowvector f
+    transmorphic scalar out
+    out = asarray_create("string", 1)
+    fh = fopen(resp, "r")
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
+        f = _parqit_fields(line, 7)
+        if (f[1] != "smeta") continue
+        asarray(out, _parqit_unhex(f[3]),
+                (_parqit_unhex(f[4]), _parqit_unhex(f[5]),
+                 _parqit_unhex(f[6]), f[2], _parqit_unhex(f[7])))
+    }
+    fclose(fh)
+    return(out)
+}
+
+string rowvector _parqit_statmeta(transmorphic scalar metadata, string scalar name)
+{
+    if (asarray_contains(metadata, name)) return(asarray(metadata, name))
+    return((name, "", "", "n", ""))
+}
+
 void _parqit_print_summarize(string scalar resp)
 {
-    real scalar      fh
+    real scalar      fh, i
     string scalar    line
-    string rowvector f
+    string rowvector f, meta
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
     fh = fopen(resp, "r")
     displayas("text")
-    printf("\n  %-24s %10s %12s %12s %12s %12s\n",
-           "variable", "obs", "mean", "sd", "min", "max")
-    printf("  %s\n", 86 * "-")
+    printf("\n    Variable {c |}        Obs        Mean    Std. dev.       Min        Max\n")
+    printf("{hline 13}{c +}{hline 57}\n")
+    i = 0
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 7)
+        if (f[1] == "sumextra") {
+            st_local("parqit_sum_sum", f[2])
+            st_local("parqit_sum_var", f[3])
+            continue
+        }
         if (f[1] != "stat") continue
-        printf("  %-24s %10s %12s %12s %12s %12s\n",
-               _parqit_unhex(f[7]),
-               f[2],
-               substr(f[3], 1, 12), substr(f[4], 1, 12),
-               substr(f[5], 1, 12), substr(f[6], 1, 12))
+        if (i > 0 & mod(i, 5) == 0) printf("\n")
+        meta = _parqit_statmeta(metadata, _parqit_unhex(f[7]))
+        printf("{txt}%s {c |} {res}%10s   %9s   %9s  %9s  %9s\n",
+               _parqit_rtext(abbrev(meta[1], 12),12),
+               _parqit_num(f[2], "%10.0gc"),
+               _parqit_num(f[3], "%9.0g"), _parqit_num(f[4], "%9.0g"),
+               _parqit_num(f[5], "%9.0g"), _parqit_num(f[6], "%9.0g"))
+        i++
         st_local("parqit_sum_n", f[2] == "." ? "0" : f[2])
         st_local("parqit_sum_mean", f[3])
         st_local("parqit_sum_sd", f[4])
@@ -3636,7 +3875,6 @@ void _parqit_print_summarize(string scalar resp)
         st_local("parqit_sum_max", f[6])
     }
     fclose(fh)
-    printf("\n")
     if (st_local("parqit_sum_n") == "") st_local("parqit_sum_n", "0")
     if (st_local("parqit_sum_mean") == "") st_local("parqit_sum_mean", ".")
     if (st_local("parqit_sum_sd") == "") st_local("parqit_sum_sd", ".")
@@ -3679,12 +3917,14 @@ string scalar _parqit_vlabel(string scalar raw, string colvector keys,
 
 void _parqit_print_tabulate(string scalar resp)
 {
-    real scalar      fh, total, rows, n, i, uselab
-    string scalar    line, kind, fmt, raw, lab
-    string rowvector f
+    real scalar      fh, total, rows, n, i, uselab, stub
+    string scalar    line, kind, fmt, raw, lab, title
+    string rowvector f, vars, meta
     string colvector vals, lkeys, ltexts
     real colvector   counts
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
     fh = fopen(resp, "r")
     vals = J(0, 1, "")
     counts = J(0, 1, .)
@@ -3692,7 +3932,7 @@ void _parqit_print_tabulate(string scalar resp)
     uselab = (st_local("parqit_tab_nolabel") != "1")
     kind = "n"
     fmt = ""
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 3)
         if (f[1] == "tabh") {
             kind = f[2]
@@ -3715,19 +3955,34 @@ void _parqit_print_tabulate(string scalar resp)
     fclose(fh)
     total = sum(counts)
     rows = rows(vals)
+    st_local("parqit_tab_n", strofreal(total, "%21.0g"))
+    st_local("parqit_tab_r", strofreal(rows, "%21.0g"))
     displayas("text")
-    printf("\n  %-32s %12s %9s %9s\n", "value", "freq.", "percent", "cum.")
-    printf("  %s\n", 66 * "-")
+    if (rows==0) {
+        printf("no observations\n")
+        return
+    }
+    vars = tokens(st_local("_sq_vars"))
+    meta = _parqit_statmeta(metadata,vars[1])
+    title = meta[2]=="" ? meta[1] : meta[2]
+    stub = max((11,min((40,st_numscalar("c(linesize)")-37,
+                max((udstrlen(title),max(udstrlen(vals))))+1))))
+    if (meta[4]=="s" & substr(meta[5],1,3)=="str" & meta[5]!="strL")
+        stub = max((stub,min((40,st_numscalar("c(linesize)")-37,
+                              strtoreal(substr(meta[5],4,.))))))
+    printf("\n{txt}%s {c |}%11s%12s%12s\n", _parqit_rtext(_parqit_clip(title,stub),stub),
+           "Freq.", "Percent", "Cum.")
+    printf("{hline %g}{c +}{hline 35}\n", stub+1)
     n = 0
     for (i = 1; i <= rows; i++) {
         n = n + counts[i]
-        printf("  %-32s %12.0f %8.2f%% %8.2f%%\n", vals[i], counts[i],
+        printf("{txt}%s {c |}{res}%11s%12.2f%12.2f\n",
+               _parqit_rtext(_parqit_clip(vals[i],stub),stub), strofreal(counts[i],"%10.0gc"),
                100 * counts[i] / total, 100 * n / total)
     }
-    printf("  %s\n", 66 * "-")
-    printf("  %-32s %12.0f\n\n", "total", total)
-    st_local("parqit_tab_n", strofreal(total, "%21.0g"))
-    st_local("parqit_tab_r", strofreal(rows, "%21.0g"))
+    printf("{txt}{hline %g}{c +}{hline 35}\n", stub+1)
+    printf("%s {c |}{res}%11s%12.2f\n", _parqit_rtext("Total",stub),
+           strofreal(total,"%10.0gc"),100)
 }
 end
 
@@ -3749,7 +4004,7 @@ void _parqit_print_views(string scalar resp)
         if (f[1] != "view") continue
         cur = (f[2] == "1" ? "* " : "  ")
         printf("  %s%-20s %8s %8s   %s\n", cur, _parqit_unhex(f[5]), f[3], f[4],
-               abbrev(_parqit_unhex(f[6]), 40))
+               _parqit_text(_parqit_clip(_parqit_unhex(f[6]),40)))
     }
     fclose(fh)
     printf("    (* = current)\n\n")
@@ -3767,60 +4022,87 @@ void _parqit_print_misstable(string scalar resp)
 
     fh = fopen(resp, "r")
     displayas("text")
-    printf("\n  %-32s %12s %12s %9s\n", "variable", "missing", "obs", "share")
-    printf("  %s\n", 70 * "-")
+    printf("\n    Variable {c |}    Missing    Observed         Obs   %% missing\n")
+    printf("{hline 13}{c +}{hline 48}\n")
     nt = 0
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 4)
         if (f[1] != "miss") continue
         nm = strtoreal(f[2])
         nt = strtoreal(f[3])
-        printf("  %-32s %12.0f %12.0f %8.2f%%\n", _parqit_unhex(f[4]), nm, nt,
+        printf("{txt}%s {c |}{res}%11s%12s%12s%12.2f\n",
+               _parqit_rtext(abbrev(_parqit_unhex(f[4]),12),12),
+               strofreal(nm,"%10.0gc"), strofreal(nt-nm,"%10.0gc"), strofreal(nt,"%10.0gc"),
                nt > 0 ? 100 * nm / nt : 0)
     }
     fclose(fh)
     /* the plugin computed complete observations row-wise over the
      * selected variables (count of rows with no missing in any of them) */
     ncomp = strtoreal(st_local("parqit_n_complete"))
-    printf("  %s\n", 70 * "-")
-    printf("  complete observations: %12.0f of %12.0f (%5.2f%%)\n\n",
-           ncomp, nt, nt > 0 ? 100 * ncomp / nt : 0)
+    printf("{txt}{hline 62}\n")
+    printf("Complete observations: {res}%s{txt} of {res}%s{txt} (%5.2f%%)\n",
+           strtrim(strofreal(ncomp,"%18.0gc")),strtrim(strofreal(nt,"%18.0gc")),
+           nt > 0 ? 100 * ncomp / nt : 0)
 }
 
 void _parqit_print_detail(string scalar resp)
 {
-    real scalar      fh, i, p
-    string scalar    line, name
-    string rowvector f, pl
+    real scalar      fh, i, p, pad
+    string scalar    line, name, title, ename
+    string rowvector f, pl, meta, ex, rightlab, rightval
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
     pl = ("1", "5", "10", "25", "50", "75", "90", "95", "99")
     fh = fopen(resp, "r")
     displayas("text")
+    ename = ""
+    ex = J(1, 8, ".")
     while ((line = fget(fh)) != J(0, 0, "")) {
+        f = _parqit_fields(line, 10)
+        if (f[1] == "dtotal") {
+            st_local("parqit_det_sum", f[2])
+            continue
+        }
+        if (f[1] == "dext") {
+            ex = f[2..9]
+            ename = _parqit_unhex(f[10])
+            continue
+        }
         f = _parqit_fields(line, 19)
         if (f[1] != "det") continue
         name = _parqit_unhex(f[19])
-        printf("\n  {bf:%s}\n", name)
-        printf("  %s\n", 60 * "-")
-        printf("  %12s %-14s %14s %-12s\n", "obs", f[2], "mean", substr(f[3], 1, 12))
-        printf("  %12s %-14s %14s %-12s\n", "sd", substr(f[4], 1, 12),
-               "variance", substr(f[5], 1, 12))
-        printf("  %12s %-14s %14s %-12s\n", "skewness", substr(f[6], 1, 12),
-               "kurtosis", substr(f[7], 1, 12))
-        printf("  %12s %-14s %14s %-12s\n", "min", substr(f[8], 1, 12),
-               "max", substr(f[9], 1, 12))
-        /* DETAIL-ODDCELL-1: nine percentiles in two columns leave the last row
-         * with no right-hand pair. Printing the empty pair anyway emitted a
-         * stray "%" with nothing attached to it, so the final row is emitted
-         * with the left column only (same widths, so the columns still line up). */
-        for (i = 1; i <= 9; i = i + 2) {
-            if (i < 9) {
-                printf("  %11s%% %-14s %13s%% %-12s\n", pl[i],
-                       substr(f[9 + i], 1, 12), pl[i + 1],
-                       substr(f[10 + i], 1, 12))
+        meta = _parqit_statmeta(metadata, name)
+        title = meta[2] == "" ? meta[1] : meta[2]
+        /* Native summarize centers the title by its UTF-8 byte length. */
+        pad = max((0, floor((61 - strlen(title)) / 2)))
+        printf("\n{txt}%s%s\n{hline 61}\n", pad * " ", _parqit_text(title))
+        if (strtoreal(f[2]) == 0) printf("no observations\n")
+        else {
+            if (ename != name) {
+                errprintf("parqit: detail output needs the rebuilt plugin; restart Stata\n")
+                _error(198)
             }
-            else {
-                printf("  %11s%% %-14s\n", pl[i], substr(f[9 + i], 1, 12))
+            printf("{txt}      Percentiles      Smallest\n")
+            for (i = 1; i <= 4; i++) {
+                printf("{txt}%2s%% {res}%12s      %9s", pl[i],
+                       _parqit_num(f[9+i], "%9.0g"), _parqit_num(ex[i], "%9.0g"))
+                if (i >= 3) printf("{txt}       %-12s{res}%11s",
+                    i == 3 ? "Obs" : "Sum of wgt.", _parqit_num(f[2], "%10.0gc"))
+                printf("\n")
+            }
+            printf("\n{txt}50%% {res}%12s{txt}                      Mean        {res}%11s\n",
+                   _parqit_num(f[14], "%9.0g"), _parqit_num(f[3], "%9.0g"))
+            printf("{txt}                        Largest       Std. dev.   {res}%11s\n",
+                   _parqit_num(f[4], "%9.0g"))
+            rightlab = ("", "Variance", "Skewness", "Kurtosis")
+            rightval = ("", f[5], f[6], f[7])
+            for (i = 1; i <= 4; i++) {
+                printf("{txt}%2s%% {res}%12s      %9s", pl[i+5],
+                       _parqit_num(f[14+i], "%9.0g"), _parqit_num(ex[i+4], "%9.0g"))
+                if (i >= 2) printf("{txt}       %-12s{res}%11s",
+                    rightlab[i], _parqit_num(rightval[i], "%9.0g"))
+                printf("\n")
             }
         }
         st_local("parqit_det_n", f[2])
@@ -3834,37 +4116,25 @@ void _parqit_print_detail(string scalar resp)
         for (p = 1; p <= 9; p++) {
             st_local("parqit_det_p" + pl[p], f[9 + p])
         }
+        ename = ""
     }
     fclose(fh)
-    printf("\n")
 }
 
-/* Distinct axis labels in the order tabulate should show them: numeric when
- * every label parses as a number (2,10,11 — not the lexicographic 10,11,2 that
- * uniqrows gives on the VARCHAR-cast labels), else alphabetic (TAB2-ORDER-1). */
-string colvector _parqit_axis_order(string colvector vals)
+/* Type, not the spelling of a value, determines its sort order. */
+string colvector _parqit_axis_order(string colvector vals, string scalar kind)
 {
     string colvector u
-    real colvector   x
-    real scalar      i, allnum
-
     u = uniqrows(vals)
-    if (rows(u) == 0) return(u)
-    allnum = 1
-    x = J(rows(u), 1, .)
-    for (i = 1; i <= rows(u); i++) {
-        x[i] = strtoreal(u[i])
-        if (u[i] == "" | x[i] == .) allnum = 0
-    }
-    if (allnum) u = u[order(x, 1)]
+    if (rows(u)>0 & kind=="n") u = u[order(strtoreal(u),1)]
     return(u)
 }
 
 void _parqit_print_tab2(string scalar resp)
 {
-    real scalar      fh, i, j, r, c, n, total
-    string scalar    line
-    string rowvector f
+    real scalar      fh, i, j, r, c, n, total, stub, capacity, b, last, row, col, pad
+    string scalar    line, rt, ct
+    string rowvector f, vars, meta
     string colvector rv, cv, cells_r, cells_c
     real colvector   cells_n
     real matrix      M
@@ -3874,7 +4144,9 @@ void _parqit_print_tab2(string scalar resp)
     string scalar    k1, k2, f1, f2, lab
     string colvector rvd, cvd, lk1, lt1, lk2, lt2
     real scalar      uselab
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
     fh = fopen(resp, "r")
     cells_r = cells_c = J(0, 1, "")
     cells_n = J(0, 1, .)
@@ -3882,7 +4154,7 @@ void _parqit_print_tab2(string scalar resp)
     uselab = (st_local("parqit_tab_nolabel") != "1")
     k1 = k2 = "n"
     f1 = f2 = ""
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 5)
         if (f[1] == "t2h") {
             k1 = f[2]
@@ -3907,8 +4179,8 @@ void _parqit_print_tab2(string scalar resp)
         cells_c = cells_c \ _parqit_unhex(f[4])
     }
     fclose(fh)
-    rv = _parqit_axis_order(cells_r)
-    cv = _parqit_axis_order(cells_c)
+    rv = _parqit_axis_order(cells_r,k1)
+    cv = _parqit_axis_order(cells_c,k2)
     r = rows(rv)
     c = rows(cv)
     M = J(r, c, 0)
@@ -3937,48 +4209,60 @@ void _parqit_print_tab2(string scalar resp)
         }
     }
 
-    displayas("text")
-    printf("\n  %-20s", "")
-    for (j = 1; j <= c; j++) printf(" %10s", abbrev(cvd[j], 10))
-    printf(" | %10s\n", "total")
-    printf("  %s\n", (22 + 11 * (c + 1)) * "-")
-    for (i = 1; i <= r; i++) {
-        printf("  %-20s", abbrev(rvd[i], 20))
-        for (j = 1; j <= c; j++) printf(" %10.0f", M[i, j])
-        printf(" | %10.0f\n", rowtot[i])
-        if (st_local("parqit_tab2_row") == "1") {
-            printf("  %-20s", "")
-            for (j = 1; j <= c; j++) printf(" %9.2f%%",
-                rowtot[i] > 0 ? 100 * M[i, j] / rowtot[i] : 0)
-            printf(" | %9.2f%%\n", 100)
-        }
-        if (st_local("parqit_tab2_col") == "1") {
-            printf("  %-20s", "")
-            for (j = 1; j <= c; j++) printf(" %9.2f%%",
-                coltot[j] > 0 ? 100 * M[i, j] / coltot[j] : 0)
-            printf(" | %9.2f%%\n", total > 0 ? 100 * rowtot[i] / total : 0)
-        }
-    }
-    printf("  %s\n", (22 + 11 * (c + 1)) * "-")
-    printf("  %-20s", "total")
-    for (j = 1; j <= c; j++) printf(" %10.0f", coltot[j])
-    printf(" | %10.0f\n", total)
-    if (st_local("parqit_tab2_row") == "1") {
-        printf("  %-20s", "")
-        for (j = 1; j <= c; j++) printf(" %9.2f%%",
-            total > 0 ? 100 * coltot[j] / total : 0)
-        printf(" | %9.2f%%\n", 100)
-    }
-    if (st_local("parqit_tab2_col") == "1") {
-        printf("  %-20s", "")
-        for (j = 1; j <= c; j++) printf(" %9.2f%%", 100)
-        printf(" | %9.2f%%\n", 100)
-    }
-    printf("\n")
-
     st_local("parqit_tab_n", strofreal(total, "%21.0g"))
     st_local("parqit_tab_r", strofreal(r, "%21.0g"))
     st_local("parqit_tab_c", strofreal(c, "%21.0g"))
+    displayas("text")
+    if (total==0) {
+        printf("no observations\n")
+        return
+    }
+    vars = tokens(st_local("_sq_vars"))
+    meta = _parqit_statmeta(metadata,vars[1])
+    rt = meta[2]=="" ? meta[1] : meta[2]
+    meta = _parqit_statmeta(metadata,vars[2])
+    ct = meta[2]=="" ? meta[1] : meta[2]
+    row = st_local("parqit_tab2_row")=="1"
+    col = st_local("parqit_tab2_col")=="1"
+    if (row | col) {
+        printf("\n{txt}{c TLC}{hline 19}{c TRC}\n{c |} Key               {c |}\n")
+        printf("{c LT}{hline 19}{c RT}\n{c |}     frequency     {c |}\n")
+        if (row) printf("{c |}  row percentage   {c |}\n")
+        if (col) printf("{c |} column percentage {c |}\n")
+        printf("{c BLC}{hline 19}{c BRC}\n")
+    }
+    stub = max((10,min((20,max((udstrlen(rt),max(udstrlen(rvd))))))))
+    capacity = max((1,floor((st_numscalar("c(linesize)")-stub-13)/11)))
+    for (b=1; b<=c; b=b+capacity) {
+        last = min((c,b+capacity-1))
+        if (capacity<c) printf("\n{txt}Columns %g-%g of %g\n",b,last,c)
+        pad = max((1,floor((11*(last-b+1)-1-udstrlen(ct))/2)+1))
+        printf("\n{txt}%s {c |}%s%s\n", _parqit_rtext("",stub),pad*" ",_parqit_text(ct))
+        printf("%s {c |}",_parqit_rtext(_parqit_clip(rt,stub),stub))
+        for (j=b; j<=last; j++) printf("%s%s",j>b ? " " : "",_parqit_rtext(_parqit_clip(cvd[j],10),10))
+        printf(" {c |}%10s\n","Total")
+        printf("{hline %g}{c +}{hline %g}{c +}{hline 10}\n",stub+1,11*(last-b+1))
+        for (i=1; i<=r+1; i++) {
+            if (i>1 & (row | col | i==r+1))
+                printf("{txt}{hline %g}{c +}{hline %g}{c +}{hline 10}\n",stub+1,11*(last-b+1))
+            printf("{txt}%s {c |}{res}",_parqit_rtext(i<=r ? _parqit_clip(rvd[i],stub) : "Total",stub))
+            for (j=b; j<=last; j++) printf("%s%10s",j>b ? " " : "",
+                strofreal(i<=r ? M[i,j] : coltot[j],"%9.0gc"))
+            printf("{txt} {c |}{res}%10s\n",strofreal(i<=r ? rowtot[i] : total,"%9.0gc"))
+            if (row) {
+                printf("{txt}%s {c |}{res}",_parqit_rtext("",stub))
+                for (j=b; j<=last; j++) printf("%s%10.2f",j>b ? " " : "",
+                    100*(i<=r ? M[i,j]/rowtot[i] : coltot[j]/total))
+                printf("{txt} {c |}{res}%10.2f\n",100)
+            }
+            if (col) {
+                printf("{txt}%s {c |}{res}",_parqit_rtext("",stub))
+                for (j=b; j<=last; j++) printf("%s%10.2f",j>b ? " " : "",
+                    i<=r ? 100*M[i,j]/coltot[j] : 100)
+                printf("{txt} {c |}{res}%10.2f\n",i<=r ? 100*rowtot[i]/total : 100)
+            }
+        }
+    }
 }
 
 void _parqit_build_levels(string scalar resp)
@@ -3991,7 +4275,7 @@ void _parqit_build_levels(string scalar resp)
     fh = fopen(resp, "r")
     out = ""
     n = 0
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 2)
         if (f[1] != "lvl") continue
         v = _parqit_unhex(f[2])
@@ -4049,7 +4333,7 @@ void _parqit_split_in(string scalar src)
     }
 }
 
-void _parqit_collect_names(string scalar resp, string scalar unused)
+void _parqit_collect_names(string scalar resp, string scalar kind)
 {
     real scalar      fh
     string scalar    line, out
@@ -4060,6 +4344,9 @@ void _parqit_collect_names(string scalar resp, string scalar unused)
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 6)
         if (f[1] != "vcol") continue
+        if (kind != "") {
+            if (_parqit_unhex(f[4]) != kind) continue
+        }
         out = out + (out == "" ? "" : " ") + _parqit_unhex(f[3])
     }
     fclose(fh)
@@ -4076,7 +4363,7 @@ void _parqit_lookfor_resp(string scalar resp)
     fh = fopen(resp, "r")
     out = ""
     displayas("text")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 6)
         if (f[1] != "vcol") continue
         name = _parqit_unhex(f[3])
@@ -4088,7 +4375,7 @@ void _parqit_lookfor_resp(string scalar resp)
             }
         }
         if (hit) {
-            printf("  %-32s %s\n", name, lab)
+            printf("  %-32s %s\n", _parqit_text(name), _parqit_text(lab))
             out = out + (out == "" ? "" : " ") + name
         }
     }
@@ -4099,24 +4386,39 @@ void _parqit_lookfor_resp(string scalar resp)
 
 void _parqit_print_codebook(string scalar resp)
 {
-    real scalar      fh
-    string scalar    line
-    string rowvector f
+    real scalar      fh, width, gap
+    string scalar    line, kind, lo, hi
+    string rowvector f, meta
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
+    width = st_numscalar("c(linesize)")
     fh = fopen(resp, "r")
     displayas("text")
-    printf("\n  %-24s %-7s %10s %9s %10s  %-12s %-12s %s\n",
-           "variable", "kind", "obs", "missing", "distinct", "min", "max", "label")
-    printf("  %s\n", 104 * "-")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 9)
         if (f[1] != "cb") continue
-        printf("  %-24s %-7s %10s %9s %10s  %-12s %-12s %s\n",
-               _parqit_unhex(f[6]),
-               (f[5] == "s" ? "string" : "numeric"),
-               f[2], f[3], f[4],
-               abbrev(_parqit_unhex(f[7]), 12), abbrev(_parqit_unhex(f[8]), 12),
-               abbrev(_parqit_unhex(f[9]), 24))
+        meta = _parqit_statmeta(metadata,_parqit_unhex(f[6]))
+        gap = max((1,width-udstrlen(meta[1])-udstrlen(meta[2])))
+        printf("\n{txt}{hline %g}\n%s%s%s\n{hline %g}\n",width,
+               _parqit_text(meta[1]),gap*" ",_parqit_text(meta[2]),width)
+        kind = f[5]=="s" ? "String" : "Numeric"
+        if (meta[5]!="") kind = kind+" ("+meta[5]+")"
+        lo = _parqit_unhex(f[7])
+        hi = _parqit_unhex(f[8])
+        if (f[5]!="s") {
+            lo = _parqit_render_num(lo,meta[3])
+            hi = _parqit_render_num(hi,meta[3])
+        }
+        else {
+            lo = char(34)+_parqit_clip(lo,24)+char(34)
+            hi = char(34)+_parqit_clip(hi,24)+char(34)
+        }
+        printf("\n{txt}                  Type: {res}%s\n",_parqit_text(kind))
+        printf("\n{txt}                 Range: {res}[%s,%s]\n",_parqit_text(lo),_parqit_text(hi))
+        printf("{txt}         Unique values: {res}%s\n",strtrim(_parqit_num(f[4],"%18.0gc")))
+        printf("{txt}               Missing: {res}%s/%s\n",strtrim(_parqit_num(f[3],"%18.0gc")),
+               strtrim(_parqit_num(f[2],"%18.0gc")))
     }
     fclose(fh)
     printf("\n")
@@ -4130,17 +4432,20 @@ void _parqit_print_distinct(string scalar resp)
 
     fh = fopen(resp, "r")
     displayas("text")
-    printf("\n  %-32s %12s %12s\n", "variable", "distinct", "obs")
-    printf("  %s\n", 60 * "-")
+    printf("\n    Variable {c |}    Distinct           Obs\n")
+    printf("{hline 13}{c +}{hline 28}\n")
     lastd = .
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 4)
         if (f[1] == "dst") {
-            printf("  %-32s %12s %12s\n", _parqit_unhex(f[4]), f[2], f[3])
+            printf("{txt}%s {c |}{res}%12s%14s\n",
+                   _parqit_rtext(abbrev(_parqit_unhex(f[4]),12),12),
+                   _parqit_num(f[2],"%12.0gc"),_parqit_num(f[3],"%14.0gc"))
             lastd = strtoreal(f[2])
         }
         else if (f[1] == "dstj") {
-            printf("  %-32s %12s %12s\n", "(joint)", f[2], f[3])
+            printf("{txt}%s {c |}{res}%12s%14s\n",_parqit_rtext("(joint)",12),
+                   _parqit_num(f[2],"%12.0gc"),_parqit_num(f[3],"%14.0gc"))
             lastd = strtoreal(f[2])
         }
     }
@@ -4157,8 +4462,9 @@ void _parqit_print_dupreport(string scalar resp)
 
     fh = fopen(resp, "r")
     displayas("text")
-    printf("\n  %10s %14s %12s\n", "copies", "observations", "surplus")
-    printf("  %s\n", 40 * "-")
+    printf("\nDuplicates in terms of %s\n",_parqit_text(st_local("_sq_vars")))
+    printf("\n{hline 38}\n%9s {c |}%13s%14s\n", "Copies", "Observations", "Surplus")
+    printf("{hline 10}{c +}{hline 27}\n")
     uniq = 0
     surplus = 0
     total = 0
@@ -4167,14 +4473,14 @@ void _parqit_print_dupreport(string scalar resp)
         if (f[1] != "dupr") continue
         copies = strtoreal(f[2])
         groups = strtoreal(f[3])
-        printf("  %10.0f %14.0f %12.0f\n", copies, copies * groups,
+        printf("{res}%9.0f {txt}{c |}{res}%13.0f%14.0f\n", copies, copies * groups,
                (copies - 1) * groups)
         uniq = uniq + groups
         surplus = surplus + (copies - 1) * groups
         total = total + copies * groups
     }
     fclose(fh)
-    printf("\n")
+    printf("{txt}{hline 38}\n")
     st_local("parqit_dup_unique", strofreal(uniq, "%21.0g"))
     st_local("parqit_dup_surplus", strofreal(surplus, "%21.0g"))
     st_local("parqit_dup_total", strofreal(total, "%21.0g"))
@@ -4182,25 +4488,43 @@ void _parqit_print_dupreport(string scalar resp)
 
 void _parqit_print_duplist(string scalar resp)
 {
-    real scalar      fh, i
-    string scalar    line
-    string rowvector f, parts
+    real scalar      fh, i, k
+    string scalar    line, value
+    string rowvector f, parts, names, meta
+    transmorphic scalar metadata
 
+    metadata = _parqit_statsmeta(resp)
+    names = J(1,0,"")
+    k = 0
     fh = fopen(resp, "r")
     displayas("text")
-    while ((line = fget(fh)) != J(0, 0, "")) {
+    while ((line = _parqit_fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 2)
-        if (f[1] == "duph") {
-            parts = ustrsplit(_parqit_unhex(f[2]), char(31))   /* DUPLIST-SEP-1 */
+        if (f[1] == "duph2") {
+            k = strtoreal(f[2])
+            f = _parqit_fields(line,k+2)
+            parts = J(1,k,"")
+            for (i=1; i<=k; i++) parts[i] = _parqit_unhex(f[i+2])
+            names = parts
             printf("\n  ")
-            for (i = 1; i <= cols(parts); i++) printf("%-14s", abbrev(parts[i], 13))
+            for (i = 1; i <= k; i++) printf("%-14s", _parqit_text(abbrev(parts[i],13)))
             printf("\n  %s\n", (14 * cols(parts)) * "-")
         }
-        else if (f[1] == "dupl") {
-            parts = ustrsplit(_parqit_unhex(f[2]), char(31))   /* DUPLIST-SEP-1 */
+        else if (f[1] == "dupl2") {
+            f = _parqit_fields(line,k+1)
             printf("  ")
-            for (i = 1; i <= cols(parts); i++) printf("%-14s", abbrev(parts[i], 13))
+            for (i = 1; i <= k; i++) {
+                value = _parqit_unhex(f[i+1])
+                meta = _parqit_statmeta(metadata,names[i])
+                if (meta[4]!="s") value = _parqit_render_num(value,meta[3])
+                value = _parqit_clip(value,13)
+                printf("%s%s",_parqit_text(value),max((0,14-udstrlen(value)))*" ")
+            }
             printf("\n")
+        }
+        else if (f[1]=="duph" | f[1]=="dupl") {
+            errprintf("parqit: duplicate output needs the rebuilt plugin; restart Stata\n")
+            _error(198)
         }
     }
     fclose(fh)
@@ -4209,65 +4533,248 @@ void _parqit_print_duplist(string scalar resp)
 
 void _parqit_print_misspatterns(string scalar resp)
 {
-    real scalar      fh, n
-    string scalar    line
-    string rowvector f
+    real scalar i, j, n, total, shown, count
+    string scalar pattern, names, item
+    string rowvector f, vars
+    string colvector lines
 
-    fh = fopen(resp, "r")
-    displayas("text")
-    n = 0
-    while ((line = fget(fh)) != J(0, 0, "")) {
-        f = _parqit_fields(line, 3)
-        if (f[1] == "mph") {
-            printf("\n  pattern key (+ observed, . missing), variables in order:\n")
-            printf("    %s\n", _parqit_unhex(f[2]))
-            printf("\n  %-20s %12s\n", "pattern", "freq.")
-            printf("  %s\n", 36 * "-")
-        }
-        else if (f[1] == "mpat") {
-            printf("  %-20s %12s\n", _parqit_unhex(f[3]), f[2])
-            n++
-        }
+    lines = _parqit_resp_lines(resp)
+    total = .
+    vars = J(1,0,"")
+    for (i=1; i<=rows(lines); i++) {
+        f = _parqit_fields(lines[i],3)
+        if (f[1]=="mph") vars = tokens(_parqit_unhex(f[2]))
+        if (f[1]=="mptotal") total = strtoreal(f[2])
     }
-    fclose(fh)
-    printf("\n")
+    if (total==.) {
+        errprintf("parqit: pattern output needs the rebuilt plugin; restart Stata\n")
+        _error(198)
+    }
+    printf("\n{txt}   Missing-value patterns\n     (1 means complete)\n")
+    printf("\n   Frequency   Percent {c |}   Pattern\n                       {c |}")
+    for (j=1; j<=cols(vars); j++) printf("%3.0f",j)
+    printf("\n  {hline 21}{c +}{hline %g}\n",3*cols(vars)+2)
+    n = shown = 0
+    for (i=1; i<=rows(lines); i++) {
+        f = _parqit_fields(lines[i],3)
+        if (f[1]!="mpat") continue
+        pattern = _parqit_unhex(f[3])
+        count = strtoreal(f[2])
+        printf("{res}%12.0f%10.2f {txt}{c |}{res}",count,total>0 ? 100*count/total : .)
+        for (j=1; j<=cols(vars); j++) printf("%3.0f",substr(pattern,j,1)=="+")
+        printf("\n")
+        shown = shown+count
+        n++
+    }
+    printf("{txt}  {hline 21}{c +}{hline %g}\n",3*cols(vars)+2)
+    printf("{res}%12.0f%10.2f {txt}{c |}\n",shown,total>0 ? 100*shown/total : .)
+    if (shown<total) printf("{txt}Shown: the 100 most frequent patterns (%s observations in all)\n",
+                            strtrim(strofreal(total,"%18.0gc")))
+    names = "  Variables are"
+    for (j=1; j<=cols(vars); j++) {
+        item = " ("+strtrim(strofreal(j))+") "+vars[j]
+        if (udstrlen(names)+udstrlen(item)>st_numscalar("c(linesize)")) {
+            printf("{txt}%s\n",_parqit_text(names))
+            names = " "
+        }
+        names = names+item
+    }
+    printf("\n{txt}%s\n",_parqit_text(names))
     st_local("parqit_mp_r", strofreal(n, "%21.0g"))
+    st_local("parqit_mp_n", strofreal(total, "%21.0g"))
+}
+
+string scalar _parqit_statname(string scalar s)
+{
+    string rowvector keys, labels
+    real scalar i
+    keys = ("n", "count", "mean", "sd", "var", "sum", "min", "max", "range", "median")
+    labels = ("N", "N", "Mean", "SD", "Variance", "Sum", "Min", "Max", "Range", "p50")
+    for (i=1; i<=cols(keys); i++) if (s==keys[i]) return(labels[i])
+    return(s)
 }
 
 void _parqit_print_tabstat(string scalar resp)
 {
-    real scalar      fh, i, ns
-    string scalar    line, g, lastg
-    string rowvector f, stats
+    real scalar i, j, ns, k, nt, ng, g, v, stub, across, capacity, b, last, rr
+    string scalar by, label, title, mat, suffix
+    string colvector lines, groups, lkeys, ltexts
+    string rowvector f, stats, labels, vars, displayvars, meta
+    real matrix S
+    transmorphic scalar metadata
 
     stats = tokens(st_local("_sq_stats"))
+    vars = tokens(st_local("_sq_vars"))
+    by = st_local("_sq_by")
     ns = cols(stats)
-    fh = fopen(resp, "r")
-    displayas("text")
-    printf("\n  %-20s %-14s", "variable", "group")
-    for (i = 1; i <= ns; i++) printf(" %12s", stats[i])
-    printf("\n  %s\n", (36 + 13 * ns) * "-")
-    lastg = ""
-    while ((line = fget(fh)) != J(0, 0, "")) {
-        f = _parqit_fields(line, 2 + ns + 1)
-        if (f[1] != "ts") continue
-        g = _parqit_unhex(f[2 + ns + 1])
-        printf("  %-20s %-14s", abbrev(_parqit_unhex(f[2 + ns]), 20),
-               abbrev(g == "" ? "(all)" : g, 14))
-        for (i = 1; i <= ns; i++) printf(" %12s", substr(f[1 + i], 1, 12))
-        printf("\n")
+    k = cols(vars)
+    labels = J(1,ns,"")
+    for (i=1; i<=ns; i++) labels[i] = _parqit_statname(stats[i])
+    lines = _parqit_resp_lines(resp)
+    metadata = _parqit_statsmeta(resp)
+    displayvars = vars
+    for (i=1; i<=k; i++) {
+        meta = _parqit_statmeta(metadata,vars[i])
+        displayvars[i] = meta[1]
     }
-    fclose(fh)
-    printf("\n")
+    lkeys = ltexts = J(0,1,"")
+    nt = 0
+    for (i=1; i<=rows(lines); i++) {
+        f = _parqit_fields(lines[i], 3)
+        if (f[1]=="ts") nt++
+        if (f[1]=="tsvl") {
+            lkeys = lkeys \ _parqit_unhex(f[2])
+            ltexts = ltexts \ _parqit_unhex(f[3])
+        }
+    }
+    ng = nt/k
+    S = J(ng*ns,k,.)
+    groups = J(ng,1,"")
+    nt = 0
+    for (i=1; i<=rows(lines); i++) {
+        f = _parqit_fields(lines[i], ns+3)
+        if (f[1]!="ts") continue
+        nt++
+        g = ceil(nt/k)
+        v = mod(nt-1,k)+1
+        S[((g-1)*ns+1)..(g*ns),v] = strtoreal(f[2..(ns+1)])'
+        groups[g] = _parqit_unhex(f[ns+3])
+    }
+    if (by!="") {
+        meta = _parqit_statmeta(metadata, by)
+        for (g=1; g<=ng; g++) {
+            label = meta[4]=="n" ? _parqit_vlabel(groups[g],lkeys,ltexts) : ""
+            groups[g] = label!="" ? label :
+                (meta[4]=="n" ? _parqit_render_num(groups[g],meta[3]) : groups[g])
+        }
+    }
+    st_local("parqit_ts_groups", strofreal(ng))
+    if (st_local("_sq_save")!="") {
+        for (g=1; g<=ng; g++) {
+            mat = st_tempname()
+            st_matrix(mat, S[((g-1)*ns+1)..(g*ns),.])
+            st_matrixrowstripe(mat, (J(ns,1,""),labels'))
+            st_matrixcolstripe(mat, (J(k,1,""),displayvars'))
+            suffix = strtrim(strofreal(g))
+            st_local("parqit_ts_mat"+suffix, mat)
+            st_local("parqit_ts_name"+suffix, groups[g])
+        }
+    }
+    if (ng==0) {
+        printf("{txt}no observations\n")
+        return
+    }
+    displayas("text")
+    stub = k==1 ? 12 : 8
+    if (by!="") {
+        if (k==1) printf("\n{txt}Summary for variables: %s\n", _parqit_text(displayvars[1]))
+        else printf("\n{txt}Summary statistics: %s\n", invtokens(labels, ", "))
+        printf("Group variable: %s", _parqit_text(meta[1]))
+        if (meta[2]!="") printf(" (%s)", _parqit_text(meta[2]))
+        printf("\n")
+        stub = max((8,min((16,max(udstrlen(groups)))),min((16,udstrlen(meta[1])))))
+        if (meta[4]=="s" & substr(meta[5],1,3)=="str" & meta[5]!="strL")
+            stub = max((stub,min((16,strtoreal(substr(meta[5],4,.))))))
+    }
+    across = k==1 ? ns : k
+    capacity = max((1, floor((st_numscalar("c(linesize)")-stub-2)/10)))
+    for (b=1; b<=across; b=b+capacity) {
+        last = min((across,b+capacity-1))
+        title = by!="" ? abbrev(meta[1],stub) : (k==1 ? "Variable" : "Stats")
+        printf("\n{txt}%s {c |}", _parqit_rtext(title,stub))
+        for (j=b; j<=last; j++) printf("%s", _parqit_rtext(k==1 ? labels[j] : abbrev(displayvars[j],9),10))
+        printf("\n{hline %g}{c +}{hline %g}\n", stub+1,10*(last-b+1))
+        for (g=1; g<=ng; g++) {
+            if (g>1 & k>1 & ns>1) printf("{txt}{hline %g}{c +}{hline %g}\n",stub+1,10*(last-b+1))
+            for (i=1; i<=(k==1 ? 1 : ns); i++) {
+                label = by!="" ? (i==1 ? _parqit_clip(groups[g],stub) : "") :
+                    (k==1 ? abbrev(displayvars[1],stub) : labels[i])
+                printf("{txt}%s {c |}{res}", _parqit_rtext(label,stub))
+                for (j=b; j<=last; j++) {
+                    rr = (g-1)*ns + (k==1 ? j : i)
+                    printf("%10s", strofreal(S[rr,k==1 ? 1 : j], "%9.0g"))
+                }
+                printf("\n")
+            }
+        }
+        printf("{txt}{hline %g}\n", stub+2+10*(last-b+1))
+    }
+}
+
+real scalar _parqit_corr_subnormal_p(real scalar r, real scalar sine, real scalar nu)
+{
+    real scalar b, q, term, series, correction, add, next, j, k, odd, coef, logp, h
+    b = nu/2
+    term = series = 1
+    correction = 0
+    if (r>=sine) {
+        if (nu>=2200 | sine==0) return(0)
+        q = sine*sine
+        k = floor(b)
+        odd = mod(nu,2)
+        coef = odd ? 2/pi() : 1
+        for (j=1; j<=k; j++) coef = coef*(odd ? 2*j/(2*j+1) : (2*j-1)/(2*j))
+        for (j=1; j<=64; j++) {
+            term = term*q*(odd ? 2*(k+j)/(2*(k+j)+1) : (2*(k+j)-1)/(2*(k+j)))
+            add = term-correction
+            next = series+add
+            correction = (next-series)-add
+            series = next
+            if (term<series*2^-60) break
+        }
+        if (j>64) return(.)
+        logp = nu*ln(sine)+ln(r*coef*series)
+    }
+    else {
+        if (b<512) return(.)
+        q = (1-r*r)/(r*r)
+        for (j=1; j<=64; j++) {
+            term = -term*((j-.5)/(b+j))*q
+            add = term-correction
+            next = series+add
+            correction = (next-series)-add
+            series = next
+            if (abs(term)<abs(series)*2^-60) break
+        }
+        if (j>64 | series<=0) return(.)
+        /* Stirling remainder here is below 2e-22 for b>=512. */
+        h = 1/b
+        coef = exp(-h/8+h^3/192-h^5/640)/sqrt(pi()*b)
+        logp = b*ln1p(-r*r)+ln(coef*series/r)
+    }
+    /* Mata exp() itself flushes subnormal results; scale before exponentiation. */
+    return(exp(logp+512*ln(2))*2^-512)
+}
+
+real scalar _parqit_corr_p(real scalar rho, real scalar sine, real scalar n,
+                           real scalar perfect, real scalar domain)
+{
+    real scalar r, p
+    if (rho>=. | sine>=. | n<3) return(.)
+    if (perfect) return(0)
+    r = abs(rho)
+    if (r==0) return(1)
+    if (n==3) {
+        if (r>=sine) return((2/pi())*atan(sine/r))
+        return(1-(2/pi())*atan(r/sine))
+    }
+    if (n==4) {
+        if (r>=sine) return((sine*sine)/(1+r))
+        return(1-r)
+    }
+    if (!domain) return(.)
+    p = r>=sine ? ibeta((n-2)/2,.5,sine*sine) : ibetatail(.5,(n-2)/2,r*r)
+    if (p==0) p = _parqit_corr_subnormal_p(r,sine,n-2)
+    return(p)
 }
 
 void _parqit_print_corr(string scalar resp)
 {
-    real scalar      fh, i, j, k, n, minn, lastr, tstat, pval
+    real scalar      fh, i, j, k, minn, lastr, b, last, width, pairwise, needsig, badtail
     string scalar    line
     string rowvector f
     string colvector names
-    real matrix      R, Nm
+    real matrix      R, Nm, P, Sine, Perfect, Domain
 
     fh = fopen(resp, "r")
     names = J(0, 1, "")
@@ -4281,50 +4788,102 @@ void _parqit_print_corr(string scalar resp)
     k = rows(names)
     R = J(k, k, .)
     Nm = J(k, k, .)
+    needsig = st_local("_sq_sig")!=""
+    P = needsig ? J(k,k,.) : J(0,0,.)
+    Sine = P
+    Perfect = P
+    Domain = P
     fh = fopen(resp, "r")
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 7)
+        if (f[1] == "cgeom") {
+            if (needsig) {
+                i = strtoreal(f[2])
+                j = strtoreal(f[3])
+                Sine[i,j] = strtoreal(f[4])
+                Perfect[i,j] = strtoreal(f[5])
+                Domain[i,j] = strtoreal(f[6])
+            }
+            continue
+        }
         if (f[1] != "cor") continue
         i = strtoreal(f[2])
         j = strtoreal(f[3])
         R[i, j] = strtoreal(f[4])
         Nm[i, j] = strtoreal(f[5])
+        R[j, i] = R[i, j]
+        Nm[j, i] = Nm[i, j]
     }
     fclose(fh)
 
-    displayas("text")
-    printf("\n  %-14s", "")
-    for (j = 1; j <= k; j++) printf(" %12s", abbrev(names[j], 12))
-    printf("\n")
     minn = .
     lastr = .
+    badtail = 0
     for (i = 1; i <= k; i++) {
-        printf("  %-14s", abbrev(names[i], 12))
         for (j = 1; j <= i; j++) {
-            printf(" %12.4f", R[i, j])
-            if (i != j) lastr = R[i, j]
-        }
-        printf("\n")
-        if (st_local("_sq_sig") != "") {
-            printf("  %-14s", "")
-            for (j = 1; j <= i; j++) {
-                if (i == j | R[i, j] == . | Nm[i, j] < 3) printf(" %12s", "")
-                else {
-                    tstat = R[i, j] * sqrt((Nm[i, j] - 2) / (1 - R[i, j]^2))
-                    pval = 2 * ttail(Nm[i, j] - 2, abs(tstat))
-                    printf(" %12.4f", pval)
-                }
+            if (R[i,j] < . & abs(R[i,j]) > 1) {
+                errprintf("parqit: correlation outside its mathematical range\n")
+                _error(498)
             }
-            printf("\n")
-        }
-        if (st_local("_sq_obs") != "") {
-            printf("  %-14s", "")
-            for (j = 1; j <= i; j++) printf(" %12.0f", Nm[i, j])
-            printf("\n")
+            if (i != j) lastr = R[i, j]
+            if (needsig & i!=j & R[i,j] < . & Nm[i,j] >= 3) {
+                P[i,j] = _parqit_corr_p(R[i,j],Sine[i,j],Nm[i,j],Perfect[i,j],Domain[i,j])
+                badtail = badtail | P[i,j]>=.
+                P[j,i] = P[i,j]
+            }
         }
         if (Nm[i, i] < minn) minn = Nm[i, i]
     }
-    printf("\n")
+    displayas("text")
+    if (badtail) printf("note: a p-value outside the supported beta-function domain was returned as missing\n")
+    pairwise = st_local("_sq_pairwise") == "true"
+    if (!pairwise) printf("{txt}(obs=%s)\n", strtrim(strofreal(minn, "%18.0g")))
+    width = max((1, floor((st_numscalar("c(linesize)") - 14) / 9)))
+    for (b = 1; b <= k; b = b + width) {
+        last = min((k, b + width - 1))
+        printf("\n{txt}             {c |}")
+        for (j = b; j <= last; j++) printf("%s", _parqit_rtext(abbrev(names[j],8),9))
+        printf("\n{hline 13}{c +}{hline %g}\n", 9*(last-b+1))
+        for (i = b; i <= k; i++) {
+            printf("{txt}%s {c |}{res}", _parqit_rtext(abbrev(names[i],12),12))
+            for (j = b; j <= min((i,last)); j++) printf("%9.4f", R[i,j])
+            printf("\n")
+            if (st_local("_sq_sig") != "") {
+                printf("{txt}             {c |}{res}")
+                for (j = b; j <= min((i-1,last)); j++) printf("%9.4f", P[i,j])
+                printf("\n")
+            }
+            if (st_local("_sq_obs") != "") {
+                printf("{txt}             {c |}{res}")
+                for (j = b; j <= min((i,last)); j++) printf("%9.0f", Nm[i,j])
+                printf("\n")
+            }
+            if (st_local("_sq_sig") != "" | st_local("_sq_obs") != "")
+                printf("{txt}             {c |}\n")
+        }
+    }
+    if (!pairwise) printf("\n")
+    st_local("parqit_corr_matrices", "0")
+    if (k > st_numscalar("c(max_matdim)")) {
+        printf("{txt}note: matrix results exceed Stata's matrix dimension limit; table and scalars returned\n")
+        st_local("parqit_corr_n", strofreal(minn, "%21.0g"))
+        st_local("parqit_corr_last", strofreal(lastr, "%21.0g"))
+        return
+    }
+    st_matrix(st_local("_sq_corr_matrix"), R)
+    st_matrixrowstripe(st_local("_sq_corr_matrix"), (J(k,1,""),names))
+    st_matrixcolstripe(st_local("_sq_corr_matrix"), (J(k,1,""),names))
+    if (pairwise) {
+        st_matrix(st_local("_sq_count_matrix"), Nm)
+        st_matrixrowstripe(st_local("_sq_count_matrix"), (J(k,1,""),names))
+        st_matrixcolstripe(st_local("_sq_count_matrix"), (J(k,1,""),names))
+        if (st_local("_sq_sig") != "") {
+            st_matrix(st_local("_sq_p_matrix"), P)
+            st_matrixrowstripe(st_local("_sq_p_matrix"), (J(k,1,""),names))
+            st_matrixcolstripe(st_local("_sq_p_matrix"), (J(k,1,""),names))
+        }
+    }
+    st_local("parqit_corr_matrices", "1")
     st_local("parqit_corr_n", strofreal(minn, "%21.0g"))
     st_local("parqit_corr_last", strofreal(lastr, "%21.0g"))
 }
@@ -4337,7 +4896,7 @@ void _parqit_fill_hist(string scalar resp)
 
     fh = fopen(resp, "r")
     while ((line = fget(fh)) != J(0, 0, "")) {
-        f = _parqit_fields(line, 3)
+        f = _parqit_fields(line, 4)
         if (f[1] != "hb") continue
         b = strtoreal(f[2]) + 1
         if (b < 1 | b > st_nobs() | b == .) {
@@ -4347,6 +4906,7 @@ void _parqit_fill_hist(string scalar resp)
             _error(3300, "parqit histogram: bin/frame mismatch")
         }
         st_store(b, "__freq", strtoreal(f[3]))
+        st_store(b, "__mid", strtoreal(f[4]))
     }
     fclose(fh)
 }

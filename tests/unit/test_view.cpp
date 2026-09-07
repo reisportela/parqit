@@ -2,6 +2,7 @@
  * DuckDB and the results are compared with Stata's semantics. */
 #include "doctest.h"
 
+#include <cmath>
 #include <vector>
 
 #include "duckdb.h"
@@ -47,6 +48,13 @@ static long long run_count(const View &v) {
     return std::strtoll(
         run_scalar("SELECT count(*) FROM (" + v.compile(false) + ")").c_str(),
         nullptr, 10);
+}
+
+TEST_CASE("integer percentile ranks avoid count multiplication and double rounding") {
+    const std::string statistic = pct_window_sql("x", "rank", "n", 99);
+    CHECK(run_scalar("SELECT " + statistic + " FROM (VALUES "
+        "(1, 7920000000000000000::BIGINT, 8000000000000000000::BIGINT), "
+        "(3, 7920000000000000001::BIGINT, 8000000000000000000::BIGINT)) t(x,rank,n)") == "2.0");
 }
 
 TEST_CASE("keep/drop/filter/gen pipeline executes with Stata semantics") {
@@ -283,6 +291,12 @@ TEST_CASE("contract, duplicates drop, keep in, sample") {
     View v6 = make_view();
     CHECK(v6.sample(50, false, 7).empty());
     CHECK(run_count(v6) == 3); /* 50% of 6 */
+    const auto previous = v6.compile(false);
+    CHECK_FALSE(v6.sample(0x1p63, true, 7).empty());
+    CHECK_FALSE(v6.sample(1e100, true, 7).empty());
+    CHECK_FALSE(v6.sample(NAN, true, 7).empty());
+    CHECK_FALSE(v6.sample(INFINITY, false, 7).empty());
+    CHECK(v6.compile(false) == previous);
 }
 
 TEST_CASE("egen group statistics") {
@@ -973,4 +987,15 @@ TEST_CASE("CONTRACT-FREQ-1/A2-15.4: contract refuses an existing frequency varia
            nlohmann::json::object(), nlohmann::json::object(), "", "contract fixture");
     CHECK_FALSE(w.contract({"_freq"}, "").empty()); /* _freq by-var AND frequency name */
     CHECK(w.contract({"_freq"}, "cnt").empty());
+}
+
+TEST_CASE("egen refuses row context without changing the view") {
+    for (const char *expr : {"_n", "_N"}) {
+        View v = make_view();
+        const std::string before = v.show();
+        const std::string error = v.egen("n", "max", expr, {}, false);
+        CHECK(error.find("_n/_N are not supported in egen") != std::string::npos);
+        CHECK(error.find("__PARQIT_") == std::string::npos);
+        CHECK(v.show() == before);
+    }
 }

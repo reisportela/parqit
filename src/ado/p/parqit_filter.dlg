@@ -1,7 +1,7 @@
 /*
   parqit keep - Keep or drop observations, or draw a random sample
 
-*!  VERSION 0.1.34  04sep2026
+*!  VERSION 0.1.35  07sep2026
 
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)
@@ -15,14 +15,21 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 305
+DEFINE _dlght 355
 INCLUDE header
-HELP hlp1, view("help parqit##menu")
+HELP hlp1, view("help parqit##verbs")
 RESET res1
+
+SCRIPT PREINIT
+BEGIN
+	create STRING dlgname
+	dlgname.storeDialogClassName
+END
 
 PROGRAM POSTINIT_PROGRAM
 BEGIN
 	call program main_mode
+	call program main_context
 END
 
 DIALOG main, label("parqit keep - Keep or drop observations, or draw a random sample") ///
@@ -84,6 +91,16 @@ BEGIN
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("These verbs change the view's plan only; materialise the result with parqit collect or parqit save.")
+  TEXT tx_context _lft 310 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
+END
+
+PROGRAM main_context
+BEGIN
+	put "parqit _dlgcontext "
+	put dlgname
+	stata hidden queue
+	clear
 END
 
 PROGRAM main_mode

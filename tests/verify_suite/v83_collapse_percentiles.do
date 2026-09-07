@@ -101,27 +101,40 @@ forvalues c = 1/2 {
     }
 }
 file close fh
-tempfile tslog
-log using `"`tslog'"', replace name(v83ts) text
+tempfile pq_ts
+file open fh using `"`pq_ts'"', write text replace
 parqit use using `"`src'"'
-parqit tabstat x f, statistics(median p25 p75 p90) by(g)
-parqit tabstat x f, statistics(median p25 p75 p90)
+parqit tabstat x f, statistics(median p25 p75 p90) by(g) save
+local k = 1
+while ("`r(name`k')'" != "") {
+    matrix S = r(Stat`k')
+    forvalues c = 1/2 {
+        forvalues r = 1/4 {
+            file write fh "`=word("x f", `c')' `r(name`k')' `r' `=string(S[`r', `c'], "%18.0g")'" _n
+        }
+    }
+    local ++k
+}
+parqit tabstat x f, statistics(median p25 p75 p90) save
+matrix S = r(StatTotal)
+forvalues c = 1/2 {
+    forvalues r = 1/4 {
+        file write fh "`=word("x f", `c')' (all) `r' `=string(S[`r', `c'], "%18.0g")'" _n
+    }
+}
+file close fh
 parqit close _all
-log close v83ts
 python:
 from sfi import Macro
-import re
 num = lambda t: None if t == "." else float(t)     # "." is missing on both sides
 nat = {}
 for line in open(Macro.getLocal("nat_ts"), encoding="utf-8"):
     v, g, r, val = line.split()
     nat[(v, g, int(r))] = num(val)
 got = {}
-for line in open(Macro.getLocal("tslog"), encoding="utf-8", errors="replace"):
-    m = re.match(r"^\s+(x|f)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$", line)
-    if m:
-        for r in range(4):
-            got[(m.group(1), m.group(2), r + 1)] = num(m.group(3 + r))
+for line in open(Macro.getLocal("pq_ts"), encoding="utf-8"):
+    v, g, r, val = line.split()
+    got[(v, g, int(r))] = num(val)
 same = lambda a, b: (a is None and b is None) or (a is not None and b is not None and abs(a - b) <= 1e-8 * max(1.0, abs(b)))
 bad = [k for k in nat if k not in got or not same(got[k], nat[k])]
 Macro.setLocal("ts_ok", "1" if not bad and len(got) == len(nat) and len(nat) >= 8 * 100 else "0")

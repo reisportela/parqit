@@ -60,7 +60,12 @@ mata: _parqit_wr_stats_request("`req_cb'", "`resp_cb'")
 plugin call parqit_plugin, view_stats `reqhex'
 mata:
 fh = fopen(st_local("resp_cb"), "r")
-f = _parqit_fields(fget(fh), 9)
+f = J(1,9,"")
+while ((line=fget(fh)) != J(0,0,"")) {
+    f = _parqit_fields(line,9)
+    if (f[1]=="cb") break
+}
+assert(f[1]=="cb")
 fclose(fh)
 st_local("cb_missing", f[3])
 st_local("cb_distinct", f[4])

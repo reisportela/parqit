@@ -46,6 +46,11 @@ struct ViewCol {
      * per-row finite/coalesce guard on already-clean columns. Carried verbs
      * (keep/drop/order/rename) preserve it; recomputing verbs leave it false. */
     bool normalized = false;
+    std::string physical_type; /* current numeric SQL type, independent of metadata */
+    bool is_float() const {
+        return physical_type == "FLOAT" ||
+               (physical_type.empty() && meta_type == "float");
+    }
 };
 
 /* Stata's percentile rule (summarize/_pctile) as a SQL aggregate expression
@@ -74,6 +79,7 @@ class View {
               const std::string &source_desc);
 
     const std::vector<ViewCol> &cols() const { return cols_; }
+    void set_numeric_types(const std::vector<std::string> &types);
     std::string coerce_numeric_column(const std::string &name,
                                       const std::string &type);
     const nlohmann::json &vallabs() const { return vallabs_; }
@@ -135,7 +141,8 @@ class View {
     std::string sample(double amount, bool is_count, long long seed /* <0 none */);
     std::string egen(const std::string &name, const std::string &fcn,
                      const std::string &arg_expr, const std::vector<std::string> &by,
-                     bool statamissing, const std::string &type_req = "");
+                     bool statamissing, const std::string &type_req = "",
+                     const std::string &arg_type = "");
 
     /* ---- two-table verbs (M3); the using side is a boundary-cast SELECT
      * over files that stay on disk ----------------------------------- */

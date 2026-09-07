@@ -16,12 +16,15 @@ capture noisily {
     parqit version
     assert `"`r(parqit_version)'"' != ""
     assert `"`r(duckdb_version)'"' != ""
+    assert r(openmp) == 1 & r(openmp_version) >= 200203
+    assert r(openmp_max_threads) >= 1
     local dver `"`r(duckdb_version)'"'
 
     * selftest covers: Mata hex codec vectors, ado↔plugin codec agreement
     * (plugin echo round-trip), and the embedded engine end-to-end
     parqit selftest
     assert `"`r(selftest)'"' == "ok"
+    assert inrange(r(openmp_threads), 1, 2)
 
     * unknown subcommand must be loud (rc 198), not silent
     capture parqit frobnicate

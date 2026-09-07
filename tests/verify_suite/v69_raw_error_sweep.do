@@ -6,7 +6,7 @@ set more off
 set varabbrev off
 set linesize 255
 args repo plugin
-adopath ++ `"`repo'/ado/plus/p"'
+adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
 
 local fails 0

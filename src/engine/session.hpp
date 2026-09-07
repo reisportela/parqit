@@ -46,6 +46,9 @@ class Session {
      * NULL). */
     bool query_scalar(const std::string &sql, std::string *value, std::string *err);
 
+    /* Register nonthrowing moment aggregates only for an overflow retry. */
+    bool prepare_stats_fallback(std::string *err);
+
     duckdb_connection con() const { return con_; }
     const std::string &last_error() const { return last_error_; }
 
@@ -64,6 +67,7 @@ class Session {
     duckdb_connection con_ = nullptr;
     std::string last_error_;
     std::string default_temp_dir_;
+    bool stats_fallback_ready_ = false;
 
     /* pending configuration (applied on open; SET when already open) */
     long long threads_ = 0;            /* 0 = engine default */
@@ -79,7 +83,7 @@ std::string quote_ident(const std::string &s);
 /* Locale-INDEPENDENT double<->text. std::to_string / printf("%g") / strtod all
  * honour LC_NUMERIC, so under a comma-decimal locale they would emit/parse
  * "3,14" and corrupt generated SQL or numeric parsing. dtoa() always uses '.'
- * and the shortest round-trippable form; atod() parses a full numeric string
+ * and a 17-significant-digit round-trippable form; atod() parses a full numeric string
  * (with optional leading blanks) using '.'. */
 std::string dtoa(double v);
 bool atod(const std::string &s, double *out);

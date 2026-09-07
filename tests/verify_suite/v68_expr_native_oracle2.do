@@ -5,7 +5,7 @@ clear all
 set more off
 set varabbrev off
 args repo plugin
-adopath ++ `"`repo'/ado/plus/p"'
+adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
 
 local fails 0

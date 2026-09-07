@@ -15,6 +15,13 @@ CONTROL_TYPES = {
     "VARLIST",
 }
 
+HELP_ANCHORS = {
+    'parqit_read': 'lazy', 'parqit_explore': 'explore', 'parqit_stats': 'explore',
+    'parqit_filter': 'verbs', 'parqit_vars': 'verbs', 'parqit_gen': 'expressions',
+    'parqit_pivot': 'verbs', 'parqit_combine': 'verbs',
+    'parqit_write': 'materialisers', 'parqit_views': 'options',
+}
+
 
 @dataclass
 class Control:
@@ -91,8 +98,15 @@ def audit_dialog(path: Path) -> list[str]:
 
     if text.count("INCLUDE _std_wide") != 1:
         errors.append("must include _std_wide exactly once")
-    if 'HELP hlp1, view("help parqit##menu")' not in text:
-        errors.append("Help must target help parqit##menu")
+    anchor = HELP_ANCHORS[path.stem]
+    if f'HELP hlp1, view("help parqit##{anchor}")' not in text:
+        errors.append(f"Help must target help parqit##{anchor}")
+    if 'tx_context' not in controls.get('main', {}) or 'bu_context' not in controls.get('main', {}):
+        errors.append('missing view-context label or Refresh control')
+    programs = named_blocks(lines, 'PROGRAM')
+    context = '\n'.join(line for _, line in programs.get('main_context', []))
+    if 'stata hidden queue' not in context or not re.search(r'^\s*clear\s*$',context,re.M):
+        errors.append('context must queue its Stata query and clear its command buffer')
     if not re.search(r"^VERSION 16\.0$", text, flags=re.M):
         errors.append("dialog VERSION must be 16.0")
     if "SYNCHRONOUS_ONLY" in text:
@@ -175,15 +189,15 @@ def main() -> int:
         "PROGRAM",
     )
     populate = "\n".join(line for _, line in write_programs.get("main_populate", []))
-    if "main.ck_data" not in populate or 'put ", data"' not in populate:
-        failures.append("parqit_write.dlg: Populate does not select in-memory variables when data is checked")
+    if "main.rb_data" not in populate or 'put ", data"' not in populate:
+        failures.append("parqit_write.dlg: Populate does not select in-memory variables in memory-save mode")
 
     ado = (repo / "src/ado/p/parqit.ado").read_text(encoding="utf-8")
     if re.search(r"if\s*\(\s*`i'\s*>\s*\d+", ado):
         failures.append("parqit.ado: _dlgvars silently caps the populated variable list")
     if "capture .`dlgname'.`listname'.Arrdropall" not in ado:
         failures.append("parqit.ado: _dlgvars does not clear stale list entries before repopulating")
-    if "program define _parqit__dlgvars, rclass" not in ado or "[, Data]" not in ado:
+    if "program define _parqit__dlgvars, rclass" not in ado or "[, Data Numeric(name)]" not in ado:
         failures.append("parqit.ado: _dlgvars lacks the testable rclass/data contract")
 
     if failures:

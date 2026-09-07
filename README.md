@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.34 — the full surface below is implemented and covered by a
+> **Status:** v0.1.35 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,12 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+The [v0.1.35 changelog](CHANGELOG.md) records the subsequent numerical,
+statistical-output and menu corrections. All plugin builds require OpenMP;
+the [build and packaging checks](BUILDING.md) verify that runtime in the exact
+distributed binary on each platform. DuckDB continues to schedule SQL work
+through its own threads.
 
 > **About.** The conceptual design of `parqit` is by **Miguel Portela** — taking
 > [`pq`](https://github.com/jrothbaum/stata_parquet_io) as the starting point and
@@ -54,8 +60,9 @@ result observations are loaded into Stata, and whatever dataset you already
 have in memory is not touched.
 
 Every mutation verb appends a step to the view's **pipeline** — a plan of work,
-like a do-file you are still writing. The candidate plan is bind-validated,
-and contract-sensitive verbs may run validation queries (for example, key or
+like a do-file you are still writing. Verbs validate their stated contracts;
+ordinary single-table operations also bind-check the candidate SQL.
+Contract-sensitive verbs may run validation queries (for example, key or
 cell uniqueness and pivot-column discovery), but these checks do not
 materialise the result in Stata. The full result plan runs when you ask for it
 with a **materialiser**:
@@ -67,12 +74,13 @@ with a **materialiser**:
   that never fits in memory can still be filtered, joined, aggregated and
   reshaped end to end.
 
-Laziness is not a gimmick; it is what makes parqit fast on large data. Because
-the engine sees the whole plan before scanning the result rows, it reads only
-the columns and row groups the result actually needs (Parquet is columnar, and
-filters are pushed into the scan), executes in vectorised, parallel C++ (the
-embedded DuckDB), and spills to a temporary directory when an intermediate
-result outgrows RAM. Typing `parqit keep if year >= 2019` on a huge panel
+The main advantage is that the engine sees the whole plan: column projection
+can avoid unused data, eligible filters can prune Parquet row groups, and
+vectorised, parallel execution can spill supported intermediate states to a
+temporary directory. Stata needs room for the result you choose to collect,
+instead of the source archive and every intermediate table. A direct
+`parqit save` can finish the pipeline when even that result is too large for
+Stata. Typing `parqit keep if year >= 2019` on a huge panel
 validates the candidate plan without scanning the full panel — and at result
 execution predicate pushdown can skip row groups whose statistics prove that
 they cannot match.
@@ -99,8 +107,9 @@ reader**. Its identity is the layer above I/O:
   view; only bounded summary output (or a few preview rows) reaches Stata and
   the current dataset stays unchanged. `describe` reads only Parquet footer
   metadata; the other commands may scan the relevant data engine-side.
-- **Out-of-core by default.** Filter, join, aggregate and reshape billion-row files
-  on a laptop; DuckDB spills to disk transparently. The current Stata dataset is
+- **Out-of-core by default.** Filter, join, aggregate and reshape files larger
+  than memory, using DuckDB's spillable operators and sufficient scratch space.
+  Some operator states still need memory. The current Stata dataset is
   replaced only by an explicitly collected pipeline result, never by its source.
 - **Two first-class data paths.** Small result → Stata's in-memory dataset
   (`parqit collect`); large transformation → **Parquet → Parquet without loading the
@@ -109,9 +118,9 @@ reader**. Its identity is the layer above I/O:
 - **Lossless metadata round-trips.** Variable labels, value labels, notes, display
   formats and characteristics survive a `parqit save` / `parqit use` cycle (stored in
   standard Parquet key–value metadata), while remaining plain Parquet for pandas,
-  polars, R, Spark and friends. (One documented exception: extended-missing
-  *categories* `.a`–`.z` collapse to a single `.` — their labels survive; see
-  Limitations.)
+  polars, R, Spark and friends. Extended-missing categories and fractional
+  date counts require the documented conversions, with loss notes; see
+  Limitations and `help parqit_technical`.
 - **Learn the SQL if you want to.** `parqit show` prints the generated query
   (like dbplyr's `show_query()`); `parqit explain` shows the plan; `parqit sql "…"`
   drops you to raw DuckDB.
@@ -151,7 +160,7 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.1.34`).
+  `download/vX.Y.Z` (for example, `download/v0.1.35`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -163,8 +172,9 @@ Download the zip for your platform from the
 `parqit.pkg`). `parqit_all_platforms.zip` bundles all four OS/architecture
 targets.
 
-**Linux (x86_64)** — runs on EL7/EL8+, Ubuntu 18.04+ and HPC clusters (the binary
-needs only glibc 2.25):
+**Linux (x86_64)** — the release workflow builds on AlmaLinux 8 for older-glibc
+compatibility on EL8-family systems and HPC clusters. Compatibility with an
+older host must be checked against the exact release binary:
 
 ```bash
 cd ~/Downloads
@@ -214,12 +224,13 @@ in the path:
 ```
 
 > A binary you build yourself on a newer Linux (glibc ≥ 2.34) will **not** run on
-> an old-glibc HPC cluster (EL7/EL8) — use the AlmaLinux-8 binary from the release
+> an old-glibc HPC cluster (for example EL8) — use the AlmaLinux-8 binary from the release
 > there.
 
 ### Option 2 — clone and build from source
 
-Needs `git`, CMake ≥ 3.16 and a C++17 compiler (gcc ≥ 10, clang, or MSVC).
+Needs `git`, CMake ≥ 3.21 for the supplied presets and a C++17 compiler
+(gcc ≥ 10, clang, or MSVC).
 The first build downloads and compiles DuckDB 1.5.3 from source
 (SHA256-pinned), so expect 10–20 minutes and a few GB of disk the first time.
 
@@ -270,12 +281,12 @@ parqit collect, clear
 parqit save firm_year_panel.parquet, replace
 ```
 
-Plain I/O works exactly as you would expect, and the format is inferred from the
-extension:
+Reading selects the input adapter from the extension. Writing always produces
+Parquet; `data` explicitly selects the dataset in Stata's memory:
 
 ```stata
 parqit use  mydata.parquet, clear          // read whole file into memory
-parqit save mydata.parquet, replace        // write the in-memory dataset
+parqit save mydata.parquet, replace data   // write the in-memory dataset
 parqit describe mydata.parquet             // schema, types, rows, row groups
 ```
 
@@ -296,17 +307,18 @@ parqit describe /data/deals_*.parquet   // rows, columns, types: footer metadata
 parqit use using /data/deals_*.parquet  // lazy view after a schema/metadata probe
 parqit head 10                          // first rows, nothing else materialised
 parqit codebook                         // per variable: type, obs, missing, distinct, min/max
-parqit misstable patterns               // missing-data patterns
-parqit summarize amount, detail         // Stata-exact moments and percentiles
+parqit misstable patterns amount client_id region // selected variables (at most 14)
+parqit summarize amount, detail         // moments and percentiles using Stata's definitions
 parqit tabulate region sector, row      // two-way table with row percentages
 parqit count if missing(client_id)      // filtered count; the view's pipeline is untouched
 parqit histogram amount, bins(30)       // bins computed on disk, drawn with twoway bar
 parqit close
 ```
 
-Each call re-executes the (lazy) pipeline, which on Parquet is fast: columnar
-scans read only the variables involved, filters prune row groups, and the
-engine parallelises across cores. This is the intended workflow — **explore
+Each data-query call re-executes the lazy pipeline: columnar scans can read
+only the variables involved, eligible filters may prune row groups, and the
+engine can parallelise across cores. Exact statistics may still require a
+full scan or sort. This is the intended workflow — **explore
 first, load last** — and it is the sense in which parqit is not another
 Parquet reader: the interesting work happens before the current dataset is
 replaced by a collected result.
@@ -315,15 +327,16 @@ replaced by a collected result.
 
 Mutation verbs append to the **current view** (an implicit lazy table, just
 like Stata's implicit current dataset). Opening probes schema and metadata,
-every candidate plan is bind-validated, and contract-sensitive verbs may run
-validation queries. Only a *materialiser* executes the full result plan.
+ordinary single-table operations bind-check the candidate SQL, and
+contract-sensitive verbs may run validation queries. Only a *materialiser*
+produces the full result table.
 
 ### The view at a glance
 
 A parqit session has four moves: **open** a view, **shape** it with lazy verbs,
-**look** at it engine-side, and **land** the result. Only the last move puts
-data into Stata's dataset or writes a file — everything between `open` and
-`collect`/`save` changes the *plan*, not your data.
+**look** at it engine-side, and **land** the result. The last move materialises
+the full result. Opening can create an input bridge and exploration can use
+scratch data; lazy verbs build the plan while the current dataset stays in place.
 
 ```
 ┌─ 1  OPEN ─ start a view
@@ -427,7 +440,7 @@ matches one Unicode character; the same expansion is used by lazy projections,
 | `parqit contract <varlist> [, freq()]` | grouped counts |
 | `parqit duplicates drop [varlist] [, force]` | `DISTINCT` / dedup |
 | `parqit keep in <range>` / `parqit drop in <range>` | validated `LIMIT/OFFSET` and its complement (`f`/`l` and negative bounds accepted) |
-| `parqit sample # [, count seed()]` | reservoir sample: percent by default, rows with `count`; reproducible with `seed()` |
+| `parqit sample # [, count seed()]` | globally rounded percentage sample, or reservoir rows with `count`; seeded reproducibility requires stable inputs/settings |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
 
@@ -476,14 +489,21 @@ reaching Stata:
 | Command | Effect |
 |---|---|
 | `parqit codebook [varlist]` | Per variable: type, obs, missing, distinct, min/max, label — in one scan |
-| `parqit misstable [summarize\|patterns]` | Missing counts and shares; missing-data pattern frequencies (≤14 vars) |
+| `parqit misstable [summarize\|patterns]` | Missing counts and shares; pattern frequencies and percentages of the full view (≤14 vars, top 100 patterns) |
 | `parqit levelsof var [, limit()]` | Sorted distinct values → `r(levels)` (refuses beyond the cap, default 5,000) |
 | `parqit distinct [varlist] [, joint]` | Distinct counts per variable (and of the joint tuple) |
 | `parqit duplicates report\|list keys` | Copies/observations/surplus table; the first offending rows |
-| `parqit tabstat varlist, s() [by()]` | Statistics × variables table (`n mean sd var sum min max range median p##`) |
-| `parqit correlate` / `parqit pwcorr [, obs sig]` | Listwise / pairwise correlation matrices |
+| `parqit tabstat varlist, s() [by() save]` | Statistics × variables table (`n mean sd var sum min max range median p##`); `save` returns the computed tables in `r()` |
+| `parqit correlate` / `parqit pwcorr [, obs sig]` | Listwise / pairwise correlations, with full returned matrices |
 | `parqit histogram var [, bins() nodraw]` | Engine-computed bins, drawn with `twoway bar` |
 | `parqit ds` / `parqit lookfor words` | Variable names → `r(varlist)`; search names and labels |
+
+The statistical tables use native Stata layouts and numeric formats.
+`summarize, detail` shows percentiles beside the four smallest/largest values,
+with moments on the right. `tabstat, by()` preserves its group-only contract
+(native `nototal` layout); `save` returns the same results without another
+query. Printed rounding does not reduce the precision of the returned tables.
+Labels come from the view, and the current dataset stays unchanged.
 
 ### Escape hatches
 
@@ -497,13 +517,13 @@ reaching Stata:
 
 ### Point and click
 
-`parqit menu` adds **User > parqit** to GUI Stata: Read Parquet data (lazy
+`parqit menu` adds **User > parqit** to GUI Stata: Read data (lazy
 view or into memory); Describe and explore data; Summary statistics, tables,
 and correlations; Keep or drop observations, or draw a sample; Keep, drop,
 order, sort, or rename variables; Create or change variables; Collapse,
 contract, pivot table, or reshape; Combine datasets (merge, append, joinby);
-Collect into memory or save as Parquet; Views, SQL, and engine settings;
-Version; Self-test; Help. Every dialog builds an ordinary `parqit` command,
+Save as Parquet or collect into memory; Views, SQL, and engine settings;
+Version; Self-test; Help; Technical reference. Every dialog builds an ordinary `parqit` command,
 echoed to the Results and Review windows like a typed command, and follows
 Stata's own dialog conventions: a **Populate** button fills the variable
 pickers from the current view, from the dataset in memory when the write dialog
@@ -514,6 +534,13 @@ being replaced, and operations with many choices use a list box rather than a
 wall of radio buttons. StataNow's native
 `import parquet` (File > Import) reads a file into memory; parqit's dialogs
 complement it and never alter Stata's own menus.
+
+The context line and **Refresh** identify the view and update variable pickers.
+Numeric calculations offer numeric variables; tabulations also offer strings,
+separate row/column fields and `nolabel`. The write dialog starts with saving
+a view and separates that from saving Stata memory or collecting a view.
+View save/collect name the selected view in the emitted command, so closing it
+cannot redirect a save to memory. Each Help button opens the relevant section.
 
 **Tuning the read.** Reads of 50,000+ rows fill Stata's memory in parallel (up
 to `min(cores, 8)` worker threads), because that per-cell fill dominates the
@@ -618,12 +645,23 @@ types are reported, never loaded as a column of silent missings.
 A `parqit save` writes Stata's variable labels, value labels, notes, display formats
 and characteristics into Parquet **key–value metadata** under a `parqit.*` namespace.
 `parqit use` restores them. The file stays 100% standard Parquet for every other tool.
-A `parqit → parqit` cycle preserves every value, type and metadatum exactly, with one
-documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a single
-`.` (their value labels still survive) — see Limitations.
+Representable values and metadata round-trip under the documented type
+contract. Extended-missing categories collapse, fractional date/period counts
+round, legacy text may be transcoded and binary strings have boundary limits.
+These conversions are reported; see Limitations and `help parqit_technical`.
 
 ## Limitations
 
+- **Resource budgets.** Out-of-core describes the disk-backed lazy pipeline.
+  A collected result must fit in Stata, and DuckDB's `memory_limit` budgets its
+  buffer manager rather than the complete process. The default memory writer
+  (`save, data`, also used by `open _data` and adapters) assembles full Arrow
+  buffers; `PARQIT_SAVE_NOARROW=1` before launching Stata selects the batched
+  staging path. Reserve memory and temporary disk space for the chosen path.
+- **Validation coverage.** CI builds and runs C++ tests for the four target
+  OS/architecture combinations. The full licensed Stata suite is run locally
+  on Linux; CI build success does not establish Stata runtime parity on every
+  supported platform or Stata version.
 - **Views are plans, not data** — open as many as you like
   (`parqit use using f.parquet, name(qp)`, `parqit view qp`, `parqit views`);
   `parqit collect` materialises the current view and keeps it open
@@ -663,11 +701,13 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   across two columns. A Hive tree whose partition key differs only by case
   from a file column is refused (the engine would replace the column's values
   with the key); an empty column name loads as `v<position>`.
-- **A source replaced while it is being read is refused, not mixed.** Every
+- **Identity checks on eager reads and direct collects.** Every
   matched file's identity is captured before planning and re-checked before
   and after the fetch (and the fetched types against the plan); a change fails
-  loudly (`r(920)`) and leaves the dataset in memory untouched — retry when the
-  file is stable. `parqit save ..., data copysource` verifies identity, names,
+  loudly (`r(920)`) and leaves the dataset in memory untouched. This is not a
+  snapshot transaction spanning all files and validation queries of a transformed
+  pipeline; keep its sources stable during execution.
+  `parqit save ..., data copysource` verifies identity, names,
   kinds, count, the sort marker and the first/last 64 observations only; an
   edit confined to the middle rows is not detected (you assert nothing
   changed).
@@ -687,8 +727,10 @@ documented exception: extended-missing *categories* (`.a`–`.z`) collapse to a 
   `x > 0.1`, `inrange()`, `inlist()`, `cond()`, `round()`) is compared in
   double, as native Stata does: `x == 0.1` is false for a float `x` holding
   0.1 and `x == float(0.1)` is the native idiom (`float()` is implemented).
-  One residual: an integral literal beyond 2^24 keeps its integer type and
-  still compares with a float variable in single precision.
+  Integral literals beyond 2^24 also compare without narrowing the value to
+  float. Bare wide integer/decimal columns retain exact comparison semantics:
+  DOUBLE 2^53 differs from BIGINT 2^53+1, even though collection rounds the
+  latter to a Stata double.
 - **String partition keys.** `partition_by()` on a string variable refuses the
   values `NULL` and `__HIVE_DEFAULT_PARTITION__` (the engine names the
   directory of a *missing* partition that way and would read them back as

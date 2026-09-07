@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.34 04sep2026}{...}
+{* *! version 0.1.35 07sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -28,10 +28,18 @@ mapping and the complete list of limitations
 {helpb parqit} is the user manual: syntax, the lazy-view model, the verbs, the
 materialisers, the exploration commands, examples and stored results. This
 entry collects what the manual leaves out on purpose — the rules parqit
-follows so that its results equal native Stata's and its files stay plain
-Parquet for other tools. Nothing here is needed to use parqit; everything here
-is needed to trust it, audit it or extend it. Every section corresponds to a
-verified contract in the package's test suites.
+follows for compatibility with native Stata and standard Parquet, together
+with the supported subset and its exceptions. Use these contracts to assess a
+workflow's resource needs and fidelity. The regression suites exercise them;
+passing tests do not establish correctness for every possible input or platform.
+
+{pstd}
+Every plugin build enables OpenMP and links a host runtime. Linux and macOS
+embed that runtime; Windows installs {cmd:parqit_vcomp140.dll} beside the plugin.
+{cmd:parqit version} reports the capability and {cmd:parqit selftest} exercises
+a small parallel region without calling Stata's API from worker threads.
+DuckDB executes SQL using its own scheduler and {cmd:parqit set threads};
+enabling OpenMP does not move SQL calculations into a second thread pool.
 
 
 {marker metadata}{...}
@@ -96,13 +104,19 @@ far larger than memory. Parquet can project columns and prune row groups;
 delimited text must still be parsed as a stream and has no Parquet row-group
 pruning. {bf:Stata} ({cmd:.dta}) and {bf:Excel} ({cmd:.xls}/{cmd:.xlsx}) inputs
 are {it:not} engine-scannable, so parqit imports them into a throwaway frame —
-your working dataset is left untouched — and snapshots them to a small Parquet
+your working dataset is left untouched — and snapshots them to a temporary Parquet
 {it:bridge} the engine then scans; their variable/value labels and formats ride
 along. parqit picks the path by the final file extension, case-insensitively.
 On the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, Parquet stays
 on disk, while delimited text, {cmd:.dta} and Excel are first imported to a
 package-owned Parquet bridge; this keeps the engine's two-table input contract
 uniform and is intended for a comparatively small using side.
+The delimited using-side adapter uses Stata's {cmd:import delimited}, whose
+type inference can differ from {cmd:read_csv_auto} on the main side (for
+example, date text versus a parsed date). Excel uses the first worksheet and
+its first row as variable names; there are no sheet/range/header options.
+To retain the main-source CSV inference for a join, open that CSV as its own
+named view and refer to {cmd:view:}{it:name}.
 Delimited-text header names get the same treatment as Parquet column names
 (see {it:Column names} under {help parqit_technical##types:Types and metadata}): a
 repeated name keeps the engine's numbered form ({cmd:a_1}, with
@@ -174,15 +188,117 @@ carries {cmd:%8.0g}); a {cmd:(count)} target is stored {cmd:long}. The {cmd:merg
 saved file's {cmd:parqit.*} metadata, third-party readers see the same
 labels/formats; the data values are unchanged.
 
+{pstd}Aggregation storage need not equal native {cmd:collapse}'s storage.
+Means and standard deviations use the engine's double results, which can
+retain more precision than native output stored as float. Percentile
+interpolation retains the source endpoints until their exact midpoint is
+rounded to double; {cmd:collapse} preserves a float
+source's native value rounding, although the result may be stored wider.
+{cmd:tabstat} uses the unrounded double statistic. Distinguish agreement of
+statistical definitions from byte-identical storage types.
+
+{pstd}Exploratory output uses native Stata numeric formats and table layouts;
+labels come from the view's carried metadata. The smallest/largest values in
+{cmd:summarize, detail} are fetched from the existing percentile sort, adding
+no source scan. Printed numbers are rounded for display; returned matrices
+retain the calculated precision. {cmd:tabstat, save} and correlation matrices
+are built from the already computed summary response, not from another query
+or a reconstruction of the raw dataset. Missing-pattern percentages use a
+total computed before the 100-pattern display cap.
+
+{pstd}Statistics cross into Stata as binary64 values before text formatting,
+including extrema from a FLOAT source. Non-finite values and magnitudes outside
+Stata's numeric range are returned as ordinary missing, and numeric response
+text is parsed as a number rather than evaluated as an expression.
+Floating sums use a fixed integer accumulator in units of the smallest
+binary64 subnormal. Integer/decimal inputs use fixed 256-bit integer states.
+Sums and means are rounded once to the nearest binary64 value, with ties to
+even; means divide the exact total before rounding. Integer/decimal conversions
+use exact midpoint comparisons, including collect, extrema and percentiles.
+Dispersion and shape use exact integer power sums. Central moments are formed
+before division; variance and Pearson kurtosis are exact rational values
+rounded to binary64, while sd and skewness certify the rounding of their square
+roots against exact midpoint squares. Correlation likewise forms exact sums
+and cross-products and independently rounds the coefficient and its geometric
+complement. Results for the same stored inputs are invariant to order,
+partitioning and thread count. No clipping or approximate retry is used;
+an internal mathematical invariant failure is an error.
+
+{pstd}Standard deviation is rounded from the exact variance independently of
+the returned variance. Thus sd can be finite when variance overflows, or nonzero when
+variance underflows to zero. A constant with a very large level still has
+zero sd and its finite mean. Conversely, a nonconstant sample can have sd
+rounded to zero at the subnormal boundary; shape uses the exact variance
+numerator and remains defined. These algorithms do not reproduce native
+Stata's numerical failures. Counts, missingness and rank definitions
+remain unchanged; unrelated SQL, source and resource failures remain errors.
+Exact integer sums in a lazy table retain the engine's integer/decimal result
+type and still refuse a true overflow of that type. For an explicitly double
+total of wide values, {cmd:egen double newvar = total(x)} accumulates before
+conversion. Returned {cmd:tabstat, s(sum)} statistics are double values too.
+
+{pstd}The states are bounded and remain inside DuckDB's grouped/window/spill
+execution: 288 bytes for a total, 832 for dispersion, 2,736 for detail and
+2,184 per correlation pair. Many groups can require more time and scratch
+than approximate accumulation. The arithmetic bound admits fewer than 2^64
+values per state, finite doubles with magnitude below 2^1023, and the engine's
+128-bit integer/decimal coefficients. No raw floating powers are formed.
+
+{pstd}Correlation significance uses the independently calculated complement,
+not {it:1 - rounded_rho^2}. A coefficient displayed or stored as 1 can therefore
+have a small positive p-value. The two-sided Student tail uses stable analytic
+or beta-function forms; a scaled series recovers subnormal probabilities that
+Mata's exponential implementation would otherwise turn into zero. Unlike the
+algebraic statistics, these transcendental tails are subject to floating-point
+library and conditioning error; correctly rounded final bits are not promised.
+The beta-function shape domain ends at 1e17: outside it, nontrivial p-values
+are missing with a note, while the correlation remains available.
+Raw {cmd:parqit sql}/{cmd:query} fragments retain DuckDB's own function semantics;
+user-written SQL aggregates are not silently replaced by parqit's routines.
+
+{pstd}A sampled or staged input to {cmd:summarize, detail} is materialized once
+inside DuckDB before its moments and spillable rank sorts. Histogram range and
+bin counts likewise share one realization. A bin boundary is compared exactly
+as {it:bins*x >= (bins-k)*min+k*max}, avoiding division by an already rounded
+width. Centers and width are rounded for Stata; indistinguishable centers are
+refused. These temporary projections never enter
+Stata's dataset and are released on completion or error. The embedded engine
+includes pinned corrections for uniform reservoir inclusion and the C-API
+window-aggregate state bridge. A missing/negative sample seed is chosen once
+per plan and appears in {cmd:show}; it is not redrawn between statistical passes.
+The count form uses a reservoir. Percentage sampling captures the source once
+inside DuckDB, rounds the exact binary64 proportion {it:N*p/100} to the nearest
+row count (half ties upward), and selects that many rows by a seeded hash
+priority with row-index tie-breaking. Its materialization and sort can spill;
+it may need substantially more time and scratch than a small fixed-count sample.
+Reproducibility requires unchanged input order, engine and execution settings.
+
+{pstd}Statistics read complete response records even when a string or label
+exceeds 32 KiB. Each duplicate-preview cell has its own encoded field, and
+string keys retain embedded NUL bytes during grouping and table construction.
+Display escapes NUL, line breaks and unit separators as {cmd:\0}, {cmd:\n},
+{cmd:\r} and {cmd:\x1f}; these escapes describe characters in the data.
+
 
 {marker materialisers}{...}
 {title:Materialisers: atomicity, copysource, encoding, locks}
+
+{pstd}The default memory-to-Parquet writer assembles complete Arrow column
+buffers before writing; this can require substantial memory in addition to
+the dataset already in Stata. {cmd:open _data} and in-memory input adapters
+use that writer too. They do not have the same memory profile as a direct
+lazy Parquet-to-Parquet save. Set the operating-system environment variable
+{cmd:PARQIT_SAVE_NOARROW=1} before launching Stata to use the existing batched
+writer through a spillable DuckDB staging table. Any presence of this variable
+(even {cmd:0}) selects that path; unset it to restore the default. This trades
+additional staging work for avoiding the complete Arrow buffer assembly.
 
 {pstd}{opt copysource} is an explicit, hardened opt-in for
 {cmd:parqit save} {it:…}{cmd:, data}: instead of reading the dataset in memory,
 it copies the unchanged Parquet file loaded by the last
 {cmd:parqit use} {it:file}{cmd:, clear} — you assert nothing has changed. The
-default {cmd:parqit save} always reads memory, because Stata's
+default memory-save path reads the dataset in memory; with a view open,
+request that path with {opt data}. Stata's
 {cmd:c(changed)} cannot prove the dataset still equals the file: it stays 0
 after {cmd:sort}/{cmd:gsort} and after Mata {cmd:st_store}/{cmd:st_sstore}/
 {cmd:st_view} writes, which reorder or edit the data. {opt copysource} therefore
@@ -226,6 +342,17 @@ process created it. A pre-existing or crash-stale lock therefore causes a loud,
 fail-closed refusal; after confirming that no writer is alive, the user may
 remove that stale lock explicitly. Historical sibling names such as
 {cmd:.parqit_tmp}/{cmd:.parqit_old} are never treated as package-owned.
+
+{pstd}Atomicity has a scope. Single-file publication uses a same-filesystem
+rename when replacing; creating a new file on POSIX uses a hard link followed
+by removal of the staging name, so an existing destination cannot be
+overwritten in a race. Filesystems without hard-link support can refuse that
+new-file path. Replacing a tree and updating several partitions
+involve multiple directory exchanges, with rollback on handled publication
+errors; they are not one transaction visible atomically to concurrent readers,
+nor a crash-recovery guarantee. The writer lock covers the resolved destination,
+not every ancestor or descendant path. Coordinate readers and writers of a
+partitioned tree, and do not concurrently write overlapping destinations.
 
 {pstd}
 {it:String encoding.} Parquet/Arrow strings must be valid UTF-8. Text that is
@@ -311,18 +438,31 @@ dataset. Use it instead of
 file on disk.{p_end}
 
 {phang}o {bf:Filter and project early.} Put {cmd:parqit keep}/{cmd:parqit keep if}
-before a {cmd:collect}/{cmd:save} so the engine reads fewer columns and rows —
-the pipeline is lazy, so order is just a hint to push work toward the scan.{p_end}
+before expensive operations when that preserves the intended result. Verb
+order is semantically significant: filtering before and after {cmd:collapse},
+{cmd:sample} or a row-number calculation can select different data. DuckDB
+pushes work toward the scan only when its optimizer can preserve meaning.{p_end}
+
+{phang}o {bf:Distinguish filtering from row-group pruning.} Floating-point
+normalization and date conversion can leave expression filters that the pinned
+engine evaluates during the scan but cannot use to prune row groups from their
+statistics. Simpler predicates, including string predicates the optimizer can
+simplify, may prune. {cmd:parqit explain} shows which form reaches the scan;
+the presence of a filter alone does not prove that row groups were skipped.{p_end}
 
 {phang}o {bf:Read into memory once.} If a workflow collects the same view more
 than once, collect it once and work on the result; each {cmd:parqit collect}
 re-executes the pipeline.{p_end}
 
 {phang}o {bf:Set a shared-machine memory budget.} The pinned DuckDB engine's
-default memory limit is 80% of available system memory. On a shared server or
-scheduler allocation, set an explicit per-process ceiling with
+default buffer-manager limit is 80% of the memory it detects. On a shared server
+or scheduler allocation, set an explicit engine budget with
 {cmd:parqit set memory_limit} (for example {cmd:8GB}) and, when useful, a spill
-location with {cmd:parqit set tempdir}.{p_end}
+location with {cmd:parqit set tempdir}. This does not cap the complete process:
+Stata frames, collected results and some engine allocations are outside this
+budget. Sorting, joining and exact percentiles may need substantial scratch
+space; complex SQL aggregate states may not spill. Smaller result output alone
+does not guarantee a cheap query.{p_end}
 
 {phang}o {bf:Force a serial fill if you need to.} Reads of 50,000+ rows fill
 Stata's memory using up to {cmd:min(cores, 8)} worker threads (the per-cell
@@ -342,8 +482,9 @@ parallel and serial fills are byte-identical.{p_end}
 The numeric edge contracts follow Stata rather than DuckDB defaults. Division
 by zero, an invalid power, overflow, {cmd:ln()}/{cmd:log10()} of a nonpositive
 value and {cmd:sqrt()} of a negative value produce missing. {cmd:round(x)} and
-{cmd:round(x,u)} break exact halves toward +infinity (so
-{cmd:round(-2.5)=-2}); {cmd:u=0} returns {cmd:x}. {cmd:mod(x,y)} is the
+{cmd:round(x,u)} break exact halves toward +infinity for positive units (so
+{cmd:round(-2.5)=-2}); negative units reverse the tie direction and {cmd:u=0}
+returns {cmd:x}. {cmd:mod(x,y)} is the
 nonnegative remainder and is missing when {cmd:y<=0}. {cmd:min()}/{cmd:max()}
 take 2–64 numeric arguments, ignore missing arguments and return missing only
 when all are missing. {cmd:missing()}/{cmd:mi()} accept one or more arguments;
@@ -382,9 +523,15 @@ a plain {cmd:i} where native keeps a combining dot. {cmd:regexm()} has no
 multiline mode: {cmd:^} and {cmd:$} anchor only at the ends of the whole
 value and {cmd:.} does not match a newline, whereas native matches
 {cmd:"^line1$"} and {cmd:"1.l"} inside {cmd:"line1"+char(10)+"line2"}.
-{cmd:mod(x,y)} follows native's arithmetic for a non-integer modulus
-({cmd:mod(7, 0.00001)} is {cmd:9.99999999911e-06}, as in Stata, not the
-manual's {cmd:x - y*floor(x/y)}).
+
+{pstd}{cmd:round()} and {cmd:mod()} operate on the actual binary64 inputs,
+without overflowing or rounding a quotient before finding its integer part.
+This corrects native numerical failures: {cmd:round(4503599627370497)} keeps
+that integer, and {cmd:mod(1e100,3)} is 1. Decimal-looking binary64 values are
+not exact decimal fractions: {cmd:round(.25,.1)} is .2, and {cmd:mod(1,.1)}
+is approximately .09999999999999995, not zero. The rounded exact remainder of
+{cmd:mod(7,.00001)} is approximately 9.99999999942738e-06. These intentional
+mathematical corrections can differ from native Stata's results.
 
 {pstd}
 Extended-missing literals {cmd:.a}-{cmd:.z} are rejected in lazy expressions.
@@ -393,8 +540,8 @@ single ordinary missing value, so accepting them would fabricate a distinction
 the view cannot observe. Use {cmd:missing(x)} or compare with {cmd:.}.
 
 {pstd}
-Expressions compute in double precision, exactly like Stata's expression
-evaluator, and every value Stata cannot hold is missing: an overflowing
+Arithmetic operators evaluate in double precision, and guarded out-of-range
+values become missing: an overflowing
 result ({cmd:exp(800)}, {cmd:1e300*1e300}) or an out-of-range literal
 ({cmd:1e309}) is {cmd:.} in filters, assignments and aggregates alike —
 never an IEEE infinity. Because untyped results are double, control the
@@ -402,21 +549,29 @@ storage of a generated column with a typed {cmd:parqit gen} (e.g.
 {cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
 is {cmd:float}. For an explicit {cmd:float} target, a finite value outside
 Stata's ±1.70e38 storage range becomes missing, as in native assignment.
-A {cmd:float} variable compared with a decimal literal ({cmd:x == 0.1},
-{cmd:x > 0.1}, and inside {cmd:inrange()}, {cmd:inlist()}, {cmd:cond()},
-{cmd:round()}) is compared in double, exactly as native Stata does:
+A {cmd:float} operand is promoted when needed for numeric evaluation, including
+comparisons with integer columns/literals above 2^24 and the alternatives of
+{cmd:min()}, {cmd:max()} and {cmd:cond()}. Float-exact comparisons and
+integer-only key filters retain their exact, narrow predicates. In particular:
 {cmd:x == 0.1} is false for a float {cmd:x} holding 0.1, and
 {cmd:x == float(0.1)} is the native idiom. {cmd:float(x)} rounds {cmd:x} to
-float precision (a value beyond ±1.70e38 is missing). One residual: an
-integral literal beyond 2^24 ({cmd:x == 16777217}) keeps its integer type,
-so against a float variable that comparison still runs in single precision.
+float precision (a value beyond ±1.70e38 is missing). {cmd:round()} and
+{cmd:mod()} normalize non-finite results before another expression uses them,
+so {cmd:missing(round(x,u))} and {cmd:round(x,u)==.} agree.
+Numeric literals first take their Stata binary64 value; fractional SQL
+literals are typed directly as DOUBLE to avoid an intermediate decimal cast.
+Bare integer/decimal columns retain their stored precision in comparisons,
+including against a floating column. Thus DOUBLE 2^53 does not equal BIGINT
+2^53+1. A DECIMAL just above .5 does not equal the literal .5, even if both
+would round to .5 upon collection. Generate an explicit double copy when that
+rounded representation is the intended comparison domain.
 Date functions floor a fractional day count (like Stata:
 {cmd:day(-0.5)} is 31) and an out-of-range argument is row-local missing.
 One documented dialect difference: {cmd:regexm()} runs on DuckDB's RE2
 engine, which understands {cmd:\d \w \s}, {cmd:{c -(}n,m{c )-}} and
 non-greedy quantifiers that Stata's own {cmd:regexm} treats as literals —
-patterns using only POSIX classes and {cmd:* + ? . [] ^ $} behave
-identically.
+patterns restricted to the shared syntax normally agree on single-line text.
+The newline and Unicode differences above remain relevant.
 
 
 {marker types}{...}
@@ -520,12 +675,19 @@ truncating it could select the wrong column and is never allowed.
 {title:Environment}
 
 {pstd}
-Three knobs live outside {cmd:parqit set}. The Stata global
+The following knobs live outside {cmd:parqit set}. The Stata global
 {cmd:PARQIT_PLUGIN_PATH} points the loader at a locally built plugin and
 takes precedence over the adopath search for {cmd:parqit.plugin};
 {cmd:global PARQIT_NOTIPS 1} mutes the one-line performance tips; and the
 operating-system environment variable {cmd:PARQIT_FILL_THREADS} controls
 the parallel memory fill (see {help parqit_technical##perf:Performance tips}).
+The operating-system variable {cmd:PARQIT_SAVE_NOARROW} selects the batched
+memory writer (see {help parqit_technical##materialisers:Materialisers}).
+
+{pstd}No plugin-path global is needed when matching package files are on the
+adopath. The ado and plugin verify their numerical protocol before operating;
+incompatible files are refused. After updating a loaded package, restart Stata
+so cached programs and the loaded binary belong to the same revision.
 
 
 {marker limitations}{...}
@@ -535,14 +697,19 @@ the parallel memory fill (see {help parqit_technical##perf:Performance tips}).
 re-executes the pipeline and can observe a source file that changed meanwhile.
 Results are not cached. A {cmd:view:}{it:name} input captures that view's plan at
 the time it is embedded, but its underlying files remain live.{p_end}
-{pstd}{cmd:•} A source file that changes {it:while} it is being read is refused,
-never mixed: every matched file's identity (size, mtime, ctime, inode) is
-captured before planning and re-checked before and after the fetch, and the
-fetched column types are compared with the plan; a change fails with
+{pstd}{cmd:•} Cross-source case or alias collisions must be resolved before
+{cmd:append}/{cmd:merge}/{cmd:joinby}; a shared engine identifier must name the
+same Stata column on both sides. Ambiguous combinations are refused before
+plan mutation (see {help parqit##verbs:Verbs}).{p_end}
+{pstd}{cmd:•} Eager {cmd:use, clear} and direct {cmd:collect} reads check each
+matched file's identity (size, mtime, ctime, inode) before planning and before
+and after the fetch. Fetched column types are compared with the plan; a change fails with
 {cmd:r(920)} and the dataset in memory is untouched — retry when the file is
-stable. This guards eager {cmd:use, clear} and a direct {cmd:collect}; a
-pipeline's whole result is built by one engine query over the files as they
-are at execution time.{p_end}
+stable. These checks are not a cross-query snapshot protocol for transformed
+collect, view save or engine-side statistics. A transformed pipeline's result
+is built by an engine query over the sources at execution time; a command
+may also run validation queries or several statistical passes. Its sources
+must remain stable throughout the command.{p_end}
 {pstd}{cmd:•} {cmd:parqit save ..., data copysource} verifies identity, names,
 kinds, count, {cmd:sortedby} and the first and last 64 observations only; an
 edit confined to the middle rows is not detected and the copy carries the
@@ -582,7 +749,7 @@ sequential behaviour.{p_end}
 expressions are the documented subset, not arbitrary Stata syntax; in
 particular {cmd:_n}/{cmd:_N} are unavailable in {cmd:replace}, in the
 {cmd:if} qualifier of {cmd:gen}, and in the read-only {cmd:count if} and
-{cmd:list if} filters.{p_end}
+{cmd:list if} filters; {cmd:egen} also refuses them.{p_end}
 {pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
 their format in metadata; third-party readers see the raw counts.{p_end}
 {pstd}{cmd:•} {cmd:discard} unloads the plugin and forgets an un-collected
