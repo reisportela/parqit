@@ -129,7 +129,7 @@ while read -r _ fn _; do
     grep -qF -- "$src" "$REPO/.github/workflows/build.yml" || \
         grep -qE -- "$(dirname "$src")/parqit_\*\.${fn##*.}" "$REPO/.github/workflows/build.yml" || \
         err "parqit.pkg ships '$fn' but the release workflow never copies $src"
-done < <(grep -E '^f ' "$REPO/src/ado/p/parqit.pkg")
+done < <(grep -E '^[fF] ' "$REPO/src/ado/p/parqit.pkg")
 
 # every 'g <PLAT> <binary> ...' must name a per-OS binary the release workflow
 # actually builds — the manifest promised MACINTEL64 that CI never produced.
@@ -138,7 +138,13 @@ while read -r _ _ gbin _; do
     [ -n "$gbin" ] || continue
     printf '%s\n' "$built" | grep -qx "$gbin" || \
         err "parqit.pkg declares platform binary '$gbin' the release workflow never builds"
-done < <(grep -E '^g ' "$REPO/src/ado/p/parqit.pkg")
+done < <(grep -E '^[gG] ' "$REPO/src/ado/p/parqit.pkg")
+
+# DLL and text suffixes otherwise select ancillary delivery rather than PLUS.
+grep -qx 'G WIN64 parqit_vcomp140.dll parqit_vcomp140.dll' "$REPO/src/ado/p/parqit.pkg" || \
+    err "the Windows OpenMP runtime must use G for installation beside the plugin"
+grep -qx 'F parqit_openmp_license.txt' "$REPO/src/ado/p/parqit.pkg" || \
+    err "the OpenMP license notice must use F for installation with the package"
 
 # Stata assigns different package platform names to GUI and console sessions
 # on both Mac architectures. Each pair executes the same binary; omitting a

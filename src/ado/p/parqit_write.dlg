@@ -1,7 +1,7 @@
 /*
   parqit save - Write Parquet or collect a view into memory
 
-*!  VERSION 0.1.35  07sep2026
+*!  VERSION 0.1.36  07sep2026
 
   User > parqit > Save as Parquet or collect into memory...
   Launch directly with:  db parqit_write      (menu installed by: parqit menu)

@@ -7,6 +7,10 @@ core_functions extensions) and has OpenMP enabled on every platform. Linux
 and macOS also embed the OpenMP runtime. The Windows package supplies
 `parqit_vcomp140.dll` beside the plugin; standard `net install` installs both.
 End users do not need a compiler or a separate runtime installer.
+The package uses `G` for the Windows DLL and `F` for the runtime license notice
+so Stata installs them in the ado directory instead of treating them as
+ancillary files. The licensed integration suite tests this routing with inert
+binary content and the actual manifest directives.
 
 ## Prerequisites
 

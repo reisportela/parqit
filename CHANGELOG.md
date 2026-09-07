@@ -6,7 +6,18 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.36] — 2026-09-07
+
+### Fixed
+- The Windows OpenMP DLL and runtime license notice are mandatory installation
+  files. Uppercase `G`/`F` package directives place them in the ado directory;
+  lowercase directives treated these extensions as ancillary files. A Stata
+  installation regression verifies destination paths and binary fidelity.
+
 ## [0.1.35] — 2026-09-07
+
+Unpublished release candidate; these changes are included in 0.1.36. Its tag
+is preserved after the runtime-installation issue was found before publication.
 
 ### Fixed
 - The pinned engine no longer accesses a destroyed thread-local block cache
