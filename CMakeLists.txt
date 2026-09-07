@@ -17,6 +17,20 @@ option(PARQIT_BUILD_TESTS "Build the C++ unit tests (doctest)." OFF)
 
 find_package(Threads REQUIRED)
 
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Some dependencies request POSIX.1-2001, which hides SDK declarations
+    # that GCC's C++ standard library still expects on recent macOS SDKs.
+    add_compile_definitions(_DARWIN_C_SOURCE)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_DEFINITIONS -D_DARWIN_C_SOURCE)
+    check_cxx_source_compiles("#define _POSIX_C_SOURCE 200112L\n#include <cstdlib>\nint main(){return 0;}"
+        PARQIT_DARWIN_CSTDLIB)
+    unset(CMAKE_REQUIRED_DEFINITIONS)
+    if(NOT PARQIT_DARWIN_CSTDLIB)
+        message(FATAL_ERROR "The GCC/macOS SDK combination cannot compile the required C++ headers")
+    endif()
+endif()
+
 set(PARQIT_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 
 # ---------------------------------------------------------------------------
