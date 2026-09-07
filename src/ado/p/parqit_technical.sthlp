@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.36 07sep2026}{...}
+{* *! version 0.1.37 07sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -34,12 +34,18 @@ workflow's resource needs and fidelity. The regression suites exercise them;
 passing tests do not establish correctness for every possible input or platform.
 
 {pstd}
-Every plugin build enables OpenMP and links a host runtime. Linux and macOS
-embed that runtime; Windows installs {cmd:parqit_vcomp140.dll} beside the plugin.
-{cmd:parqit version} reports the capability and {cmd:parqit selftest} exercises
-a small parallel region without calling Stata's API from worker threads.
-DuckDB executes SQL using its own scheduler and {cmd:parqit set threads};
-enabling OpenMP does not move SQL calculations into a second thread pool.
+DuckDB executes SQL using its own scheduler; {cmd:parqit set threads} controls
+its worker limit. From 0.1.37, plugins do not link an OpenMP runtime or require
+a companion Windows DLL. The OpenMP region in 0.1.36 was a diagnostic self-test,
+not the execution mechanism for data calculations. Removing it does not change
+the statistical algorithms or DuckDB's parallel execution.
+{cmd:parqit version} returns {cmd:r(parallel_backend)} equal to {cmd:duckdb};
+the legacy {cmd:r(openmp*)} diagnostics return zero.
+
+{pstd}
+Compiler-runtime notices remain in {cmd:parqit_openmp_license.txt}; its filename
+is retained for package compatibility, although no OpenMP runtime is bundled.
+The MIT license for parqit's own code does not replace third-party licenses.
 
 
 {marker metadata}{...}

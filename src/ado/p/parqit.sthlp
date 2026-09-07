@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.36 07sep2026}{...}
+{* *! version 0.1.37 07sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -1102,10 +1102,10 @@ view closes; {cmd:close _all} closes every view and performs the final owned-
 bridge sweep. {cmd:show} prints compiled SQL; {cmd:explain} asks DuckDB for its
 plan. {cmd:path} resolves a path to an absolute spelling and reports whether it
 exists, without creating it. {cmd:version} reports the parqit and embedded
-DuckDB versions and confirms OpenMP support. {cmd:selftest} exercises the OpenMP
-runtime, checks the ado/plugin codec, opens the engine, and writes/reads a small
-metadata-bearing Parquet file in process. The Windows package includes
-{cmd:parqit_vcomp140.dll}; keep it beside the plugin when installing manually.
+DuckDB versions and identifies DuckDB as the parallel execution backend.
+{cmd:selftest} checks the ado/plugin codec, opens the engine, and writes/reads a
+small metadata-bearing Parquet file in process. No separate OpenMP runtime or
+Windows OpenMP DLL is required. {cmd:parqit set threads} controls DuckDB's workers.
 {cmd:menu} adds the reproducible dialogs to {bf:User > parqit} once per GUI
 session and refuses console/batch sessions.
 
@@ -1428,13 +1428,13 @@ Native {cmd:tabstat} instead reports error 2000 for that empty-group case.
 {cmd:r(start)}.
 
 {pstd}{it:Diagnostics.} {cmd:path} returns local {cmd:r(path)} and scalar
-{cmd:r(exists)}. {cmd:version} returns locals {cmd:r(parqit_version)} and
-{cmd:r(duckdb_version)}, plus scalars {cmd:r(openmp)} (1),
-{cmd:r(openmp_version)} (the compiled OpenMP specification date) and
-{cmd:r(openmp_max_threads)} (the runtime's default team limit, not DuckDB's
-thread setting). {cmd:selftest} returns local {cmd:r(selftest)} equal
-to {cmd:ok} and scalar {cmd:r(openmp_threads)} for its two-worker request;
-runtime resource limits may reduce that team to one.
+{cmd:r(exists)}. {cmd:version} returns locals {cmd:r(parqit_version)},
+{cmd:r(duckdb_version)} and {cmd:r(parallel_backend)} equal to {cmd:duckdb}.
+For compatibility, scalars {cmd:r(openmp)}, {cmd:r(openmp_version)} and
+{cmd:r(openmp_max_threads)} remain available and equal zero: the plugin has no
+OpenMP dependency. These are not DuckDB worker counts. {cmd:selftest} returns
+local {cmd:r(selftest)} equal to {cmd:ok} and legacy scalar
+{cmd:r(openmp_threads)} equal to zero.
 Commands not listed in this section do not promise parqit-specific
 stored results; in particular the lazy mutation verbs normally change only the
 view plan, while {cmd:codebook}, {cmd:tabstat} without {opt save}, {cmd:duplicates list},

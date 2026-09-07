@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.36 — the full surface below is implemented and covered by a
+> **Status:** v0.1.37 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -31,11 +31,13 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
-The [v0.1.36 changelog](CHANGELOG.md) records the subsequent numerical,
-statistical-output and menu corrections. All plugin builds require OpenMP;
-the [build and packaging checks](BUILDING.md) verify that runtime in the exact
-distributed binary on each platform. DuckDB continues to schedule SQL work
-through its own threads.
+The [changelog](CHANGELOG.md) records the numerical, statistical-output and menu
+corrections. Version 0.1.37 removes the OpenMP runtime dependency, including the
+companion Windows DLL. DuckDB continues to schedule queries through its own
+threads, controlled by `parqit set threads`. The former OpenMP region only
+tested runtime availability; it did not execute calculations over the data.
+The [build and packaging checks](BUILDING.md) validate the exact distributed
+plugin, and a worker-observation test verifies DuckDB's parallel execution.
 
 > **About.** The conceptual design of `parqit` is by **Miguel Portela** — taking
 > [`pq`](https://github.com/jrothbaum/stata_parquet_io) as the starting point and
@@ -160,7 +162,7 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.1.36`).
+  `download/vX.Y.Z` (for example, `download/v0.1.37`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 

@@ -1,4 +1,4 @@
-* Runtime support files must be installed beside the plugin by net install.
+* net install delivers the platform plugin and compiler-runtime notices, without a DLL.
 clear all
 set more off
 args repo plugin

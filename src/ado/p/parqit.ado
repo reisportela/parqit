@@ -1,4 +1,4 @@
-*! version 0.1.36 07sep2026
+*! version 0.1.37 07sep2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -96,17 +96,18 @@ program define _parqit_version, rclass
     syntax
     _parqit_ensure_plugin
     plugin call parqit_plugin, version
-    if ("`parqit_openmp'" != "1") {
-        di as err "parqit: install the matching OpenMP plugin and restart Stata"
+    if ("`parqit_openmp'" != "0" | "`parqit_parallel_backend'" != "duckdb") {
+        di as err "parqit: install the matching plugin and restart Stata"
         exit 498
     }
     di as txt "parqit version " as res "`parqit_plugin_version'" ///
         as txt "  (engine: DuckDB " as res "`parqit_duckdb_version'" ///
         as txt ", Stata Plugin Interface " as res "`parqit_spi_version'" ///
-        as txt ", OpenMP enabled)"
+        as txt ", parallelism: DuckDB)"
     return local parqit_version `"`parqit_plugin_version'"'
     return local duckdb_version `"`parqit_duckdb_version'"'
-    return scalar openmp = 1
+    return local parallel_backend "duckdb"
+    return scalar openmp = 0
     return scalar openmp_version = real("`parqit_openmp_version'")
     return scalar openmp_max_threads = real("`parqit_openmp_max_threads'")
 end
@@ -136,7 +137,7 @@ program define _parqit_selftest, rclass
         exit 920
     }
     di as txt "parqit selftest: " as res "ok" ///
-        as txt "  (OpenMP runtime, codecs, engine, Parquet write/read and metadata verified in-process)"
+        as txt "  (codecs, engine, Parquet write/read and metadata verified in-process)"
     return local selftest "ok"
     return scalar openmp_threads = real("`parqit_openmp_threads'")
 end

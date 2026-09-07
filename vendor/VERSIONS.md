@@ -10,15 +10,13 @@
 
 Pins:
 
-- GNU libgomp **14.3.0** is built as a PIC static runtime on Linux/macOS by
-  `cmake/ParqitOpenMP.cmake`. Only libgomp is compiled from
-  `https://ftp.gnu.org/gnu/gcc/gcc-14.3.0/gcc-14.3.0.tar.xz`, SHA256
-  `e0dc77297625631ac8e50fa92fffefe899a4eb702592da5c32ef04e2293aca3a`.
-  License: GPL-3.0 with the GCC Runtime Library Exception, copied into the
-  shipped `parqit_openmp_license.txt`.
-- Windows OpenMP uses the installed MSVC toolchain's x64 `vcomp140.dll`
-  redistributable. Its exact packaged bytes are identified by the release
-  checksum manifest; no runtime is downloaded at plugin execution time.
+- Version 0.1.37 removes all OpenMP runtimes. DuckDB continues to use its own
+  scheduler and native worker threads. No `vcomp140.dll` is distributed.
+- The GCC C/C++ runtimes linked into Linux/macOS plugins retain their GPL-3.0
+  plus GCC Runtime Library Exception terms. Windows embeds the MSVC C/C++
+  runtime under the applicable Microsoft terms. Notices retain the legacy
+  filename `parqit_openmp_license.txt`; removing OpenMP does not relicense
+  other compiler-runtime code.
 - DuckDB tarball SHA256
   `f22a7cfb3e72be3010f4a7f2fbdd8de7d62fa036b838543acb663a722a7a71df`
   (verified by CMake on every fetch).

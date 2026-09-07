@@ -140,11 +140,12 @@ while read -r _ _ gbin _; do
         err "parqit.pkg declares platform binary '$gbin' the release workflow never builds"
 done < <(grep -E '^[gG] ' "$REPO/src/ado/p/parqit.pkg")
 
-# DLL and text suffixes otherwise select ancillary delivery rather than PLUS.
-grep -qx 'G WIN64 parqit_vcomp140.dll parqit_vcomp140.dll' "$REPO/src/ado/p/parqit.pkg" || \
-    err "the Windows OpenMP runtime must use G for installation beside the plugin"
+# Keep compiler-runtime notices on the ado path; no OpenMP DLL is shipped.
+if grep -Eqi '^[gG] .*\.(dll|so|dylib)( |$)' "$REPO/src/ado/p/parqit.pkg"; then
+    err "the package must not install a separate runtime library"
+fi
 grep -qx 'F parqit_openmp_license.txt' "$REPO/src/ado/p/parqit.pkg" || \
-    err "the OpenMP license notice must use F for installation with the package"
+    err "the compiler-runtime notice must use F for installation with the package"
 
 # Stata assigns different package platform names to GUI and console sessions
 # on both Mac architectures. Each pair executes the same binary; omitting a

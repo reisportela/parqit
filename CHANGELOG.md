@@ -6,6 +6,22 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.1.37] — 2026-09-07
+
+### Changed
+- Removed OpenMP from all plugin builds and the companion Windows
+  `parqit_vcomp140.dll` from the package. The former OpenMP region was only a
+  runtime self-test; queries and calculations continue to use DuckDB's own
+  scheduler, controlled by `parqit set threads`. Numerical algorithms are unchanged.
+- `parqit version` identifies `r(parallel_backend)` as `duckdb`. Existing
+  `r(openmp)`, `r(openmp_version)`, `r(openmp_max_threads)` and self-test
+  `r(openmp_threads)` diagnostics remain available and now return zero.
+- The exact packaged plugin must pass the engine probe without OpenMP imports.
+  A separate regression observes actual DuckDB workers and checks identical
+  results with one and four threads.
+- Compiler-runtime notices retain the filename `parqit_openmp_license.txt`
+  for installation compatibility; the package no longer includes OpenMP code.
+
 ## [0.1.36] — 2026-09-07
 
 ### Fixed

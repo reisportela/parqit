@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.1.36 LANGUAGES C CXX)
+project(parqit VERSION 0.1.37 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,18 @@ option(PARQIT_BUILD_TESTS "Build the C++ unit tests (doctest)." OFF)
 find_package(Threads REQUIRED)
 
 if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(PARQIT_TARGET_ARCH)
+        execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -dumpmachine
+            OUTPUT_VARIABLE _gcc_machine OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(PARQIT_TARGET_ARCH STREQUAL "arm64")
+            set(_arch_pattern "^aarch64-")
+        else()
+            set(_arch_pattern "^x86_64-")
+        endif()
+        if(NOT _gcc_machine MATCHES "${_arch_pattern}")
+            message(FATAL_ERROR "The selected GCC does not target ${PARQIT_TARGET_ARCH}")
+        endif()
+    endif()
     # Some dependencies request POSIX.1-2001, which hides SDK declarations
     # that GCC's C++ standard library still expects on recent macOS SDKs.
     add_compile_definitions(_DARWIN_C_SOURCE)
@@ -50,7 +62,6 @@ if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif()
 include(FetchContent)
-include(cmake/ParqitOpenMP.cmake)
 
 if(PARQIT_DUCKDB_ARCHIVE)
     set(_parqit_duckdb_url "${PARQIT_DUCKDB_ARCHIVE}")
@@ -132,7 +143,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
 else()
     target_link_libraries(parqit_engine PUBLIC ${PARQIT_DUCKDB_LIBS})
 endif()
-target_link_libraries(parqit_engine PUBLIC parqit_openmp Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(parqit_engine PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 # parqit's own translation units include duckdb.h and link the STATIC DuckDB, so
 # DUCKDB_C_API must be empty (not __declspec(dllimport)) on Windows — otherwise
 # the linker looks for __imp_duckdb_* DLL stubs the static lib never provides.
@@ -150,7 +161,6 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(parqit_plugin SHARED
     src/plugin/parqit_plugin.cpp
-    src/plugin/openmp_runtime.cpp
     src/plugin/plugin_io.cpp
     src/plugin/plugin_view.cpp
     "${PARQIT_VENDOR_DIR}/stata/stplugin.c"
@@ -168,11 +178,6 @@ target_include_directories(parqit_plugin PRIVATE
     "${PARQIT_VENDOR_DIR}/json"
 )
 target_link_libraries(parqit_plugin PRIVATE parqit_engine Threads::Threads ${CMAKE_DL_LIBS})
-if(MSVC)
-    target_link_libraries(parqit_plugin PRIVATE delayimp)
-    target_link_options(parqit_plugin PRIVATE
-        "$<IF:$<CONFIG:Debug>,/DELAYLOAD:vcomp140d.dll,/DELAYLOAD:vcomp140.dll>")
-endif()
 set_target_properties(parqit_plugin PROPERTIES OUTPUT_NAME "parqit" PREFIX "" SUFFIX ".plugin")
 target_compile_definitions(parqit_plugin PRIVATE PARQIT_VERSION="${PROJECT_VERSION}")
 if(NOT WIN32)
@@ -239,14 +244,6 @@ foreach(f parqit.ado parqit.sthlp parqit_technical.sthlp parqit_openmp_license.t
 endforeach()
 add_custom_target(parqit_ado_sync DEPENDS ${_parqit_ado_synced})
 add_dependencies(parqit_plugin parqit_ado_sync)
-if(MSVC)
-    add_custom_command(TARGET parqit_plugin POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PARQIT_OPENMP_DLL_SOURCE}" "${PARQIT_LOCAL_ADO_DIR}/parqit_vcomp140.dll"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PARQIT_OPENMP_DLL_SOURCE}" "$<TARGET_FILE_DIR:parqit_plugin>/parqit_vcomp140.dll"
-        COMMENT "Stage the matching OpenMP runtime")
-endif()
 
 # The binary: stripped into the tree after every relink (POST_BUILD), and
 # also reconciled on plain `cmake --build build/dev` via the ALL target
@@ -286,23 +283,22 @@ add_custom_target(parqit_local_ado ALL
 # ---------------------------------------------------------------------------
 if(PARQIT_BUILD_TESTS)
     enable_testing()
-    add_executable(parqit_openmp_probe tests/plugin_openmp_probe.cpp)
-    target_include_directories(parqit_openmp_probe PRIVATE "${PARQIT_VENDOR_DIR}/stata")
-    target_link_libraries(parqit_openmp_probe PRIVATE ${CMAKE_DL_LIBS})
+    add_executable(parqit_runtime_probe tests/plugin_runtime_probe.cpp)
+    target_include_directories(parqit_runtime_probe PRIVATE "${PARQIT_VENDOR_DIR}/stata")
+    target_link_libraries(parqit_runtime_probe PRIVATE ${CMAKE_DL_LIBS})
     if(NOT WIN32)
-        target_compile_definitions(parqit_openmp_probe PRIVATE SYSTEM=OPUNIX)
+        target_compile_definitions(parqit_runtime_probe PRIVATE SYSTEM=OPUNIX)
     endif()
-    add_dependencies(parqit_openmp_probe parqit_plugin)
-    add_test(NAME plugin_openmp
-        COMMAND parqit_openmp_probe "$<TARGET_FILE:parqit_plugin>")
-    set_tests_properties(plugin_openmp PROPERTIES
-        ENVIRONMENT "OMP_DYNAMIC=FALSE;OMP_THREAD_LIMIT=2")
+    add_dependencies(parqit_runtime_probe parqit_plugin)
+    add_test(NAME plugin_runtime
+        COMMAND parqit_runtime_probe "$<TARGET_FILE:parqit_plugin>")
     add_executable(parqit_tests
         tests/unit/test_main.cpp
         tests/unit/test_hexcodec.cpp
         tests/unit/test_legacy_encoding.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
+        tests/unit/test_parallelism.cpp
         tests/unit/test_statistics.cpp
         tests/unit/test_typemap.cpp
         tests/unit/test_sanitize.cpp

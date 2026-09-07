@@ -22,10 +22,9 @@
 #include "engine/session.hpp"
 #include "plugin/plugin_io.hpp"
 #include "plugin/plugin_view.hpp"
-#include "plugin/openmp_runtime.hpp"
 
-#ifndef _OPENMP
-#error "Every parqit plugin must be compiled with OpenMP enabled"
+#ifdef _OPENMP
+#error "parqit uses DuckDB's scheduler and must not link an OpenMP runtime"
 #endif
 
 #ifndef PARQIT_VERSION
@@ -85,16 +84,11 @@ ST_retcode cmd_version(const std::vector<std::string> &) {
     save_local("_parqit_plugin_version", PARQIT_VERSION);
     save_local("_parqit_duckdb_version", duckdb_library_version());
     save_local("_parqit_spi_version", "3.0");
-    save_local("_parqit_openmp", "1");
-    save_local("_parqit_openmp_version", std::to_string(parqit_plugin::openmp_version()));
-    save_local("_parqit_openmp_max_threads", std::to_string(parqit_plugin::openmp_max_threads()));
-    return 0;
-}
-
-ST_retcode cmd_openmp_probe(const std::vector<std::string> &) {
-    const auto result = parqit_plugin::openmp_probe();
-    save_local("_parqit_openmp_threads", std::to_string(result.threads));
-    save_local("_parqit_openmp_checksum", std::to_string(result.checksum));
+    save_local("_parqit_parallel_backend", "duckdb");
+    // Retain the public diagnostic fields introduced in 0.1.36.
+    save_local("_parqit_openmp", "0");
+    save_local("_parqit_openmp_version", "0");
+    save_local("_parqit_openmp_max_threads", "0");
     return 0;
 }
 
@@ -111,7 +105,7 @@ ST_retcode cmd_selftest(const std::vector<std::string> &args) {
         cry("parqit selftest: missing tmpdir argument");
         return kRcUsage;
     }
-    cmd_openmp_probe(args);
+    save_local("_parqit_openmp_threads", "0");
     parqit::Session &s = parqit::Session::instance();
     s.set_default_temp_dir(tmpdir);
 
@@ -169,7 +163,6 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "ping") return cmd_ping(args);
     if (cmd == "echo") return cmd_echo(args);
     if (cmd == "version") return cmd_version(args);
-    if (cmd == "openmp_probe") return cmd_openmp_probe(args);
     if (cmd == "selftest") return cmd_selftest(args);
     if (cmd == "use_prepare") return parqit_plugin::cmd_use_prepare(args);
     if (cmd == "use_fetch") return parqit_plugin::cmd_use_fetch(args);

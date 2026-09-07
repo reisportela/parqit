@@ -1,4 +1,4 @@
-// Run the exact plugin's OpenMP code without linking this verifier to OpenMP.
+// Load the exact packaged plugin and exercise its public engine diagnostics.
 #include "stplugin.h"
 #include <cstdlib>
 #include <chrono>
@@ -26,7 +26,7 @@ int report_error(char *message) {
 
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 3 || (argc == 3 && std::string(argv[2]) != "--distribution")) {
-        std::cerr << "usage: parqit_openmp_probe /absolute/path/parqit.plugin [--distribution]\n";
+        std::cerr << "usage: parqit_runtime_probe /absolute/path/parqit.plugin [--distribution]\n";
         return 2;
     }
 #ifdef _WIN32
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     };
 #endif
     if (!library) {
-        std::cerr << "OpenMP plugin load failed";
+        std::cerr << "Plugin load failed";
 #ifndef _WIN32
         std::cerr << ": " << dlerror();
 #endif
@@ -68,16 +68,11 @@ int main(int argc, char **argv) {
     if (initialize(&stata) != SD_PLUGINVER) return 1;
     char version[] = "version";
     char *version_args[] = {version};
-    if (call(1, version_args) != 0 || locals["_parqit_openmp"] != "1" ||
-        std::atoi(locals["_parqit_openmp_version"].c_str()) < 200203)
-        return 1;
-    char probe[] = "openmp_probe";
-    char *probe_args[] = {probe};
-    if (call(1, probe_args) != 0 || locals["_parqit_openmp_threads"] != "2" ||
-        locals["_parqit_openmp_checksum"] != "3") {
-        std::cerr << "OpenMP must execute two workers: threads="
-                  << locals["_parqit_openmp_threads"] << " checksum="
-                  << locals["_parqit_openmp_checksum"] << '\n';
+    if (call(1, version_args) != 0 || locals["_parqit_openmp"] != "0" ||
+        locals["_parqit_openmp_version"] != "0" ||
+        locals["_parqit_openmp_max_threads"] != "0" ||
+        locals["_parqit_parallel_backend"] != "duckdb") {
+        std::cerr << "Plugin must use DuckDB's scheduler without OpenMP\n";
         return 1;
     }
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -92,13 +87,13 @@ int main(int argc, char **argv) {
     }
     char selftest[] = "selftest";
     char *selftest_args[] = {selftest, hex.data()};
-    const bool engine_ok = call(2, selftest_args) == 0 && locals["_parqit_selftest"] == "ok";
+    const bool engine_ok = call(2, selftest_args) == 0 && locals["_parqit_selftest"] == "ok" &&
+                           locals["_parqit_openmp_threads"] == "0";
     std::error_code cleanup_error;
     std::filesystem::remove(temporary, cleanup_error);
     if (!engine_ok || cleanup_error) return 1;
-    std::cout << "PLUGIN_OPENMP_PASS version=" << locals["_parqit_plugin_version"]
-              << " standard=" << locals["_parqit_openmp_version"]
-              << " threads=2 checksum=3 engine=PASS\n";
-    // Keep the runtime resident until process exit, as Stata normally does.
+    std::cout << "PLUGIN_RUNTIME_PASS version=" << locals["_parqit_plugin_version"]
+              << " parallel_backend=duckdb openmp=0 engine=PASS\n";
+    // Keep the plugin resident until process exit, as Stata normally does.
     return 0;
 }

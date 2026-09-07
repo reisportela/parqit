@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify the exact plugin file that packaging/upload will consume.
 # Usage: tests/verify_collected_plugin.sh FILE linux|macos|windows
-# Set PARQIT_OPENMP_PROBE to the built verifier, which links no OpenMP itself.
+# Set PARQIT_RUNTIME_PROBE to the built plugin verifier.
 set -eu
 
 FILE_PATH="${1:-}"
@@ -25,8 +25,8 @@ case "$PLATFORM" in
             sort -u)"
         [ "$exports" = "$(printf '%s\n' pginit stata_call | sort)" ] || \
             die "export table must contain exactly pginit and stata_call (got: $(printf '%s' "$exports" | tr '\n' ' '))"
-        if readelf -d -W "$FILE_PATH" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s|libgomp|libomp)'; then
-            die "Linux artifact must embed its C++ and OpenMP runtimes"
+        if readelf -d -W "$FILE_PATH" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s|libgomp|libi?omp)'; then
+            die "Linux artifact must embed its C++ runtime and have no OpenMP dependency"
         fi
         ;;
     macos)
@@ -43,8 +43,8 @@ case "$PLATFORM" in
         exports="$(printf '%s\n' "$symbols" | sort -u)"
         [ "$exports" = "$(printf '%s\n' _pginit _stata_call | sort)" ] || \
             die "export table must contain exactly _pginit and _stata_call (got: $(printf '%s' "$exports" | tr '\n' ' '))"
-        if otool -L "$FILE_PATH" | grep -Eq '(libomp|libgomp|/opt/homebrew/|/usr/local/opt/)'; then
-            die "macOS artifact must embed OpenMP and have no Homebrew runtime path"
+        if otool -L "$FILE_PATH" | grep -Eq '(libi?omp|libgomp|/opt/homebrew/|/usr/local/opt/)'; then
+            die "macOS artifact must have no OpenMP or Homebrew runtime dependency"
         fi
         codesign --verify --strict "$FILE_PATH" || die "macOS signature verification failed"
         ;;
@@ -57,10 +57,9 @@ case "$PLATFORM" in
                  inside && $1 ~ /^\[/ {print $NF}' | sort -u)"
         [ "$exports" = "$(printf '%s\n' pginit stata_call | sort)" ] || \
             die "PE export table must contain exactly pginit and stata_call"
-        runtime="$(dirname "$FILE_PATH")/parqit_vcomp140.dll"
-        [ -f "$runtime" ] || die "Windows package is missing parqit_vcomp140.dll"
-        objdump -f "$runtime" | grep -Eqi 'pei-x86-64|pe-x86-64' || \
-            die "OpenMP runtime is not x64 PE/COFF"
+        if LC_ALL=C objdump -p "$FILE_PATH" | grep -Eqi '(vcomp|libomp|libiomp|libgomp)[^[:space:]]*\.dll'; then
+            die "Windows artifact must not import or delay-load an OpenMP runtime"
+        fi
         # MSVC Release output is the distributable binary; there is no Unix
         # strip step or ELF section contract to apply on this platform.
         ;;
@@ -69,13 +68,13 @@ case "$PLATFORM" in
         ;;
 esac
 
-# This executable links no OpenMP runtime itself. The two workers must come
-# from the exact plugin under inspection, after its package has been copied.
-if [ -n "${PARQIT_OPENMP_PROBE:-}" ]; then
-    OMP_DYNAMIC=FALSE OMP_THREAD_LIMIT=2 "$PARQIT_OPENMP_PROBE" "$FILE_PATH" --distribution || \
-        die "the collected plugin did not execute two OpenMP workers"
+# The compiled guard and dependency checks reject OpenMP; this probe checks
+# the exact plugin's diagnostics and engine after packaging and stripping.
+if [ -n "${PARQIT_RUNTIME_PROBE:-}" ]; then
+    "$PARQIT_RUNTIME_PROBE" "$FILE_PATH" --distribution || \
+        die "the collected plugin did not pass the runtime and engine checks"
 else
-    die "PARQIT_OPENMP_PROBE must name the built parqit_openmp_probe verifier"
+    die "PARQIT_RUNTIME_PROBE must name the built parqit_runtime_probe verifier"
 fi
 
 if stat -c %s "$FILE_PATH" >/dev/null 2>&1; then
