@@ -86,6 +86,7 @@ FetchContent_Declare(duckdb
 FetchContent_MakeAvailable(duckdb)
 include(cmake/PatchDuckDBSampling.cmake)
 include(cmake/PatchDuckDBCapi.cmake)
+include(cmake/PatchDuckDBLifetime.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 
@@ -325,5 +326,13 @@ if(PARQIT_BUILD_TESTS)
         add_test(NAME unit_concurrent
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_unit_concurrent.sh"
                          "$<TARGET_FILE:parqit_tests>")
+        find_program(PARQIT_VALGRIND valgrind)
+        if(PARQIT_VALGRIND)
+            add_test(NAME session_shutdown_memory
+                COMMAND "${PARQIT_VALGRIND}" --tool=memcheck --vgdb=no
+                    --error-exitcode=97 --leak-check=no --num-callers=25
+                    "$<TARGET_FILE:parqit_tests>"
+                    "--test-case=session close reopen and process teardown preserve allocator lifetimes")
+        endif()
     endif()
 endif()

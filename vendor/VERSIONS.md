@@ -28,6 +28,11 @@ Pins:
   capacity. Internal table-statistics sampling keeps its existing policy.
 - `cmake/PatchDuckDBCapi.cmake` fixes the C aggregate bridge's state-vector
   flattening for window execution; the correction is also checked by source hash.
+- `cmake/PatchDuckDBLifetime.cmake` removes access to a thread-local block cache
+  from allocator destruction, when that cache may already have been destroyed.
+  It also initializes transaction invalidation and automatic-rollback flags.
+  Both source edits are hash-checked; the close/reopen/shutdown regression runs
+  under Valgrind in Linux CI.
 - `stata/stplugin.h` md5 `5916aa9797bdb05e9bdc0f5b2920dbaf`.
 
 Why a source build rather than the released amalgamation: verified on

@@ -9,14 +9,61 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <memory>
 #include <string>
 
 #include "abi.h" /* Arrow C Data Interface */
 #include "duckdb.h"
 #include "engine/session.hpp"
+#include "duckdb/common/allocator.hpp"
+#include "duckdb/storage/block_allocator.hpp"
 #include "test_tmp.hpp"
 
 using parqit::Session;
+
+TEST_CASE("destroying an unrelated block allocator preserves live pool capacity") {
+    static size_t fallback_calls;
+    fallback_calls = 0;
+    duckdb::Allocator fallback(
+        [](duckdb::PrivateAllocatorData *, idx_t size) {
+            ++fallback_calls;
+            return static_cast<duckdb::data_ptr_t>(std::malloc(size));
+        },
+        [](duckdb::PrivateAllocatorData *, duckdb::data_ptr_t pointer, idx_t) { std::free(pointer); },
+        [](duckdb::PrivateAllocatorData *, duckdb::data_ptr_t pointer, idx_t, idx_t size) {
+            ++fallback_calls;
+            return static_cast<duckdb::data_ptr_t>(std::realloc(pointer, size));
+        }, nullptr);
+    constexpr idx_t block_size = 4096, blocks = 128;
+    auto other = std::make_unique<duckdb::BlockAllocator>(fallback, block_size,
+                                                        block_size * blocks, block_size * blocks);
+    duckdb::BlockAllocator live(fallback, block_size, block_size * blocks, block_size * blocks);
+    std::vector<duckdb::data_ptr_t> pointers;
+    pointers.push_back(live.AllocateData(block_size));
+    pointers.front()[0] = 42;
+    other.reset();
+    for (idx_t i = 1; i < blocks; ++i) pointers.push_back(live.AllocateData(block_size));
+    CHECK(fallback_calls == 0);
+    CHECK(pointers.front()[0] == 42);
+    for (auto pointer : pointers) live.FreeData(pointer, block_size);
+}
+
+TEST_CASE("session close reopen and process teardown preserve allocator lifetimes") {
+    Session &s = Session::instance();
+    s.close();
+    REQUIRE(s.ensure_open());
+    duckdb_result result{};
+    std::string error, value;
+    CHECK_FALSE(s.query("SELECT CAST(value AS BIGINT) FROM (VALUES ('1'), ('bad')) t(value)",
+                        &result, &error));
+    CHECK_FALSE(error.empty());
+    s.close();
+    REQUIRE(s.ensure_open());
+    REQUIRE(s.query_scalar("SELECT 1", &value, &error));
+    CHECK(value == "1");
+    // Leave the final session open: process teardown must handle TLS destruction.
+}
 
 TEST_CASE("C API aggregate finalizer errors reach the query caller") {
     Session &s=Session::instance();

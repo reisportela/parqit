@@ -9,6 +9,9 @@ semantic versioning once `v0.1.0` is tagged.
 ## [0.1.35] — 2026-09-07
 
 ### Fixed
+- The pinned engine no longer accesses a destroyed thread-local block cache
+  during process shutdown. Transaction error-policy flags have explicit
+  defaults. A close/reopen regression runs under a memory checker in Linux CI.
 - Dispersion, skewness, kurtosis and correlation now use exact integer power
   sums/cross-products and certified binary64 rounding. Subnormal shape survives
   extreme scaling; rounded zero sd no longer implies constancy. Correlation

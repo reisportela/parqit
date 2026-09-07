@@ -51,7 +51,7 @@ jobs:
           # without it the CMake probe falls through to a DYNAMIC libstdc++ link
           # and the shipped .so fails to dlopen on older HPC nodes.
           dnf -y install gcc-toolset-12 gcc-toolset-12-libstdc++-devel \
-                         glibc-langpack-en binutils file git cmake make python3 zip
+                         glibc-langpack-en valgrind binutils file git cmake make python3 zip
           echo "/opt/rh/gcc-toolset-12/root/usr/bin" >> $GITHUB_PATH
           echo "LANG=en_US.UTF-8" >> "$GITHUB_ENV"
           echo "LC_ALL=en_US.UTF-8" >> "$GITHUB_ENV"

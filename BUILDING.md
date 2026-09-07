@@ -40,7 +40,7 @@ End users do not need a compiler or a separate runtime installer.
 # Linux
 cmake --preset linux && cmake --build --preset linux -j
 
-# macOS (build the architecture you are on, or both)
+# macOS (run each preset on a host of that architecture)
 cmake --preset macos-arm64  && cmake --build --preset macos-arm64 -j
 cmake --preset macos-x86_64 && cmake --build --preset macos-x86_64 -j
 
@@ -50,10 +50,12 @@ cmake --preset windows && cmake --build --preset windows
 
 The plugin lands at `build/<preset>/parqit.plugin`. The first build compiles
 DuckDB from source and takes several minutes; afterwards only parqit's own
-files recompile. The pinned engine also receives two hash-checked local fixes:
-uniform SQL reservoir sampling and C-API aggregate state flattening for windows.
-See [PatchDuckDBSampling.cmake](cmake/PatchDuckDBSampling.cmake) and
-[PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake). Configure refuses an
+files recompile. The pinned engine also receives hash-checked local fixes:
+uniform SQL reservoir sampling, C-API aggregate state flattening for windows,
+safe block-allocator shutdown and initialized transaction error-policy flags.
+See [PatchDuckDBSampling.cmake](cmake/PatchDuckDBSampling.cmake),
+[PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake) and
+[PatchDuckDBLifetime.cmake](cmake/PatchDuckDBLifetime.cmake). Configure refuses an
 unexpected edited dependency file instead of overwriting it.
 
 The statistics implementation requires IEEE binary64 evaluation without
@@ -69,6 +71,10 @@ cmake --preset dev
 cmake --build build/dev --target parqit_plugin parqit_tests -j
 ctest --preset dev          # C++ unit tests (doctest)
 ```
+
+When Valgrind is available, CTest also runs the close/reopen/process-shutdown
+regression under Memcheck. The Linux release runner installs it and requires
+zero memory errors, including errors after the assertions have passed.
 
 `PARQIT_LOCAL_ADO_DIR` can point to a separate staging directory while validating
 a change. Its default is the repo's `ado/plus/p`; restore that location after
