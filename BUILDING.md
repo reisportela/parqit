@@ -153,7 +153,8 @@ PARQIT_OPENMP_PROBE=build/linux/parqit_openmp_probe \
 
 The Linux check requires ELF64, exported `stata_call`/`pginit`, no ordinary
 `.symtab` or debug sections, and no dynamic C++ or OpenMP runtime dependency.
-The macOS build uses a two-symbol strip keep-list and ad-hoc signing. Its check
+The macOS link disables GCC's automatic runtime exports with `-nodefaultexport`,
+then uses a two-symbol strip keep-list and ad-hoc signing. Its check
 recognises Mach-O, verifies the signature and rejects leaked runtime exports;
 the Windows check recognises PE/COFF, the required exports and the bundled
 `parqit_vcomp140.dll`. Set the verifier path to `build/<preset>/parqit_openmp_probe`

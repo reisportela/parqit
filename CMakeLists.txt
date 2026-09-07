@@ -23,9 +23,11 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_definitions(_DARWIN_C_SOURCE)
     include(CheckCXXSourceCompiles)
     set(CMAKE_REQUIRED_DEFINITIONS -D_DARWIN_C_SOURCE)
+    set(CMAKE_REQUIRED_LINK_OPTIONS -nodefaultexport)
     check_cxx_source_compiles("#define _POSIX_C_SOURCE 200112L\n#include <cstdlib>\nint main(){return 0;}"
         PARQIT_DARWIN_CSTDLIB)
     unset(CMAKE_REQUIRED_DEFINITIONS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
     if(NOT PARQIT_DARWIN_CSTDLIB)
         message(FATAL_ERROR "The GCC/macOS SDK combination cannot compile the required C++ headers")
     endif()
@@ -185,7 +187,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(APPLE)
     target_link_options(parqit_plugin PRIVATE
-        -static-libstdc++ -static-libgcc
+        -static-libstdc++ -static-libgcc -nodefaultexport
         "-Wl,-exported_symbol,_stata_call"
         "-Wl,-exported_symbol,_pginit")
 elseif(UNIX)

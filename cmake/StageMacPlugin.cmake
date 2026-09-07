@@ -1,5 +1,5 @@
-# GCC's Darwin driver exports runtime helpers when libgcc is embedded.
-# Apple strip prunes both the symbol table and the dyld export trie.
+# The linker disables GCC's default exports and keeps the two Stata entries.
+# Strip local symbols, then refresh the signature of the distribution file.
 execute_process(COMMAND "${STRIP}" -u -s "${EXPORTS}" -o "${OUTPUT}" "${INPUT}"
     RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
