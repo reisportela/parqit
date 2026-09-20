@@ -1786,6 +1786,16 @@ program define _parqit_lossy_notes
         di as txt "note: extended missing values (.a-.z) in " ///
             as res `"`ext'"' ///
             as txt " were written as nulls (Parquet has a single missing concept)"
+        * MISSKEY-NOTE-1: the collapse is cosmetic in a payload column, but
+        * not in a KEY. A reader of this file (maybe another session) merging
+        * on one of these columns pairs rows native Stata keeps apart, because
+        * .a and . are then the same missing. Kept as a separate di so the
+        * phrase "extended missing values" stays on its own line (v29, v77).
+        di as txt "note: in a " as res "merge" as txt "/" as res "joinby" ///
+            as txt " key these categories are no longer distinguishable from " ///
+            as res "." as txt ", so rows that native Stata did not match now " ///
+            "match; the join reports it — see " ///
+            "{help parqit##limitations:Limitations in the parqit help}"
     }
     if (`"`frac'"' != "") {
         di as txt "note: non-integer date/period values in " ///

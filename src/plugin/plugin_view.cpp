@@ -53,6 +53,10 @@ namespace {
 constexpr ST_retcode kRcUsage = 198;
 constexpr ST_retcode kRcTypeMismatch = 106;
 constexpr ST_retcode kRcVarNotFound = 111;
+/* Stata's "variables ... do not uniquely identify observations": what native
+ * merge 1:1 / 1:m / m:1 returns when the side it requires to be unique is not
+ * (verified natively: capture merge 1:1 on a duplicated key leaves _rc 459) */
+constexpr ST_retcode kRcNotUnique = 459;
 constexpr ST_retcode kRcEngine = 920;
 /* Stata's "no room to add more observations" — the SPI obs index (ST_int)
  * is a 32-bit int, so one dataset can address at most 2^31-1 rows */
@@ -2332,7 +2336,77 @@ ST_retcode check_unique(Session &s, const std::string &rel_sql,
     if (n != "0") {
         *err = std::string("the key does not uniquely identify observations in the ") +
                side + " data";
-        return kRcUsage;
+        /* native Stata's own code for this contract (r(459)), so a caller's
+         * `capture ... if _rc == 459` catches parqit as it catches merge */
+        return kRcNotUnique;
+    }
+    return 0;
+}
+
+/* MISSKEY-NOTE-1 (triple-precision audit 2026-09-19, T11). Stata matches
+ * missing with missing in merge and in joinby, and parqit does the same
+ * (key_equality's IS NOT DISTINCT FROM over key_value) — verified natively for
+ * merge 1:1, merge m:1 and joinby, the last matching missing rows
+ * Cartesian-style. Parquet has one missing concept, so a side written from
+ * Stata has had its extended missings .a-.z folded into a plain `.`: a master
+ * row keyed .a then matches a using row keyed . that native Stata would never
+ * have paired, and _merge says 3. The write path already warns, but the person
+ * who suffers the false match is the READER — possibly in another session,
+ * over a file they did not write. Disclose it here, at the join, where it
+ * bites.
+ *
+ * One statement per side, per-key counts, one scan each. The counts use the
+ * SAME normalised key expressions the uniqueness guards and the join use
+ * (nullif(k,'') for text, NaN -> NULL for numbers), never the raw column: a ""
+ * key is Stata-missing to parqit (MERGE-1) and counting the raw name would
+ * make the note lie in exactly the case that contract exists for. Residual
+ * gap, deliberate and one-sided: the engine's key_value also folds +/-Inf and
+ * |x| >= Stata's missing threshold to missing, which norm_key does not, so
+ * such a key — reachable only from a foreign file — is under-counted here,
+ * never over-counted.
+ *
+ * A note, never an error: matching missing with missing IS the Stata
+ * behaviour and parqit must keep doing it. A pairing needs missing on BOTH
+ * sides of the SAME key, so that is the only case that says anything. */
+ST_retcode missing_key_notes(Session &s, const std::string &mrel,
+                             const std::string &urel,
+                             const std::vector<std::string> &keys,
+                             const std::vector<std::string> &mkeys,
+                             const std::vector<std::string> &ukeys,
+                             std::vector<std::string> *warns, std::string *err) {
+    /* join_keys_error() passes an empty key list (it only checks the keys it
+     * is given); merge_with/joinby_with are the ones that say "key varlist
+     * required". Leave that message to them instead of building a keyless
+     * SELECT and replacing it with a DuckDB parser error. */
+    if (keys.empty()) return 0;
+    auto counts = [&](const std::string &rel, const std::vector<std::string> &norm,
+                      std::vector<long long> *out) -> bool {
+        std::string sel;
+        for (const auto &k : norm) {
+            if (!sel.empty()) sel += ", ";
+            sel += "count(*) FILTER (WHERE " + k + " IS NULL)";
+        }
+        duckdb_result res;
+        if (!s.query("SELECT " + sel + " FROM (" + rel + ")", &res, err)) return false;
+        for (size_t i = 0; i < norm.size(); i++)
+            out->push_back(duckdb_value_int64(&res, i, 0));
+        duckdb_destroy_result(&res);
+        return true;
+    };
+    std::vector<long long> mn, un;
+    if (!counts(mrel, mkeys, &mn) || !counts(urel, ukeys, &un)) return kRcEngine;
+    for (size_t i = 0; i < keys.size(); i++) {
+        if (mn[i] == 0 || un[i] == 0) continue;
+        warns->push_back(
+            "key " + keys[i] + ": " + std::to_string(mn[i]) + " master and " +
+            std::to_string(un[i]) +
+            " using row(s) have a missing value in this key; missing matches "
+            "missing (as native Stata does), so if either side was written "
+            "from Stata its extended missings .a-.z, collapsed to ., now match "
+            /* plain text, not SMCL: SF_error does not interpret markup (an
+             * empirical check printed `{help parqit}` with its braces), and no
+             * other plugin message uses it */
+            "plain . — see Limitations in help parqit");
     }
     return 0;
 }
@@ -2455,6 +2529,36 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             cry("parqit " + kerr);
             return key_type_mismatch ? kRcTypeMismatch : kRcVarNotFound;
         }
+        /* Normalise each key exactly as the join does, so a "" / NaN key that
+         * the join folds to Stata-missing is folded here too (MERGE-1). Shared
+         * by the uniqueness contracts below (merge only) and by the
+         * missing-key disclosure (both verbs), which is why it is built here
+         * and not inside the merge branch. */
+        auto norm_key = [](const std::string &k, bool is_str) -> std::string {
+            std::string q = quote_ident(k);
+            if (is_str) return "nullif(" + q + ", '')";
+            return "(CASE WHEN isnan(CAST(" + q +
+                   " AS DOUBLE)) THEN NULL ELSE " + q + " END)";
+        };
+        std::map<std::string, char> mkind, ukind;
+        for (const auto &c : g_view_ref().cols()) mkind[c.name] = c.kind;
+        for (const auto &c : u.cols) ukind[c.name] = c.kind;
+        std::vector<std::string> mkeys, ukeys;
+        for (const auto &k : keys) {
+            auto mit = mkind.find(k);
+            auto uit = ukind.find(k);
+            mkeys.push_back(norm_key(k, mit != mkind.end() && mit->second == 's'));
+            ukeys.push_back(norm_key(k, uit != ukind.end() && uit->second == 's'));
+        }
+        /* MISSKEY-NOTE-1: say it for EVERY merge_kind and for joinby, before
+         * the plan mutation moves `u` away — not only for the kinds that
+         * happen to need a uniqueness guard. */
+        rc = missing_key_notes(s, g_view_ref().compile(false), u.select_sql, keys,
+                               mkeys, ukeys, &warns, &err);
+        if (rc != 0) {
+            cry("parqit " + op + ": " + err);
+            return rc;
+        }
         if (op == "joinby") {
             std::string e = candidate.joinby_with(keys, std::move(u), &warns);
             if (!e.empty()) {
@@ -2470,25 +2574,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                 cry(err);
                 return kRcUsage;
             }
-            /* uniqueness contracts before any plan mutation (loud, Stata-true).
-             * Normalise each key exactly as the join does so a "" / NaN key that
-             * the join folds to Stata-missing is folded here too (MERGE-1). */
-            auto norm_key = [](const std::string &k, bool is_str) -> std::string {
-                std::string q = quote_ident(k);
-                if (is_str) return "nullif(" + q + ", '')";
-                return "(CASE WHEN isnan(CAST(" + q +
-                       " AS DOUBLE)) THEN NULL ELSE " + q + " END)";
-            };
-            std::map<std::string, char> mkind, ukind;
-            for (const auto &c : g_view_ref().cols()) mkind[c.name] = c.kind;
-            for (const auto &c : u.cols) ukind[c.name] = c.kind;
-            std::vector<std::string> mkeys, ukeys;
-            for (const auto &k : keys) {
-                auto mit = mkind.find(k);
-                auto uit = ukind.find(k);
-                mkeys.push_back(norm_key(k, mit != mkind.end() && mit->second == 's'));
-                ukeys.push_back(norm_key(k, uit != ukind.end() && uit->second == 's'));
-            }
+            /* uniqueness contracts before any plan mutation (loud, Stata-true) */
             if (merge_kind == "1:1" || merge_kind == "1:m") {
                 rc = check_unique(s, g_view_ref().compile(false), mkeys, "master", &err);
                 if (rc != 0) {

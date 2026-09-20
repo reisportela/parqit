@@ -692,6 +692,28 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   Labels attached to extended missings do survive (they live in `parqit.*`
   metadata). Since their identity is then unavailable, `.a`–`.z` literals are
   rejected in lazy expressions; use `missing(x)` or compare with ordinary `.`.
+  In a **`merge`/`joinby` key** the collapse stops being cosmetic: `.a` and `.`
+  are then the same missing, and Stata matches missing with missing, so rows
+  that native Stata kept apart now pair and `_merge` reports 3. Both verbs say
+  so at join time — when the same key carries missing values on *both* sides,
+  they print a `note:` naming the key and the two counts.
+- **Row order after a lazy `merge`/`joinby`.** The result comes back grouped by
+  the key, with a `sortedby` marker that is true, and that order is *not* the
+  native one. What is guaranteed is the content — the same rows and cells as
+  native `merge`, as a multiset — and determinism: the same plan run twice
+  gives the same order. Order itself cannot be a contract, because native
+  `merge`'s own within-key order is not reproducible: changing only the
+  physical row order of the *using* file makes native `merge m:1` return the
+  master in a different order. Code that depends on `_n` or `by:` should sort
+  explicitly after collecting.
+- **`int64`/`uint64` values above 2^53.** Reading them into Stata rounds each
+  to the nearest `double` and says so (`note: <var>: values beyond 2^53
+  rounded to nearest double`), so two distinct keys can become one. The
+  lossless path is text: `parqit sql "SELECT …, CAST(col AS VARCHAR) AS s FROM
+  read_parquet('f.parquet')"` returns the digits exactly. A **lazy** `merge` or
+  `joinby` over such a key is exact even so, because the join runs in the
+  engine before any Stata `double` exists; only what is then collected is
+  rounded.
 - **Legacy (non-UTF-8) text.** Parquet strings must be UTF-8. `parqit save`
   transcodes string cells, labels, value labels, notes and characteristics
   that carry raw Latin-1/Windows-1252/MacRoman bytes (data saved by Stata 13

@@ -1326,7 +1326,24 @@ sources stable throughout a transformation or statistical command; see
 bounded.{p_end}
 {pstd}{cmd:•} Extended missings {cmd:.a}-{cmd:.z} become plain missing in
 Parquet (their labels survive); their literals are refused in lazy
-expressions.{p_end}
+expressions. In a {cmd:merge}/{cmd:joinby} {it:key} that collapse matches rows
+native Stata kept apart, because {cmd:.a} and {cmd:.} are then the same missing
+and Stata matches missing with missing; both verbs print a {cmd:note:} naming
+the key and the counts when the same key has missing values on {it:both}
+sides.{p_end}
+{pstd}{cmd:•} A lazy {cmd:merge}/{cmd:joinby} returns its result grouped by the
+key, with a true {cmd:sortedby} marker, in an order that is not native Stata's.
+Guaranteed are the content (the same rows and cells as native {cmd:merge}, as a
+multiset) and determinism: the same plan twice gives the same order. Order
+cannot be a contract because native {cmd:merge}'s own within-key order changes
+with the physical order of the {it:using} file. Sort explicitly after
+collecting if {cmd:_n} or {cmd:by:} depends on it.{p_end}
+{pstd}{cmd:•} {cmd:int64}/{cmd:uint64} values above 2^53 are rounded to the
+nearest {cmd:double} when read into Stata, with a {cmd:note:}, so two distinct
+keys can collide. For the digits exactly, read them as text with
+{cmd:parqit sql "SELECT ..., CAST(col AS VARCHAR) AS s FROM}
+{cmd:read_parquet('f.parquet')"}. A {it:lazy} join over such a key is exact
+regardless: it runs in the engine before any Stata {cmd:double} exists.{p_end}
 {pstd}{cmd:•} Stata {cmd:.dta} and Excel inputs are bridged through memory;
 Parquet and delimited text are scanned out of core. {cmd:describe} with a file
 argument is Parquet-only.{p_end}
