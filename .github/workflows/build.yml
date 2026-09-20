@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
     tags: ["v*"]
   pull_request:
     branches: [main]
@@ -69,7 +69,12 @@ jobs:
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
+      - name: Build through the source-archive entrypoint (Linux)
+        if: matrix.label == 'linux-x86_64'
+        run: bash build.sh 4
+
       - name: Build
+        if: matrix.label != 'linux-x86_64'
         run: cmake --build --preset ${{ matrix.preset }} -j 4
 
       - name: Unit tests

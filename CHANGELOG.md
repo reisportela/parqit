@@ -6,7 +6,40 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-20
+
+This minor release combines new fidelity/input controls, streamed parallel
+collection and the audit-derived fixes below. Compatibility changes are
+explicit: wide-integer reads now default to refusal, Parquet saves default to
+zstd, and non-unique lazy merge keys return native `r(459)`.
+Parallel execution remains DuckDB plus C++ fill workers, without OpenMP or
+companion runtime DLLs. Performance measurements below describe the named
+development snapshots and workloads, not universal timing guarantees.
+
 ### Changed
+- Multi-file reads whose `parqit.*` metadata differs now refuse with rc 198
+  when an extended-missing channel is present, including `relaxed` globs.
+  Previously the cosmetic-metadata fallback also discarded the missing codes,
+  so valid files written with `xmissing` could reload `.a` as `.` and expose
+  the companion as an ordinary variable. Read the files separately and use
+  `parqit appendin` to preserve the codes. Sources without this channel retain
+  their existing metadata fallback (CA-04, v113).
+- **No thread count is hard-coded any more; the machine is the only limit.**
+  The fill workers' automatic rule is one worker per CPU available to the
+  process (previously `min(cores, 16)`), `parqit set fill_threads` and
+  `parqit set threads` accept any number from 1 up to that count, and a larger
+  number is clamped to it with a `note:` (previously `fill_threads` refused
+  above 1024 and `threads` accepted anything up to 2^31−1). "Available" means
+  the affinity mask on Linux (a SLURM/cgroup allocation, `taskset`), the
+  hardware count elsewhere; `PARQIT_FILL_THREADS` is clamped the same way,
+  said once per session. **The engine's default thread count is now that
+  number too**: DuckDB's own default is the hardware count and ignored the
+  mask (48 threads under `taskset -c 0-7` on a 48-core box), so a restricted
+  job oversubscribed its allocation. Measured as a matrix of engine threads
+  (16/24/48) by fill workers (8–48) on that box: the 58.8M×9 numeric read
+  keeps improving up to 48 workers (1.2–1.3 s → 0.62–0.73 s) at every engine
+  thread count, with no oversubscription penalty when both run at 48; the
+  string-heavy read is scan-bound and flat.
 - `parqit use ..., clear` and `parqit collect` now fill Stata's memory from a
   *streamed* engine result. The whole query used to be executed into a
   materialised result collection and copied out chunk by chunk while the cells
@@ -15,11 +48,11 @@ semantic versioning once `v0.1.0` is tagged.
   rows 1.70 → 1.48 s, `keep`+`gen`+`collect` of that file 2.31 → 2.13 s,
   `sort`+`collect` 4.41 → 4.07 s, two-file `append`+`collect` of 15.4M×15
   rows 8.82 → 7.83 s, a string-heavy 7.9M×15 read unchanged. The streaming
-  buffer is capped at the result's estimated size, so engine-side peak memory
-  stays bounded by the result as before (measured 0.2–0.5 GB lower on those
-  reads — not a large saving) and, with that default, the engine still
-  completes its scan before the fill starts: the gain is the removed copies,
-  not scan/fill overlap. Values, types, metadata, messages, the
+  buffer is sized from the estimated result. In those measurements engine-side
+  peak memory was 0.2–0.5 GB lower and the scan completed before the fill
+  started: the gain came from removed copies. The buffer is a soft cap, not a
+  bound on total process memory or every variable-width payload.
+  Values, types, metadata, messages, the
   parallel/serial fill and every error path are unchanged.
 - A mid-stream engine failure (for example a corrupt page in a late row group)
   is now reported with the engine's own message. It could previously only be
@@ -31,7 +64,7 @@ semantic versioning once `v0.1.0` is tagged.
   at `n` MB: on plain reads peak memory drops by up to about half (58.8M×9
   read: +4.0 → +2.6 GB at 8 MB) at the price of a slower, stop-and-go fill once
   the cap falls below roughly half the result (1.48 → 4.67 s on that read;
-  string-heavy reads are unaffected; `0` leaves the engine's own 1 MB default).
+  string-heavy reads are unaffected; `0` restores the engine's own buffer default).
   `PARQIT_TEST_FAIL_FETCH_AT` is a test-only deterministic fetch failure.
 - **`parqit save` writes zstd by default.** An option-less save (a view, `data`,
   a partitioned tree, the internal `.dta`/Excel bridge snapshots) now names
@@ -51,8 +84,102 @@ semantic versioning once `v0.1.0` is tagged.
   (`the key does not uniquely identify observations in the <side> data`) and
   the failure remains loud and before any plan mutation. This is a public
   semantic change, declared here; no test asserted the old code.
+- **A column whose integers exceed 2^53 is no longer read into Stata memory by
+  default: the read is refused.** Outside Stata's consecutively exact range
+  of +/-2^53, parqit conservatively protects the whole column, even if some
+  particular larger values are representable. A
+  `BIGINT`/`UBIGINT`/`HUGEINT`/wide-`DECIMAL` column beyond it used to arrive
+  as the nearest double with a `note:` — two distinct keys could become one
+  observation. `parqit use ..., clear`, `parqit collect`, `parqit mergein` and
+  `parqit appendin` now stop with **`r(198)`**, one message naming every such
+  column and both remedies, before anything is staged; the data in memory is
+  untouched. `int64(round)` restores the previous behaviour, note included,
+  and `int64(string)` loads those columns as exact text (below). Columns of the
+  same family whose values all fit are unaffected, as are `parqit save`, the
+  lazy verbs and every statistic — they never round, and nothing about the
+  on-disk payload changes. A preview (`parqit head`, `parqit list`) never
+  refuses: it shows the exact digits as text. This is a public semantic change;
+  see `ASSUMPTIONS.md` #142.
+- The drop message of a Parquet `BINARY`/`BLOB` column now names the remedy:
+  `BLOB has no Stata representation (add binary(text) or binary(hex) to load
+  it)`. The column is still dropped by default. See `ASSUMPTIONS.md` #143.
+- The parallel memory fill now also triggers on the number of cells (2 million),
+  not only on 50,000 rows: a wide-but-short result (3,200 variables x 20,000
+  rows = 64M cells) used to fill on one worker; it now fills on the pool,
+  cutting the fetch 2.1 -> 1.7 s and the load 2.7 -> 2.3 s on this file. The
+  parallel and serial fills stay byte-identical (`v20`, `t01`).
+- **The fill workers now convert their own chunks** (ARROW-IN-WORKERS). The
+  producer thread of the parallel fill only fetches and hands each engine chunk
+  over; the worker that fills it does the Arrow conversion. That takes the one
+  serial step off the critical path: same binary, default settings, min of 3 —
+  `use` 58.8M×9 1.41 → 1.29 s, `use` 7.9M×15 strings 2.64 → 2.37 s,
+  keep+gen+collect 2.04 → 1.79 s, sort+collect 4.87 → 3.86 s, two-file
+  append+collect 7.86 → 7.37 s at 8 workers, and the read now keeps scaling
+  with more workers (58.8M×9: 12 → 1.00 s, 16 → 0.95 s, 24 → 0.80 s), so the
+  intermediate automatic cap rose from 8 to 16 workers: that snapshot's
+  default 58.8M×9 read was 0.90 s. The final release instead uses the CPUs
+  available to the process on reads of 50,000+ rows or 2M+ cells. Values are
+  byte-identical to the serial fill and to the previous build (datasignature
+  and pyarrow/duckdb oracles); string-heavy reads stay scan-bound and flat.
 
 ### Added
+- **`parqit set stream_buffer_mb auto|0|#`**: the in-session counterpart of
+  `PARQIT_STREAM_BUFFER_MB` (a cap in megabytes on the engine result buffered
+  ahead of the fill; `0` restores the engine default; `auto` inherits the
+  environment or per-read sizing). Explicit numbers outrank the environment;
+  the session choice is reported by `parqit version` as
+  `r(stream_buffer_mb)`. The variable's silent 4096 MB ceiling is gone: a cap is
+  a cap. Every cap loads byte-identical data (v108).
+- `parqit version` reports `r(cpus)` (the CPUs available to the process) and
+  `r(threads)` (the engine threads in force), and prints them with the fill
+  workers and the stream buffer.
+- The read dialog gains a free-text field for the delimited-text reader's
+  `csv()` sub-options (verified with a real Submit in GUI Stata; t15).
+- **`parqit save ..., xmissing`** preserves extended missing values `.a`–`.z`,
+  the one documented loss of the Parquet round trip. Each variable that holds
+  one gets an `int8` companion column `_parqit_xm_<var>` with the code of every
+  cell (0 = none, 1–26 = `.a`–`.z`; the variable's own cell stays null) and the
+  pairs are recorded under a new `parqit.xmissing` footer key; the file stays
+  ordinary Parquet for other readers. `parqit use`, `describe`, `mergein` and
+  `appendin` hide the companions, and the eager loads restore the cells in
+  every numeric storage type (byte, int, long, float, double), printing a note
+  that names the variables. A companion with a code outside 0–26, or one that
+  marks a cell holding a value, fails the load loudly with memory untouched; a
+  companion paired with a string column is hidden and ignored with a note. A
+  lazy view over such a file hides the companions, reads those cells as `.`
+  and says so when opened (phase 1: the lazy pipeline does not carry them).
+  Both writers (Arrow and the staged fallback) produce the same file, checked
+  by pyarrow. `xmissing` is refused with `copysource`, with `partitions()`, on
+  a view save, and when a variable already carries a companion's name;
+  `copysource` refuses a source that carries companions. Without the option
+  nothing changes on disk, and the existing loss note now names the option.
+  A memory save returns `r(xmissing_vars)`. The write dialog gains the
+  checkbox. Verify test v109 (pyarrow oracle, both writers, partitioned tree,
+  0 rows, projection, appendin, corrupt fixtures).
+- **`int64(refuse|round|string)`** on `parqit use` (eager and lazy),
+  `parqit collect`, `parqit mergein` and `parqit appendin`, and the session
+  default **`parqit set int64 refuse|round|string`** for a user with many such
+  files. An explicit option beats the value the view was opened with, which
+  beats the session setting, which defaults to `refuse`. `int64(string)` casts
+  only the columns that actually exceed 2^53 to text, sized by the observed
+  maximum (`str16` … `str20` for 64-bit integers, wider for `HUGEINT`/
+  `DECIMAL`), and says so per column; the digits are exact because the cast
+  happens in the engine, over the integer, before any double exists. The Read
+  dialog carries the choice as a drop-down.
+- **`binary(text|hex)`** on `parqit use` (eager and lazy). `binary(text)`
+  decodes the bytes as UTF-8 and fails loudly — naming the column, with the
+  data in memory untouched — if any row is not valid UTF-8; `binary(hex)`
+  loads two UPPERCASE hex digits per byte, which is always exact. Either way
+  the column is text sized by the observed maximum (`strL` beyond 2045 bytes)
+  and carries a note naming the mode. The option acts where a lazy view's
+  columns are decided, i.e. at `parqit use using`; `parqit collect, binary()`
+  says so instead of ignoring it. The Read dialog carries it as a drop-down.
+- `tests/verify_suite/v104_int64_protective_default.do` and
+  `tests/verify_suite/v105_binary_columns.do` pin both contracts end to end
+  (refusal and its untouched-memory guarantee, the three int64 modes on the
+  eager, lazy, preview and session paths, `UBIGINT` and the signed extremes,
+  and for binary the default drop, exact UTF-8, Python-oracle hex, and the
+  loud invalid-UTF-8 refusal on both paths).
 - `parqit merge` and `parqit joinby` now disclose a **missing key** at join
   time. When the same key carries missing values on *both* sides, the verb
   prints a `note:` naming the key and the two counts. Stata matches missing
@@ -78,14 +205,111 @@ semantic versioning once `v0.1.0` is tagged.
   `parqit sql ... CAST(col AS VARCHAR)` path (`str19`), and the exactness of a
   lazy join over a `BIGINT` key. The source is generated by parqit's own SQL
   and verified on disk with pyarrow.
+- `parqit use ..., filename(newvar)` adds one string variable holding the path
+  each observation was read from — the path as matched, so an absolute pattern
+  gives absolute paths. It works on both forms (the eager `clear` read and the
+  lazy view) and for a Parquet file, glob or Hive directory and for delimited
+  text. The column is an ordinary variable: lazy verbs filter on it,
+  `parqit describe` lists it, `collect` and `save` carry it, and a saved file
+  holds it as plain Parquet text. It carries a Stata note saying what it is, is
+  added even when a varlist selects only some columns (naming it in the varlist
+  places it where you put it), and is never mistaken for a Hive partition key.
+  A name the source already loads — a column or a partition key, compared
+  case-insensitively — is refused with rc 198 naming the clash instead of being
+  quietly renamed, and a `.dta`/Excel source is refused because the path would
+  be the package-owned temporary bridge. The dataset in memory is untouched on
+  every refusal. Verify test `v106_filename_provenance`; assumption #144.
+- `parqit use ..., csv(read_options)` forces a delimited-text source's dialect
+  and types instead of letting the reader infer them, on both forms. The
+  sub-options are `delim("c")`, `quote("c")`, `escape("c")`, `header(on|off)`,
+  `dateformat("...")`, `timestampformat("...")`, `sample(#)` (`-1` reads the
+  whole file), `allvarchar`, `types(name:TYPE ...)` and `nullstr("...")`; any
+  other key is refused by name,
+  and a `types()` type the engine does not know is refused by name — proved
+  against the engine before anything is read, so the message is parqit's and
+  never the binder's query dump. This is a data-integrity option: inference silently
+  turns `1e5` into 100000, rounds a decimal with more digits than a double
+  holds, and makes `TRUE` a 1 — `types()` and `allvarchar` stop it. A forced
+  dialect is applied to the header-name recovery as well as to the scan, so
+  duplicate and case-clashing header names are still recovered exactly;
+  `header(off)` leaves the engine's `column0`, `column1`, ... names. `csv()` on
+  a source that is not delimited text is an error, never a silent no-op.
+  Verify test `v107_csv_options`; assumption #145.
+- `parqit set fill_threads auto|#` chooses the fill-worker count in the session
+  (`1` = serial, `auto` = the rule above), outranks the `PARQIT_FILL_THREADS`
+  environment variable and is reported by `parqit version` as `r(fill_threads)`;
+  `tests/verify_suite/v108_fill_threads_setting.do` pins the setting, its
+  refusals and byte-identical loads for 1/2/4/8 workers on tall and wide files.
 
 ### Documentation
+- The official source archive now includes the existing Linux `build.sh`
+  helper. Windows and both macOS architectures retain their CMake presets.
+- Release branches receive the same four-platform checks before tagging.
+  The collected Windows plugin must import only reviewed system DLLs, with
+  no separately installed compiler/OpenMP runtime; embedded MSVC runtime
+  licensing remains documented in the supplied notices.
+- Menu/dialogs and both helps now cover the current session and read options:
+  all seven `set` settings, `int64()` on collect/mergein/appendin, and an
+  explicit `default` (inherit) choice on integer read selectors. Selecting
+  `refuse` now emits `int64(refuse)` even if the session default is `string`.
+  Help clarifies string merge keys, the two-million-cell parallel trigger,
+  environment precedence, extended-missing preservation/refusals, the
+  conservative +/-2^53 policy and the complete `version` returns. Dialog lint
+  checks option emission as well as declaration; t17 covers the new shapes.
+- `discard` refreshes ado programs but does not guarantee unloading the plugin:
+  its settings and views persist in the tested Stata runtime. Restart Stata
+  after a plugin rebuild; use `parqit close _all` to close views explicitly
+  (CA-05, v114). Both helps and the development instructions now say so.
 - `README.md` and `help parqit` Limitations: the extended-missing bullet now
   follows the loss into a `merge`/`joinby` key; two new bullets cover row order
   after a lazy join (grouped by key, true `sortedby`, not native's order, and
   why native's order cannot be a contract) and `int64`/`uint64` above 2^53
   (announced rounding, the `CAST(... AS VARCHAR)` recipe, and the exactness of
   the lazy join).
+- The `int64` Limitations bullet now documents the refusal and the two
+  options instead of only the manual `CAST(... AS VARCHAR)` recipe, and the
+  type-contract table in `help parqit_technical` gains the
+  `BIGINT`/`UBIGINT`/`BLOB` rows. `README.md` lists `int64()`/`binary()` on
+  `use` and `collect` and `int64` under `parqit set`.
+
+### Fixed
+- `stream_buffer_mb 0` now resets the connection's streaming buffer to the
+  engine default before fetching, including after an automatic or explicit
+  larger buffer and when zero comes from the environment (CA-01, v110).
+- Invalid `parqit.xmissing` graphs can no longer hide a primary data column:
+  a column declared as both primary and companion is refused before any load
+  or view mutation (CA-02, v111).
+- `int64(string)` now validates extended-missing companions too. For converted
+  columns, valid codes become the literal text `.a`–`.z`, while ordinary nulls
+  remain empty strings; digits beyond 2^53 remain exact. The serial/parallel
+  and streamed/materialised paths share this rule (CA-03, v112).
+- An explicit CSV `nullstr()` containing `delim()` now returns a parqit usage
+  error instead of exposing the generated query and a Binder Error. The reverse
+  containment, allowed by the pinned engine for multi-byte delimiters, remains
+  accepted (CA-06, v115).
+- The parallel-fill regression now isolates the cell-count trigger with
+  20,000 rows × 110 columns and verifies both worker selection and exact data
+  against synthetic PyArrow values (v116).
+- The lazy `merge`'s uniqueness contracts (the `r(459)` checks) and the
+  missing-key note folded a numeric key to missing only when it was NaN,
+  while the join itself also folds ±Inf and any magnitude of 2^1023 or more
+  (values Stata cannot hold). A third-party using file holding `inf` or
+  `1e308` in a key therefore passed the m:1 / 1:1 contract while the join
+  matched those rows as one missing key, so the master's missing-key row
+  could be duplicated with rc 0 and the note under-counted. Both now apply
+  the join's own rule through one shared function; the contract returns 459
+  and the note counts every such row (v102-F, pyarrow-written fixture).
+  parqit's own writer never produces such values, so files written by parqit
+  were not affected. The GROUP BY / PARTITION BY key folds (collapse, egen,
+  contract, tabulate, summarize, xtile, reshape) and the reshape "j contains
+  missing values" check use that same function now; no reachable result
+  changed there, since every view column is boundary-normalised or
+  finite-guarded, but a second implementation of the rule no longer exists.
+- The engine's finite guard behind every lazy arithmetic result, and the
+  statistics boundary, wrote the 2^1023 bound as a 16-digit decimal literal
+  that parses to 2^1023 − 2^970, which is Stata's `maxdouble()`; that one
+  legitimate value was reported as missing. The bound is now exactly 2^1023
+  (unit test MAXDOUBLE-1).
 
 ## [0.1.37] — 2026-09-07
 

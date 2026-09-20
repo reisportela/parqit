@@ -71,6 +71,11 @@ capture noisily parqit use using `"`autodta'"', encoding(latin1)
 _shape `=_rc' "parqit use using file.dta, encoding()"
 capture noisily parqit use using `"`autodta'"', clear encoding(latin1)
 _shape `=_rc' "parqit use using file.dta, clear encoding()"
+* CSV-OPT-1 dialog field: csv() reaches the ado as one option string
+tempfile autocsv
+quietly export delimited using `"`autocsv'.csv"', replace delimiter(";")
+capture noisily parqit use using `"`autocsv'.csv"', clear csv(delim(;) header(on))
+_shape `=_rc' "parqit use using file.csv, clear csv(delim(;) header(on))"
 capture noisily parqit open _data
 _shape `=_rc' "parqit open _data"
 capture noisily parqit open _data, name(mem) encoding(latin1)
@@ -371,6 +376,8 @@ capture noisily parqit save `"`part'"', partition_by(foreign) partitions(append)
 _shape `=_rc' "parqit save dir, partition_by() partitions(append)"
 capture noisily parqit save `"`out2'"', replace data
 _shape `=_rc' "parqit save file, replace data (memory while a view is open)"
+capture noisily parqit save `"`out2'"', replace data xmissing
+_shape `=_rc' "parqit save file, replace data xmissing"
 parqit close _all
 parqit use using `"`auto'"', clear
 capture noisily parqit save `"`copy'"', replace data copysource

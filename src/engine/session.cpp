@@ -9,7 +9,11 @@
 #include <locale>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #ifdef _WIN32
 #include <process.h>
@@ -233,7 +237,10 @@ static void parqit_finite_fn(duckdb_function_info, duckdb_data_chunk input,
     duckdb_vector_ensure_validity_writable(output);
     uint64_t *out_validity = duckdb_vector_get_validity(output);
 
-    static const double kMissThreshold = 8.988465674311579e307; /* 2^1023 */
+    /* exactly 2^1023 (Stata's `.`). The decimal literal 8.988465674311579e307
+     * this used to be parses to 2^1023 - 2^970 = Stata's maxdouble(), so the
+     * guard nulled that one legitimate finite value (MAXDOUBLE-1). */
+    static const double kMissThreshold = 0x1p1023;
     for (idx_t r = 0; r < n; r++) {
         if (valid_row(validity, r) && std::isfinite(vals[r]) &&
             std::fabs(vals[r]) < kMissThreshold) {
@@ -307,6 +314,24 @@ void Session::close() {
     }
 }
 
+int available_cpus() {
+    /* CPUS-1 (see session.hpp). sched_getaffinity fails with EINVAL on a
+     * machine with more CPUs than cpu_set_t holds (1024); the fallback covers
+     * it. hardware_concurrency() may return 0 when detection fails: 1 then. */
+    int n = 0;
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof set, &set) == 0) n = CPU_COUNT(&set);
+#endif
+    if (n <= 0) n = static_cast<int>(std::thread::hardware_concurrency());
+    return n < 1 ? 1 : n;
+}
+
+long long Session::threads() const {
+    return threads_ > 0 ? threads_ : available_cpus();
+}
+
 bool Session::ensure_open() {
     if (db_ && con_) return true;
     close();
@@ -316,8 +341,12 @@ bool Session::ensure_open() {
         last_error_ = "could not create DuckDB config";
         return false;
     }
-    if (threads_ > 0)
-        duckdb_set_config(config, "threads", std::to_string(threads_).c_str());
+    /* CPUS-1: the engine's threads are bounded by the CPUs available to this
+     * process unless the user chose a count (`parqit set threads`, itself
+     * clamped to the same number). DuckDB's own default is
+     * hardware_concurrency(), which ignores the affinity mask. */
+    duckdb_set_config(config, "threads",
+                      std::to_string(threads_ > 0 ? threads_ : available_cpus()).c_str());
     if (!memory_limit_.empty())
         duckdb_set_config(config, "memory_limit", memory_limit_.c_str());
     /* temp_directory is what lets the in-memory instance spill to disk:

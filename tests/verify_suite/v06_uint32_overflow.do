@@ -23,7 +23,10 @@ t = pa.table({
 pq.write_table(t, Macro.getLocal("f"))
 end
 
-parqit use using `"`f'"', clear
+* int64(round): u64/i64 hold values beyond 2^53, which the read now refuses
+* unless told what to do (INT64-PROTECT-1, v104). The rounding this test
+* checks is exactly what round() asks for.
+parqit use using `"`f'"', clear int64(round)
 assert _N == 3
 
 * the pq corruption signature: u32 == [0, ., .]

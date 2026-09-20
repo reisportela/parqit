@@ -42,7 +42,47 @@ constexpr double kStataFloatMax = 1.7014117331926443e+38;
  * runtime SV_missval) so the two agree bit-for-bit. */
 constexpr double kStataMissThreshold = 0x1p1023; /* 8.98846567431158e+307 */
 
+/* XMISS-1: Stata's extended missing values. `.` is 2^1023 and `.a`..`.z` are
+ * 2^1023 * (1 + k/4096), k = 1..26 — bits 0x7fe0000000000000 + (k << 40),
+ * verified against Stata's own %21x output (.a = +1.0010000000000X+3ff,
+ * .z = +1.01a0000000000X+3ff; a float .a promotes to the same double).
+ * Parquet has one null, so `parqit save, xmissing` writes the code k of each
+ * such cell into a TINYINT companion column named xmissing_companion_name()
+ * (0 = not an extended missing; the primary cell is null either way) and lists
+ * primary -> companion under the kXmissingMetaKey KV key; the readers hide the
+ * companion and `parqit use` restores the cell from its code. */
+constexpr int kStataExtMissMax = 26;
+constexpr const char *kXmissingMetaKey = "parqit.xmissing";
+constexpr const char *kXmissingPrefix = "_parqit_xm_";
+/* the double for code 0..26 (0 = `.`); NaN for any other code */
+double stata_missing_value(int code);
+/* the exact code 0..26 of a Stata missing double; -1 for a value, NaN, ±Inf or
+ * a magnitude in the missing range that is not one of the 27 codes */
+int stata_missing_code(double d);
+std::string xmissing_companion_name(const std::string &var);
+
 enum class StType { Byte, Int, Long, Float, Double, Str, StrL };
+
+/* ---- read-time type options (INT64-PROTECT-1 / BINARY-DECODE-1) -------
+ * Stata has no 64-bit integer and no binary type. Both families used to be
+ * handled silently-enough to lose data: a BIGINT/UBIGINT/HUGEINT/wide
+ * DECIMAL beyond 2^53 loaded as a rounded double with a note (two distinct
+ * keys could become one — audit 2026-09-19, T12), and a BLOB was simply
+ * dropped. The user now chooses, and the DEFAULT refuses rather than
+ * rounds. */
+enum class Int64Mode {
+    Refuse, /* default: fail the read naming the columns and both remedies */
+    Round,  /* the historical behaviour: nearest double + the loud note     */
+    String  /* the affected columns load as exact decimal text             */
+};
+enum class BinaryMode {
+    Drop, /* default: dropped-with-message, as before */
+    Text, /* decode(blob): UTF-8 text, loud on invalid UTF-8 */
+    Hex   /* hex(blob): uppercase hex text, always valid */
+};
+/* parse the wire/user spelling; false (and *m untouched) on anything else */
+bool int64_mode_parse(const std::string &s, Int64Mode *m);
+bool binary_mode_parse(const std::string &s, BinaryMode *m);
 
 /* storage-type code used on the wire and by st_addvar(): "byte", "int",
  * "long", "float", "double", "str7", "strL" */
@@ -89,6 +129,11 @@ struct ColumnPlan {
                                 * "sub-ms truncated" note only if a value
                                 * actually loses sub-ms (T1). NS/TZ variants
                                 * that already carry a static note stay false. */
+    /* XMISS-1: the scan name of this column's extended-missing companion
+     * (the file's parqit.xmissing pairs it with this column, it is an integer
+     * column, and this column is numeric); "" when none. The fetch selects it
+     * after the planned columns and the fill restores .a-.z from its codes. */
+    std::string xm_source;
 
     /* range pass requirements */
     bool needs_minmax = false;     /* integer family: size byte/int/long/double */
@@ -106,8 +151,19 @@ struct ColumnPlan {
 };
 
 /* Decide the plan for one column given its DuckDB logical type (no data
- * seen yet). source_ref_sql is the quoted identifier to wrap in casts. */
-ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type t);
+ * seen yet). source_ref_sql is the quoted identifier to wrap in casts.
+ * `binary` decides what happens to a BLOB column (default: dropped). */
+ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type t,
+                            BinaryMode binary = BinaryMode::Drop);
+
+/* INT64-PROTECT-1: turn a plan whose values were proved to exceed 2^53
+ * (needs_big53 && stats.any_beyond_2p53) into an EXACT text column, for
+ * int64(string). Must be applied BEFORE refine_plan: it hands the width
+ * decision to the existing needs_strlen sizing (the caller measures
+ * max(strlen(CAST(col AS VARCHAR))) in the same stats pass) and clears
+ * needs_big53 so refine_plan does not also announce a rounding that no
+ * longer happens. */
+void plan_big53_as_text(ColumnPlan &p);
 
 /* Refine a plan with observed statistics (NULL stats = all-null column). */
 struct ColumnStats {

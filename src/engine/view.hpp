@@ -62,6 +62,18 @@ struct ViewCol {
 std::string pct_window_sql(const std::string &ref, const std::string &prn,
                            const std::string &pn, double p);
 
+/* KEYFOLD-1: the ONE rule that decides when a merge/joinby key value is
+ * "missing" — used by the join itself (key_value in view.cpp) and by every
+ * check that must agree with it (the uniqueness contracts behind r(459) and
+ * the missing-key disclosure in plugin_view.cpp). A string key is missing when
+ * empty; a numeric key when NULL, NaN, ±Inf or |x| >= 2^1023 (a value Stata
+ * would read as a missing code). Two implementations of this rule once
+ * diverged (the contract folded only NaN), so a using file holding inf or
+ * 1e308 in a key passed the uniqueness check while the join matched those rows
+ * as one missing key — a 1:1 / m:1 merge could duplicate rows with rc 0.
+ * `ref` is an already-quoted SQL reference; kind is 'n' or 's'. */
+std::string key_missing_fold_sql(const std::string &ref, char kind);
+
 struct PendingRange { /* keep in f/l — validated against real counts at
                          materialisation (charter §6.13) */
     size_t stage;     /* index of the stage the LIMIT was applied to */
@@ -101,6 +113,24 @@ class View {
         src_paths_sql_ = paths_sql;
     }
     const std::string &source_paths_sql() const { return src_paths_sql_; }
+
+    /* INT64-PROTECT-1: the int64() the view was OPENED with ("refuse",
+     * "round", "string"), carried so `parqit use using f, int64(string)` is
+     * honoured by a later `parqit collect` that names no option. "" (the
+     * default, restored by close()) means the session setting decides.
+     * Stored as the canonical spelling so the engine layer stays free of the
+     * read-time type policy. */
+    void set_int64_mode(const std::string &mode) { int64_mode_ = mode; }
+    const std::string &int64_mode() const { return int64_mode_; }
+    /* FILENAME-1: the view column that carries each row's source path
+     * (`parqit use …, filename(newvar)`), so a direct-read collect plans the
+     * scan knowing it is NOT one of the files' own columns (it must stay out
+     * of the leaf alignment and out of the Hive partition keys). "" otherwise;
+     * reset by close(), like the source paths. */
+    void set_source_filename_column(const std::string &name) {
+        src_filename_col_ = name;
+    }
+    const std::string &source_filename_column() const { return src_filename_col_; }
 
     /* expand Stata varlist wildcards (*, ?) against the live schema, in
      * pattern order, deduplicated; "" or an error for a no-match pattern.
@@ -244,6 +274,8 @@ class View {
     std::string scan_;
     std::string source_desc_;
     std::string src_paths_sql_; /* Parquet footer paths, "" unless file-backed */
+    std::string int64_mode_;    /* int64() carried from the open; "" = session */
+    std::string src_filename_col_; /* FILENAME-1 provenance column, "" if none */
     std::vector<std::string> stages_; /* each a full SELECT … FROM <prev> */
     std::vector<std::string> descs_;
     std::vector<ViewCol> cols_;

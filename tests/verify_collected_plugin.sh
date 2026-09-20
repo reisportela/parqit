@@ -60,6 +60,14 @@ case "$PLATFORM" in
         if LC_ALL=C objdump -p "$FILE_PATH" | grep -Eqi '(vcomp|libomp|libiomp|libgomp)[^[:space:]]*\.dll'; then
             die "Windows artifact must not import or delay-load an OpenMP runtime"
         fi
+        imports="$(LC_ALL=C objdump -p "$FILE_PATH" | awk '/DLL Name:/ {print tolower($3)}' | sort -u)"
+        [ -n "$imports" ] || die "could not inspect PE import dependencies"
+        for dependency in $imports; do
+            case "$dependency" in
+                kernel32.dll|rstrtmgr.dll|ws2_32.dll|api-ms-win-*.dll|ext-ms-win-*.dll) ;;
+                *) die "unexpected non-system DLL dependency: $dependency" ;;
+            esac
+        done
         # MSVC Release output is the distributable binary; there is no Unix
         # strip step or ELF section contract to apply on this platform.
         ;;

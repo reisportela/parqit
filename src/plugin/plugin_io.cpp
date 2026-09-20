@@ -445,7 +445,8 @@ static std::string glob_escape_brackets(const std::string &p) {
 }
 
 Source source_for(const std::vector<std::string> &files, bool relaxed,
-                  bool csv) {
+                  bool csv, const std::string &filename_column,
+                  const CsvOptions &csv_opts) {
     std::string list;
     bool any_dir = false;
     for (size_t i = 0; i < files.size(); i++) {
@@ -483,6 +484,27 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
      * emits rows for columns that exist in a file, so that guard would pass. An
      * all-null row group is still caught and falls back to a scan.) */
     if (relaxed) opts += ", union_by_name = true";
+    /* FILENAME-1: `filename = '<name>'` — a VARCHAR value names the column that
+     * carries each row's file path (duckdb v1.5.3
+     * src/common/multi_file/multi_file_reader.cpp:137-144; a non-VARCHAR value
+     * is taken as the boolean form, default column name `filename`,
+     * src/include/duckdb/common/multi_file/multi_file_options.hpp:33). The
+     * column is appended to the bound names AFTER the files' own columns and
+     * BEFORE the Hive partition keys: MultiFileReader::BindOptions appends it
+     * at multi_file_reader.cpp:219-229 and only then appends the partition keys
+     * (lines 231-247), and BindOptions itself runs once the file columns are
+     * bound — multi_file_reader.cpp:566-577 for a plain read (the first file's
+     * columns are appended at 568-572, BindOptions at 573) and
+     * multi_file_reader.cpp:544-551 for a union_by_name read (UnionCols first,
+     * BindOptions at 549); the custom-bind path calls it in the same order
+     * (src/include/duckdb/common/multi_file/multi_file_function.hpp:109-111).
+     * read_csv_auto shares these options through
+     * MultiFileReader::AddParameters (src/function/table/read_csv.cpp:100,
+     * multi_file_reader.cpp:87-93). The name is a user string and therefore a
+     * quoted literal, never spliced raw. */
+    if (!filename_column.empty())
+        opts += ", filename = " + quote_literal(filename_column);
+    s.filename_column = filename_column;
     if (csv) {
         /* delimited text: auto-detect schema/delimiter. No Parquet footer, so
          * leave paths_sql "[]" — every parquet_* metadata probe is skipped and
@@ -491,12 +513,209 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
         /* CSV-HEADER-1: the first entry, already glob-escaped like the list */
         const size_t comma = list.find("', '");
         s.csv_first_sql = comma == std::string::npos ? list : list.substr(0, comma + 1);
-        s.scan_sql = "read_csv_auto(" + paths + opts + ")";
+        /* CSV-OPT-1: the user's csv(...) — already validated and quoted */
+        s.csv_dialect = csv_opts.dialect;
+        s.scan_sql = "read_csv_auto(" + paths + opts + csv_opts.sql + ")";
     } else {
         s.paths_sql = paths;
         s.scan_sql = "read_parquet(" + paths + opts + ")";
     }
     return s;
+}
+
+/* CSV-OPT-1 (2026-09-20): decode and validate `parqit use … , csv(...)`. The
+ * accepted keys are exactly the pinned reader's own option names (duckdb
+ * v1.5.3, src/execution/operator/csv_scanner/util/csv_reader_options.cpp):
+ *   delim / quote / escape / header / nullstr  CSVReaderOptions::SetBaseOption
+ *     (lines 386-402: `delim` matches any option starting with "delim",
+ *     `quote`, `escape`, `header`, `nullstr`);
+ *   sample_size (line 237: -1 = whole file, otherwise >= 1),
+ *   dateformat (line 264), timestampformat (line 267)  SetReadOption;
+ *   all_varchar (line 750) and types (line 711: a STRUCT keyed by column name
+ *     whose values are type NAMES; an unknown type raises the engine's own
+ *     "Unrecognized type \"…\" for read_csv types definition")
+ *     CSVReaderOptions::FromNamedParameters.
+ * All of them are declared named parameters of read_csv/read_csv_auto
+ * (src/function/table/read_csv.cpp:57-99). Any other key is refused HERE, by
+ * name, and never reaches the engine. Every user value is emitted as a
+ * quote_literal SQL literal; the one number (sample_size) is proved to be a
+ * decimal integer before it is spliced (INJ-1, #115). */
+ST_retcode csv_options_from_request(Session &s, const json &req, CsvOptions *out,
+                                    std::string *err) {
+    *out = CsvOptions();
+    if (!req.contains("csvopts")) return 0;
+    const json &j = req["csvopts"];
+    if (!j.is_object()) {
+        *err = "csv(): malformed option request";
+        return kRcUsage;
+    }
+    auto hex_value = [&](const json &v, std::string *decoded) {
+        return v.is_string() && parqit::hex_decode(v.get<std::string>(), *decoded);
+    };
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const std::string key = it.key();
+        if (key == "types") {
+            /* a JSON array of hex-encoded `name:TYPE` items (the ado
+             * tokenised them, so a name is never whitespace-split here) */
+            if (!it.value().is_array()) {
+                *err = "csv(): malformed types() request";
+                return kRcUsage;
+            }
+            std::string body;
+            for (const auto &item : it.value()) {
+                std::string pair;
+                if (!hex_value(item, &pair)) {
+                    *err = "csv(): malformed types() request";
+                    return kRcUsage;
+                }
+                const size_t colon = pair.rfind(':');
+                if (colon == std::string::npos || colon == 0 ||
+                    colon + 1 == pair.size()) {
+                    *err = "csv(): types() takes name:TYPE pairs (for example "
+                           "types(zip:VARCHAR sales:DOUBLE)); \"" + pair +
+                           "\" is not one";
+                    return kRcUsage;
+                }
+                const std::string col = pair.substr(0, colon);
+                const std::string type = pair.substr(colon + 1);
+                /* The engine reports an unrecognised type only from the CSV
+                 * bind (csv_reader_options.cpp:711 -> TransformStringToLogicalType),
+                 * and that message arrives with the binder's own "LINE 1: SELECT
+                 * ... read_csv_auto(...)" dump — internal SQL and the user's path,
+                 * which parqit never shows (v69). So prove the type HERE: first
+                 * the shape (letters, digits, _ , parentheses and commas — this
+                 * also makes the token unable to carry SQL), then one cheap
+                 * CAST of a NULL, run on the same connection with no result
+                 * stream open, before any scan SQL is built. */
+                for (char c : type) {
+                    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                    (c >= '0' && c <= '9') || c == '_' || c == '(' ||
+                                    c == ')' || c == ',';
+                    if (ok) continue;
+                    *err = "csv(types()): \"" + type + "\" is not a type name for "
+                           "column " + col + " (a type is letters, digits, _ and "
+                           "parentheses, for example VARCHAR, BIGINT or "
+                           "DECIMAL(18,2))";
+                    return kRcUsage;
+                }
+                std::string perr;
+                if (!s.exec("SELECT CAST(NULL AS " + type + ")", &perr)) {
+                    *err = "csv(types()): unknown type " + type + " for column " +
+                           col + " (see help parqit for the types the engine "
+                           "accepts)";
+                    return kRcUsage;
+                }
+                if (!body.empty()) body += ", ";
+                body += quote_literal(col) + ": " + quote_literal(type);
+            }
+            if (body.empty()) {
+                *err = "csv(): types() is empty";
+                return kRcUsage;
+            }
+            out->sql += ", types = {" + body + "}";
+            continue;
+        }
+        std::string val;
+        if (!hex_value(it.value(), &val)) {
+            *err = "csv(): malformed value for " + key;
+            return kRcUsage;
+        }
+        if (key == "delim") {
+            out->sql += ", delim = " + quote_literal(val);
+            out->dialect.has_delim = true;
+            out->dialect.delim = val;
+        } else if (key == "quote") {
+            out->sql += ", quote = " + quote_literal(val);
+            out->dialect.has_quote = true;
+            out->dialect.quote = val;
+        } else if (key == "escape") {
+            out->sql += ", escape = " + quote_literal(val);
+            out->dialect.has_escape = true;
+            out->dialect.escape = val;
+        } else if (key == "header") {
+            const std::string low = parqit::ascii_lower(val);
+            if (low != "on" && low != "off") {
+                *err = "csv(): header() takes on or off, not \"" + val + "\"";
+                return kRcUsage;
+            }
+            out->sql += low == "on" ? ", header = true" : ", header = false";
+            out->dialect.header = low == "on" ? 1 : 0;
+        } else if (key == "dateformat") {
+            out->sql += ", dateformat = " + quote_literal(val);
+        } else if (key == "timestampformat") {
+            out->sql += ", timestampformat = " + quote_literal(val);
+        } else if (key == "nullstr") {
+            out->sql += ", nullstr = " + quote_literal(val);
+        } else if (key == "allvarchar") {
+            out->sql += ", all_varchar = true";
+        } else if (key == "sample") {
+            size_t p = (!val.empty() && val[0] == '-') ? 1 : 0;
+            bool digits = p < val.size();
+            for (size_t i = p; i < val.size(); i++)
+                digits = digits && val[i] >= '0' && val[i] <= '9';
+            const long long n = digits ? std::strtoll(val.c_str(), nullptr, 10) : 0;
+            if (!digits || (n != -1 && n < 1)) {
+                *err = "csv(): sample() takes a positive number of rows to "
+                       "sniff, or -1 for the whole file, not \"" + val + "\"";
+                return kRcUsage;
+            }
+            out->sql += ", sample_size = " + std::to_string(n);
+        } else {
+            *err = "csv(): unknown option " + key;
+            return kRcUsage;
+        }
+    }
+    /* CA-06: match the pinned CSV reader's explicit delimiter/null conflict
+     * before its binder can expose the generated scan SQL. */
+    if (j.contains("nullstr") && out->dialect.has_delim) {
+        std::string nullmark;
+        hex_value(j["nullstr"], &nullmark);
+        std::string delimiter = out->dialect.delim;
+        /* CSVReaderOptions::SetDelimiter expands literal \\t before binding. */
+        for (size_t pos = delimiter.find("\\t"); pos != std::string::npos;
+             pos = delimiter.find("\\t", pos + 1))
+            delimiter.replace(pos, 2, "\t");
+        if (!nullmark.empty() && !delimiter.empty() &&
+            nullmark.find(delimiter) != std::string::npos) {
+            *err = "csv(): nullstr() must not contain delim(); "
+                   "choose a different delimiter or missing-value marker";
+            return kRcUsage;
+        }
+    }
+    return 0;
+}
+
+/* FILENAME-1: the provenance column must arrive under the exact name the user
+ * asked for. DuckDB refuses only an EXACT clash with a file column, and with a
+ * message spelling DuckDB syntax ("filename='<filename column name>'") the
+ * Stata user never typed (multi_file_reader.cpp:221-224); it does not check
+ * the Hive keys it appends after it at all. Probe the source WITHOUT the
+ * option and refuse a case-insensitive clash with anything it exposes —
+ * DuckDB resolves identifiers case-insensitively, so two columns differing
+ * only by case could not both be addressed in the fetch SELECT. */
+ST_retcode check_provenance_name(Session &s, const Source &plain,
+                                 const std::string &name, std::string *err) {
+    duckdb_result res;
+    if (!s.query("SELECT * FROM " + plain.scan_sql + " LIMIT 0", &res, err)) {
+        const bool nofile = is_no_files_error(*err);
+        *err = friendly_engine_error(*err);
+        return nofile ? kRcFileNotFound : kRcEngine;
+    }
+    const idx_t ncol = duckdb_column_count(&res);
+    const std::string want = parqit::ascii_lower(name);
+    std::string clash;
+    for (idx_t c = 0; c < ncol && clash.empty(); c++) {
+        const char *nm = duckdb_column_name(&res, c);
+        const std::string cn = nm ? nm : "";
+        if (parqit::ascii_lower(cn) == want) clash = cn;
+    }
+    duckdb_destroy_result(&res);
+    if (!clash.empty()) {
+        *err = "filename(" + name + "): the source already has a column \"" +
+               clash + "\"; the provenance column needs a name of its own";
+        return kRcUsage;
+    }
+    return 0;
 }
 
 /* SCH1/SCH2: without `relaxed`, DuckDB's plain read_parquet takes the FIRST
@@ -708,8 +927,18 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
     }
     duckdb_destroy_result(&res);
     const auto &first = per_file.begin()->second;
+    bool has_xmissing = false;
+    for (const auto &pf : per_file)
+        has_xmissing |= pf.second.count(parqit::kXmissingMetaKey) != 0;
     for (const auto &pf : per_file) {
         if (pf.second != first) {
+            /* CA-04: missing codes carry values, not just presentation. */
+            if (has_xmissing) {
+                m.refusal = "parqit metadata differs across matched files containing "
+                    "extended-missing companions; read the files separately and "
+                    "appendin them to preserve .a-.z";
+                return m;
+            }
             warnings->push_back("parqit metadata differs across matched files; "
                                 "labels/formats not restored");
             return m;
@@ -732,6 +961,7 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
     json vallabs = get("parqit.vallabs");
     json chars = get("parqit.chars");
     json dl = get("parqit.dtalabel");
+    json xm = get(parqit::kXmissingMetaKey); /* XMISS-1 */
     if (malformed) return ParqitMeta();
     if (!schema.is_null() && !schema.is_object()) {
         warnings->push_back("parqit.schema is not a JSON object; all parqit "
@@ -752,6 +982,21 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
         warnings->push_back("parqit.dtalabel is not a JSON string; all parqit "
                             "metadata skipped");
         return ParqitMeta();
+    }
+    if (!xm.is_null()) {
+        /* XMISS-1: {"<primary>": "<companion>", ...}, both non-empty names */
+        bool ok = xm.is_object();
+        for (auto it = xm.begin(); ok && it != xm.end(); ++it)
+            ok = !it.key().empty() && it.value().is_string() &&
+                 !it.value().get<std::string>().empty();
+        if (!ok) {
+            warnings->push_back(std::string(parqit::kXmissingMetaKey) +
+                                " is not a JSON object of column-name pairs; all "
+                                "parqit metadata skipped");
+            return ParqitMeta();
+        }
+        for (auto it = xm.begin(); it != xm.end(); ++it)
+            m.xmissing[it.key()] = it.value().get<std::string>();
     }
     m.schema = std::move(schema);
     m.vallabs = vallabs.is_null() ? json::object() : std::move(vallabs);
@@ -797,6 +1042,54 @@ std::vector<std::string> stata_name_basis(const std::vector<std::string> &scan_n
     return raw;
 }
 
+parqit::Int64Mode &int64_session_default() {
+    static parqit::Int64Mode mode = parqit::Int64Mode::Refuse;
+    return mode;
+}
+
+int &fill_threads_session() {
+    /* FILL-THREADS-SET-1: `parqit set fill_threads` for the session; -1 = not
+     * set (the environment variable, then the automatic rule, decide). Defined
+     * here, OUTSIDE the file's anonymous namespace, because cmd_set (views TU)
+     * and cmd_version (dispatcher TU) reference it — an internal-linkage
+     * definition left the symbol unresolved at dlopen time. */
+    static int v = -1;
+    return v;
+}
+
+long long &stream_buffer_session() {
+    /* STREAM-BUFFER-SET-1: see plugin_io.hpp; defined outside the anonymous
+     * namespace for the same reason as fill_threads_session() */
+    static long long v = -1;
+    return v;
+}
+
+bool rewrite_decode_failure(std::string *err) {
+    if (err->find("Failure in decode") == std::string::npos) return false;
+    *err = "a binary column of this view holds bytes that are not valid UTF-8, "
+           "so binary(text) cannot decode it; reopen the source with "
+           "binary(hex) (parqit use using ..., binary(hex)) to load the exact "
+           "bytes as hex text";
+    return true;
+}
+
+bool read_type_options(const json &req, PlanContext *ctx, std::string *err) {
+    ctx->int64_mode = int64_session_default();
+    std::string v;
+    if (!parqit::req_text(req, "int64", &v, err, /*required=*/false)) return false;
+    if (!v.empty() && !parqit::int64_mode_parse(v, &ctx->int64_mode)) {
+        *err = "int64() must be refuse, round or string";
+        return false;
+    }
+    v.clear();
+    if (!parqit::req_text(req, "binary", &v, err, /*required=*/false)) return false;
+    if (!v.empty() && !parqit::binary_mode_parse(v, &ctx->binary_mode)) {
+        *err = "binary() must be drop, text or hex";
+        return false;
+    }
+    return true;
+}
+
 ST_retcode plan_columns(Session &s, const Source &src,
                         const std::vector<std::string> &varlist, bool with_stats,
                         PlanContext *ctx, std::string *err, bool need_count) {
@@ -814,10 +1107,28 @@ ST_retcode plan_columns(Session &s, const Source &src,
         const char *nm = duckdb_column_name(&res, c);
         src_names[c] = nm ? nm : "";
         duckdb_logical_type lt = duckdb_column_logical_type(&res, c);
-        plans.push_back(parqit::plan_read_column(src_names[c], lt));
+        plans.push_back(parqit::plan_read_column(src_names[c], lt, ctx->binary_mode));
         duckdb_destroy_logical_type(&lt);
     }
     duckdb_destroy_result(&res);
+
+    /* FILENAME-1: the provenance column `filename(newvar)` adds is a KNOWN
+     * column, not a file column: DuckDB appends it after the files' own
+     * columns and before the Hive partition keys (source_for cites the bind
+     * order). Every alignment below therefore counts the scan's columns
+     * WITHOUT it, no Hive tagging or clash check may see it, and the manifest
+     * never describes it. prov_idx == ncol when the option is off or the
+     * column is not in this scan (a projection dropped it). */
+    ctx->provenance_column.clear();
+    idx_t prov_idx = ncol;
+    if (!src.filename_column.empty())
+        for (idx_t c = 0; c < ncol; c++)
+            if (src_names[c] == src.filename_column) {
+                prov_idx = c;
+                ctx->provenance_column = src.filename_column;
+                break;
+            }
+    const idx_t ncol_eff = prov_idx < ncol ? ncol - 1 : ncol;
 
     /* duplicate column names: read_parquet has already renamed them (dup,
      * dup_1, …). Recover the true parquet names positionally from
@@ -876,7 +1187,15 @@ ST_retcode plan_columns(Session &s, const Source &src,
         auto tag_hive_by_name = [&](const std::vector<std::string> &leaves) {
             std::set<std::string> leafset(leaves.begin(), leaves.end());
             for (const auto &p : plans)
-                if (!leafset.count(p.source_name)) ctx->hive_columns.insert(p.source_name);
+                if (!leafset.count(p.source_name) &&
+                    p.source_name != ctx->provenance_column)
+                    ctx->hive_columns.insert(p.source_name); /* FILENAME-1 */
+        };
+        /* FILENAME-1: the partition keys are the scan columns past the leaves
+         * EXCEPT the provenance column that sits between them */
+        auto tag_hive_by_position = [&](idx_t first) {
+            for (idx_t c = first; c < ncol; c++)
+                if (c != prov_idx) ctx->hive_columns.insert(plans[c].source_name);
         };
         if (!src.relaxed) {
             duckdb_result sres;
@@ -898,12 +1217,10 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 leaf_names_seen = leaves;
                 /* a flat scan has exactly the leaves (plus partition keys for a
                  * Hive directory); anything else (nested children) is left alone */
-                const bool aligned = (n == ncol) || (src.hive && n < ncol);
+                const bool aligned = (n == ncol_eff) || (src.hive && n < ncol_eff);
                 if (aligned) {
                     for (size_t c = 0; c < leaves.size(); c++) recover_at(c, leaves[c]);
-                    if (src.hive)
-                        for (idx_t c = n; c < ncol; c++)
-                            ctx->hive_columns.insert(plans[c].source_name);
+                    if (src.hive) tag_hive_by_position(n);
                 } else if (src.hive) {
                     /* could not align: still tag the partition keys by name */
                     tag_hive_by_name(leaves);
@@ -995,7 +1312,7 @@ ST_retcode plan_columns(Session &s, const Source &src,
                     return kRcUsage;
                 }
                 const size_t nu = uplan.names.size();
-                bool aligned = (nu == ncol) || (src.hive && nu < ncol);
+                bool aligned = (nu == ncol_eff) || (src.hive && nu < ncol_eff);
                 for (size_t i = 0; aligned && i < nu; i++) {
                     const std::string expect = uplan.names[i].empty()
                                                    ? parqit::duckdb_empty_column_name(i)
@@ -1021,15 +1338,14 @@ ST_retcode plan_columns(Session &s, const Source &src,
                                 " is unioned into \"" + T + "\" (the names differ only by "
                                 "case; the engine's union is case-insensitive)");
                         }
-                    if (src.hive)
-                        for (idx_t c = static_cast<idx_t>(nu); c < ncol; c++)
-                            ctx->hive_columns.insert(plans[c].source_name);
+                    if (src.hive) tag_hive_by_position(static_cast<idx_t>(nu));
                 } else {
                     /* not contained: never silent — name the engine names kept */
                     std::set<std::string> all_true(leaf_names_seen.begin(), leaf_names_seen.end());
                     std::string kept;
                     for (const auto &p : plans)
-                        if (!all_true.count(p.source_name))
+                        if (!all_true.count(p.source_name) &&
+                            p.source_name != ctx->provenance_column)
                             kept += (kept.empty() ? "" : ", ") + p.source_name;
                     if (!kept.empty())
                         ctx->warnings.push_back(
@@ -1099,6 +1415,17 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 duckdb_destroy_result(&sres);
             }
         }
+        /* CSV-OPT-1: a dialect the user forced with csv(...) wins over the
+         * sniff — the raw-header probe has to read the file exactly as the
+         * scan does, or it would recover names from a different split.
+         * header(off) means there is no header line to recover from at all
+         * (the engine names the columns column0…), so recovery is skipped.
+         * Only dialect keys reach this probe: a nullstr/types/dateformat is
+         * about VALUES and would corrupt the names it reads back. */
+        if (src.csv_dialect.has_delim) delim = src.csv_dialect.delim;
+        if (src.csv_dialect.has_quote) quote = src.csv_dialect.quote;
+        if (src.csv_dialect.has_escape) esc = src.csv_dialect.escape;
+        if (src.csv_dialect.header >= 0) hashdr = src.csv_dialect.header == 1;
         if (sniffed && hashdr && !delim.empty()) {
             std::string opts = ", header = false, all_varchar = true, delim = " +
                                quote_literal(delim) + ", quote = " + quote_literal(quote) +
@@ -1109,7 +1436,8 @@ ST_retcode plan_columns(Session &s, const Source &src,
             if (s.query("SELECT * FROM read_csv(" + quote_literal(first) + opts + ") LIMIT 1",
                         &hres, &perr)) {
                 const idx_t n = duckdb_column_count(&hres);
-                if (duckdb_row_count(&hres) == 1 && n == ncol) {
+                /* FILENAME-1: the provenance column has no header cell */
+                if (duckdb_row_count(&hres) == 1 && n == ncol_eff) {
                     for (idx_t c = 0; c < n; c++) recover_at(c, varchar_cell(&hres, c, 0));
                 }
                 duckdb_destroy_result(&hres);
@@ -1123,6 +1451,35 @@ ST_retcode plan_columns(Session &s, const Source &src,
      * `NUEMP` apart, so both load under their exact names; the engine key
      * stays source_name. */
     std::vector<std::string> raw_names = stata_name_basis(src_names, ctx->parquet_names);
+    /* FILENAME-1: the engine refuses only an EXACT clash with a file column,
+     * and only against the names it binds. A source column whose recovered
+     * name equals the requested one (a Hive key, a case variant, or a name the
+     * sanitiser would fold — "my file" -> my_file) would instead make
+     * sanitize_unique quietly rename one of the two. What matters is the name
+     * a column LOADS under, which the sanitiser decides, so sanitise the
+     * source's names WITHOUT the provenance column — exactly what they would
+     * be had the option not been given — and refuse when one of them claims
+     * the requested name. ctx->refusal so the lazy caller, which ignores the
+     * metadata-only plan's other failures, refuses too. */
+    if (prov_idx < ncol) {
+        std::vector<std::string> others;
+        others.reserve(raw_names.size());
+        for (size_t i = 0; i < raw_names.size(); i++)
+            if (i != static_cast<size_t>(prov_idx)) others.push_back(raw_names[i]);
+        const std::vector<std::string> onames = parqit::sanitize_unique(others);
+        const std::string want = parqit::ascii_lower(ctx->provenance_column);
+        for (size_t i = 0; i < onames.size(); i++) {
+            /* case-insensitively: DuckDB resolves identifiers that way, so the
+             * two columns could not both be addressed in the scan */
+            if (parqit::ascii_lower(onames[i]) != want) continue;
+            ctx->refusal = "filename(" + ctx->provenance_column +
+                           "): the source column \"" + others[i] +
+                           "\" already loads as " + onames[i] +
+                           "; the provenance column needs a name of its own";
+            *err = ctx->refusal;
+            return kRcUsage;
+        }
+    }
     std::vector<bool> renamed;
     std::vector<std::string> stata_names = parqit::sanitize_unique(raw_names, &renamed);
     for (size_t i = 0; i < plans.size(); i++) {
@@ -1167,6 +1524,11 @@ ST_retcode plan_columns(Session &s, const Source &src,
     /* parqit.* metadata: original types/formats/labels ride along (period
      * formats stay integers with their true format — charter §6.3) */
     ctx->meta = read_parqit_meta(s, src.paths_sql, &ctx->warnings, &ctx->files);
+    if (!ctx->meta.refusal.empty()) {
+        ctx->refusal = ctx->meta.refusal;
+        *err = ctx->refusal;
+        return kRcUsage;
+    }
     /* HIVE-CLASH-1 (audit 2026-08-22, V2.6): the engine binds a Hive partition
      * key onto an existing file column when the names match CASE-INSENSITIVELY
      * (MultiFileReader::BindOptions, StringUtil::CIEquals): a foreign tree with
@@ -1233,6 +1595,12 @@ ST_retcode plan_columns(Session &s, const Source &src,
             return pn != ctx->parquet_names.end() ? pn->second : p.source_name;
         };
         for (auto &p : plans) {
+            /* FILENAME-1: the provenance column is not in the file, so it
+             * carries no parqit.* metadata — never let a manifest entry that
+             * happens to share its name retype or relabel it */
+            if (!ctx->provenance_column.empty() &&
+                p.source_name == ctx->provenance_column)
+                continue;
             auto it = by_src.find(meta_name_of(p));
             if (it == by_src.end()) continue;
             const json &jv = *it->second;
@@ -1341,6 +1709,75 @@ ST_retcode plan_columns(Session &s, const Source &src,
         }
     }
 
+    /* XMISS-1: fold each extended-missing companion column into its primary
+     * (ColumnPlan::xm_source) and hide it — it is parqit's own bookkeeping,
+     * never a variable, on every planner (use, describe, the lazy open's
+     * metadata pass, mergein/appendin). Restored only when the pair is sound:
+     * the primary is present, numeric and not dropped, and the companion is an
+     * integer column; otherwise the companion stays hidden and the mismatch
+     * is said, never silently applied. Matched by TRUE parquet names, which is
+     * what the writer recorded (NAME-CASE-1 aliases are scan names). */
+    if (!ctx->meta.xmissing.empty()) {
+        /* CA-02: hiding a primary would remove data before code validation. */
+        for (const auto &pair : ctx->meta.xmissing) {
+            if (ctx->meta.xmissing.count(pair.second)) {
+                ctx->refusal = "invalid parqit.xmissing: column \"" + pair.second +
+                    "\" is declared both as a primary and as a companion; "
+                    "the load is refused to avoid hiding a data column";
+                *err = ctx->refusal;
+                return kRcUsage;
+            }
+        }
+        auto true_name_of = [&](const ColumnPlan &p) {
+            auto pn = ctx->parquet_names.find(p.source_name);
+            return pn != ctx->parquet_names.end() ? pn->second : p.source_name;
+        };
+        std::map<std::string, size_t> by_true;
+        for (size_t i = 0; i < plans.size(); i++)
+            by_true.emplace(true_name_of(plans[i]), i);
+        std::set<size_t> hidden;
+        std::vector<std::string> ignored;
+        for (const auto &pair : ctx->meta.xmissing) {
+            auto pc = by_true.find(pair.second);
+            if (pc == by_true.end()) continue; /* companion not in this scan */
+            hidden.insert(pc->second);
+            const ColumnPlan &c = plans[pc->second];
+            auto pp = by_true.find(pair.first);
+            if (pp == by_true.end() || pp->second == pc->second) {
+                ignored.push_back("\"" + pair.second + "\" (its column \"" +
+                                  pair.first + "\" is not in the file)");
+                continue;
+            }
+            ColumnPlan &p = plans[pp->second];
+            const bool int_comp =
+                c.src_type == DUCKDB_TYPE_TINYINT || c.src_type == DUCKDB_TYPE_SMALLINT ||
+                c.src_type == DUCKDB_TYPE_INTEGER || c.src_type == DUCKDB_TYPE_BIGINT ||
+                c.src_type == DUCKDB_TYPE_UTINYINT || c.src_type == DUCKDB_TYPE_USMALLINT ||
+                c.src_type == DUCKDB_TYPE_UINTEGER || c.src_type == DUCKDB_TYPE_UBIGINT;
+            if (p.dropped || p.transfer == Transfer::Utf8 || !int_comp) {
+                ignored.push_back("\"" + pair.second + "\" (" + pair.first +
+                                  (p.dropped ? " is not loadable"
+                                   : p.transfer == Transfer::Utf8
+                                       ? " is a string column"
+                                       : "'s codes are not an integer column") +
+                                  ")");
+                continue;
+            }
+            p.xm_source = c.source_name;
+            ctx->xmissing_restored.push_back(p.stata_name);
+        }
+        if (!hidden.empty()) {
+            std::vector<ColumnPlan> kept;
+            kept.reserve(plans.size() - hidden.size());
+            for (size_t i = 0; i < plans.size(); i++)
+                if (!hidden.count(i)) kept.push_back(plans[i]);
+            plans.swap(kept);
+        }
+        for (const auto &ig : ignored)
+            ctx->warnings.push_back("extended-missing companion column " + ig +
+                                    " is hidden and ignored; those cells load as .");
+    }
+
     /* varlist selection: named columns, named order (charter §6.1) */
     if (!varlist.empty()) {
         std::vector<ColumnPlan> picked;
@@ -1360,6 +1797,21 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 *err = "variable " + want + " not found in the file(s)";
                 return kRcVarNotFound;
             }
+        }
+        /* FILENAME-1: filename() asks for the provenance column explicitly, so
+         * a varlist that selects columns of the FILE still gets it (appended
+         * last). Naming it in the varlist instead places it where the user
+         * put it — the loop above already picked it then. */
+        if (!ctx->provenance_column.empty()) {
+            bool have = false;
+            for (const auto &p : picked)
+                have = have || p.source_name == ctx->provenance_column;
+            if (!have)
+                for (const auto &p : plans)
+                    if (p.source_name == ctx->provenance_column) {
+                        picked.push_back(p);
+                        break;
+                    }
         }
         plans.swap(picked);
     }
@@ -1526,15 +1978,65 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 const std::string sref = p.cast_sql.empty() ? ref : p.cast_sql;
                 add("coalesce(max(strlen(" + sref + ")), 0)::BIGINT", i, 'l');
             }
-            if (p.needs_big53)
+            if (p.needs_big53) {
                 add("coalesce(max(abs(" + ref +
                         "::HUGEINT)) > 9007199254740992::HUGEINT, false)",
                     i, 'b');
+                /* INT64-PROTECT-1: under int64(string) the affected columns
+                 * become exact text, and their width must be measured over
+                 * the very expression plan_big53_as_text() will project. The
+                 * conversion is only decided once this same query has
+                 * answered 'b', so the width is measured NOW, in the same
+                 * pass, for every column of the family (one extra aggregate
+                 * over a scan that already runs; no second pass, no second
+                 * read). Columns whose values all fit 2^53 stay numeric and
+                 * simply ignore the measurement: refine_plan sizes strings
+                 * only when needs_strlen is set, and it is not set here.
+                 * needs_big53 and needs_strlen are mutually exclusive in
+                 * plan_read_column, so slot 'l' is free for this column. */
+                if (ctx->int64_mode == parqit::Int64Mode::String)
+                    add("coalesce(max(strlen(CAST(" + ref + " AS VARCHAR))), 0)::BIGINT",
+                        i, 'l');
+            }
         }
         if (!sel.empty()) {
             duckdb_result sres;
-            if (!s.query("SELECT " + sel + " FROM " + src.scan_sql, &sres, err))
+            if (!s.query("SELECT " + sel + " FROM " + src.scan_sql, &sres, err)) {
+                /* BINARY-DECODE-1: decode() raises on an invalid UTF-8 byte
+                 * sequence (encode.cpp:36-51), which is exactly the loud
+                 * failure we want — but the engine's message names the
+                 * function, not the column, and this one query sizes every
+                 * column at once. Re-probe each binary(text) column alone so
+                 * the refusal names the offender and the remedy. This runs
+                 * only on a failed plan (never on the happy path), and
+                 * nothing has been staged yet. */
+                if (ctx->binary_mode == parqit::BinaryMode::Text) {
+                    for (const auto &bp : ctx->active) {
+                        if (bp.src_type != DUCKDB_TYPE_BLOB || bp.cast_sql.empty())
+                            continue;
+                        duckdb_result pres;
+                        std::string perr;
+                        if (s.query("SELECT coalesce(max(strlen(" + bp.cast_sql +
+                                        ")), 0) FROM " + src.scan_sql,
+                                    &pres, &perr)) {
+                            duckdb_destroy_result(&pres);
+                            continue;
+                        }
+                        *err = "column " +
+                               (bp.stata_name.empty() ? bp.source_name : bp.stata_name) +
+                               " holds bytes that are not valid UTF-8, so binary(text) "
+                               "cannot decode it; use binary(hex) to load the exact "
+                               "bytes as hex text";
+                        return kRcUsage;
+                    }
+                }
+                /* The lazy path plans over the VIEW's already-decoded SELECT,
+                 * where the binary column is a VARCHAR and the loop above has
+                 * nothing to probe: the engine's own text is then the only
+                 * evidence, and it is engine text (A4-7). */
+                if (rewrite_decode_failure(err)) return kRcUsage;
                 return kRcEngine;
+            }
             for (size_t k = 0; k < slots.size(); k++) {
                 size_t pi = slots[k].first;
                 bool isnull = duckdb_value_is_null(&sres, k, 0);
@@ -1562,6 +2064,40 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 }
             }
             duckdb_destroy_result(&sres);
+        }
+        /* INT64-PROTECT-1 (audit 2026-09-19, T12): Stata's widest exact
+         * integer is 2^53. A BIGINT/UBIGINT/HUGEINT/wide-DECIMAL column whose
+         * values go beyond it used to load as a rounded double with a note,
+         * so two distinct keys could become one observation-silently. The
+         * default now REFUSES the read; int64(round) restores the old
+         * behaviour (note included) and int64(string) loads the affected
+         * columns as exact text. Columns of the same family whose values all
+         * fit stay numeric either way. */
+        std::vector<std::string> beyond;
+        for (size_t i = 0; i < ctx->active.size(); i++) {
+            ColumnPlan &p = ctx->active[i];
+            if (p.needs_big53 && stats[i].any_beyond_2p53) {
+                if (ctx->int64_mode == parqit::Int64Mode::Refuse)
+                    beyond.push_back(p.stata_name.empty() ? p.source_name
+                                                          : p.stata_name);
+                else if (ctx->int64_mode == parqit::Int64Mode::String)
+                    parqit::plan_big53_as_text(p); /* before refine_plan sizes it */
+            }
+        }
+        if (!beyond.empty()) {
+            /* ONE message naming every offending column and both remedies;
+             * the caller prefixes the command the user typed. Nothing has
+             * been staged at this point (the plan is not even written to the
+             * response file yet), so the dataset in memory is untouched. */
+            std::string names;
+            for (size_t i = 0; i < beyond.size(); i++)
+                names += (i ? ", " : "") + beyond[i];
+            *err = "column(s) " + names +
+                   " hold integer values beyond 2^53, which a Stata double "
+                   "cannot represent exactly; add int64(string) to load them as "
+                   "exact text, or int64(round) to accept rounding to the "
+                   "nearest double (see help parqit)";
+            return kRcUsage;
         }
         for (size_t i = 0; i < ctx->active.size(); i++) {
             parqit::refine_plan(ctx->active[i], stats[i]);
@@ -1610,6 +2146,19 @@ void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
          * it is no longer written as a response 'warn' record here. General
          * structural warnings (ctx.warnings, below) keep the record path. */
     }
+    /* FILENAME-1: the provenance column says where each row came from, which
+     * is exactly what a Stata note is for (notes are chars; the ado's char
+     * branch applies them to the staged variable). It carries no parqit.*
+     * metadata — no variable label, value label, format or src_name. */
+    if (!ctx.provenance_column.empty()) {
+        for (const auto &p : ctx.active) {
+            if (p.source_name != ctx.provenance_column) continue;
+            w.rec("char", {}, {p.stata_name, "note0", "1"});
+            w.rec("char", {}, {p.stata_name, "note1",
+                               "source file of each row (filename())"});
+            break;
+        }
+    }
     if (ctx.meta.present && ctx.meta.vallabs.is_object()) {
         /* stringify a JSON scalar without throwing on a foreign file that
          * stored a value-label key/text as a number instead of a string */
@@ -1654,6 +2203,18 @@ void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
     }
     for (const auto &d : ctx.drops)
         w.rec("drop", {}, {d.first, d.second});
+    /* XMISS-1: say which variables carry a companion — worded to be true for
+     * every caller of these records (use and mergein/appendin restore the
+     * cells; describe only reports the file) */
+    if (!ctx.xmissing_restored.empty()) {
+        std::string names;
+        for (size_t i = 0; i < ctx.xmissing_restored.size(); i++)
+            names += (i ? " " : "") + ctx.xmissing_restored[i];
+        w.rec("warn", {},
+              {"extended missing values (.a-.z) are preserved in companion columns "
+               "for: " + names + " (restored by parqit use, mergein and appendin; "
+               "hidden from the variable list)"});
+    }
     for (const auto &wmsg : ctx.warnings)
         w.rec("warn", {}, {wmsg});
 }
@@ -2546,11 +3107,12 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     std::vector<std::string> files, varlist;
-    std::string respfile, tmpdir, strlfile;
+    std::string respfile, tmpdir, strlfile, filename_col;
     if (!parqit::req_text_list(req, "files", &files, &err) ||
         !parqit::req_text_list(req, "varlist", &varlist, &err, false) ||
         !parqit::req_text(req, "respfile", &respfile, &err) ||
         !parqit::req_text(req, "strlfile", &strlfile, &err, false) ||
+        !parqit::req_text(req, "filename", &filename_col, &err, false) ||
         !parqit::req_text(req, "tmpdir", &tmpdir, &err)) {
         cry(err);
         return kRcUsage;
@@ -2563,10 +3125,27 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
     Session &s = Session::instance();
     s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
-    const Source src = source_for(files, req.value("relaxed", false),
-                                  req.value("csv", false));
+    CsvOptions csv_opts; /* CSV-OPT-1 (types() are proved against the engine) */
+    if (ST_retcode crc = csv_options_from_request(s, req, &csv_opts, &err)) {
+        cry("parqit use: " + err);
+        return crc;
+    }
+    const Source plain = source_for(files, req.value("relaxed", false),
+                                    req.value("csv", false), std::string(),
+                                    csv_opts);
     /* TORN-READ-1: identities BEFORE any probe touches the files */
-    const std::vector<FileIdentity> snap = snapshot_source_files(s, src.paths_sql);
+    const std::vector<FileIdentity> snap = snapshot_source_files(s, plain.paths_sql);
+    /* FILENAME-1: refuse a clash before the option is applied, so the user
+     * reads parqit's message and not the engine's DuckDB-syntax one */
+    if (!filename_col.empty()) {
+        if (ST_retcode prc = check_provenance_name(s, plain, filename_col, &err)) {
+            cry("parqit use: " + err);
+            return prc;
+        }
+    }
+    const Source src = source_for(files, req.value("relaxed", false),
+                                  req.value("csv", false), filename_col,
+                                  csv_opts);
     ST_retcode grc = strict_schema_gate(s, src, files, req.value("relaxed", false),
                                         req.value("csv", false), &err);
     if (grc != 0) {
@@ -2574,6 +3153,15 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
         return grc;
     }
     PlanContext ctx;
+    /* INT64-PROTECT-1 / BINARY-DECODE-1: the read-time type options. Absent
+     * from the request means "use the session default" for int64 (parqit set
+     * int64, itself defaulting to refuse) and "drop" for binary. The ado has
+     * already validated the spelling; an unknown value here can only be a
+     * corrupt request, so it is refused rather than silently downgraded. */
+    if (!read_type_options(req, &ctx, &err)) {
+        cry("parqit use: " + err);
+        return kRcUsage;
+    }
     ST_retcode rc = plan_columns(s, src, varlist, /*with_stats=*/true, &ctx, &err);
     if (rc != 0) {
         cry("parqit use: " + err);
@@ -2623,8 +3211,12 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
     save_local("_parqit_fast_source_ctime", "");
     save_local("_parqit_fast_source_inode", "");
     save_local("_parqit_fast_source_footer", "");
+    /* FILENAME-1: a filename() load holds a column the file does not, so the
+     * dataset is no longer an image of that file — do not offer the
+     * copy-the-source fast path for it (the save's own name check would refuse
+     * it later anyway, further from the cause) */
     if (!req.value("csv", false) && !req.value("relaxed", false) &&
-        files.size() == 1) {
+        filename_col.empty() && files.size() == 1) {
         /* COPYSOURCE-1: the load-time identity an explicit `parqit save,
          * copysource` must match exactly (FP-2: size, mtime, ctime, inode and
          * the footer digest) */
@@ -2651,7 +3243,10 @@ namespace {
  * (the SPI has no strL write call); Mata pours them in afterwards. */
 bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *col,
                  std::FILE *strl_spill, long long *inf_seen, long long *nul_seen,
-                 long long *rng_seen, long long *subms_seen, std::string *err) {
+                 long long *rng_seen, long long *subms_seen, std::string *err,
+                 /* XMISS-1: the column's extended-missing companion (TINYINT
+                  * codes) from the same chunk, or nullptr */
+                 const ArrowArray *xm = nullptr) {
     const uint8_t *validity = static_cast<const uint8_t *>(col->buffers[0]);
     const int64_t off = col->offset;
     auto valid = [&](int64_t r) -> bool {
@@ -2701,6 +3296,51 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         }
         return true;
     };
+    /* XMISS-1: restore .a-.z from the companion BEFORE the value walk. The
+     * walks below never touch a NULL cell, so the restored missing double or
+     * int64(string) code is the only write those cells get. SF_vstore converts
+     * a missing double to the variable's own storage type (a byte .a remains
+     * a byte .a). Every non-zero code must sit on a NULL
+     * primary and be one of the 26 — anything else means the file's companion
+     * does not describe this column, and the load is refused rather than
+     * guessed. A NULL code (a third-party writer) means "not extended". */
+    if (xm) {
+        if (xm->length != col->length) {
+            *err = "internal: companion chunk length mismatch for " + p.stata_name;
+            return false;
+        }
+        const uint8_t *xvalid = static_cast<const uint8_t *>(xm->buffers[0]);
+        const int8_t *codes = static_cast<const int8_t *>(xm->buffers[1]);
+        const int64_t xoff = xm->offset;
+        for (int64_t r = 0; r < col->length; r++) {
+            const int64_t pos = xoff + r;
+            if (xvalid && !((xvalid[pos >> 3] >> (pos & 7)) & 1)) continue;
+            const int code = codes[pos];
+            if (code == 0) continue;
+            if (code < 0 || code > parqit::kStataExtMissMax) {
+                *err = "column " + p.stata_name + " observation " +
+                       std::to_string(base + r + 1) +
+                       ": its extended-missing companion column holds code " +
+                       std::to_string(code) + " (valid codes are 1-26 for .a-.z); "
+                       "the file's companion column is corrupt, so the load is refused";
+                return false;
+            }
+            if (valid(r)) {
+                *err = "column " + p.stata_name + " observation " +
+                       std::to_string(base + r + 1) +
+                       ": its extended-missing companion column marks the cell as ." +
+                       std::string(1, static_cast<char>('a' + code - 1)) +
+                       " but the cell holds a value; the file's companion column "
+                       "does not describe this column, so the load is refused";
+                return false;
+            }
+            if (p.transfer == Transfer::Utf8) {
+                /* CA-03: int64(string) preserves the code as explicit text. */
+                char text[] = {'.', static_cast<char>('a' + code - 1), '\0'};
+                if (!store_str(r, text)) return false;
+            } else if (!store_num(r, parqit::stata_missing_value(code))) return false;
+        }
+    }
     switch (p.transfer) {
     case Transfer::Int8: {
         const int8_t *v = static_cast<const int8_t *>(col->buffers[1]);
@@ -2893,6 +3533,21 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
  * fetch+convert with the fill instead of serialising them, and processes each
  * chunk while its Arrow buffers are still cache-warm.
  *
+ * ARROW-IN-WORKERS (2026-09-20): the producer no longer converts. It only
+ * fetches (duckdb_fetch_chunk must stay on one thread: one result cursor) and
+ * enqueues the raw chunk with its observation offset; each worker converts the
+ * chunk it fills (duckdb_data_chunk_to_arrow) and releases both. That takes the
+ * one serial step off the critical path — measured under the streamed fetch,
+ * the fill was flat from 8 workers because the producer's per-chunk conversion
+ * was the floor (ASSUMPTIONS #141). Concurrent conversions of DISTINCT chunks
+ * are safe by construction in the fetched DuckDB 1.5.3 source: the C entry point
+ * only reads the options wrapper and copies its ClientProperties by value
+ * (capi/arrow-c.cpp:48-69), the converter builds a per-call ArrowAppender over
+ * the chunk (common/arrow/arrow_converter.cpp:19-25), and the one shared lookup
+ * it makes — the Arrow extension-type registry — is read under the config's own
+ * mutex (function/table/arrow/arrow_duck_schema.cpp:431-440 →
+ * common/arrow/arrow_type_extension.cpp:235-243). The serial path is unchanged.
+ *
  * PERF-STREAM-1: the chunks the producer pulls now come from a LIVE streaming
  * result (Session::query_streaming), not from a finished in-memory collection.
  * duckdb_query "stores the full (materialized) result" (duckdb.h:1209), so until
@@ -2913,41 +3568,69 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
  * the queue, abort flag and first-error string are guarded by the queue mutex. */
 
 struct ChunkSlot {
-    ArrowArray arr;
-    duckdb_data_chunk chunk;
-    long long base; /* global 0-based obs offset; SF row = base + r + 1 */
+    duckdb_data_chunk chunk; /* the raw engine chunk; the WORKER converts it */
+    long long base;          /* global 0-based obs offset; SF row = base + r + 1 */
+    long long length;        /* rows in the chunk (duckdb_data_chunk_get_size) */
 };
 
-/* Rows below this stay on the unchanged serial path: thread setup would cost
- * more than it saves, and small-read latency must not regress. */
+/* Reads below BOTH of these stay on the unchanged serial path: thread setup
+ * would cost more than it saves, and small-read latency must not regress. The
+ * row floor alone left wide-but-short results serial (WIDE-FILL-1, 2026-09-20:
+ * 3200 vars x 20k rows = 64M cells ran on one worker; forcing 8 cut the fetch
+ * 2.1 -> 1.7 s), so the cell count is the second trigger. */
 constexpr long long kParallelMinRows = 50'000;
-/* Cap on fill workers. The pipeline's single producer (DuckDB fetch + Arrow
- * convert, necessarily serial) is the bottleneck once the fill is hidden behind
- * it, and the SPI store does not scale linearly anyway; measured on a 48-core box
- * the read is flat from ~4 workers and best near 8, then regresses past ~12 from
- * oversubscription. 8 captures the win while staying light on shared HPC nodes;
- * PARQIT_FILL_THREADS overrides it for atypical (very wide / string-heavy) reads. */
-constexpr int kFillThreadCap = 8;
+constexpr long long kParallelMinCells = 2'000'000;
+/* CPUS-1 (2026-09-20): no hard-coded cap on the fill workers. The automatic
+ * rule uses every CPU available to this process (parqit::available_cpus(): the
+ * affinity mask on Linux, so a SLURM/cgroup allocation is honoured — the very
+ * reason a cap of 16 used to exist), and an explicit count from `parqit set
+ * fill_threads` (clamped at set time) or PARQIT_FILL_THREADS is clamped to
+ * that number. Measured on the 48-core box as a threads x fill matrix (min of
+ * 2; 58.8M x 9 numeric): fill 8 -> 1.2-1.3 s, 16 -> 0.91-0.98, 24 -> 0.69-0.83,
+ * 32 -> 0.70-0.79, 48 -> 0.62-0.73 at engine threads 16, 24 and 48 alike, so
+ * both at 48 show no oversubscription penalty; the string-heavy 7.9M x 15
+ * read is flat at 2.4-2.8 s (scan-bound). Earlier sweeps (ASSUMPTIONS
+ * #37/#141/#146) are superseded by this matrix. */
 
-/* Workers to use for the fill of an n-row read (1 == serial path). Honours
- * PARQIT_FILL_THREADS (0/1 disables; >1 forces a count) for tuning and as an escape
- * hatch, else scales to the hardware up to kFillThreadCap. */
-int fill_thread_count(long long nrows) {
+/* Workers to use for the fill of an n-row, k-column read (1 == serial path).
+ * Honours PARQIT_FILL_THREADS (0/1 disables; >1 forces a count) for tuning and
+ * as an escape hatch, else uses every available CPU once the read is big by
+ * rows OR by cells. */
+int fill_thread_count(long long nrows, long long ncols) {
     /* An explicit override wins even below the row threshold: 0/1 forces the
      * serial path, >1 forces that many workers regardless of n — the latter lets
      * the test suite drive the parallel path through every small-data invariant
-     * (0/1 row, 1 var, strL, dup names, locale, float extremes, …). */
+     * (0/1 row, 1 var, strL, dup names, locale, float extremes, …). The session
+     * setting (`parqit set fill_threads`) is the user's in-session choice and
+     * therefore outranks the environment variable fixed before Stata started. */
+    const int cpus = parqit::available_cpus();
+    auto bounded = [&](long long v) -> int {
+        return v <= 1 ? 1 : static_cast<int>(std::min<long long>(v, cpus));
+    };
+    const int s = fill_threads_session();
+    if (s >= 0) return bounded(s);
     if (const char *e = std::getenv("PARQIT_FILL_THREADS")) {
         char *end = nullptr;
         long v = std::strtol(e, &end, 10);
-        if (end != e && v >= 0)
-            return v <= 1 ? 1 : static_cast<int>(std::min<long>(v, 1024));
+        if (end != e && v >= 0) {
+            /* clamped like the session setting, said once per session */
+            static bool noted = false;
+            if (v > cpus && !noted) {
+                noted = true;
+                std::string line = "note: PARQIT_FILL_THREADS=" + std::to_string(v) +
+                                   " exceeds the " + std::to_string(cpus) +
+                                   " CPUs available to this process; using " +
+                                   std::to_string(cpus) + "\n";
+                SF_display(const_cast<char *>(line.c_str()));
+            }
+            return bounded(v);
+        }
     }
-    if (nrows < kParallelMinRows) return 1;
-    unsigned hw = std::thread::hardware_concurrency();
-    if (hw == 0) hw = 4;
-    int t = static_cast<int>(std::min<unsigned>(hw, kFillThreadCap));
-    return t < 1 ? 1 : t;
+    /* ncols <= Stata's variable ceiling and nrows < 2^31, so the product
+     * cannot overflow a long long */
+    if (nrows < kParallelMinRows && nrows * (ncols > 0 ? ncols : 1) < kParallelMinCells)
+        return 1;
+    return cpus;
 }
 
 /* PERF-STREAM-1 escape hatch: PARQIT_FETCH_MATERIALIZED=1 fetches through the
@@ -2964,23 +3647,28 @@ bool fetch_materialized() {
  * cap and not a reservation a floor above a tiny result costs nothing. */
 constexpr long long kStreamBufferFloor = 16LL * 1000 * 1000;
 
-/* PARQIT_STREAM_BUFFER_MB, the user's explicit ceiling on the streaming buffer:
- *   unset / unparsable -> 0  : no ceiling beyond the estimated result size;
- *   n > 0              -> n MB (capped at 4096), authoritative even below the
- *                         floor — a smaller buffer is a deliberate memory/time
- *                         trade, and is documented as such;
+/* The user's explicit ceiling on the streaming buffer — `parqit set
+ * stream_buffer_mb` for the session (STREAM-BUFFER-SET-1, outranks the
+ * variable), else PARQIT_STREAM_BUFFER_MB:
+ *   unset / auto       -> 0  : no ceiling beyond the estimated result size;
+ *   n > 0              -> n MB, authoritative even below the floor — a smaller
+ *                         buffer is a deliberate memory/time trade, and is
+ *                         documented as such (no upper clamp: the buffer is a
+ *                         cap, not a reservation);
  *   0                  -> -1 : leave DuckDB's own default (1 MB), i.e. minimum
  *                         memory and the slowest fill-bound reads.
- * Read with getenv, like PARQIT_FILL_THREADS, so a Stata `global` cannot set
- * it and it is fixed for the whole session. */
+ * The variable is read with getenv, like PARQIT_FILL_THREADS, so a Stata
+ * `global` cannot set it and it is fixed for the whole session. */
 long long stream_buffer_cap_bytes() {
+    const long long sv = stream_buffer_session();
+    if (sv >= 0) return sv == 0 ? -1 : sv * 1000000LL;
     const char *e = std::getenv("PARQIT_STREAM_BUFFER_MB");
     if (!e) return 0;
     char *end = nullptr;
     long long v = std::strtoll(e, &end, 10);
     if (end == e || *end != '\0' || v < 0) return 0;
     if (v == 0) return -1;
-    return (v > 4096 ? 4096 : v) * 1000000LL;
+    return v * 1000000LL;
 }
 
 /* Test-only deterministic fetch failure (same idea as PARQIT_TEST_FAIL_THREAD_AT
@@ -3034,6 +3722,10 @@ struct FillQueue {
 void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                  const std::vector<int> &regular_cols,
                  const std::vector<int> &strl_cols, std::FILE *strl_spill,
+                 duckdb_arrow_options aopts,
+                 /* XMISS-1: result columns in a chunk = the planned columns +
+                  * their companions; xm_idx[col] is a companion's index or -1 */
+                 int ntotal, const std::vector<int> &xm_idx,
                  std::vector<long long> &inf_local,
                  std::vector<long long> &nul_local,
                  std::vector<long long> &rng_local,
@@ -3050,6 +3742,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
         bool owns = false;
         std::string lerr;
         bool ok = true;
+        ArrowArray arr;
+        std::memset(&arr, 0, sizeof(arr));
         try {
             {
                 std::unique_lock<std::mutex> lk(fq.m);
@@ -3067,19 +3761,39 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                 fq.cv_not_full.notify_one();
             }
 
-            for (int col : regular_cols)
-                if (!fill_column(plans[col], col + 1, slot.base,
-                                 slot.arr.children[col], /*strl_spill=*/nullptr,
-                                 &inf_local[col], &nul_local[col], &rng_local[col],
-                                 &subms_local[col], &lerr)) {
-                    ok = false;
-                    break;
-                }
+            /* ARROW-IN-WORKERS (2026-09-20): the Arrow conversion of THIS chunk
+             * happens here, on the worker that fills it, not on the producer —
+             * see the pipeline note above for why that is safe. A conversion
+             * failure takes the same abort path a fill failure does. */
+            duckdb_error_data ed = duckdb_data_chunk_to_arrow(aopts, slot.chunk, &arr);
+            if (ed) {
+                lerr = duckdb_error_data_message(ed);
+                duckdb_destroy_error_data(&ed);
+                ok = false;
+            } else if (arr.n_children != ntotal) {
+                lerr = "internal: chunk column count mismatch";
+                ok = false;
+            } else if (arr.length != slot.length) {
+                lerr = "internal: chunk length mismatch";
+                ok = false;
+            }
+
+            if (ok)
+                for (int col : regular_cols)
+                    if (!fill_column(plans[col], col + 1, slot.base,
+                                     arr.children[col], /*strl_spill=*/nullptr,
+                                     &inf_local[col], &nul_local[col], &rng_local[col],
+                                     &subms_local[col], &lerr,
+                                     xm_idx[col] >= 0 ? arr.children[xm_idx[col]]
+                                                      : nullptr)) {
+                        ok = false;
+                        break;
+                    }
             if (ok && !strl_cols.empty()) {
                 std::lock_guard<std::mutex> g(fq.strl_mu);
                 for (int col : strl_cols)
                     if (!fill_column(plans[col], col + 1, slot.base,
-                                     slot.arr.children[col], strl_spill,
+                                     arr.children[col], strl_spill,
                                      &inf_local[col], &nul_local[col],
                                      &rng_local[col], &subms_local[col], &lerr)) {
                         ok = false;
@@ -3095,7 +3809,7 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
         }
 
         if (owns) {
-            if (slot.arr.release) slot.arr.release(&slot.arr);
+            if (arr.release) arr.release(&arr);
             duckdb_destroy_data_chunk(&slot.chunk);
         }
 
@@ -3154,6 +3868,19 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
         sel += p.cast_sql.empty() ? quote_ident(p.source_name) : p.cast_sql;
         sel += " AS " + quote_ident(p.source_name);
     }
+    /* XMISS-1: the companions travel AFTER the planned columns, as TINYINT
+     * (a wider integer that does not fit is a loud cast error, not a wrapped
+     * code); xm_idx maps each planned column to its companion's result index
+     * or -1. The manifest, the ado and every count of k are unchanged. */
+    std::vector<int> xm_idx(static_cast<size_t>(k), -1);
+    int ntotal = k;
+    for (int i = 0; i < k; i++) {
+        const ColumnPlan &p = prep.plans[i];
+        if (p.xm_source.empty()) continue;
+        sel += ", CAST(" + quote_ident(p.xm_source) + " AS TINYINT) AS " +
+               quote_ident(p.xm_source);
+        xm_idx[static_cast<size_t>(i)] = ntotal++;
+    }
     /* TORN-READ-1 (A4-3): the plan probed the schema and counted the rows in
      * separate passes; a concurrent replace between them (or during the
      * fetch) could deliver one file's rows under another's schema. Refuse
@@ -3189,7 +3916,14 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
      * slower, stop-and-go fill-bound read. */
     if (!materialized) {
         const long long cap = stream_buffer_cap_bytes();
-        if (cap >= 0) {
+        if (cap < 0) {
+            /* CA-01: a previous read may have changed this connection setting. */
+            std::string berr;
+            if (!s.exec("RESET streaming_buffer_size", &berr)) {
+                cry("parqit use: could not reset the streaming buffer: " + berr);
+                return kRcEngine;
+            }
+        } else {
             long long want =
                 parqit::estimate_transfer_bytes(prep.plans, prep.nrows);
             if (want < kStreamBufferFloor) want = kStreamBufferFloor;
@@ -3225,11 +3959,22 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
     /* TORN-READ-1: the fetched column types must be the planned transfer
      * types (a same-count schema swap would otherwise be walked as the wrong
      * buffer layout) */
-    if (static_cast<int>(duckdb_column_count(&res)) != k) {
+    if (static_cast<int>(duckdb_column_count(&res)) != ntotal) {
         duckdb_destroy_result(&res);
         cry("parqit use: the source's column count changed between plan and fetch "
             "(modified concurrently?); the dataset in memory is untouched");
         return kRcEngine;
+    }
+    for (int i = 0; i < k; i++) { /* XMISS-1: the companions are TINYINT */
+        const int xi = xm_idx[static_cast<size_t>(i)];
+        if (xi < 0) continue;
+        if (duckdb_column_type(&res, static_cast<idx_t>(xi)) != DUCKDB_TYPE_TINYINT) {
+            duckdb_destroy_result(&res);
+            cry("parqit use: the extended-missing companion of " +
+                prep.plans[i].stata_name + " is not an integer column (source modified "
+                "concurrently?); the dataset in memory is untouched");
+            return kRcEngine;
+        }
     }
     for (int i = 0; i < k; i++) {
         const duckdb_type got = duckdb_column_type(&res, static_cast<idx_t>(i));
@@ -3286,7 +4031,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
         subms_counts(k, 0);
     long long base = 0;
     ST_retcode rc = 0;
-    const int nthreads = fill_thread_count(prep.nrows);
+    const int nthreads = fill_thread_count(prep.nrows, k);
     /* Streaming bookkeeping, shared by both fill paths: `end_of_stream` is true
      * only when a fetch returned NULL with no error recorded — i.e. the result
      * was drained to its end and DuckDB cleaned the query up itself
@@ -3318,14 +4063,16 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 rc = kRcEngine;
                 break;
             }
-            if (arr.n_children != k) {
+            if (arr.n_children != ntotal) {
                 err = "internal: chunk column count mismatch";
                 rc = kRcMismatch;
             } else {
                 for (int i = 0; i < k && rc == 0; i++) {
+                    const int xi = xm_idx[static_cast<size_t>(i)];
                     if (!fill_column(prep.plans[i], i + 1, base, arr.children[i],
                                      strl_spill, &inf_counts[i], &nul_counts[i],
-                                     &rng_counts[i], &subms_counts[i], &err))
+                                     &rng_counts[i], &subms_counts[i], &err,
+                                     xi >= 0 ? arr.children[xi] : nullptr))
                         rc = kRcEngine;
                 }
             }
@@ -3388,6 +4135,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 workers.emplace_back(
                     fill_worker, std::ref(fq), std::cref(prep.plans),
                     std::cref(regular_cols), std::cref(strl_cols), strl_spill,
+                    aopts, ntotal, std::cref(xm_idx),
                     std::ref(inf_locals[t]), std::ref(nul_locals[t]),
                     std::ref(rng_locals[t]), std::ref(subms_locals[t]));
             }
@@ -3437,42 +4185,22 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                                     duckdb_result_error(&res) == nullptr;
                     break;
                 }
+                /* ARROW-IN-WORKERS: the producer only fetches and hands the raw
+                 * chunk over; the worker that fills it converts it. The row
+                 * count comes from the chunk itself (duckdb_data_chunk_get_size,
+                 * duckdb.h) so the observation offsets are fixed here, in
+                 * fetch order, before any worker touches the chunk. */
                 ChunkSlot slot;
-                std::memset(&slot.arr, 0, sizeof(slot.arr));
-                duckdb_error_data ed =
-                    duckdb_data_chunk_to_arrow(aopts, chunk, &slot.arr);
-                if (ed) {
-                    err = duckdb_error_data_message(ed);
-                    duckdb_destroy_error_data(&ed);
-                    duckdb_destroy_data_chunk(&chunk);
-                    std::lock_guard<std::mutex> lk(fq.m);
-                    if (fq.err.empty()) fq.err = err;
-                    fq.aborted = true;
-                    rc = kRcEngine;
-                    fq.cv_not_empty.notify_all();
-                    break;
-                }
-                if (slot.arr.n_children != k) {
-                    if (slot.arr.release) slot.arr.release(&slot.arr);
-                    duckdb_destroy_data_chunk(&chunk);
-                    std::lock_guard<std::mutex> lk(fq.m);
-                    if (fq.err.empty())
-                        fq.err = "internal: chunk column count mismatch";
-                    fq.aborted = true;
-                    rc = kRcMismatch;
-                    fq.cv_not_empty.notify_all();
-                    break;
-                }
                 slot.chunk = chunk;
                 slot.base = base;
-                base += slot.arr.length;
+                slot.length = static_cast<long long>(duckdb_data_chunk_get_size(chunk));
+                base += slot.length;
 
                 std::unique_lock<std::mutex> lk(fq.m);
                 fq.cv_not_full.wait(
                     lk, [&] { return fq.q.size() < fq.cap || fq.aborted; });
                 if (fq.aborted) {
                     lk.unlock();
-                    if (slot.arr.release) slot.arr.release(&slot.arr);
                     duckdb_destroy_data_chunk(&slot.chunk);
                     break;
                 }
@@ -3501,10 +4229,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             if (w.joinable()) w.join();
 
         /* Anything still queued when a worker aborted must be freed here. */
-        for (ChunkSlot &slot : fq.q) {
-            if (slot.arr.release) slot.arr.release(&slot.arr);
-            duckdb_destroy_data_chunk(&slot.chunk);
-        }
+        for (ChunkSlot &slot : fq.q) duckdb_destroy_data_chunk(&slot.chunk);
         fq.q.clear();
 
         if (fq.aborted && rc == 0) {
@@ -3797,7 +4522,11 @@ inline void save_transcode_locals(const std::vector<SaveVar> &vars,
 
 bool build_save_kv_metadata(const std::vector<SaveVar> &vars, const json &req,
                             const std::string &dtalabel, SaveTranscode &tr,
-                            std::string *kv, std::string *err) {
+                            std::string *kv, std::string *err,
+                            /* XMISS-1: exact Stata name -> companion leaf name
+                             * of every companion written; nullptr/empty = the
+                             * key is not written */
+                            const std::map<std::string, std::string> *xmissing = nullptr) {
     /* every user-originated string entering the JSON goes through here: valid
      * UTF-8 is returned byte-exact, legacy bytes are transcoded and counted */
     auto fix = [&tr](std::string s) {
@@ -3870,8 +4599,14 @@ bool build_save_kv_metadata(const std::vector<SaveVar> &vars, const json &req,
     *kv = "KV_METADATA {'parqit.schema': " + quote_literal(schema.dump()) +
           ", 'parqit.vallabs': " + quote_literal(vallabs.dump()) +
           ", 'parqit.chars': " + quote_literal(chars.dump()) +
-          ", 'parqit.dtalabel': " + quote_literal(json(fix(dtalabel)).dump()) +
-          "}";
+          ", 'parqit.dtalabel': " + quote_literal(json(fix(dtalabel)).dump());
+    if (xmissing && !xmissing->empty()) { /* XMISS-1 */
+        json jx = json::object();
+        for (const auto &pr : *xmissing) jx[pr.first] = pr.second;
+        *kv += ", '" + std::string(parqit::kXmissingMetaKey) + "': " +
+               quote_literal(jx.dump());
+    }
+    *kv += "}";
     return true;
 }
 
@@ -4070,6 +4805,9 @@ ST_retcode save_assemble_arrow(
     long long chunk, const std::function<bool(std::string *)> &make_kv,
     SaveTranscode &tr, long long *written_out, long long *appended_out,
     std::vector<std::string> &frac_warned, std::vector<std::string> &ext_missing,
+    /* XMISS-1: write the companions; the pairs written (exact Stata name ->
+     * companion leaf name) go to *xm_pairs BEFORE make_kv runs */
+    bool xmissing, std::map<std::string, std::string> *xm_pairs,
     std::string *err, const std::string &partition_mode, std::string *note) {
     constexpr int64_t kArrowFlagNullable = 2;
     const int k = static_cast<int>(vars.size());
@@ -4119,6 +4857,11 @@ ST_retcode save_assemble_arrow(
     std::string strbuf(8192, '\0');
     std::string fixed; /* ENC-2 scratch for a transcoded cell */
     const size_t offset_limit = arrow_offset_limit();
+    /* XMISS-1: one TINYINT code column per variable that holds an extended
+     * missing, allocated on its first such cell (0 everywhere else, no validity
+     * buffer); appended after the k columns as `_parqit_xm_<var>` and listed
+     * under parqit.xmissing. A variable with only plain . gets none. */
+    std::vector<std::vector<int8_t>> xcodes(static_cast<size_t>(k));
     ST_retcode rc = 0;
     for (ST_int j = in1; j <= in2 && rc == 0; j++) {
         if (!SF_ifobs(j)) continue;
@@ -4188,6 +4931,14 @@ ST_retcode save_assemble_arrow(
                         warned_ext[i] = true;
                         ext_missing.push_back(v.name);
                     }
+                    if (xmissing && d > SV_missval) { /* XMISS-1 */
+                        const int code = parqit::stata_missing_code(d);
+                        if (code > 0) {
+                            std::vector<int8_t> &xc = xcodes[static_cast<size_t>(i)];
+                            if (xc.empty()) xc.assign(static_cast<size_t>(N), 0);
+                            xc[static_cast<size_t>(idx)] = static_cast<int8_t>(code);
+                        }
+                    }
                     c.valid[static_cast<size_t>(idx) >> 3] &=
                         static_cast<uint8_t>(~(1u << (idx & 7)));
                     c.null_count++;
@@ -4216,13 +4967,28 @@ ST_retcode save_assemble_arrow(
     }
     if (rc != 0) return rc;
 
+    /* XMISS-1: the companions follow the k columns, in variable order; their
+     * exact leaf names extend `leaf` (positional, like the columns') and the
+     * pairs are recorded for the KV metadata built by make_kv below. */
+    std::vector<int> xm_vars;
+    for (int i = 0; i < k; i++)
+        if (!xcodes[static_cast<size_t>(i)].empty()) xm_vars.push_back(i);
+    const int kk = k + static_cast<int>(xm_vars.size());
+    std::vector<std::string> xm_engine_names;
+    for (int i : xm_vars) {
+        xm_engine_names.push_back(
+            parqit::xmissing_companion_name(engine_names[static_cast<size_t>(i)]));
+        leaf.push_back(parqit::xmissing_companion_name(vars[i].name));
+        if (xm_pairs) (*xm_pairs)[vars[i].name] = leaf.back();
+    }
+
     /* Wrap the buffers as an Arrow struct array (record batch). All structs and
      * buffer-pointer arrays are locals that outlive the synchronous COPY. */
-    std::vector<ArrowSchema> child_s(k);
-    std::vector<ArrowSchema *> child_s_ptr(k);
-    std::vector<ArrowArray> child_a(k);
-    std::vector<ArrowArray *> child_a_ptr(k);
-    std::vector<std::vector<const void *>> bufp(k);
+    std::vector<ArrowSchema> child_s(kk);
+    std::vector<ArrowSchema *> child_s_ptr(kk);
+    std::vector<ArrowArray> child_a(kk);
+    std::vector<ArrowArray *> child_a_ptr(kk);
+    std::vector<std::vector<const void *>> bufp(kk);
     for (int i = 0; i < k; i++) {
         child_s[i] = ArrowSchema{};
         child_s[i].format = arrow_format_for(wk[i]);
@@ -4249,11 +5015,29 @@ ST_retcode save_assemble_arrow(
         child_a[i].buffers = bufp[i].data();
         child_a_ptr[i] = &child_a[i];
     }
+    for (size_t j = 0; j < xm_vars.size(); j++) { /* XMISS-1: int8, no nulls */
+        const int ci = k + static_cast<int>(j);
+        child_s[ci] = ArrowSchema{};
+        child_s[ci].format = "c";
+        child_s[ci].name = xm_engine_names[j].c_str();
+        child_s[ci].flags = kArrowFlagNullable;
+        child_s[ci].release = noop_arrow_schema_release;
+        child_s_ptr[ci] = &child_s[ci];
+        child_a[ci] = ArrowArray{};
+        child_a[ci].length = N;
+        child_a[ci].offset = 0;
+        child_a[ci].null_count = 0;
+        child_a[ci].n_buffers = 2;
+        child_a[ci].release = noop_arrow_array_release;
+        bufp[ci] = {nullptr, xcodes[static_cast<size_t>(xm_vars[j])].data()};
+        child_a[ci].buffers = bufp[ci].data();
+        child_a_ptr[ci] = &child_a[ci];
+    }
 
     ArrowSchema struct_s = ArrowSchema{};
     struct_s.format = "+s";
     struct_s.name = "";
-    struct_s.n_children = k;
+    struct_s.n_children = kk;
     struct_s.children = child_s_ptr.data();
     struct_s.release = noop_arrow_schema_release;
 
@@ -4264,7 +5048,7 @@ ST_retcode save_assemble_arrow(
     struct_a.offset = 0;
     struct_a.n_buffers = 1;
     struct_a.buffers = struct_bufs;
-    struct_a.n_children = k;
+    struct_a.n_children = kk;
     struct_a.children = child_a_ptr.data();
     struct_a.release = noop_arrow_array_release;
 
@@ -4447,6 +5231,38 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         return kRcUsage;
     }
 
+    /* XMISS-1: `xmissing` preserves .a-.z in companion columns. Refused with
+     * partitions(replace|append): every file of a Hive tree must carry the
+     * same parqit.* metadata (read_parqit_meta drops it all otherwise) and the
+     * companion set depends on the data being written, so a partial rewrite
+     * could not promise that; a whole-tree write can. A variable may not carry
+     * the name reserved for another's companion (the engine resolves names
+     * case-insensitively, so the check does too). */
+    const bool xmissing = req.value("xmissing", false);
+    if (xmissing && !partition_mode.empty()) {
+        cry("parqit save: xmissing is not available with partitions(" + partition_mode +
+            "): every file of a Hive tree must carry the same parqit metadata and "
+            "the companion columns depend on the data written; write the whole "
+            "tree (replace) instead");
+        return kRcUsage;
+    }
+    std::map<std::string, std::string> xm_pairs; /* exact name -> companion leaf */
+    if (xmissing) {
+        std::map<std::string, std::string> lower_of;
+        for (int i = 0; i < k; i++)
+            lower_of[parqit::ascii_lower(engine_names[static_cast<size_t>(i)])] = vars[i].name;
+        for (int i = 0; i < k; i++) {
+            if (wk[i] == WStr || wk[i] == WStrL) continue;
+            const auto hit = lower_of.find(parqit::ascii_lower(
+                parqit::xmissing_companion_name(engine_names[static_cast<size_t>(i)])));
+            if (hit == lower_of.end()) continue;
+            cry("parqit save: variable " + hit->second + " has the name parqit "
+                "reserves for the extended-missing companion column of " +
+                vars[i].name + " (xmissing); rename it");
+            return kRcUsage;
+        }
+    }
+
     tr.cells.assign(static_cast<size_t>(k), 0);
     tr.max_bytes.assign(static_cast<size_t>(k), 0);
     /* ENC-2: each writer builds the KV metadata after its data pass, so the
@@ -4455,7 +5271,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
     auto make_kv = [&](std::string *kvout) -> bool {
         save_widen_for_transcoding(vars, tr);
         tr.meta = 0;
-        return build_save_kv_metadata(vars, req, dtalabel, tr, kvout, &err);
+        return build_save_kv_metadata(vars, req, dtalabel, tr, kvout, &err, &xm_pairs);
     };
 
     /* Default write path: assemble each column once as an Arrow array and COPY
@@ -4470,6 +5286,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         rc = save_assemble_arrow(s, vars, wk, engine_names, dest, replace, compression,
                                  comp_level, partition_by, chunk, make_kv, tr,
                                  &written, &appended, frac_warned, ext_missing,
+                                 xmissing, &xm_pairs,
                                  &err, partition_mode, &pnote);
         if (rc == kRcRetryStaged) {
             use_staged = true;
@@ -4477,6 +5294,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
             written = appended = 0;
             frac_warned.clear();
             ext_missing.clear();
+            xm_pairs.clear();
             std::fill(tr.cells.begin(), tr.cells.end(), 0);
             std::fill(tr.max_bytes.begin(), tr.max_bytes.end(), 0);
             err.clear();
@@ -4495,6 +5313,18 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         cols += quote_ident(engine_names[static_cast<size_t>(i)]) + " " + /* NAME-CASE-1 */
                 parqit::duck_type_for(vars[i].st, vars[i].fcls);
     }
+    /* XMISS-1: a TINYINT companion per numeric variable (0 = none), staged
+     * for every one of them; only those that received a code are copied out,
+     * exactly the columns the Arrow path writes */
+    std::vector<int> xm_slot(static_cast<size_t>(k), -1);
+    int kx = k;
+    if (xmissing)
+        for (int i = 0; i < k; i++) {
+            if (wk[i] == WStr || wk[i] == WStrL) continue;
+            xm_slot[static_cast<size_t>(i)] = kx++;
+            cols += ", " + quote_ident(parqit::xmissing_companion_name(
+                                engine_names[static_cast<size_t>(i)])) + " TINYINT";
+        }
     if (!s.exec("CREATE TEMP TABLE " + quote_ident(stage) + " (" + cols + ")", &err)) {
         cry("parqit save: " + err);
         return kRcEngine;
@@ -4540,20 +5370,28 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         default: return DUCKDB_TYPE_DOUBLE;
         }
     };
-    std::vector<duckdb_logical_type> ltypes(k, nullptr);
+    std::vector<duckdb_logical_type> ltypes(static_cast<size_t>(kx), nullptr);
     for (int i = 0; i < k; i++)
         ltypes[i] = duckdb_create_logical_type(wkind_type(wk[i]));
+    for (int c = k; c < kx; c++) /* XMISS-1 */
+        ltypes[static_cast<size_t>(c)] = duckdb_create_logical_type(DUCKDB_TYPE_TINYINT);
 
     duckdb_data_chunk dchunk = duckdb_create_data_chunk(ltypes.data(),
-                                                       static_cast<idx_t>(k));
+                                                       static_cast<idx_t>(kx));
     const idx_t CAP = duckdb_vector_size();
     idx_t filln = 0;
-    std::vector<void *> vdata(k, nullptr);
+    std::vector<void *> vdata(static_cast<size_t>(kx), nullptr);
+    std::vector<bool> xm_any(static_cast<size_t>(k), false);
     auto begin_chunk = [&]() {
         for (int i = 0; i < k; i++) {
             if (wk[i] == WStr || wk[i] == WStrL) continue;
             vdata[i] = duckdb_vector_get_data(
                 duckdb_data_chunk_get_vector(dchunk, static_cast<idx_t>(i)));
+        }
+        for (int c = k; c < kx; c++) { /* XMISS-1: every code starts at 0 */
+            vdata[static_cast<size_t>(c)] = duckdb_vector_get_data(
+                duckdb_data_chunk_get_vector(dchunk, static_cast<idx_t>(c)));
+            std::memset(vdata[static_cast<size_t>(c)], 0, CAP);
         }
     };
     auto flush_chunk = [&]() -> bool {
@@ -4629,6 +5467,16 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
                         warned_ext[i] = true;
                         ext_missing.push_back(v.name);
                     }
+                    if (xmissing && d > SV_missval &&
+                        xm_slot[static_cast<size_t>(i)] >= 0) { /* XMISS-1 */
+                        const int code = parqit::stata_missing_code(d);
+                        if (code > 0) {
+                            static_cast<int8_t *>(
+                                vdata[static_cast<size_t>(xm_slot[static_cast<size_t>(i)])])
+                                [filln] = static_cast<int8_t>(code);
+                            xm_any[static_cast<size_t>(i)] = true;
+                        }
+                    }
                     duckdb_vector vec =
                         duckdb_data_chunk_get_vector(dchunk, static_cast<idx_t>(i));
                     duckdb_vector_ensure_validity_writable(vec);
@@ -4674,12 +5522,25 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
     }
     if (rc != 0) return rc;
 
+    /* XMISS-1: copy out the k columns plus the companions that received a
+     * code, named and ordered exactly as the Arrow path writes them; their
+     * exact leaf names extend `names` for the NAME-CASE-1 footer rewrite */
+    std::string stage_sel;
+    for (int i = 0; i < k; i++)
+        stage_sel += (i ? ", " : "") + quote_ident(engine_names[static_cast<size_t>(i)]);
+    for (int i = 0; i < k; i++) {
+        if (!xm_any[static_cast<size_t>(i)]) continue;
+        stage_sel += ", " + quote_ident(parqit::xmissing_companion_name(
+                                engine_names[static_cast<size_t>(i)]));
+        names.push_back(parqit::xmissing_companion_name(vars[i].name));
+        xm_pairs[vars[i].name] = names.back();
+    }
     std::string kv; /* ENC-2: built after the data pass (see make_kv) */
     if (!make_kv(&kv)) {
         cry(err);
         return kRcUsage;
     }
-    ST_retcode crc = copy_out_parquet(s, "SELECT * FROM " + quote_ident(stage),
+    ST_retcode crc = copy_out_parquet(s, "SELECT " + stage_sel + " FROM " + quote_ident(stage),
                                       dest, replace, compression, comp_level,
                                       partition_by, chunk, kv, &written, &err,
                                       case_alias ? &names : nullptr, nullptr,
@@ -4710,7 +5571,16 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
     save_local("_parqit_written_n", std::to_string(appended));
     save_local("_parqit_written_k", std::to_string(k));
     save_local("_parqit_dest", parqit::hex_encode(abs));
-    save_local("_parqit_ext_missing", extlist);
+    /* XMISS-1: with the option, the variables whose .a-.z were preserved are
+     * reported apart; only a variable that still LOST them (a missing-range
+     * value that is none of the 27 codes — impossible from Stata) stays in
+     * the lossy list, so the note is never wrong in either direction */
+    std::string xmlist, lostlist;
+    for (const auto &pr : xm_pairs) xmlist += (xmlist.empty() ? "" : " ") + pr.first;
+    for (const auto &v : ext_missing)
+        if (!xm_pairs.count(v)) lostlist += (lostlist.empty() ? "" : " ") + v;
+    save_local("_parqit_ext_missing", xmissing ? lostlist : extlist);
+    save_local("_parqit_xm_vars", xmlist);
     save_local("_parqit_frac_dates", fraclist);
     save_transcode_locals(vars, tr); /* ENC-2 */
     return 0;
@@ -4961,6 +5831,16 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
             cry("parqit save: copysource — could not re-read the source file: " + err);
             return grc;
         }
+    }
+    /* XMISS-1: the copy reads the file's data columns under the memory's
+     * manifest, so the companions and their KV key would be dropped and the
+     * .a-.z the load restored would come back as plain . — refuse rather than
+     * publish a file that silently lost them */
+    if (!sctx.meta.xmissing.empty()) {
+        cry("parqit save: copysource — the source file preserves extended missing "
+            "values (.a-.z) in companion columns, which the copy would drop" +
+            std::string(kUseDefault) + " with the xmissing option");
+        return kRcUsage;
     }
     if (expect_n >= 0 && sctx.nrows != expect_n) {
         cry("parqit save: copysource — the dataset has " + std::to_string(expect_n) +

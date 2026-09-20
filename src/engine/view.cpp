@@ -62,15 +62,17 @@ static std::string coerce_storage(const std::string &v,
 }
 
 /* GROUPKEY-1: fold a grouping key's missing encodings together the way the
- * merge/joinby join key_norm and native Stata already do — an empty string and
- * NULL are both the missing string "", a NaN and NULL are both numeric missing.
- * A GROUP BY / PARTITION BY on a bare user key would otherwise split '' from
- * NULL (and NaN from NULL) into separate groups, diverging from Stata and from
- * parqit's own merge. `kind` is the key column's kind ('n' or 's'). */
+ * merge/joinby join and native Stata already do — an empty string and NULL
+ * are both the missing string "", and NaN, ±Inf, a magnitude of 2^1023 or
+ * more and NULL are all numeric missing. A GROUP BY / PARTITION BY on a bare
+ * user key would otherwise split them into separate groups, diverging from
+ * Stata and from parqit's own merge. KEYFOLD-1: the rule is the join's own
+ * (key_missing_fold_sql), so the two cannot drift apart again; every column a
+ * view holds today is boundary-normalised or finite-guarded, so the wider
+ * fold changes no reachable result — it removes a second implementation.
+ * `kind` is the key column's kind ('n' or 's'). */
 static std::string norm_group_key(const std::string &ref, char kind) {
-    if (kind == 's') return "nullif(" + ref + ", '')";
-    return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " + ref +
-           " END)";
+    return key_missing_fold_sql(ref, kind);
 }
 
 void View::close() { *this = View(); }
@@ -1336,12 +1338,19 @@ static std::string numeric_output(const std::string &ref, const ViewCol &c,
            " cannot be combined without losing precision; cast explicitly first") + ") END)";
 }
 
-static std::string key_value(const std::string &ref, const ViewCol &c) {
-    if (c.kind == 's') return "nullif(" + ref + ", '')";
-    if (c.normalized) return ref;
+std::string key_missing_fold_sql(const std::string &ref, char kind) {
+    if (kind == 's') return "nullif(" + ref + ", '')";
     const std::string number = "__parqit_double(" + ref + ")";
     return "(CASE WHEN isfinite(" + number + ") AND abs(" + number + ") < " +
            dtoa(kStataMissThreshold) + " THEN " + ref + " ELSE NULL END)";
+}
+
+static std::string key_value(const std::string &ref, const ViewCol &c) {
+    /* KEYFOLD-1: one rule, shared with the contracts in plugin_view.cpp. A
+     * normalized column (MISS-1) already holds no special or out-of-range
+     * value, so the guard is skipped there; the rule is unchanged. */
+    if (c.kind != 's' && c.normalized) return ref;
+    return key_missing_fold_sql(ref, c.kind);
 }
 
 static std::string key_equality(const std::string &left, const ViewCol &lc,

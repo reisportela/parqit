@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.1.37 — the full surface below is implemented and covered by a
+> **Status:** v0.2.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -31,13 +31,18 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
-The [changelog](CHANGELOG.md) records the numerical, statistical-output and menu
-corrections. Version 0.1.37 removes the OpenMP runtime dependency, including the
-companion Windows DLL. DuckDB continues to schedule queries through its own
-threads, controlled by `parqit set threads`. The former OpenMP region only
-tested runtime availability; it did not execute calculations over the data.
-The [build and packaging checks](BUILDING.md) validate the exact distributed
-plugin, and a worker-observation test verifies DuckDB's parallel execution.
+Version 0.2.0 adds protective integer reads with exact-text alternatives,
+opt-in extended-missing preservation, binary and CSV controls, source-file
+provenance, streamed parallel collection, and aligned menus/help. It also
+changes two defaults: wide integers are refused unless their conversion is
+chosen explicitly, and Parquet saves use zstd. See the [changelog](CHANGELOG.md)
+for the compatibility notes and audit-derived corrections.
+
+Parallel execution does not require OpenMP: DuckDB schedules queries through
+its own threads (`parqit set threads`), and C++ workers fill Stata's memory
+(`parqit set fill_threads`). No companion Windows DLL is shipped. The
+[build and packaging checks](BUILDING.md) validate the exact distributed
+plugin; worker-observation and independent-oracle tests check the parallel paths.
 
 > **About.** The conceptual design of `parqit` is by **Miguel Portela** — taking
 > [`pq`](https://github.com/jrothbaum/stata_parquet_io) as the starting point and
@@ -403,7 +408,7 @@ need. Use them when the disk side is a small lookup; use `parqit use` +
 
 | Command | Compiles to | Notes |
 |---|---|---|
-| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge. |
+| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge; `int64(refuse|round|string)` says what to do with integers beyond 2^53 (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it.; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
 | `parqit open _data [, name() encoding()]` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
 
 **Input formats.** Parquet and delimited text are scanned *out of core* (the
@@ -420,6 +425,23 @@ processes share one temporary directory) and is package-owned: an operation
 failure removes it, while a successful lazy operation keeps it until the last
 view whose plan references it is closed or replaced. `parqit close _all` is the
 final package-owned cleanup sweep.
+
+**Where did this row come from?** `filename(newvar)` adds one string variable
+holding the path each observation was read from — the path *as matched*, so an
+absolute pattern gives absolute paths. It is an ordinary variable: lazy verbs
+filter on it, `collect` and `save` carry it, and a saved file holds it as plain
+Parquet text. It is never confused with a Hive partition key, and a name the
+source already loads is refused rather than quietly renamed. A `.dta`/Excel
+source refuses it, because the path would be the temporary bridge.
+
+**Delimited text you already know.** Type inference is a guess, and a wrong
+guess changes values with no error: `1e5` becomes 100000, a decimal with more
+digits than a double holds is rounded, `TRUE` becomes 1. `csv(...)` replaces the
+guess — `delim("c")`, `quote("c")`, `escape("c")`, `header(on|off)`,
+`dateformat("...")`, `timestampformat("...")`, `sample(#)` (`-1` = the whole
+file), `allvarchar`, `types(name:TYPE ...)` and `nullstr("...")`. Any other key
+is refused by name. The forced dialect drives the header-name recovery as well
+as the scan, so the names come back from the same split as the data.
 
 Column subsets in eager or lazy reads accept Stata wildcards, for example
 `parqit use id wage* using panel.parquet, clear`. `*` matches any run and `?`
@@ -463,8 +485,8 @@ lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` p
 
 | Command | Effect |
 |---|---|
-| `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts>]` | Native `merge` of the in-memory data with a disk lookup (read via parqit) |
-| `parqit appendin using <file> [, keep() force]` | Native `append` of a disk file onto the in-memory data |
+| `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts> int64()]` | Native `merge` of the in-memory data with a disk lookup (read via parqit) |
+| `parqit appendin using <file> [, keep() force int64()]` | Native `append` of a disk file onto the in-memory data |
 
 ### Materialisers and engine-side result commands
 
@@ -474,8 +496,8 @@ the view without replacing the current dataset.
 
 | Command | Effect |
 |---|---|
-| `parqit collect [, clear]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). |
-| `parqit save <dest> [, replace data partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree); `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match. |
+| `parqit collect [, clear int64(refuse|round|string)]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). `int64()` decides what happens to a column whose integers exceed 2^53 (default: refuse); it overrides the value the view was opened with. |
+| `parqit save <dest> [, replace data partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource xmissing]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree); `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match; `xmissing` (a memory save) preserves extended missing values `.a`–`.z` in one `int8` companion column per affected variable (`_parqit_xm_<var>`, 0 = none, 1–26 = `.a`–`.z`, listed under the `parqit.xmissing` footer key) that `parqit use`, `mergein` and `appendin` restore for every numeric storage type; the file stays ordinary Parquet for other readers. |
 | `parqit count` | Row count → `r(N)` (no rows materialised). |
 | `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). |
@@ -514,7 +536,7 @@ Labels come from the view, and the current dataset stays unchanged.
 | `parqit sql "<DuckDB SQL>" [, clear name()]` | Run raw DuckDB SQL; lazy by default (opens/replaces a view, current dataset untouched), or `clear` collects it. `name()` opens under a view name. |
 | `parqit query "<sql fragment>"` | Inject a raw fragment into the current pipeline (e.g. a `QUALIFY`). |
 | `parqit show` / `parqit explain` | Print the generated SQL / the query plan. |
-| `parqit set statamissing\|threads\|memory_limit\|tempdir <value>` | Engine settings (missing-value mode, DuckDB threads, memory budget, spill directory). |
+| `parqit set statamissing\|int64\|fill_threads\|stream_buffer_mb\|threads\|memory_limit\|tempdir <value>` | Engine settings (missing-value mode, the session default for integers beyond 2^53, the workers that fill Stata's memory on `use`/`collect` — `auto` or a number, reported by `parqit version` `r(fill_threads)` —, the cap in MB on the engine result buffered ahead of that fill — `auto`, `0` or a number —, DuckDB threads, memory budget, spill directory). Every thread count defaults to, and is bounded by, the CPUs available to the process (`r(cpus)`; the affinity mask on Linux): any number from 1 up to it is accepted, a larger one is clamped to it with a note. |
 | `parqit path <file>` / `parqit menu` / `db parqit_*` | Resolve a path (→ `r(path)`, `r(exists)`); install the **User > parqit** submenu (GUI Stata; one line in `profile.do` keeps it); the ten point-and-click dialogs, also listed in the help file's Dialog menu. |
 
 ### Point and click
@@ -543,11 +565,19 @@ separate row/column fields and `nolabel`. The write dialog starts with saving
 a view and separates that from saving Stata memory or collecting a view.
 View save/collect name the selected view in the emitted command, so closing it
 cannot redirect a save to memory. Each Help button opens the relevant section.
+Integer-precision selectors are available on read, collect, mergein and appendin:
+`default` inherits the view/session policy, while choosing `refuse`, `round` or
+`string` emits an explicit `int64()` option. The session dialog exposes all
+seven settings, including integer precision, fill workers and the streaming buffer.
 
-**Tuning the read.** Reads of 50,000+ rows fill Stata's memory in parallel (up
-to `min(cores, 8)` worker threads), because that per-cell fill dominates the
-cost. To force the single-threaded path — e.g. on a platform you have not yet
-verified — set the **operating-system** environment variable
+**Tuning the read.** Reads of 50,000+ rows or 2 million+ cells fill Stata's memory in parallel (one
+worker thread per CPU available to the process — the affinity mask on Linux, so
+a cluster job's allocation is honoured; no hard-coded cap), because that
+per-cell fill dominates the cost. `parqit set fill_threads 1` selects the
+serial path in the session; any positive count up to the available CPUs is
+accepted, and a larger one is clamped with a note. `auto` uses the environment
+override when one is set, otherwise the size/CPU rule above.
+To select serial filling before Stata starts, set the **operating-system** environment variable
 `PARQIT_FILL_THREADS=0` *before launching Stata* (`export PARQIT_FILL_THREADS=0` in
 your shell; the plugin reads it via `getenv`, so a Stata `global` will not reach
 it). `PARQIT_FILL_THREADS=n` pins `n` workers. The parallel and serial fills are
@@ -556,12 +586,14 @@ byte-identical — only the scheduling differs.
 That fill reads a *streamed* engine result: the engine's chunks are handed to
 the fill directly instead of first being collected into a materialised result
 and copied out again. The buffer that holds them is sized per read from the
-result's estimated size, so the scan finishes without stalling and engine-side
-peak memory stays bounded by the result, as before (measured slightly lower).
-`PARQIT_STREAM_BUFFER_MB=n` caps that buffer at `n` MB: on plain reads peak
-memory drops by up to about half, at the price of a slower, stop-and-go fill
-once the cap falls below roughly half the result (`0` leaves the engine's own
-1 MB default: least memory, slowest wide numeric reads).
+result's estimated size to avoid repeated buffer stalls. This is a soft
+engine-buffer cap; it does not bound the complete process or every possible
+variable-width payload.
+`parqit set stream_buffer_mb n` (in-session) or `PARQIT_STREAM_BUFFER_MB=n` caps
+that buffer at `n` MB: on plain reads peak memory drops by up to about half, at
+the price of a slower, stop-and-go fill once the cap falls below roughly half
+the result (`0` restores the engine's own default before each fetch, normally
+1 MB; `auto` uses the environment override or per-read sizing).
 `PARQIT_FETCH_MATERIALIZED=1` restores the earlier materialised fetch — a
 conservative fallback that changes no value.
 
@@ -648,7 +680,9 @@ rescales a date.
 | `%tC %tb` | `BIGINT` / `INTEGER` counts | kept as integer counts with their display format; third-party readers see the raw counts |
 | boolean | `BOOLEAN` → `byte` 0/1 | |
 | `DECIMAL(p,s)` | → `double` on read | warehouse money types load as numbers, with a note because binary64 may round the decimal |
-| `UINT32` `UINT64` | → `long`/`double` (bound-checked) | values above the signed range never become missing; UINT64 values beyond 2^53 are rounded to binary64 with a note |
+| `UINT32` `UINT64` | → `long`/`double` (bound-checked) | values above the signed range never become missing; values beyond 2^53 refuse the read unless `int64(round)`/`int64(string)` says what to do |
+| `BIGINT` `HUGEINT` | → `double`, or `str#` with `int64(string)` | as above: exact while the values fit 2^53, and never rounded without being asked |
+| `BLOB` | dropped, or `str#`/`strL` with `binary(text|hex)` | raw bytes have no Stata type; `text` refuses invalid UTF-8 loudly, `hex` is always exact |
 | `LIST` `STRUCT` | error or drop-with-message | unrepresentable types are loud, never silent all-missing |
 
 Unsigned integers, decimals and out-of-range values are bound-checked; unsupported
@@ -660,7 +694,7 @@ A `parqit save` writes Stata's variable labels, value labels, notes, display for
 and characteristics into Parquet **key–value metadata** under a `parqit.*` namespace.
 `parqit use` restores them. The file stays 100% standard Parquet for every other tool.
 Representable values and metadata round-trip under the documented type
-contract. Extended-missing categories collapse, fractional date/period counts
+contract. Without `xmissing`, extended-missing categories collapse; fractional date/period counts
 round, legacy text may be transcoded and binary strings have boundary limits.
 These conversions are reported; see Limitations and `help parqit_technical`.
 
@@ -689,9 +723,21 @@ These conversions are reported; see Limitations and `help parqit_technical`.
 - **Extended missings** `.a`–`.z` collapse to a single null in Parquet (the
   format has one missing concept); `parqit save`, `parqit open _data` and any
   command that bridges a `.dta`/Excel source warn when this loses information.
-  Labels attached to extended missings do survive (they live in `parqit.*`
-  metadata). Since their identity is then unavailable, `.a`–`.z` literals are
-  rejected in lazy expressions; use `missing(x)` or compare with ordinary `.`.
+  `parqit save ..., xmissing` (opt-in) keeps them: each affected variable gets
+  an `int8` companion column `_parqit_xm_<var>` holding the code (1–26) and
+  the pairs are recorded under the `parqit.xmissing` footer key; `parqit use`,
+  `mergein` and `appendin` hide the companions and restore `.a`–`.z` in every
+  numeric storage type, a corrupt companion is refused loudly, and a lazy view
+  over such a file reads those cells as `.` and says so when opened (the
+  companions are hidden there too). `copysource` and `partitions()` do not
+  combine with it. A column declared both as a primary and a companion is
+  refused on read. A multi-file source with differing `parqit.*` metadata and
+  an extended-missing channel is also refused, even with `relaxed`: read the
+  files separately and combine them with `parqit appendin` to preserve the
+  codes. Labels attached to extended missings do survive (they live
+  in `parqit.*` metadata). Since their identity is then unavailable in a view,
+  `.a`–`.z` literals are rejected in lazy expressions; use `missing(x)` or
+  compare with ordinary `.`.
   In a **`merge`/`joinby` key** the collapse stops being cosmetic: `.a` and `.`
   are then the same missing, and Stata matches missing with missing, so rows
   that native Stata kept apart now pair and `_merge` reports 3. Both verbs say
@@ -706,14 +752,29 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   physical row order of the *using* file makes native `merge m:1` return the
   master in a different order. Code that depends on `_n` or `by:` should sort
   explicitly after collecting.
-- **`int64`/`uint64` values above 2^53.** Reading them into Stata rounds each
-  to the nearest `double` and says so (`note: <var>: values beyond 2^53
-  rounded to nearest double`), so two distinct keys can become one. The
-  lossless path is text: `parqit sql "SELECT …, CAST(col AS VARCHAR) AS s FROM
-  read_parquet('f.parquet')"` returns the digits exactly. A **lazy** `merge` or
-  `joinby` over such a key is exact even so, because the join runs in the
-  engine before any Stata `double` exists; only what is then collected is
-  rounded.
+- **`int64`/`uint64` values above 2^53.** These are outside Stata's
+  consecutively exact integer range, so parqit conservatively **refuses
+  the read by default**, even if particular larger values are representable
+  (`r(198)`, naming every such column; nothing is
+  staged, the data in memory is untouched). Choose what should happen:
+  `int64(string)` loads those columns as exact text (the cast happens in the
+  engine, over the integer); on an eager read, preserved `.a`–`.z` codes become
+  the text `.a`–`.z` in those converted columns, ordinary missing becomes an
+  empty string, and corrupt codes still refuse the load. `int64(round)` accepts the nearest `double` with
+  the note `values beyond 2^53 rounded to nearest double` — after which two
+  distinct keys can be one observation. `parqit set int64 refuse|round|string`
+  moves the session default; `parqit head`/`parqit list` always preview the
+  exact digits. A **lazy** `merge` or `joinby` over such a key is exact
+  whatever you choose, because the join runs in the engine before any Stata
+  `double` exists; only what is then collected is affected. The manual recipe
+  still works: `parqit sql "SELECT …, CAST(col AS VARCHAR) AS s FROM
+  read_parquet('f.parquet')"`.
+- **Binary (`BLOB`) columns** have no Stata representation and are dropped
+  with a message. `parqit use ..., binary(text)` loads them as UTF-8 text
+  (and refuses loudly, naming the column, if any row is not valid UTF-8);
+  `binary(hex)` loads two uppercase hex digits per byte, which always works.
+  On the lazy path the option belongs to `parqit use using` — a view's
+  columns are decided when it is opened.
 - **Legacy (non-UTF-8) text.** Parquet strings must be UTF-8. `parqit save`
   transcodes string cells, labels, value labels, notes and characteristics
   that carry raw Latin-1/Windows-1252/MacRoman bytes (data saved by Stata 13

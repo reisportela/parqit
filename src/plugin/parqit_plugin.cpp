@@ -85,6 +85,22 @@ ST_retcode cmd_version(const std::vector<std::string> &) {
     save_local("_parqit_duckdb_version", duckdb_library_version());
     save_local("_parqit_spi_version", "3.0");
     save_local("_parqit_parallel_backend", "duckdb");
+    /* FILL-THREADS-SET-1: the session's fill-worker setting, "auto" unless
+     * `parqit set fill_threads` chose a number (the environment variable and
+     * the automatic rule are not reported here: they are decided per fetch). */
+    {
+        const int ft = parqit_plugin::fill_threads_session();
+        save_local("_parqit_fill_threads", ft < 0 ? std::string("auto") : std::to_string(ft));
+        /* CPUS-1 / STREAM-BUFFER-SET-1: the CPUs available to this process, the
+         * engine thread count in force (the user's, else those CPUs) and the
+         * streaming-buffer setting ("auto" unless parqit set chose a number) */
+        save_local("_parqit_cpus", std::to_string(parqit::available_cpus()));
+        save_local("_parqit_threads",
+                   std::to_string(parqit::Session::instance().threads()));
+        const long long sb = parqit_plugin::stream_buffer_session();
+        save_local("_parqit_stream_buffer_mb",
+                   sb < 0 ? std::string("auto") : std::to_string(sb));
+    }
     // Retain the public diagnostic fields introduced in 0.1.36.
     save_local("_parqit_openmp", "0");
     save_local("_parqit_openmp_version", "0");

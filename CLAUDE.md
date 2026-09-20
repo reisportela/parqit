@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `parqit` is a Stata package — "dbplyr's architecture with Stata's vocabulary" — that compiles lazy Stata-flavoured verbs (`keep`, `gen`, `collapse`, `merge`, …) into a single DuckDB SQL query executed out-of-core over Parquet. Its two full-result materialisers are `parqit collect`, which streams the result into Stata's current dataset atomically, and `parqit save`, which writes Parquet → Parquet without loading that result into the current dataset. It is not another Parquet reader; the product is the manipulation layer and those two data paths.
 
-Current state: **v0.1.37** (see [CMakeLists.txt](CMakeLists.txt) `project(... VERSION)`). The full command surface in `README.md` is implemented (single-table verbs, two-table verbs, reshape, pivot, sql/query, native `mergein`/`appendin`, dialogs, metadata round-trip). Milestones M0–M4 (brief §11) are in the tree; M5 is SSC-release polish. The version/date lives in synchronised CMake, ado/help/dialog, README, package-manifest, citation and contributor-guidance surfaces; `tests/release_lint.sh` fails the build if they drift. Bump them together.
+Current state: **v0.2.0** (see [CMakeLists.txt](CMakeLists.txt) `project(... VERSION)`). The full command surface in `README.md` is implemented (single-table verbs, two-table verbs, reshape, pivot, sql/query, native `mergein`/`appendin`, dialogs, metadata round-trip). Milestones M0–M4 (brief §11) are in the tree; M5 is SSC-release polish. The version/date lives in synchronised CMake, ado/help/dialog, README, package-manifest, citation and contributor-guidance surfaces; `tests/release_lint.sh` fails the build if they drift. Bump them together.
 
 **`parqit_build_prompt.md` is the authoritative build brief.** Where it states a decision ("must", "do not"), treat it as fixed — do not relitigate. Where it is silent, use judgement consistent with the thesis and record the assumption in `ASSUMPTIONS.md` instead of guessing silently. `README.md` documents the public command surface (brief §3) — stable once published, additive changes only; changes to it must be flagged in `CHANGELOG.md` and `ASSUMPTIONS.md`. Per the non-regression rule (`AGENTS.md`): never remove a feature, reduce precision, corrupt metadata, weaken an error path, or change public command semantics silently. Correctness is the first gate; performance work only after the fidelity/type/metadata/oracle checks pass.
 
@@ -62,7 +62,7 @@ cmake --preset dev && cmake --build build/dev -j
 
 # Every build also refreshes the repo-local install tree ado/plus/p/ (ado+help+pkg synced,
 # plugin stripped-and-copied). Point Stata at it once:  adopath ++ "<repo>/ado/plus/p"
-# A running Stata keeps the plugin it loaded — `discard` or restart Stata after a rebuild.
+# Restart Stata after rebuilding the plugin; `discard` only refreshes ado programs.
 
 # C++ unit tests (doctest; the parqit_engine layer, no Stata needed)
 ctest --preset dev                                   # or: ./build/dev/parqit_tests
@@ -98,7 +98,7 @@ When using local Stata directly, keep test state repo-local: prepend the repo ad
 - **Loud errors:** every plugin entry returns a real `ST_retcode`; the `stata_call` catch-all converts any escaped C++ exception into a nonzero rc + `SF_error` (never let one cross the `extern "C"` boundary — it kills the Stata process). The ado checks `_rc`; failures are nonzero rc **plus** a message — never rc 0 with a stale/missing file.
 - **Atomic validate-then-mutate:** `collect`/`use, clear` stage into a temp frame and swap on success; never destroy the in-memory dataset before the new data is known good.
 - Type contract highlights (`typemap.cpp`): `%tm/%tq/%th/%ty/%tw` stay INTEGER period counts (never mis-scaled to calendar dates); uint32/uint64/decimal are bound-checked numbers, never silent nulls; unsupported types (LIST/STRUCT) error or drop-with-message, never a silent all-missing column; string lengths are bytes (UTF-8), respecting the 2045-char `str#`/`strL` boundary.
-- Stata metadata (variable/value labels, notes, formats, characteristics) round-trips via Parquet key–value metadata under a `parqit.*` namespace; the file stays standard Parquet for third parties. One documented loss: extended-missing *categories* `.a`–`.z` collapse to a single `.` (labels survive; `save` warns).
+- Stata metadata (variable/value labels, notes, formats, characteristics) round-trips via Parquet key–value metadata under a `parqit.*` namespace; the file stays standard Parquet for third parties. One documented loss: extended-missing *categories* `.a`–`.z` collapse to a single `.` (labels survive; `save` warns) — unless the file is written with `parqit save ..., xmissing`, which keeps their codes in `int8` companion columns (`_parqit_xm_<var>`, listed under `parqit.xmissing`) that `use`/`mergein`/`appendin` restore; the lazy view folds them to `.` and says so (phase 1).
 - Expressions default to SQL missing semantics; `parqit set statamissing on` emulates Stata's "missing is larger than everything" ordering. The translator (`exprtrans.cpp`) is a focused, unit-tested module.
 - Never invent benchmark numbers or API behaviour. Unsure → read the fetched DuckDB header / vendored Arrow/Stata header / local Stata docs; still unsure → `ASSUMPTIONS.md` + the conservative option.
 

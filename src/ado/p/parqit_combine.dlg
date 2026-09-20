@@ -2,7 +2,7 @@
   parqit merge - Combine the view with a file or another view, or join the
   data in memory with a file
 
-*!  VERSION 0.1.37  07sep2026
+*!  VERSION 0.2.0  20sep2026
 
   User > parqit > Combine datasets (merge, append, joinby)...
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
@@ -185,6 +185,11 @@ BEGIN
 	default("windows-1252")						///
 	option(encoding)						///
 	label("Code page")
+  TEXT tx_int64 _lft _ls _iwd ., ///
+	label("Large integers read by mergein/appendin (default = inherit the session):")
+  COMBOBOX cb_int64 @ _ss _vnwd ., dropdownlist contents(i64_list) ///
+	default("default") option(int64) label("Integers beyond 2^53") ///
+	tooltip("string preserves exact digits; merge keys must have compatible types on both sides")
 END
 
 LIST vv_list
@@ -209,6 +214,14 @@ BEGIN
 	"m:1"
 	"1:m"
 	"m:m"
+END
+
+LIST i64_list
+BEGIN
+	default
+	refuse
+	round
+	string
 END
 
 PROGRAM main_mode
@@ -240,6 +253,8 @@ BEGIN
 	call opt.ck_aforce.disable
 	call opt.tx_enc.disable
 	call opt.cb_enc.disable
+	call opt.tx_int64.disable
+	call opt.cb_int64.disable
 	if main.rb_merge | main.rb_mergein {
 		call main.tx_kind.enable
 		call main.cb_kind.enable
@@ -276,6 +291,8 @@ BEGIN
 	}
 	if main.rb_mergein {
 		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, or Excel):"
+		call opt.tx_int64.enable
+		call opt.cb_int64.enable
 		call opt.gb_native.enable
 		call opt.ck_update.enable
 		call opt.ck_nolabel.enable
@@ -290,6 +307,8 @@ BEGIN
 	}
 	if main.rb_appendin {
 		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, or Excel):"
+		call opt.tx_int64.enable
+		call opt.cb_int64.enable
 		call main.tx_keepus.enable
 		call main.cb_keepus.enable
 		call opt.ck_aforce.enable
@@ -418,6 +437,7 @@ BEGIN
 			option opt.ck_nonotes
 			option opt.ck_mforce
 			option opt.ck_noreport
+			optionarg /hidedefault opt.cb_int64
 		endoptions
 	}
 	if main.rb_appendin {
@@ -429,6 +449,7 @@ BEGIN
 				put "keep(" main.cb_keepus ") "
 			}
 			option opt.ck_aforce
+			optionarg /hidedefault opt.cb_int64
 		endoptions
 	}
 END

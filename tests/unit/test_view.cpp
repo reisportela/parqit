@@ -999,3 +999,65 @@ TEST_CASE("egen refuses row context without changing the view") {
         CHECK(v.show() == before);
     }
 }
+
+TEST_CASE("KEYFOLD-1: one missing-key rule for the join and its contracts") {
+    /* NULL, NaN, ±Inf and |x| >= 2^1023 are missing keys; finite values pass.
+     * The contracts behind r(459) and the missing-key note use this very
+     * function, so they cannot drift from the join again (v102-F). */
+    const std::string fold = key_missing_fold_sql("x", 'n');
+    const std::string sql =
+        "SELECT format('{},{},{}', count(*) FILTER (WHERE " + fold + " IS NULL), "
+        "count(*) FILTER (WHERE " + fold + " IS NOT NULL), count(DISTINCT " + fold +
+        ")) FROM (VALUES (NULL::DOUBLE), ('nan'::DOUBLE), ('inf'::DOUBLE), "
+        "('-inf'::DOUBLE), (1e308::DOUBLE), (-power(2::DOUBLE, 1023)), "
+        "(8.9884656743115785e307::DOUBLE), (8.9e307::DOUBLE), (1.0::DOUBLE), "
+        "(0.0::DOUBLE)) t(x)";
+    /* -2^1023 is Stata's `.` in magnitude (missing); 8.9884656743115785e307 is
+     * Stata's maxdouble(), one ULP below it (a value) */
+    CHECK(run_scalar(sql) == "6,4,4");
+    /* an integer key takes the same rule (the guard converts, the value is
+     * passed through unchanged) */
+    const std::string ifold = key_missing_fold_sql("i", 'n');
+    CHECK(run_scalar("SELECT format('{},{}', count(*) FILTER (WHERE " + ifold +
+                     " IS NULL), sum(" + ifold + ")) FROM (VALUES (1), (NULL::INTEGER), "
+                     "(2)) t(i)") == "1,3");
+    /* a string key is missing when empty (or NULL) */
+    const std::string sfold = key_missing_fold_sql("s", 's');
+    CHECK(run_scalar("SELECT count(*) FILTER (WHERE " + sfold +
+                     " IS NULL) FROM (VALUES (''), ('a'), (NULL::VARCHAR)) t(s)") == "2");
+}
+
+TEST_CASE("MAXDOUBLE-1: the finite guard keeps Stata's maxdouble and nulls 2^1023") {
+    /* 8.9884656743115785e307 is maxdouble() = 2^1023 - 2^970, a legitimate
+     * Stata value; 2^1023 is `.`. A 16-digit decimal literal for the threshold
+     * parsed to maxdouble itself and the guard nulled it. */
+    CHECK(run_scalar("SELECT parqit_finite(8.9884656743115785e307::DOUBLE) = "
+                     "8.9884656743115785e307::DOUBLE") == "true");
+    CHECK(run_scalar("SELECT parqit_finite(-8.9884656743115785e307::DOUBLE) IS NOT NULL") ==
+          "true");
+    CHECK(run_scalar("SELECT parqit_finite(power(2::DOUBLE, 1023)) IS NULL") == "true");
+    CHECK(run_scalar("SELECT parqit_finite(-power(2::DOUBLE, 1023)) IS NULL") == "true");
+}
+
+TEST_CASE("KEYFOLD-1: group keys fold NaN, Inf and the missing range like the join") {
+    /* A raw source (no boundary) with a numeric key holding 1, NULL, NaN, Inf
+     * and 1e308: collapse by it must give TWO groups — the value and ONE
+     * missing group carrying every special — exactly what the join calls one
+     * missing key. Before KEYFOLD-1 the group fold caught only NaN. */
+    View v;
+    std::vector<ViewCol> cols;
+    for (const char *n : {"k", "x"}) {
+        ViewCol c;
+        c.name = n;
+        c.kind = 'n';
+        cols.push_back(c);
+    }
+    v.open("SELECT * FROM (VALUES (1.0::DOUBLE, 1), (NULL::DOUBLE, 1), "
+           "('nan'::DOUBLE, 1), ('inf'::DOUBLE, 1), (1e308::DOUBLE, 1)) t(k, x)",
+           cols, nlohmann::json::object(), nlohmann::json::object(), "", "keyfold fixture");
+    REQUIRE(v.collapse({{"sum", "sx", "x"}}, {"k"}).empty());
+    const std::string sql = v.compile(false);
+    CHECK(run_scalar("SELECT count(*) FROM (" + sql + ")") == "2");
+    CHECK(run_scalar("SELECT sx FROM (" + sql + ") WHERE k IS NULL") == "4");
+    CHECK(run_scalar("SELECT sx FROM (" + sql + ") WHERE k = 1") == "1");
+}

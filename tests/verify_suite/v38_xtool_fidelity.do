@@ -37,7 +37,9 @@ Macro.setLocal("f32_01", repr(struct.unpack("f", struct.pack("f", 0.1))[0]))
 Macro.setLocal("i64d", repr(float(9007199254740993)))
 end
 
-parqit use using `"`t'_fr.parquet"', clear
+* int64(round): the fixture's i64 column carries 2^53+1 on purpose and the
+* assertion below is the documented rounding (INT64-PROTECT-1, v104)
+parqit use using `"`t'_fr.parquet"', clear int64(round)
 capture assert i8[1]==-128 & i8[2]==127 & missing(i8[3])
 if (_rc) di as err "FAIL A int8 extremes"
 local fails=`fails'+(_rc!=0)

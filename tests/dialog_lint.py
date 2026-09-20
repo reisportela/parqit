@@ -89,6 +89,52 @@ def attribute(control: Control, name: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def conditional_body(text: str, selector: str) -> str:
+    match = re.search(rf"\bif\s+{re.escape(selector)}\s*\{{", text)
+    if not match:
+        return ""
+    start = match.end()
+    depth = 1
+    for pos in range(start, len(text)):
+        depth += (text[pos] == "{") - (text[pos] == "}")
+        if depth == 0:
+            return text[start:pos]
+    return ""
+
+
+def current_option_contracts(repo: Path, ado: str) -> list[str]:
+    errors = []
+    set_body = ado.split("program define _parqit_set", 1)[1].split("\nend", 1)[0]
+    guard = next(line for line in set_body.splitlines() if "if !inlist(" in line)
+    settings = set(re.findall(r'"([a-z][a-z0-9_]*)"', guard))
+    views = uncomment((repo / "src/ado/p/parqit_views.dlg").read_text())
+    lists = named_blocks(views.splitlines(), "LIST")
+    values = set(list_values(lists.get("op_vals", [])))
+    command = "\n".join(line for _, line in named_blocks(views.splitlines(), "PROGRAM")["command"])
+    for setting in sorted(settings):
+        if setting not in values or f'put "parqit set {setting} "' not in command:
+            errors.append(f"parqit_views.dlg: missing set {setting} selection/emission")
+    routes = {"parqit_read": ("main", ["main.rb_use"], []),
+              "parqit_write": ("main", ["main.rb_collect"], ["main.rb_save | main.rb_data"]),
+              "parqit_combine": ("opt", ["main.rb_mergein", "main.rb_appendin"],
+                                  ["main.rb_merge", "main.rb_append", "main.rb_joinby"])}
+    for name, (tab, enabled, forbidden) in routes.items():
+        text = uncomment((repo / f"src/ado/p/{name}.dlg").read_text())
+        controls, _ = controls_by_tab(text.splitlines())
+        control = controls.get(tab, {}).get("cb_int64")
+        if not control or attribute(control, "default") != '"default"':
+            errors.append(f"{name}.dlg: int64 must distinguish inheritance from explicit refuse")
+        command = "\n".join(line for _, line in named_blocks(text.splitlines(), "PROGRAM")["command"])
+        emit = f"optionarg /hidedefault {tab}.cb_int64"
+        for selector in enabled:
+            if emit not in conditional_body(command, selector):
+                errors.append(f"{name}.dlg: {selector} does not emit the chosen int64 option")
+        for selector in forbidden:
+            if f"{tab}.cb_int64" in conditional_body(command, selector):
+                errors.append(f"{name}.dlg: {selector} must not emit int64")
+    return errors
+
+
 def audit_dialog(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     text = uncomment(raw)
@@ -104,6 +150,31 @@ def audit_dialog(path: Path) -> list[str]:
     if 'tx_context' not in controls.get('main', {}) or 'bu_context' not in controls.get('main', {}):
         errors.append('missing view-context label or Refresh control')
     programs = named_blocks(lines, 'PROGRAM')
+    pending = ["command"]
+    seen = set()
+    emitted = ""
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        body = "\n".join(line for _, line in programs.get(name, []))
+        emitted += "\n" + body
+        pending.extend(re.findall(r"\bput\s+/program\s+(\w+)", body))
+    for tab, members in controls.items():
+        for name, control in members.items():
+            if attribute(control, "option") is None:
+                continue
+            ref = re.escape(f"{tab}.{name}")
+            forwarded = re.search(rf"^\s*(?:optionarg|option|put)\b[^\n]*\b{ref}\b", emitted, re.M)
+            if not forwarded and control.kind == "CHECKBOX":
+                option = re.escape(attribute(control, "option"))
+                for condition in re.findall(rf"\bif\s+([^\n{{}}]*\b{ref}\b[^\n{{}}]*)\{{", emitted):
+                    block = conditional_body(emitted, condition.strip())
+                    if re.search(rf'\bput\s+"{option}(?:\s|"|$)', block):
+                        forwarded = True
+            if not forwarded:
+                errors.append(f"option control {tab}.{name} never reaches PROGRAM command output")
     context = '\n'.join(line for _, line in programs.get('main_context', []))
     if 'stata hidden queue' not in context or not re.search(r'^\s*clear\s*$',context,re.M):
         errors.append('context must queue its Stata query and clear its command buffer')
@@ -193,6 +264,7 @@ def main() -> int:
         failures.append("parqit_write.dlg: Populate does not select in-memory variables in memory-save mode")
 
     ado = (repo / "src/ado/p/parqit.ado").read_text(encoding="utf-8")
+    failures.extend(current_option_contracts(repo, ado))
     if re.search(r"if\s*\(\s*`i'\s*>\s*\d+", ado):
         failures.append("parqit.ado: _dlgvars silently caps the populated variable list")
     if "capture .`dlgname'.`listname'.Arrdropall" not in ado:

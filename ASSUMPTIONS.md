@@ -1675,6 +1675,175 @@ entry notes the conservative fallback if the assumption proves wrong.
     remains the normative surface — the map deliberately shows verb *names*
     without their options so it stays one screen. Verified in the GUI Viewer,
     which is the release check for help layout (see #118).
+
+121. **Audit execution and column identity (2026-09-05).** An engine alias is
+    not a stable cross-source identity. Named views retain their current alias
+    map when embedded; combinations where equal engine names identify different
+    exposed Stata names (or the same exposed name has incompatible aliases)
+    are refused before mutation. Append also refuses unresolved case-only
+    engine clashes across all sides. This preserves file-source alignment and
+    already aligned case-distinct manifests without publishing wrong values.
+    A name exposed by an existing aliased column remains occupied after its
+    case sibling is dropped. V88 covers refusal, preserved state, named views,
+    Parquet using inputs, compatible supersets and both materialisers.
+122. **Statistical execution and precision (2026-09-05).** A pending slice
+    contract applies to every statistics query, including count-if. Codebook
+    and misstable cannot silently ignore nonexistent explicitly requested
+    columns. Percentile interpolation and range/bin arithmetic run in double
+    before narrow integer overflow can occur; collapse still rounds float-source
+    percentiles to native's value. Storage can be wider than native collapse,
+    and existing double mean/sd results are retained rather than reduced to
+    float. V86/V87 and the native/pyarrow audit probes specify these boundaries.
+123. **Documentation and evidence scope (2026-09-05).** Lazy describes the
+    disk-backed plan, not zero memory, one physical query for the entire call,
+    universal row-group pruning, or a cached snapshot. The memory writer may
+    assemble full Arrow buffers; the existing PARQIT_SAVE_NOARROW environment
+    switch selects batched staging. Partition metadata equality remains strict;
+    no compatibility check was weakened. Single-file publication, handled-error
+    rollback and multi-directory snapshot/crash guarantees are distinct. The
+    audit used local Linux Stata, native and pyarrow oracles, the exact pinned
+    1.5.3 engine for plan inspection, and two read-only Fable 5.1 max-effort
+    reviews. Its 136 MB source / 16 MB engine-budget exercise establishes that
+    bounded workflow, not a universal benchmark or cross-platform certification.
+124. **Native exploratory output (2026-09-05).** The user requested consistent
+    exploratory outputs aligned with native Stata, specifically summarize,
+    detail, without expanding the catalogue of statistical procedures. The
+    existing engine computations remain authoritative; display is formatted
+    with Stata formats rather than substring truncation. Detail picks its four
+    smallest/largest values from the existing percentile sort and takes labels
+    from the view, not the current dataset. Tables and correlation panels
+    follow observed native layouts. Codebook/misstable retain their compact
+    documented information, including string missing and complete observations;
+    no unsupported native fields are fabricated. Missing-pattern percentages
+    use a window total before LIMIT 100. Tabstat's group-only result remains
+    equivalent to native nototal; save returns those existing tables without
+    an additional query. Correlation matrices use native names, while the
+    existing N/rho scalar meanings are kept for compatibility. V89 compares
+    native text layouts, result matrices, UTF-8 labels, degenerate samples,
+    scientific notation and preserved dataset/view state. V83 now compares
+    returned numeric matrices with its native oracle rather than parsing the
+    former printed layout, with its numeric tolerance unchanged.
+125. **Adversarial statistics follow-up (2026-09-05).** Non-finite numeric
+    results are canonical Stata missing and never expressions that can bind
+    to user variables/scalars. FLOAT extrema cross the response boundary after
+    exact promotion to double. Successful statistics keep their built-in engine
+    aggregates; only four pinned moment-finalizer errors permit one retry with
+    fixed-size Welford/covariance states and NULL for non-finite final values.
+    The fallback registry belongs to Session and is reset on close. Valid
+    groups/columns survive an overflow elsewhere; arbitrary-range native bit
+    parity is not claimed. No upstream lazy aggregate is silently rewritten.
+126. **Statistical text and grammar (2026-09-05).** Long records are read as
+    complete lines, with memory proportional to one record for streaming
+    printers. Duplicate cells have individual hex fields. A VARCHAR in DuckDB's
+    legacy C result is NUL-terminated even through its string getter, so text
+    result columns use ENCODE/BLOB before that boundary; raw grouping keys stay
+    unchanged. Numeric and string axes are sorted according to carried types.
+    Exact statistical names resolve through the existing view name resolver;
+    wildcard/qualifier expansion and automatic missing-pattern selection are
+    deferred. Generate is a synonym, not a new transformation. Native matrix
+    row names were verified; existing rho and empty-group conventions are
+    preserved and their differences documented. V90/V91 pin the repaired
+    numerical, text, grouping, alias, output and state contracts.
+127. **Menu and dialog alignment (2026-09-06).** User authorized the proposed
+    GUI revisions after the statistics/help audit. The ten task-oriented
+    dialogs remain the surface; no all-in-one command or new statistical
+    procedure is added. Tabulations have explicit row/column fields and
+    nolabel; numeric computation pickers are filtered from the view schema.
+    Context/source callbacks use `stata hidden queue`, not its implicit
+    immediate default, because db can itself be running while the dialog
+    initializes. Their command buffers are cleared and their private ado
+    helpers preserve r(). Populate remains an explicit schema query and clears
+    stale arrays even when it fails. No source rows are needed for context.
+128. **Explicit GUI materialisation target (2026-09-06).** The write dialog
+    starts with Parquet output and offers separate choices for a selected view,
+    the dataset in Stata memory, and collection. View save/collect emit
+    `parqit view name:` using the view shown in the context line, refreshed on
+    opening, mode changes or Refresh. If the user later closes that view,
+    the command must fail rather than fall through to memory-save semantics.
+    CLI save defaults are unchanged. These GUI prefixes use the existing
+    named-view command and keep the generated command reviewable.
+129. **Numerical remediation (2026-09-06).** The user authorized all confirmed
+    fixes after Codex's independent numerical audit and Fable co-review. No new
+    public command or correctness opt-in mode is introduced. Returned summary
+    statistics use stable, bounded states; means/sums preserve integer/decimal
+    accumulation before conversion to Stata double. Native numerical failures
+    are not acceptance oracles when exact/independent arithmetic is available.
+130. **Storage and range (2026-09-06).** Exact integer/decimal SUM columns in a
+    lazy table retain their existing engine types. Overflow of that exact
+    result type remains a loud error; it is not converted to a silent missing
+    or a globally rounded key. The existing typed `egen double ...=total(...)`
+    requests a double result after wide accumulation. FLOAT combination and
+    assignment semantics are resolved separately from display/storage metadata.
+131. **Sampling and C API patches (2026-09-06).** DuckDB remains pinned at 1.5.3
+    plus two reviewed source-hash patches in `cmake/`. SQL reservoir sampling
+    uses uniform replacement from the start; only internal table-statistics
+    sampling retains the prior approximation. The C aggregate bridge flattens
+    constant state vectors before callbacks. An omitted/negative sample seed
+    is chosen once in the lazy plan. Sources must remain stable during execution.
+132. **Local validation surface (2026-09-06).** Builds during remediation use
+    an isolated PARQIT_LOCAL_ADO_DIR under audit_repro. The habitual local ado
+    tree is refreshed only after validation. Old audits, manifests, unrelated
+    dirty changes, global ado/profile files and public release assets remain
+    outside the implementation changes.
+133. **Additional numerical audit (2026-09-06).** Supersedes the numerical
+    implementation details in 125 and 129: production statistics no longer use
+    the legacy overflow retry. Exact floating sums use 34 fixed integer limbs;
+    integer/decimal totals and conversions round only after exact arithmetic.
+    The previous fallback remains covered as legacy code. Dispersion/shape/rho
+    now use exact power sums and certified rational/square-root rounding;
+    approximate pivot classes are retained only as inactive reference code.
+    Claude Fable 5.1 max reviewed the explicitly authorized snapshot read-only,
+    with no time/turn cap; Codex reproduced, adjudicated and implemented fixes.
+134. **Consistent exact-value semantics (2026-09-06).** The user's precision
+    clarification takes precedence over reproducing native arithmetic defects.
+    round/mod use the actual binary64 inputs, including decimal-looking ties.
+    Bare wide integer/decimal comparisons are exact; mixed output coercions
+    refuse unrepresentable values unless explicitly converted by the user.
+    Percentiles, differences and histogram boundaries retain source precision.
+    Percentage sampling replaces the engine's block percentage reservoir,
+    whose zero-size block can crash and whose block rounding changes global N.
+    A seeded priority sort over one captured input implements the globally
+    rounded sample size lazily; its memory/scratch/time costs require measurement.
+135. **Exact moments and significance (2026-09-06).** Additional Fable mathematical
+    reviews confirmed the central-moment formulas and fixed limb bounds. Only
+    Codex edits. Raw powers/cross-products are integer products; final algebraic
+    statistics have one certified binary64 rounding. SD and shape do not infer
+    constancy from a rounded variance. Correlation retains the independently
+    rounded complement needed by significance, including when rho rounds to1.
+    Tail probabilities use native beta/analytic forms and a bounded scaled
+    series when Mata's exp path loses subnormal results. Their transcendental
+    precision is measured separately, not described as universally correctly
+    rounded. Exact states have a larger per-group footprint; performance and
+    spill costs require explicit reporting. Numeric protocol3 checks both
+    directions of ado/plugin compatibility before operation.
+136. **Required OpenMP release builds (2026-09-07).** The user explicitly
+    requested a version bump, commit, push and release with OpenMP enabled in
+    every plugin build. Compile/link support is mandatory and a separate
+    verifier loads the exact collected plugin and observes two workers.
+    DuckDB retains its SQL scheduler; no audited numerical algorithm is moved
+    into an OpenMP reduction. Linux and macOS embed PIC GNU libgomp 14.3.0,
+    with the macOS plugin deployment target; macOS uses GCC 14. The system GNU
+    static archive was rejected for executable-only TLS relocations. A pinned
+    LLVM runtime then passed standalone CI-style probes but aborted inside
+    Stata because Stata's private Intel runtime was already initialized. No
+    duplicate-runtime override is allowed; rebuild GNU libgomp with PIC instead.
+    Its internal TLS optimization is disabled in favor of the supported pthread
+    key implementation: initial-exec TLS otherwise prevents dlopen after the
+    statically embedded DuckDB increases the plugin's TLS footprint.
+    MSVC requires its redistributable DLL, installed as parqit_vcomp140.dll
+    beside the plugin and resolved by a delay-load hook. The selftest accepts
+    a reduced team under explicit runtime limits; CI requires two workers.
+137. **Release shutdown and transaction defaults (2026-09-07).** Linux CI
+    exposed heap corruption after all assertions had passed. Memcheck traced
+    it to DuckDB's BlockAllocator destructor reusing a thread-local cache after
+    its destructor. Removing that access preserves ownership: cached entries
+    are block IDs, the dead token prevents later queue access, and the pool is
+    unmapped by the allocator. Cache initialization already resets stale IDs.
+    Memcheck also found an uninitialized transaction invalidation policy;
+    initialize it and auto_rollback to the standard policy/false defaults.
+    Both pinned dependency edits are guarded by source hashes. A focused
+    close/reopen/shutdown test must fail under Memcheck before the fixes and
+    report zero errors afterwards; passing value assertions alone is insufficient.
 138. **The Stata fill drains a STREAMED engine result, not a materialised one
     (2026-09-19, PERF-STREAM-1).** `cmd_use_fetch` — the single fetch behind
     `parqit use …, clear` and `parqit collect` — ran its SELECT through
@@ -1904,3 +2073,511 @@ entry notes the conservative fallback if the assumption proves wrong.
     the engine before any Stata `double` exists — v103 pins all three.
     Entry **138** is the streamed fill (PERF-STREAM-1), merged into `main` the
     same day from a separate worktree; the numbering 138/139/140 is complete.
+141. **The parallel fill triggers on cells as well as rows; batched variable
+    allocation was measured and not adopted (2026-09-20, WIDE-FILL-1).** A
+    review of `pq` 4.0.x for ideas within parqit's scope singled out its
+    "batched variable allocation" (up to 7x on wide files). Measured on a
+    3,200-variable x 20,000-row parqit file (64M cells, zstd): variable
+    creation (`_parqit_resp_create`, one `st_addvar` per variable plus one
+    `format` per variable) costs 0.17-0.26 s of a 2.7-3.1 s load, so
+    vectorising it could save at most ~0.15 s — not worth the change. What
+    the profile did expose: the fill ran on ONE worker, because the parallel
+    trigger (#37) counted rows only (50,000) and this file has 20,000. Forcing
+    8 workers cut the fetch 2.1 -> 1.7 s; the trigger is now rows >= 50,000 OR
+    rows x columns >= 2,000,000 (`kParallelMinCells`), with the same serial
+    path for everything smaller. The remaining wide-file cost is the engine's
+    own per-column scan: the DuckDB CLI alone takes 3.6 s to `CREATE TABLE AS`
+    the same file, so parqit's 1.6-1.9 s fetch already beats a plain
+    materialisation and the per-variable Stata work is not the bottleneck.
+    Byte-identity of parallel vs serial is unchanged (v20 oracle, t01 with
+    2,500+ variables). The worker cap of 8 (#37) was re-measured under the
+    streamed fetch (`PARQIT_FILL_THREADS` sweep, min of 3, 48-core box under
+    moderate load): `use` 58.8M×9 — 4 workers 2.18 s, 8 1.49 s, 12 1.49 s,
+    16 1.60 s, 24 1.93 s; `use` 7.9M×15 with three string columns — flat at
+    2.65–2.91 s for every count. So 8 is still the plateau: the single
+    producer (one `duckdb_fetch_chunk` + one Arrow conversion per 2048-row
+    chunk, ~29k chunks for 58.8M rows) is the floor, not the per-cell store.
+    The next Stata-side lever is therefore to move the Arrow conversion into
+    the workers (each converts the chunk it fills; `duckdb_fetch_chunk` stays
+    on one thread), not a higher worker count; Stata/MP's own threads never
+    apply to plugin stores, and the SPI has no bulk store. Other `pq` items
+    judged in scope but not implemented in
+    this round, in priority order: a protective default for `int64`/`uint64`
+    beyond 2^53 (refuse, with a string-load option — `ToDo.md`); a source-file
+    provenance column for globs/directories (`read_parquet(..., filename)`),
+    which must be kept out of the Hive-key and name-recovery logic of
+    `plan_columns`; read-time `cast()` with strict/`lax` semantics; a decode
+    option for `BINARY` columns (dropped with a message today); and explicit
+    CSV reader options (date parsing, sample size, delimiter). Out of scope by
+    the brief or by the integrity rule: SAS/SPSS, `compress_string_to_numeric`,
+    `metadata_only`, `fast`, and loading more than 2^31-1 rows into memory.
+142. **INT64-PROTECT-1 — `int64(refuse|round|string)`, refusing by default
+    (2026-09-20).** Entry #140(v) recorded that no read option for values
+    beyond 2^53 had been added and proposed one; this is that option, and it
+    goes further than `pq`'s `safe_int64` by making the *protective* case the
+    default. The decisions:
+    (i) **Refuse rather than round.** A `BIGINT`/`UBIGINT`/`HUGEINT`/wide
+    `DECIMAL` column whose observed magnitude exceeds 2^53 now fails the read
+    with rc 198 (`kRcUsage`), one message naming every such column and both
+    remedies. The note it replaces was loud but easy to lose in a log, and the
+    damage it announced (two keys becoming one observation) is silent
+    afterwards. This is a public semantic change, so it is declared in
+    `CHANGELOG.md` under `### Changed`; the tests that deliberately exercise
+    the rounding now ask for `int64(round)` explicitly.
+    (ii) **Where it fires.** In `plan_columns`, after the range pass that
+    already measured `any_beyond_2p53`, so the trigger is the DATA, never the
+    declared type: a `BIGINT` column whose values all fit loads exactly as
+    before, with no option and no note, and the extra `max(strlen(...))`
+    aggregate that sizes the text form is only added under `int64(string)`
+    (one more aggregate in a query that already scans; no second pass). The
+    refusal happens before anything is staged and before the response file is
+    written, so `use`/`collect`'s atomic validate-then-mutate keeps the data
+    in memory untouched — pinned by a sentinel dataset in v104.
+    (iii) **`string` is exact by construction.** `CAST(col AS VARCHAR)` is
+    evaluated in the engine over the integer itself (DuckDB v1.5.3
+    `NumericHelper::FormatSigned`, `cast_helpers.hpp:64-78`, with the
+    `hugeint_t` specialisation at `:107` and `DecimalToString` at `:109-127`);
+    no double is constructed, unlike the `__parqit_double()` path. The width
+    is the observed `max(strlen(...))` over the same expression, so it is
+    exact (`str16` for 2^53+1, `str19`/`str20` for the signed extremes,
+    `str20` for `UBIGINT`), and the existing `str#`/`strL` rule at 2045 bytes
+    applies unchanged. A converted column loses its numeric display format and
+    any value-label attachment, because neither can be applied to a Stata
+    string variable; the digits are the payload, and the note says the column
+    became text.
+    (iv) **Previews never refuse and never round.** `parqit head`/`parqit
+    list` force `string` for such columns: a preview exists to show what is in
+    the file, changes nothing in memory, and a refusal there would hide the
+    very values the user is looking for.
+    (v) **Precedence and scope.** Explicit option > the value
+    `parqit use using ..., int64()` opened the view with (carried on the
+    `View`) > `parqit set int64` > `refuse`. `parqit mergein`/`appendin` read
+    their disk side through `parqit use`, so they inherit the default and
+    forward their own `int64()`; the message they surface carries the inner
+    `parqit use:` prefix. That is a **known cosmetic limit, accepted** (ruling
+    of the 2026-09-20 audit): naming the outer command would mean a `label`
+    field on the use request, like collect's MSG-LABEL-1, and the actionable
+    part — the option name, which both commands accept — is already in the
+    message. Measured on
+    a >2^53 disk side (2026-09-20): default → rc 198 with the data in memory
+    intact; `int64(round)` → the note, and then native `merge` stopping with
+    `r(459)` because the rounding itself made the key non-unique — the hazard,
+    demonstrated; `int64(string)` on a *key* → native `r(106)` (double in the
+    master, `str16` in the using data). So on a `mergein`/`appendin` key the
+    usable remedy is `int64(round)`, and `string` is for the payload /
+    `keepusing()` columns; `help parqit` says exactly that.
+    `parqit save`, the lazy verbs, the join keys and every statistic are
+    untouched: nothing there ever became a Stata double.
+143. **BINARY-DECODE-1 — `binary(text|hex)` for Parquet BLOB columns
+    (2026-09-20).** The default is unchanged (dropped with a message), because
+    raw bytes have no Stata representation and a silent hex expansion of a
+    100-byte blob column would be a surprise, not a service. The drop message
+    now names the two options. `binary(text)` is `decode(blob)`, which DuckDB
+    v1.5.3 defines as BLOB→VARCHAR that *throws* on an invalid UTF-8 sequence
+    (`extension/core_functions/scalar/blob/encode.cpp:36-51`, registered at
+    `:105-107`) — never a replacement character; `binary(hex)` is `hex(blob)`,
+    two uppercase digits per byte (`extension/core_functions/scalar/string/
+    hex.cpp:66-85`, registered at `:394`, digits from `Blob::HEX_TABLE`,
+    `src/include/duckdb/common/types/blob.hpp:21`). Both are sized by the
+    ordinary `strlen` pass, so a wide blob becomes a `strL` by the existing
+    rule. Two consequences of the lazy architecture are accepted and
+    documented: the option acts at `parqit use using` (the boundary decides a
+    view's columns once, and a blob kept beyond it would change what every
+    verb and `parqit save` see), so `parqit collect, binary()` is refused with
+    a message naming where it works; and a preview cannot show a blob the view
+    never had. The eager path names the offending column when `decode` fails
+    (each binary column is re-probed alone, only on the failing plan); the
+    lazy path cannot — it plans over an already-decoded VARCHAR — so the
+    engine's SQL-flavoured advice is rewritten into parqit's remedy there
+    (`rewrite_decode_failure`, signature-matched, so no other engine message
+    or rc changes). There are **three** failure points, not two: the planner's
+    sizing pass on a direct read, and — for a view with stages — the
+    `CREATE TEMP TABLE` that materialises it *before* the planner runs. All
+    three refuse with rc 198 and print parqit's own words, with no generated
+    SQL and no `try(decode(...))`/`'replace'` advice (v69's no-raw-engine-text
+    contract), leaving the data in memory untouched (v105, including the
+    filter-then-collect case). One accepted consequence: a view opened
+    `binary(text|hex)` and then saved writes TEXT where the source had BINARY.
+    That is the representation the user asked for, the default still drops the
+    column so no save changes without the option, and it is deliberately left
+    without a save-time note (ruling of the 2026-09-20 audit).
+144. **`filename(newvar)` is a first-class known column, not a file column
+    (2026-09-20, FILENAME-1).** The brief fixes the public command surface but
+    says nothing about a provenance column; users of a glob or a Hive tree
+    repeatedly need to know which file a row came from. DuckDB already computes
+    it: `filename = '<name>'` with a VARCHAR value names the column
+    (`multi_file_reader.cpp:137-144`, default name `filename`,
+    `multi_file_options.hpp:33`). The decision is how parqit *plans* it.
+    `MultiFileReader::BindOptions` appends the column after the files' own
+    columns and BEFORE the Hive partition keys (`multi_file_reader.cpp:219-229`
+    adds it, `:231-247` then adds the keys; BindOptions itself runs after the
+    file columns are bound — `:566-577` plain, `:544-551` union_by_name,
+    `multi_file_function.hpp:109-111` custom bind), and `read_csv_auto` shares
+    the option through `MultiFileReader::AddParameters`
+    (`read_csv.cpp:100`). So `Source::filename_column` /
+    `PlanContext::provenance_column` travel with the scan and the column is
+    excluded from the leaf-vs-scan alignment count, from Hive tagging
+    (positional and by name), from the `parqit.*` manifest and from the
+    HIVE-CLASH-1 / PART-STRKEY-1 checks; the lazy view carries the name
+    (`View::set_source_filename_column`) so a direct-read collect re-plans the
+    same way. Without this the alignment `n == ncol` would fail on a flat glob
+    (silently dropping exact-name recovery) and, over a Hive tree, the column
+    would be tagged a partition key and retyped from the manifest. Two clash
+    layers, both loud (rc 198), because the engine's own check is only an exact
+    match against the FILE columns and its message spells DuckDB syntax: a
+    probe of the source without the option refuses a case-insensitive clash
+    with anything it exposes (partition keys included — DuckDB resolves
+    identifiers case-insensitively, so two such columns could not both be
+    addressed), and `plan_columns` sanitises the source's names WITHOUT the
+    provenance column — exactly what they would be had the option not been
+    given — and refuses when one of them claims the requested name (a header
+    `my file` loads as `my_file`, an empty name as `v<position>`), which
+    `sanitize_unique` would otherwise have suffixed silently. The value is the path as the engine
+    reports it (absolute for an absolute pattern); the column carries a Stata
+    note and no manifest metadata, is auto-appended when a varlist does not
+    name it (`filename()` asks for it explicitly), and is not offered to
+    `parqit save ..., copysource` — the dataset is no longer an image of one
+    file. A `.dta`/Excel source is refused in the ado: it is scanned through a
+    package-owned bridge whose path says nothing about the user's file. Verify
+    `v106`.
+
+145. **`csv()` forces the reader's dialect and types; the whitelist is the
+    engine's own option names (2026-09-20, CSV-OPT-1).** Delimited-text type
+    inference is a guess, and a wrong guess changes values with rc 0: with the
+    pinned reader `1e5` becomes 100000, a 21-digit decimal is rounded to what a
+    double holds, and `TRUE` becomes 1. A single Stata option `csv(...)` is
+    parsed by the ado (`_parqit_csv_opts`) and validated again by the plugin
+    against the names the pinned engine accepts (duckdb v1.5.3
+    `csv_reader_options.cpp`: `delim`/`quote`/`escape`/`header`/`nullstr` at
+    `SetBaseOption` :386-402, `sample_size` :237, `dateformat` :264,
+    `timestampformat` :267, `types` :711 — a STRUCT keyed by column name whose
+    values are type names — and `all_varchar` :750; all declared named
+    parameters of `read_csv`/`read_csv_auto`, `read_csv.cpp:57-99`). Anything
+    else is rc 198 naming the key. A `types()` type is not matched against a
+    hard-coded list (that would drift from the pinned engine) and is not left
+    to the engine either: DuckDB reports an unrecognised type only from the CSV
+    bind (`csv_reader_options.cpp:711` → `TransformStringToLogicalType`), and
+    that message arrives with the binder's `LINE 1:` dump of parqit's own probe
+    SQL and the user's path — internal text parqit never shows (`v69`). So the
+    plugin proves the type itself, before any scan SQL exists: the token must
+    be letters, digits, `_`, parentheses and commas (which also makes it unable
+    to carry SQL), then one `SELECT CAST(NULL AS <type>)` on the same
+    connection, with no result stream open. A failure is rc 198 naming the type
+    and the column. Every value crosses the
+    wire hex-encoded and reaches SQL as a `quote_literal` literal (the struct
+    keys of `types` included); the one number, `sample_size`, is proved to be a
+    decimal integer before it is spliced (#115). `types()` items are tokenised
+    in Mata and split at the last `:` in the plugin, so a column name is never
+    whitespace-split across the boundary — the cost is that neither the header
+    name nor the type spelling may contain whitespace (`DECIMAL(18,2)` works,
+    `DECIMAL(18, 2)` does not), which is documented. A forced
+    dialect (`delim`/`quote`/`escape`/`header`) is applied to the CSV-HEADER-1
+    raw-header probe as well as to the scan, or name recovery would read the
+    file with a different split than the data; only dialect keys go to that
+    probe (a `nullstr` or a `types` would corrupt the names it reads back), and
+    `header(off)` means there is no header line to recover from, so the columns
+    keep the engine's `column0…` names. An empty sub-option value counts as not
+    given — each of these wants a character or a word. `csv()` on a source that
+    is not delimited text is rc 198, never a silent no-op, because unlike
+    `encoding()` it changes values. A `csv()` written with nothing in it is a
+    different matter and is simply not given: Stata's own parser drops an
+    option with empty parentheses before `syntax` ever sees it (`passthru`
+    reports it exactly as `string` does, `""` — verified on this Stata), so
+    every Stata command behaves this way and parqit follows, rather than
+    carrying code to recover the difference from the raw command line. The `using` side of
+    `merge`/`joinby`/`append` is unaffected: it is bridged through Stata's
+    `import delimited`, which has its own options (#41). Verify `v107`.
+146. **The fill workers convert their own Arrow chunks; the worker cap is 16;
+    `parqit set fill_threads` (2026-09-20, ARROW-IN-WORKERS / FILL-THREADS-SET-1).**
+    Under the streamed fetch the fill was flat from 8 workers (#141): the
+    producer's per-chunk `duckdb_data_chunk_to_arrow` was the floor. The
+    producer now only fetches (`duckdb_fetch_chunk` must stay on one thread:
+    one cursor) and enqueues the raw chunk with its observation offset and row
+    count (`duckdb_data_chunk_get_size`); each worker converts the chunk it
+    fills and releases both. Concurrent conversions of distinct chunks are safe
+    by construction in the fetched DuckDB 1.5.3 source: the C entry point reads
+    the options wrapper only and copies its `ClientProperties` by value
+    (`capi/arrow-c.cpp:48-69`), the converter builds a per-call `ArrowAppender`
+    over the chunk (`common/arrow/arrow_converter.cpp:19-25`), and its one
+    shared lookup, the Arrow extension-type registry, runs under the config's
+    own mutex (`function/table/arrow/arrow_duck_schema.cpp:431-440` →
+    `common/arrow/arrow_type_extension.cpp:235-243`). A conversion failure
+    takes the worker's abort path (loud rc, staged frame dropped). The serial
+    path is unchanged. Measured, same binary, min of 3, 48-core box: at 8
+    workers `use` 58.8M×9 1.41 → 1.29 s, `use` 7.9M×15 strings 2.64 → 2.37 s,
+    keep+gen+collect 2.04 → 1.79 s, sort+collect 4.87 → 3.86 s, two-file
+    append+collect 7.86 → 7.37 s; peak RSS within ±5%. The worker sweep on the
+    numeric file changed regime — 4 → 1.89 s, 8 → 1.25 s, 12 → 1.00 s,
+    16 → 0.95 s, 24 → 0.80 s (previously 8 → 1.49 s and worse beyond) — while
+    the string-heavy file stayed flat at 2.35–2.9 s (scan-bound), so
+    `kFillThreadCap` rises from 8 to 16: `min(cores, 16)` takes most of the
+    gain while staying moderate on shared HPC nodes, whose core allocation
+    `hardware_concurrency()` does not see; the default 58.8M×9 read is 0.90 s.
+    `parqit set fill_threads auto|#` is the in-session knob (a function-local
+    static in the plugin, `fill_threads_session()`, read at every fetch and
+    reported by `parqit version` as `r(fill_threads)`); it outranks the
+    `PARQIT_FILL_THREADS` environment variable, which is fixed before Stata
+    starts, and the ado/plugin refuse anything but `auto`/`0` or 1..1024.
+    Integrity: streamed vs materialised loads identical by `datasignature`
+    and every per-variable statistic on the real files, and identical to the
+    previous build's signatures; v20 (1.5M-row pyarrow oracle, parallel), v60
+    (worker lifecycle and injection), v100, t01, v09 and the new v108 (1/2/4/8
+    workers byte-identical on a tall and a wide file against pyarrow) pass.
+    Lesson recorded: a function-local static used across translation units
+    must be defined outside the file's anonymous namespace — the first build
+    linked but the plugin failed to load with an unresolved symbol, caught by
+    the `plugin_runtime` ctest before any Stata run.
+147. **One missing-key rule for the lazy join and its contracts; the finite
+    bound is exactly 2^1023 (2026-09-20, KEYFOLD-1 / MAXDOUBLE-1).** Reading
+    the two predicates side by side: `key_value` in `view.cpp` (the join)
+    folded a numeric key to missing when NULL, NaN, ±Inf or |x| >= 2^1023,
+    while `norm_key` in `plugin_view.cpp` — the uniqueness contracts behind
+    r(459) and the missing-key note — folded only NaN, although its comment
+    claimed "exactly as the join does". Confirmed with the duckdb CLI over
+    (NULL, nan, inf, 1e308): the contract saw 2 distinct keys and 2 missing,
+    the join saw 4 missing. Consequence: a third-party using file with `inf`
+    or `1e308` in a numeric key (parqit never writes those; the boundary
+    normalises them) passed m:1/1:1 and the join, comparing with IS NOT
+    DISTINCT FROM, matched every such row against the master's missing-key
+    row — a silent duplication with rc 0, and an under-counting note. Fix: the
+    rule is ONE function, `parqit::key_missing_fold_sql(ref, kind)`, used by
+    `key_value` (the MISS-1 `normalized` shortcut is kept) and by the
+    contracts/note; there is no second implementation to drift. Pinned by a
+    unit test (9 values, 6 missing) and v102-F (pyarrow fixture: m:1 → 459 on
+    the using side, 1:1 → 459 on a master view over such a file, joinby
+    delivers all four using rows with three under a missing key, note counts
+    "1 master and 3 using"). A refused merge prints no notes — by design, so
+    the count is read from the joinby log. MAXDOUBLE-1, found while writing
+    that test: the 16-digit literal `8.988465674311579e307` used as "2^1023"
+    by `parqit_finite` (session.cpp) and `stata_stat_finite` (plugin_view.cpp)
+    parses to 2^1023 − 2^970, which is Stata's `maxdouble()`, so the guard
+    reported that one legitimate finite value as missing (verified in the CLI:
+    `8.988465674311579e307::DOUBLE = power(2, 1023)` is false; the 17-digit
+    form and `power(2, 1023)` are exact). Both now use the exact constant
+    (`0x1p1023` / `parqit::kStataMissThreshold`); unit test MAXDOUBLE-1 keeps
+    maxdouble and nulls 2^1023. No public behaviour changes for any value a
+    Stata dataset can hold except that one; no file format change. Follow-up
+    (same day): the two GROUP BY / PARTITION BY key folds — `norm_group_key`
+    in the engine (GROUPKEY-1, whose comment promised the join's rule) and its
+    plugin twin `norm_view_key` (tabulate, summarize, xtile, reshape) — and
+    the reshape check "variable j contains missing values" folded only NaN;
+    all three now call `key_missing_fold_sql` too, so there is no second
+    implementation anywhere. Reachability today: every column a view holds
+    is boundary-normalised (open, `sql`, and the using side of
+    append/merge/joinby all go through `boundary_for`) or finite-guarded
+    (gen/replace/aggregates), so no user path fed Inf or 1e308 to a group
+    key — the change removes the drift, it fixes no observed result. Pinned
+    by a unit test over a raw VALUES source (1, NULL, NaN, Inf, 1e308 → two
+    groups, the missing one summing every special). Cost measured in the
+    duckdb CLI on the 58.8M-row `firm` key: NaN-only fold 0.47–0.59 s, full
+    fold 0.52–0.57 s per GROUP BY (noise; user CPU +15% spread over threads).
+148. **Extended missings `.a`–`.z` survive the Parquet round trip on request:
+    `parqit save ..., xmissing` (2026-09-20, XMISS-1).** The "one documented
+    loss" of the format (Parquet has a single null) is now optional, as an
+    additive opt-in that leaves the default byte-identical. Encoding: the
+    27 Stata missing doubles are 2^1023·(1 + k/4096), k = 0..26 — bits
+    0x7fe0000000000000 + (k << 40), verified against Stata's own %21x output
+    (.a = +1.0010000000000X+3ff, .z = +1.01a0000000000X+3ff; a float .a
+    promotes to the same double), and both directions are exact in binary64
+    (unit test XMISS-1 checks every code bit for bit and rejects inf, NaN,
+    maxdouble, 1e308 and a one-bit neighbour of .a). On disk: an `int8`
+    companion column `_parqit_xm_<var>` per variable that holds at least one
+    extended missing — dense, 0 = none, 1–26 = the code, no validity buffer,
+    the primary cell null either way — and the pairs (exact Stata name →
+    companion leaf name) under the `parqit.xmissing` KV key. Dense 0 rather
+    than NULL because the staged writer would otherwise invalidate nearly
+    every numeric cell one call at a time, and a zero column compresses to
+    nothing; sparse (only affected variables) rather than one companion per
+    numeric variable because a 3000-variable file would double its column
+    count and every parqit read scans its companions. Both writers produce the
+    same columns, codes and map (v109-E compares the Arrow and
+    PARQIT_SAVE_NOARROW files with pyarrow). The reader folds the companion
+    into its primary's plan (`ColumnPlan::xm_source`, matched by TRUE parquet
+    name, hidden from every planner — use, describe, the lazy open's metadata
+    pass, mergein/appendin), the fetch selects it after the planned columns as
+    TINYINT (so the manifest, the ado and every count of k are unchanged;
+    a wider integer that does not fit is a loud cast error), and the fill
+    restores the cell before the value walk, which skips NULL cells; SF_vstore
+    converts the double to the variable's own storage type (v109-A: byte,
+    int, long, float, double all come back as .a/.z/.m). Integrity contract:
+    a code outside 1–26, or a non-zero code on a cell that holds a value,
+    fails the load with memory untouched; a companion paired with a string
+    column or with an absent primary is hidden and ignored with a note; a
+    companion of a non-integer type likewise. Lazy path, phase 1: the open
+    hides the companions, folds the cells to `.` and prints a note naming the
+    variables (a view save therefore writes plain nulls, announced at open);
+    carrying (value, code) through the verbs and using it in merge-key
+    equality is phase 2, deliberately not started here. Refusals: `xmissing`
+    with `copysource` (the file is copied as it is) and with
+    `partitions(replace|append)` (read_parqit_meta drops ALL metadata when the
+    parqit.* keys differ across a tree's files, and the companion set depends
+    on the data written, so a partial rewrite cannot promise equality; a
+    whole-tree write can — v109-F reads one back); on a view save; and when a
+    variable carries a companion's name (case-insensitively, as the engine
+    resolves identifiers). `copysource` refuses a source that carries
+    companions — its copy reads the memory's columns under a rebuilt KV and
+    would have dropped both the companions and the key, silently returning
+    the restored .a–.z as `.` (the ORDER-PROOF-1 comparison folds missings, so
+    it would not have noticed). Reporting: `r(xmissing_vars)`, a "preserved"
+    note instead of the loss note, and the loss note (without the option) now
+    names the option; the phrase "extended missing values" keeps its own line
+    (v29/v77). Arithmetic on an extended missing gives plain `.` in native
+    Stata (`.a + 1`, `1 * .a` checked), so a computed column folding to `.`
+    matches native semantics. Dialog: `parqit_write.dlg` gains the checkbox,
+    enabled only for the memory save, height 450 → 475 (checked under Xvfb).
+149. **No hard-coded thread limit: every count defaults to, and is bounded by,
+    the CPUs available to the process (2026-09-20, CPUS-1).** The maintainer's
+    rule: any thread count in parqit — the engine's `threads`, the fill
+    workers — must be settable as 1, 2, …, N where N is the machine's, with
+    nothing hard-coded. Implementation: `parqit::available_cpus()` = the
+    affinity mask on Linux (`sched_getaffinity` / CPU_COUNT — what a
+    SLURM/cgroup allocation or `taskset` leaves visible; `nproc` and Stata's
+    c(processors_mach) agree with it), `std::thread::hardware_concurrency()`
+    elsewhere and as the fallback (1 if detection fails). The fill's automatic
+    rule is N workers (was `min(cores, 16)`; the 16 existed only because
+    hardware_concurrency() cannot see an allocation — the affinity count
+    can); `parqit set fill_threads` and `parqit set threads` accept 1..N and
+    CLAMP a larger number to N with a note (`_parqit_set_note`, printed by the
+    ado), never refuse it: refusing would change `parqit set threads`'s
+    public semantics (it accepted up to 2^31−1) and break a script written
+    for a bigger machine; PARQIT_FILL_THREADS is clamped the same way, said
+    once per session. The engine's default is N too (`Session::ensure_open`
+    sets `threads` when the user chose none): DuckDB's own default is the
+    hardware count and ignores the mask — verified on this box, `SELECT
+    current_setting('threads')` returned 48 under `taskset -c 0-7` while
+    nproc said 8 — so a restricted job used to oversubscribe its allocation.
+    `parqit version` prints and returns `r(cpus)`, `r(threads)`,
+    `r(fill_threads)` and `r(stream_buffer_mb)`. Evidence for the auto rule,
+    a matrix of engine threads {16, 24, 48} × fill workers {8, 16, 24, 32,
+    48} on the 48-core box (min of 2): the 58.8M×9 numeric read takes 1.2–1.3 s
+    with 8 workers, 0.91–0.98 with 16, 0.69–0.83 with 24, 0.70–0.79 with 32 and
+    0.62–0.73 with 48 at every engine thread count (best 0.616 at 24×48, 0.637
+    at 48×48), i.e. no oversubscription penalty with both at N; the
+    string-heavy 7.9M×15 read is 2.36–2.83 s throughout (scan-bound, noise).
+    The earlier sweeps in #37/#141/#146 are superseded. Small-read overhead,
+    measured at the same time (1000 rows × 9 vars, 20 calls each): `parqit
+    use` 19.8 ms per call, `parqit describe` 19.3 ms, lazy open+collect+close
+    25.1 ms, native `use` 0.1 ms — the fixed cost is the plan's probes
+    (schema, footer metadata, count, identities, stats) at a few ms each, not
+    worth attacking; the earlier "0.1–0.3 s" figure was wrong. Pinned by
+    v108: clamps and notes for both settings, r(threads) read back through
+    `current_setting('threads')`, a child Stata under `taskset -c 0-1`
+    reporting r(cpus) = r(threads) = 2 (the executable is found by probing
+    stata-mp/stata-se/stata under c(sysdir_stata): c(flavor) says IC on this
+    MP installation), the PARQIT_FILL_THREADS clamp said once, and
+    byte-identical loads at every worker count. Edge recorded: when both
+    detections fail (no affinity call, `hardware_concurrency()` = 0) N is 1
+    and the engine runs single-threaded where it used to keep its own
+    default — a safe choice for an undetectable machine, and `parqit set
+    threads` overrides it. The Linux affinity call sits under `__linux__`;
+    macOS/Windows compile the fallback only, so CI must be green before any
+    release tag (the Stata suites cannot run there). The Views/SQL/settings
+    dialog still lists only the four original `set` options (`int64`,
+    `fill_threads`, `stream_buffer_mb` absent): a follow-up, with a real
+    click, like #151.
+150. **`parqit set stream_buffer_mb auto|0|#` (2026-09-20,
+    STREAM-BUFFER-SET-1).** The in-session counterpart of
+    PARQIT_STREAM_BUFFER_MB (#138), same idiom as `fill_threads` (a
+    function-local static outside the anonymous namespace, `stream_buffer_session()`,
+    consulted by `stream_buffer_cap_bytes()` before the variable), reported
+    by `parqit version`. The variable's silent clamp at 4096 MB is removed —
+    the buffer is a cap, not a reservation, and a quiet ceiling is exactly what
+    #149 forbids; the parser still refuses non-integers and negatives, and
+    bounds the value at 10^9 MB only to keep the byte arithmetic in range.
+    v108 loads the tall and the wide file under 8 MB and under 0 (the engine's
+    1 MB default, which bites on both) and gets the reference datasignatures.
+151. **The read dialog exposes `csv()` (2026-09-20).** A free-text EDIT
+    (`ed_csv`, `optionarg`) under the provenance field, enabled with the
+    int64/binary controls in `use` mode, disabled for `open _data`/`path`;
+    height 510 → 545 and the context line moved from y=465 to 500. Verified in
+    GUI Stata under Xvfb with a real Submit: the emitted command was `parqit
+    use using ….csv, clear csv(delim(;) header(on))` and 74 rows loaded; t15
+    runs the same shape on an `export delimited` fixture. Lesson kept from the
+    write dialog: `.command` and dialog-lint do not catch an option missing
+    from PROGRAM command — only a click does. Not built this round, with the
+    reasons recorded in ToDo.md: a per-column digest (needs a hash parqit
+    controls — DuckDB's `hash()` is version-internal —, an order-independent
+    per-column combination so parallel and projected reads can verify, an
+    opt-in switch and adversarial fixtures; done quickly it would refuse valid
+    files) and the rowid-addressed fill for scan/fill overlap (single-file
+    only as far as the engine's row numbering goes, unknown payoff). Not
+    actionable: the version bump belongs to the release step (release_lint
+    keeps the surfaces in step), the DuckDB deprecations wait for the engine
+    upgrade, and the Stata suites cannot run in CI without a licence.
+152. **Codex adversarial audit remediation (2026-09-20, CA-01–CA-06).**
+    The six findings and original repros are preserved in
+    `docs/audits/AUDITORIA_ADVERSARIAL_HOLISTICA_CODEX_ASTRA_2026-09-20.md`.
+    Decisions for the local correction:
+    - `stream_buffer_mb 0` means RESET of the connection setting on every
+      streamed fetch, not omission of SET: an earlier fetch can have changed
+      it. The pinned engine implements RESET through
+      `StreamingBufferSizeSetting::ResetLocal` (custom_settings.cpp:1605),
+      which calls `ClientConfig::SetDefaultStreamingBufferSize`; no copied
+      default constant is needed. This supersedes #150's ineffective zero
+      transition, without changing the intended setting contract (v110).
+    - Extended-missing metadata controls values. A primary cannot also be a
+      hidden companion; reject that graph before hiding columns, including
+      self-pairs and chains/cycles. A differing multi-file metadata set with
+      an extended-missing channel is refused with rc 198 before the former
+      all-metadata fallback can erase codes. `PlanContext::refusal` propagates
+      this to lazy opens and using sides too. Per-file reconciliation is not
+      implemented; separate reads plus `appendin` preserve the values. The
+      restriction is announced in the changelog (v111/v113).
+    - An integer column converted by `int64(string)` carries valid extended
+      codes as the text `.a`–`.z`; a plain null remains `""`. Validation must
+      still reject an invalid code or a code on a non-null primary, before
+      swapping the staged dataset. This is an explicit text representation,
+      not a change to the lazy view's phase-1 folding policy (v112).
+    - `discard` does not reset the registered plugin in the local Stata
+      runtime. Document restart for a rebuilt plugin, and explicit `close`
+      for views; do not introduce an implicit plugin reset (v114).
+    - The CSV conflict check follows the actual pinned source, not just its
+      error wording: `BaseCSVData::Finalize` calls `StringDetection` with
+      the delimiter as the needle and nullstr as the haystack
+      (`src/function/table/copy_csv.cpp:45` and `:90`). Therefore nullstr may
+      be contained in a multi-byte delimiter; the originally proposed
+      symmetric check would have removed a supported input. SetDelimiter
+      also expands literal `\t` sequences to TAB (csv_reader_options.cpp:124),
+      whereas nullstr stays literal; normalize the comparison in the same
+      way so a TAB-separated file may still use the two-byte `\t` null marker.
+      Only the
+      reproduced explicit-delimiter conflict is checked here (v115).
+    - v108's 90,000-row "wide" fixture also crosses the row threshold, so
+      v116 independently exercises 20,000 × 110 cells. A worker-start fault
+      proves the automatic parallel path was selected; both serial and auto
+      reads are checked against the independent generated values.
+153. **Current menu/help alignment (2026-09-20).** The GUI has the same
+    seven `set` choices as the ado, and `int64()` selectors on eager/lazy
+    read, collect, mergein and appendin. For those selectors, the displayed
+    `default` is a GUI-only inheritance choice and emits no option; explicit
+    `refuse` must be emitted, because a session or view can default to
+    `string`. The session-setting selector always emits its chosen policy.
+    This removes the old read dialog's ambiguity from hiding its `refuse`
+    default. The engine and public command grammar are unchanged.
+    The helps distinguish presentation-metadata fallback from value-metadata
+    refusals, document all version results, describe +/-2^53 as a conservative
+    consecutively exact integer range, and allow lossless string merge keys
+    when both native sides are strings. Session `auto` defers to environment
+    overrides; a positive fill count or an explicit numeric buffer setting
+    overrides them. The row/cell trigger is 50,000 rows OR 2M cells.
+    Dialog lint checks that option-bearing controls reach command output,
+    including conditional literal flags, and checks the current setting list
+    against the ado. New t17 verifies the integer-policy command shapes.
+    GUI validation uses a private Xvfb display and a read-only, network-isolated
+    Stata sandbox with one writable scratch directory, avoiding personal
+    preference changes; only the test processes are terminated.
+154. **0.2.0 release boundary (2026-09-20).** The accumulated new input and
+    fidelity controls, streamed fill and protective integer default warrant
+    a minor-version increment rather than another 0.1.x patch. The user
+    explicitly withdrew the OpenMP request provided multi-thread execution
+    works. Retain DuckDB's scheduler and the existing C++ fill pool; prove
+    worker execution and exact-result parity, not just a compiler flag.
+    Windows keeps the verified MSVC /MT build and no companion DLL. Embedded
+    Microsoft runtime code is distinct from a required external runtime and
+    remains under its documented terms; do not claim an entirely MIT binary.
+    The PE gate allows reviewed Windows system imports only. Release branches
+    run all four CI targets before a tag; publish only after exact-asset and
+    staged-install checks. Commit product/build/docs and regression tests,
+    not personal examples, manuscripts, logs or local audit kits. Include the
+    Linux build helper in the official sources without claiming it supports
+    the other platforms; their presets remain available.

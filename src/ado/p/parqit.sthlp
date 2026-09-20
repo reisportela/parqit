@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.37 07sep2026}{...}
+{* *! version 0.2.0 20sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -49,10 +49,13 @@ the shared vocabulary. The syntax below defines the supported surface.
 into memory:
 
 {p 8 16 2}
-{cmd:parqit use} [{it:varlist-patterns}] {cmd:using} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)} {opt relax:ed} {opt enc:oding(name)}]
+{cmd:parqit use} [{it:varlist-patterns}] {cmd:using} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)}
+{opt relax:ed} {opt enc:oding(name)} {opt int64(refuse|round|string)} {opt binary(text|hex)}
+{opt file:name(newvar)} {opt csv(read_options)}]
 
 {p 8 16 2}
-{cmd:parqit use} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)} {opt relax:ed} {opt enc:oding(name)}]
+{cmd:parqit use} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)} {opt relax:ed} {opt enc:oding(name)}
+{opt int64(refuse|round|string)} {opt binary(text|hex)} {opt file:name(newvar)} {opt csv(read_options)}]
 
 {pstd}The second form is the first without a {it:varlist}: {cmd:using} may be
 omitted only when no variable list is given, and the two forms are otherwise
@@ -74,6 +77,78 @@ mismatch across the matched files is a loud error. {opt encoding(name)} names
 the legacy 8-bit code page for a {cmd:.dta}/Excel source that must be bridged to
 Parquet (see {help parqit_technical##formats:Input formats}); it is ignored, with a note,
 for a Parquet/CSV source (read as UTF-8).
+
+{pstd}{opt int64(refuse|round|string)} says what to do with a column whose
+integers go beyond 2^53, outside the consecutively exact integer range of a
+Stata {cmd:double}. The protection is conservative, even if a particular
+larger integer happens to be representable exactly.
+{cmd:refuse} (the default) stops the read with {cmd:r(198)}, naming every such
+column; nothing is staged and the data in memory is untouched. {cmd:round}
+accepts the nearest double and says so per column — two distinct keys can then
+be one observation. {cmd:string} loads only the affected columns as exact
+decimal text (sized to the widest value; other columns are untouched).
+On an eager read, preserved extended missings become the text {cmd:.a}-{cmd:.z}
+in those converted columns; ordinary missing values become empty strings.
+Companion codes are validated even when the primary column becomes text.
+{cmd:parqit set int64} moves the default for the session; an option on the
+command always wins. On a lazy {cmd:parqit use using} the value is carried by
+the view and applied by {cmd:parqit collect}.
+{cmd:parqit mergein} and {cmd:parqit appendin} read their disk side through
+{cmd:parqit use} and take the same option. Merge keys must have compatible
+types on both sides: {cmd:int64(string)} works with a matching string key in
+memory, while a numeric master key and a using key converted to text give
+native {cmd:r(106)}. {cmd:int64(round)} keeps a numeric key but may collapse
+distinct values into a non-unique key ({cmd:r(459)}). Text conversion also
+works for non-key payload/{opt keepus:ing()} columns.
+
+{pstd}{opt binary(text|hex)} loads a Parquet {cmd:BINARY}/{cmd:BLOB} column,
+which is otherwise dropped with a message (raw bytes have no Stata type).
+{cmd:text} decodes the bytes as UTF-8 and refuses the read loudly, naming the
+column, if any row is not valid UTF-8; {cmd:hex} loads two UPPERCASE hex digits
+per byte, which always works. Either way the column arrives as text sized to
+the widest value ({cmd:strL} beyond 2045 bytes), with a note naming the mode.
+A lazy view's columns are decided when it is opened, so give the option to
+{cmd:parqit use using}, not to {cmd:parqit collect}.
+
+{pstd}{opt filename(newvar)} adds one string variable holding the path each
+observation was read from — the path {it:as matched}, so an absolute pattern
+gives absolute paths and a relative one gives relative paths. It is an ordinary
+variable: lazy verbs can filter on it, {cmd:collect} and {cmd:save} carry it,
+and a saved file holds it as plain text. It is added even when a
+{it:varlist} selects only some columns; naming it in the {it:varlist} places it
+where you put it. The name must not be one the source already loads (including
+a Hive partition key) — that refuses, naming the clash — and a {cmd:.dta} or
+Excel source refuses too, because such a source is read through a temporary
+Parquet bridge whose path says nothing about your file.
+
+{pstd}{opt csv(read_options)} hands the reader the dialect and the types of a
+delimited-text source instead of letting it infer them; it is an error on any
+other source. {it:read_options} are:
+
+{p2colset 9 30 32 2}{...}
+{p2col:{opt delim("c")}}field separator ({cmd:"\t"} is a tab){p_end}
+{p2col:{opt quote("c")}}quote character{p_end}
+{p2col:{opt esc:ape("c")}}escape character{p_end}
+{p2col:{opt head:er(on|off)}}first line is names, or data{p_end}
+{p2col:{opt date:format("...")}}date format, e.g. {cmd:"%d/%m/%Y"}{p_end}
+{p2col:{opt timestamp:format("...")}}timestamp format{p_end}
+{p2col:{opt sample(#)}}rows to sniff for types; {cmd:-1} = the whole file{p_end}
+{p2col:{opt allvar:char}}no type inference: every column is text{p_end}
+{p2col:{opt types(name:TYPE ...)}}force these columns' types ({cmd:VARCHAR},
+{cmd:BIGINT}, {cmd:DOUBLE}, {cmd:DATE}, ...){p_end}
+{p2col:{opt nullstr("...")}}text that means missing{p_end}
+{p2colreset}{...}
+
+{pstd}Use {opt types()} or {opt allvarchar} whenever inferred types would
+change a value — an identifier written as {cmd:1e5}, a decimal with more digits
+than a double holds, or a code with leading zeros is safest read as
+{cmd:VARCHAR}. The names in {opt types()} are the file's own header names;
+neither a name nor a type spelling may contain a space ({cmd:DECIMAL(18,2)}
+works, {cmd:DECIMAL(18, 2)} does not), and a type the engine does not know is
+refused by name before anything is read. {cmd:csv()} written with nothing in it
+is treated as not given at all, as Stata treats every empty option argument.
+{opt header(off)} means there are no names to recover, so the columns load
+under the engine's {cmd:column0}, {cmd:column1}, ... names.
 
 {pstd}Verbs on the open view (all lazy):
 
@@ -98,8 +173,10 @@ for a Parquet/CSV source (read as UTF-8).
 {p 8 16 2}{cmd:parqit append using} {it:source} [{it:source} ...] [{cmd:,} {opt gen:erate(newvar)} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source} [{cmd:,} {opt enc:oding(name)}]{p_end}
 
-{p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file} [{cmd:,} {it:merge_options}]{p_end}
-{p 8 16 2}{cmd:parqit appendin using} {it:file} [{cmd:,} {opt keep(varlist)} {opt force}]{space 3}({opt keep()}
+{p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file}
+[{cmd:,} {it:merge_options} {opt int64(refuse|round|string)}]{p_end}
+{p 8 16 2}{cmd:parqit appendin using} {it:file}
+[{cmd:,} {opt keep(varlist)} {opt force} {opt int64(refuse|round|string)}]{space 3}({opt keep()}
 names variables {it:of the file}, as in native {helpb append}){p_end}
 
 {pstd}{cmd:mergein}/{cmd:appendin} join the data {it:already in Stata's memory}
@@ -126,10 +203,11 @@ in {help parqit_technical##formats:Input formats}.
 {pstd}Materialisers and engine-side result commands (these execute against the
 pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 
-{p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear}]{space 8}stream the result into memory (atomically){p_end}
+{p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear} {opt int64(refuse|round|string)}]{space 2}stream the result into memory (atomically){p_end}
 {p 8 16 2}{cmd:parqit save} {it:filename} [{cmd:,} {opt replace} {opt d:ata}
 {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)}
-{opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}]{p_end}
+{opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}
+{opt xmiss:ing}]{p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}
@@ -157,7 +235,8 @@ ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit view} [{it:viewname}[{cmd::} {it:parqit_command}]] | {cmd:parqit views}{p_end}
 {p 8 16 2}{cmd:parqit open _data} [{cmd:,} {opt n:ame(viewname)} {opt enc:oding(name)}]
 | {cmd:parqit close} [{it:viewname}|{cmd:_all}] | {cmd:parqit path} {it:filename}{p_end}
-{p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:threads}|{cmd:memory_limit}|{cmd:tempdir} {it:value}{p_end}
+{p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:int64}|{cmd:fill_threads}|{cmd:stream_buffer_mb}|{cmd:threads}|
+{cmd:memory_limit}|{cmd:tempdir} {it:value}{p_end}
 {p 8 16 2}{cmd:parqit version}{space 4}(plugin + engine versions){p_end}
 {p 8 16 2}{cmd:parqit selftest}{space 3}(end-to-end engine and codec check, useful on new installs/HPC nodes){p_end}
 {p 8 16 2}{cmd:parqit menu}{space 8}(add parqit to the {bf:User} menu — GUI Stata only){p_end}
@@ -192,7 +271,12 @@ memory with {opt clear} — {cmd:open _data}, and {cmd:path}; {bf:Populate}
 lists the variables recorded in the Parquet footer of the source, and
 {bf:Describe} runs {cmd:describe} on it. These two footer-inspection buttons
 are disabled for recognized delimited-text, Stata and Excel inputs; those
-sources can still be opened, and variable names can be typed.{p_end}
+sources can still be opened, and variable names can be typed. The
+{opt int64()}, {opt binary()}, {opt filename()} and {opt csv()} options have
+their own fields (the last a free-text field for the delimited-text reader's
+sub-options, such as {cmd:delim(;) header(off)}). The integer selector's
+{bf:default} choice inherits the session setting; selecting {bf:refuse},
+{bf:round} or {bf:string} emits that explicit option.{p_end}
 
 {phang2}{bf:User > parqit > Describe and explore data...}{p_end}
 {p 12 12 2}({cmd:db parqit_explore}) {cmd:describe}/{cmd:glimpse} of the view
@@ -235,20 +319,24 @@ statistic rows plus free additional specifications; {cmd:contract};
 {p 12 12 2}({cmd:db parqit_combine}) lazy {cmd:merge}, {cmd:append} (several
 sources) and {cmd:joinby} over files, globs, Hive directories or
 {cmd:view:}{it:name}; native {cmd:mergein}/{cmd:appendin} for data already
-in memory, with the native merge options on the {bf:Options} tab. The
+in memory, with the native merge options and an {opt int64()} selector on
+the {bf:Options} tab. That selector applies only to the memory routes. The
 additional-sources field is raw Stata source-list syntax: compound-quote each
 path that contains spaces or commas.{p_end}
 
 {phang2}{bf:User > parqit > Save as Parquet or collect into memory...}{p_end}
 {p 12 12 2}({cmd:db parqit_write}) three explicit choices: save the selected
 view to Parquet (the initial choice), save Stata memory with {opt data}, or
-{cmd:collect} [{opt clear}]. View save and collect use
+{cmd:collect} [{opt clear} {opt int64()}]. The integer selector is enabled
+for collect; {bf:default} inherits the view's option or the session setting.
+View save and collect use
 {cmd:parqit view} {it:name}{cmd::} to name the view shown in the context line;
 closing it cannot silently redirect a save to memory. Refresh after switching
 views to select a different target. Saving offers
 {opt replace} (an existing file asks first, as in Stata's save dialog),
 {opt compression()}, {opt compression_level()}, {opt partition_by()},
-{opt partitions()}, {opt chunk()}, {opt encoding()}, {opt data} and {opt copysource};
+{opt partitions()}, {opt chunk()}, {opt encoding()}, {opt data}, {opt copysource}
+and {opt xmissing};
 {bf:Populate} lists variables from the view, or from the dataset in memory
 when {opt data} is selected.{p_end}
 
@@ -256,8 +344,9 @@ when {opt data} is selected.{p_end}
 {p 12 12 2}({cmd:db parqit_views}) buttons that report on the current view at
 once ({cmd:views}, {cmd:show}, {cmd:explain}, {cmd:describe}, {cmd:ds},
 {cmd:version}, {cmd:selftest}); the actions {cmd:view}, {cmd:close},
-{cmd:view} {it:name}{cmd::} {it:command}, {cmd:sql}, {cmd:query} and the four
-{cmd:set} options.{p_end}
+{cmd:view} {it:name}{cmd::} {it:command}, {cmd:sql}, {cmd:query} and all seven
+{cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:threads},
+{cmd:fill_threads}, {cmd:stream_buffer_mb}, {cmd:memory_limit}, {cmd:tempdir}.{p_end}
 
 {phang2}{bf:User > parqit > Version}, {bf:Self-test}, {bf:Help on parqit}, {bf:Technical reference}{p_end}
 {p 12 12 2}run {cmd:parqit version}, {cmd:parqit selftest} and
@@ -623,8 +712,9 @@ order-dependent sequential behaviour is deliberately required.
 ({cmd:master}/{cmd:1}, {cmd:using}/{cmd:2}, {cmd:match}/{cmd:matched}/{cmd:3})
 and repeated tokens do not change their meaning. {opt keepusing()} accepts
 wildcards. A nonkey name present on both sides keeps the master column and
-prints a note; missing string, NULL and NaN key encodings are folded to Stata's
-single missing-key semantics before uniqueness tests and matching. The result
+prints a note. Empty-string keys and numeric NULL, NaN, infinities and
+magnitudes at or above 2^1023 are folded to the same ordinary missing key
+before uniqueness tests and matching. The result
 is ordered by the merge keys.
 
 {pstd}{cmd:append} accepts one or more file or {cmd:view:}{it:name} sources and
@@ -721,6 +811,31 @@ A valid destination name is accepted up to the filesystem limit
 ({cmd:NAME_MAX}, 255 bytes on the usual systems); the package lock and staging
 siblings fall back to short digest-keyed names when the destination basename is
 long.
+
+{pstd}{opt xmissing} (a save of the dataset in memory) preserves extended
+missing values {cmd:.a}-{cmd:.z}, which Parquet's single null otherwise
+collapses to {cmd:.}: every variable that holds one gets an {cmd:int8}
+companion column {cmd:_parqit_xm_}{it:var} carrying the code of each cell
+(0 = none, 1-26 = {cmd:.a}-{cmd:.z}; the variable's own cell stays null) and
+the pairs are recorded under the {cmd:parqit.xmissing} footer key. The file is
+still ordinary Parquet — other readers see the companions as columns.
+{cmd:parqit use}, {cmd:mergein} and {cmd:appendin} hide the companions and
+restore the cells in every numeric storage type (a byte {cmd:.a} comes back a
+byte {cmd:.a}), printing a {cmd:note:} that names the variables; a companion
+whose codes are outside 0-26, or that marks a cell holding a value, makes the
+load fail rather than guess, and a variable named like a companion is refused
+at save time. A column declared both as a primary and a companion is refused
+on read. A multi-file source with differing {cmd:parqit.*} metadata and an
+extended-missing channel is also refused, including with {opt relaxed}; read
+the files separately and use {cmd:parqit appendin} to preserve the codes.
+A lazy view over a compatible source hides the companions and reads
+those cells as plain {cmd:.} — the open says so — so a {cmd:collect} or a view
+{cmd:save} from it carries no extended missings. Not available with
+{opt copysource} (the file is copied as it is; a source that carries companions
+is refused there) or with {opt partitions()} (every file of a tree must carry
+the same metadata); a whole-tree {opt partition_by()} save is fine. Without the
+option nothing changes: the loss is announced as before, and the note now
+names the option.
 
 {pstd}{opt partitions(replace)} and {opt partitions(append)} update an
 {it:existing} partitioned tree partition by partition instead of rewriting it
@@ -1033,9 +1148,9 @@ An unsupported function is a loud, position-anchored error that names the
 function — never a silent guess; syntax native Stata rejects ({cmd:||},
 {cmd:&&}, uppercase extended missings like {cmd:.A}, malformed numbers) is
 rejected here too, with one lenience: a unary plus ({cmd:+x}) is accepted.
-Every value whose magnitude reaches Stata's missing sentinel (8.99e+307) is
-missing in either sign; native Stata still stores such a {it:negative}
-value. {cmd:parqit sql} and {cmd:parqit query} are the escape
+Every value whose magnitude reaches 2^1023 is normalized to missing in either
+sign; Stata's largest finite value, {cmd:maxdouble()}, remains a value.
+{cmd:parqit sql} and {cmd:parqit query} are the escape
 hatches.
 
 {pstd}
@@ -1053,21 +1168,42 @@ details, ties in sort keys, extended missings and double-precision evaluation
 {marker options}{...}
 {title:Settings, raw SQL and diagnostics}
 
-{pstd}{bf:Engine settings.} {cmd:parqit set} takes one of four names and a value:
+{pstd}{bf:Engine settings.} {cmd:parqit set} takes one of seven names and a value:
 
 {p 8 12 2}{cmd:parqit set statamissing on}|{cmd:off}{space 4}expression missing-value mode{p_end}
-{p 8 12 2}{cmd:parqit set threads} {it:#}{space 14}engine threads{p_end}
+{p 8 12 2}{cmd:parqit set int64} {it:mode}{space 12}refuse|round|string for integers beyond 2^53{p_end}
+{p 8 12 2}{cmd:parqit set fill_threads} {cmd:auto}|{it:#}{space 3}workers that fill Stata's memory on
+{cmd:use}/{cmd:collect} ({cmd:auto} = environment override, otherwise one per available CPU
+on reads with at least 50,000 rows or 2 million cells;
+{cmd:1} = serial; {cmd:0} aliases {cmd:auto}; any positive count up to those CPUs,
+a larger one is clamped and said; an explicit positive count outranks
+{cmd:PARQIT_FILL_THREADS}; reported by {cmd:parqit version} as
+{cmd:r(fill_threads)}){p_end}
+{p 8 12 2}{cmd:parqit set stream_buffer_mb} {cmd:auto}|{it:#}{space 1}cap in megabytes on the
+engine result buffered ahead of that fill ({cmd:auto} = environment override, otherwise sized per read;
+{cmd:0} restores the engine's own default before fetching; an explicit number
+outranks {cmd:PARQIT_STREAM_BUFFER_MB}; reported as
+{cmd:r(stream_buffer_mb)}){p_end}
+{p 8 12 2}{cmd:parqit set threads} {it:#}{space 14}engine threads, 1 up to the CPUs available to this
+process (the default; a larger number is clamped to them and said){p_end}
 {p 8 12 2}{cmd:parqit set memory_limit} {it:value}{space 4}e.g. {cmd:8GB}{p_end}
 {p 8 12 2}{cmd:parqit set tempdir} {it:path}{space 9}spill directory for out-of-core
 execution (warns if the directory does not exist yet){p_end}
 
 {pstd}
-{cmd:statamissing} defaults to {cmd:off}. {cmd:threads} must be an integer from
-1 through 2,147,483,647 and controls DuckDB query execution, not the separate
-Arrow-to-Stata fill pool. {cmd:memory_limit} accepts DuckDB size strings such as
-{cmd:8GB}; {cmd:tempdir} accepts a literal path (quote paths containing spaces).
-The four settings apply to this loaded plugin session and survive view changes;
-{cmd:discard} unloads the plugin and resets them. A nonexistent temp directory
+{cmd:statamissing} defaults to {cmd:off}. {cmd:threads} controls DuckDB query
+execution, not the separate fill pool: it defaults to the CPUs available to
+this process (on Linux the affinity mask, so a cluster job's allocation is
+honoured — the engine's own default would ignore it) and accepts any whole
+number from 1 up to that count; a larger number is clamped to it with a
+{cmd:note:}, never refused, so a script written for a bigger machine still
+runs. {cmd:parqit version} reports the count as {cmd:r(cpus)} and the engine
+threads in force as {cmd:r(threads)}. {cmd:memory_limit} accepts DuckDB size
+strings such as {cmd:8GB}; {cmd:tempdir} accepts a literal path (quote paths
+containing spaces). The settings apply to this loaded plugin session and survive view changes.
+{cmd:discard} refreshes ado programs but does not guarantee a reset of the loaded plugin.
+Restart Stata to load a rebuilt plugin or restore fresh-session defaults.
+Close views explicitly with {cmd:parqit close _all}. A nonexistent temp directory
 is warned about immediately but not forbidden, because it may be created before
 the first spill.
 
@@ -1325,12 +1461,16 @@ sources stable throughout a transformation or statistical command; see
 2,147,483,647 observations; the lazy path and {cmd:save} are not so
 bounded.{p_end}
 {pstd}{cmd:•} Extended missings {cmd:.a}-{cmd:.z} become plain missing in
-Parquet (their labels survive); their literals are refused in lazy
-expressions. In a {cmd:merge}/{cmd:joinby} {it:key} that collapse matches rows
-native Stata kept apart, because {cmd:.a} and {cmd:.} are then the same missing
-and Stata matches missing with missing; both verbs print a {cmd:note:} naming
-the key and the counts when the same key has missing values on {it:both}
-sides.{p_end}
+Parquet (their labels survive) unless the file is written with
+{cmd:parqit save ..., xmissing}, which keeps their codes in companion columns
+that {cmd:parqit use}, {cmd:mergein} and {cmd:appendin} restore (see
+{it:xmissing} under {it:Materialisers}); a lazy view reads such a file with
+plain {cmd:.} in those cells and says so when opened. Their literals are
+refused in lazy expressions. In a {cmd:merge}/{cmd:joinby} {it:key} the
+collapse matches rows native Stata kept apart, because {cmd:.a} and {cmd:.} are
+then the same missing and Stata matches missing with missing; both verbs print
+a {cmd:note:} naming the key and the counts when the same key has missing
+values on {it:both} sides.{p_end}
 {pstd}{cmd:•} A lazy {cmd:merge}/{cmd:joinby} returns its result grouped by the
 key, with a true {cmd:sortedby} marker, in an order that is not native Stata's.
 Guaranteed are the content (the same rows and cells as native {cmd:merge}, as a
@@ -1338,12 +1478,20 @@ multiset) and determinism: the same plan twice gives the same order. Order
 cannot be a contract because native {cmd:merge}'s own within-key order changes
 with the physical order of the {it:using} file. Sort explicitly after
 collecting if {cmd:_n} or {cmd:by:} depends on it.{p_end}
-{pstd}{cmd:•} {cmd:int64}/{cmd:uint64} values above 2^53 are rounded to the
-nearest {cmd:double} when read into Stata, with a {cmd:note:}, so two distinct
-keys can collide. For the digits exactly, read them as text with
-{cmd:parqit sql "SELECT ..., CAST(col AS VARCHAR) AS s FROM}
-{cmd:read_parquet('f.parquet')"}. A {it:lazy} join over such a key is exact
-regardless: it runs in the engine before any Stata {cmd:double} exists.{p_end}
+{pstd}{cmd:•} {cmd:int64}/{cmd:uint64} values outside +/-2^53 are conservatively
+{bf:refused} by default, even if a particular larger integer is exactly
+representable ({cmd:r(198)}, naming
+every such column; nothing is staged). {opt int64(string)} loads them as exact
+text and {opt int64(round)} accepts the nearest {cmd:double} with a
+{cmd:note:} — after which two distinct keys can collide.
+{cmd:parqit set int64} moves the session default; {cmd:parqit head} and
+{cmd:parqit list} always preview the exact digits. A {it:lazy} join over such a
+key is exact regardless: it runs in the engine before any Stata {cmd:double}
+exists.{p_end}
+{pstd}{cmd:•} {cmd:BINARY}/{cmd:BLOB} columns are dropped with a message;
+{opt binary(text)} loads them as UTF-8 text (loud refusal, naming the column,
+on invalid UTF-8) and {opt binary(hex)} as uppercase hex digits. Give the
+option to {cmd:parqit use}, which is where a view's columns are decided.{p_end}
 {pstd}{cmd:•} Stata {cmd:.dta} and Excel inputs are bridged through memory;
 Parquet and delimited text are scanned out of core. {cmd:describe} with a file
 argument is Parquet-only.{p_end}
@@ -1387,7 +1535,10 @@ locals {cmd:r(transcoded_vars)} and {cmd:r(encoding)} (see
 and {cmd:r(encoding)} still names the selected code page when nothing needed
 transcoding. A lazy view save does not return these transcoding counters.
 {cmd:parqit save} {it:…}{cmd:, data copysource} additionally returns local
-{cmd:r(copysource)}, the source file it copied.
+{cmd:r(copysource)}, the source file it copied. A memory save with
+{opt xmissing} returns local {cmd:r(xmissing_vars)}, the variables whose
+extended missings were preserved in companion columns (empty when none had
+any); those variables are then absent from {cmd:r(ext_missing)}.
 
 {pstd}{it:Sources and views.} Lazy {cmd:merge}/{cmd:joinby} return
 {cmd:r(bridge)} only when their using source needed an adapter. {cmd:append}
@@ -1447,7 +1598,12 @@ Native {cmd:tabstat} instead reports error 2000 for that empty-group case.
 
 {pstd}{it:Diagnostics.} {cmd:path} returns local {cmd:r(path)} and scalar
 {cmd:r(exists)}. {cmd:version} returns locals {cmd:r(parqit_version)},
-{cmd:r(duckdb_version)} and {cmd:r(parallel_backend)} equal to {cmd:duckdb}.
+{cmd:r(duckdb_version)}, {cmd:r(parallel_backend)} equal to {cmd:duckdb} and
+{cmd:r(fill_threads)} ({cmd:auto}, or the number chosen with {cmd:parqit set fill_threads}),
+and {cmd:r(stream_buffer_mb)} ({cmd:auto}, {cmd:0}, or the chosen MB cap).
+Scalars {cmd:r(cpus)} and {cmd:r(threads)} report the available CPU count and
+the active engine thread count. The two setting locals report the session
+choice; {cmd:auto} can still inherit an operating-system environment override.
 For compatibility, scalars {cmd:r(openmp)}, {cmd:r(openmp_version)} and
 {cmd:r(openmp_max_threads)} remain available and equal zero: the plugin has no
 OpenMP dependency. These are not DuckDB worker counts. {cmd:selftest} returns

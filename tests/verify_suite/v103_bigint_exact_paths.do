@@ -71,8 +71,11 @@ else di as txt "VERDICT(v103_source_is_exact_int64_on_disk): PASS (`Ophys')"
 * =====================================================================
 * A — reading into Stata rounds, and announces the rounding
 * =====================================================================
+* INT64-PROTECT-1: reading such a column into memory now REFUSES by default
+* (v104); int64(round) is exactly this documented rounding path, and asking
+* for it explicitly is what makes the loss a choice instead of a surprise.
 log using `"`t'_A.log"', replace text name(v103A)
-parqit use `"`t'_m.parquet"', clear
+parqit use `"`t'_m.parquet"', clear int64(round)
 log close v103A
 capture quietly parqit close _all
 _v103_loghas `"`t'_A.log"' values beyond 2^53 rounded to nearest double
@@ -113,7 +116,9 @@ else di as txt "VERDICT(v103_varchar_cast_is_exact): PASS (`B_type')"
 capture quietly parqit close _all
 parqit use using `"`t'_m.parquet"'
 parqit merge 1:1 bk using `"`t'_u.parquet"'
-parqit collect, clear
+* the JOIN is exact in the engine; only the trip into Stata memory rounds,
+* which int64(round) now asks for explicitly (INT64-PROTECT-1)
+parqit collect, clear int64(round)
 capture quietly parqit close _all
 quietly count if side_m == "A" & val_u == 10
 local C_A = r(N)
@@ -134,7 +139,7 @@ else di as txt "VERDICT(v103_lazy_bigint_join_is_exact): PASS"
 * The same keys read into memory first DO collapse — the contrast that makes
 * the lazy join's exactness a property of the architecture, not of the data.
 capture quietly parqit close _all
-parqit use `"`t'_m.parquet"', clear
+parqit use `"`t'_m.parquet"', clear int64(round)
 quietly duplicates report bk
 local C_mem = r(unique_value)
 capture assert `C_mem' == 2

@@ -105,7 +105,7 @@ pq.write_table(t, Macro.getLocal("bfile"))
 end
 * capture the load's output even though it is issued quietly
 clear
-quietly parqit use using `"`bfile'"', clear
+quietly parqit use using `"`bfile'"', clear int64(round)
 * the note went through SF_error, so it is not in the return but the load is
 * correct and typed double; the key regression check is that it did NOT vanish
 * the data or abort. (Visible-note behaviour is covered by the non-quiet load.)

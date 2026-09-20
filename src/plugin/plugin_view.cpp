@@ -76,7 +76,9 @@ void save_local(const char *name, const std::string &v) {
  * extrema. Never send nan/inf as an expression or round a float through its
  * short FLOAT-to-VARCHAR spelling before promoting it to double. */
 bool stata_stat_finite(double value) {
-    return std::isfinite(value) && std::fabs(value) < 8.988465674311579e307;
+    /* MAXDOUBLE-1: the bound is exactly 2^1023 (Stata's `.`); the 16-digit
+     * decimal literal that used to sit here parses to maxdouble() itself */
+    return std::isfinite(value) && std::fabs(value) < parqit::kStataMissThreshold;
 }
 
 std::string stat_number(double value) {
@@ -334,7 +336,9 @@ std::string float_missing_guard(const std::string &ref, const std::string &inner
 /* A grouping key inside a live view can have two physical encodings for the
  * same Stata missing value after append/merge/reshape: string '' vs SQL NULL,
  * or numeric NaN vs SQL NULL. Fold them before every GROUP BY/PARTITION BY.
- * This is the plugin-side twin of View::norm_group_key. */
+ * This is the plugin-side twin of View::norm_group_key, and like it (KEYFOLD-1)
+ * it applies the join's own rule — NaN, ±Inf, |x| >= 2^1023 and NULL are one
+ * missing key — through the one shared function. */
 std::string norm_view_key(const std::string &name) {
     const std::string ref = quote_ident(name);
     char kind = 'n';
@@ -343,12 +347,11 @@ std::string norm_view_key(const std::string &name) {
             kind = c.kind;
             break;
         }
-    if (kind == 's') return "nullif(" + ref + ", '')";
-    return "(CASE WHEN isnan(CAST(" + ref + " AS DOUBLE)) THEN NULL ELSE " +
-           ref + " END)";
+    return parqit::key_missing_fold_sql(ref, kind);
 }
 
-BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
+BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt,
+                         parqit::BinaryMode binary = parqit::BinaryMode::Drop) {
     BoundaryCol b;
     b.physical_type = numeric_sql_type(lt);
     const std::string ref = quote_ident(name);
@@ -435,8 +438,20 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt) {
         break;
     default: {
         /* NULL-typed columns drop loudly here too (via plan_read_column's
-         * drop_reason), never load as an all-missing byte (brief §4, §6.11). */
-        parqit::ColumnPlan probe = parqit::plan_read_column(name, lt);
+         * drop_reason), never load as an all-missing byte (brief §4, §6.11).
+         * BINARY-DECODE-1: a BLOB is also dropped here unless the view was
+         * opened with binary(text|hex) — the boundary decides ONCE, at open,
+         * because every later verb (and `parqit save`) sees the view's
+         * columns, so a blob kept lazily would change what the view writes.
+         * plan_read_column builds the decode()/hex() expression and the drop
+         * message, so the eager and lazy paths cannot drift. */
+        parqit::ColumnPlan probe = parqit::plan_read_column(name, lt, binary);
+        if (!probe.dropped) {
+            b.sql = "coalesce(" + probe.cast_sql + ", '')"; /* PQ-AUD-002 */
+            b.kind = 's';                 /* physical_type is "" for a BLOB */
+            b.note = probe.note;
+            break;
+        }
         b.dropped = true;
         b.drop_reason = probe.drop_reason.empty() ? "unsupported type"
                                                   : probe.drop_reason;
@@ -790,16 +805,55 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         cry("parqit use: " + err);
         return kRcUsage;
     }
+    std::string filename_col;
+    if (!parqit::req_text(req, "filename", &filename_col, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
     Session &s = Session::instance();
     s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
 
+    CsvOptions csv_opts; /* CSV-OPT-1 (types() are proved against the engine) */
+    if (ST_retcode crc = csv_options_from_request(s, req, &csv_opts, &err)) {
+        cry("parqit use: " + err);
+        return crc;
+    }
+
+    /* FILENAME-1: refuse a name the source already exposes BEFORE the option is
+     * applied — the bind below reports the engine's own DuckDB-syntax message */
+    if (!filename_col.empty()) {
+        const Source plain = source_for(files, req.value("relaxed", false),
+                                        req.value("csv", false), std::string(),
+                                        csv_opts);
+        if (ST_retcode prc = check_provenance_name(s, plain, filename_col, &err)) {
+            cry("parqit use: " + err);
+            return prc;
+        }
+    }
     const Source src = source_for(files, req.value("relaxed", false),
-                                  req.value("csv", false));
+                                  req.value("csv", false), filename_col,
+                                  csv_opts);
     ST_retcode grc = strict_schema_gate(s, src, files, req.value("relaxed", false),
                                         req.value("csv", false), &err);
     if (grc != 0) {
         cry("parqit use: " + err);
         return grc;
+    }
+    /* INT64-PROTECT-1 / BINARY-DECODE-1: the read-time type options of the
+     * lazy open. binary() must act HERE (the boundary decides the view's
+     * columns, and a blob kept beyond it would change what every later verb
+     * and `parqit save` see); int64() is only carried, because nothing is
+     * rounded until a materialiser turns a column into a Stata number —
+     * DATA-002 keeps 64-bit integers exact through the whole lazy plan. */
+    PlanContext opt_ctx;
+    if (!read_type_options(req, &opt_ctx, &err)) {
+        cry("parqit use: " + err);
+        return kRcUsage;
+    }
+    std::string int64_req;
+    if (!parqit::req_text(req, "int64", &int64_req, &err, /*required=*/false)) {
+        cry("parqit use: " + err);
+        return kRcUsage;
     }
     duckdb_result res;
     if (!s.query("SELECT * FROM " + src.scan_sql + " LIMIT 0", &res, &err)) {
@@ -813,7 +867,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         const char *nm = duckdb_column_name(&res, c);
         src_names[c] = nm ? nm : "";
         duckdb_logical_type lt = duckdb_column_logical_type(&res, c);
-        bounds[c] = boundary_for(src_names[c], lt);
+        bounds[c] = boundary_for(src_names[c], lt, opt_ctx.binary_mode);
         duckdb_destroy_logical_type(&lt);
     }
     duckdb_destroy_result(&res);
@@ -821,6 +875,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     /* parqit.* metadata rides along: reuse the planner's reader via a tiny
      * plan context (no stats, no varlist) */
     PlanContext meta_ctx;
+    meta_ctx.binary_mode = opt_ctx.binary_mode; /* same columns as the boundary */
     {
         std::string merr;
         /* metadata/schema only — no row count needed (PERF-3) */
@@ -894,7 +949,27 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         for (idx_t c = 0; c < ncol; c++)
             if (!taken[c]) order.push_back(c);
     }
+    std::string prov_alias; /* FILENAME-1: the view's name for the column */
+    /* XMISS-1: an extended-missing companion column is parqit's bookkeeping
+     * for the eager reader, never a view variable. The lazy pipeline does not
+     * restore .a-.z (phase 1): the companion is hidden here and the fact is
+     * said once, naming the columns, so nothing collected or saved from this
+     * view can be mistaken for the file's full content. Matched by TRUE
+     * parquet name, as the planner does. */
+    std::map<std::string, std::string> xm_primary_of;
+    for (const auto &pr : meta_ctx.meta.xmissing) xm_primary_of[pr.second] = pr.first;
+    std::vector<std::string> xm_folded;
     for (idx_t c : order) {
+        if (!xm_primary_of.empty()) {
+            const auto pn0 = meta_ctx.parquet_names.find(src_names[c]);
+            const std::string tn =
+                pn0 == meta_ctx.parquet_names.end() ? src_names[c] : pn0->second;
+            const auto xp = xm_primary_of.find(tn);
+            if (xp != xm_primary_of.end()) {
+                xm_folded.push_back(xp->second);
+                continue;
+            }
+        }
         if (bounds[c].dropped) {
             drops.push_back("column \"" + src_names[c] + "\" dropped: " +
                             bounds[c].drop_reason);
@@ -928,6 +1003,19 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         const std::string original_name =
             pn == meta_ctx.parquet_names.end() ? src_names[c] : pn->second;
         const json *jm = nullptr;
+        /* FILENAME-1: the provenance column is not in the files, so it takes no
+         * parqit.* metadata and no src_name char — it carries a Stata note
+         * (chars travel to collect and into a view save, like the eager path) */
+        const bool is_prov = !filename_col.empty() && src_names[c] == filename_col;
+        if (is_prov) {
+            prov_alias = vc.name;
+            vchars[vc.exposed()]["note0"] = "1";
+            vchars[vc.exposed()]["note1"] = "source file of each row (filename())";
+            if (!sel.empty()) sel += ", ";
+            sel += bounds[c].sql + " AS " + quote_ident(vc.name);
+            cols.push_back(vc);
+            continue;
+        }
         auto it = meta_by_src.find(original_name);
         if (it != meta_by_src.end()) jm = it->second;
         std::string mfmt = sget(jm, "fmt");
@@ -985,6 +1073,15 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     /* Build the replacement off to the side.  The old view and its bridge
      * references remain valid until every requested projection has passed;
      * only then do we swap and transfer the newly reserved bridge. */
+    if (!xm_folded.empty()) { /* XMISS-1 */
+        std::string names;
+        for (size_t i = 0; i < xm_folded.size(); i++) names += (i ? " " : "") + xm_folded[i];
+        warns.push_back("extended missing values (.a-.z) preserved in the file for " +
+                        names + " are not carried by a lazy view: those cells are "
+                        "plain . here and in anything collected or saved from this "
+                        "view (the companion columns are hidden); parqit use <file>, "
+                        "clear restores them");
+    }
     View candidate;
     candidate.open("SELECT " + sel + " FROM " + src.scan_sql, cols,
                    meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
@@ -1004,9 +1101,25 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
      * can size its columns from row-group statistics (the F2 metadata path
      * `parqit use` uses) instead of a redundant full scan. */
     candidate.set_source_paths(src.paths_sql);
+    /* INT64-PROTECT-1: carry the open's int64() to every later collect of
+     * this view ("" = decided by `parqit set int64` at collect time) */
+    candidate.set_int64_mode(int64_req);
+    /* FILENAME-1: a direct-read collect re-plans the scan; tell it which
+     * column is the provenance one so it stays out of the leaf alignment and
+     * out of the Hive partition keys */
+    candidate.set_source_filename_column(prov_alias);
 
     /* optional initial projection (named columns, named order) */
     if (!varlist.empty()) {
+        /* FILENAME-1: filename() asks for the provenance column explicitly, so
+         * a varlist of the FILE's columns still gets it (appended last);
+         * naming it keeps the user's placement */
+        if (!prov_alias.empty()) {
+            bool wanted = false;
+            for (const auto &want : varlist)
+                wanted = wanted || parqit::glob_match(want, prov_alias);
+            if (!wanted) varlist.push_back(prov_alias);
+        }
         std::string verr = candidate.keep_vars(varlist);
         if (!verr.empty()) {
             cry("parqit use: " + verr);
@@ -1473,15 +1586,55 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
          * the result is byte-for-byte the scan-based plan. */
         vsrc.paths_sql = g_view_ref().source_paths_sql();
         if (vsrc.paths_sql.empty()) vsrc.paths_sql = "[]";
+        /* FILENAME-1: the passthrough carries the provenance column, which is
+         * NOT one of the files' leaves — without this the planner would count
+         * it against the leaf alignment (silently dropping exact-name
+         * recovery) and, over a Hive tree, tag it as a partition key */
+        vsrc.filename_column = g_view_ref().source_filename_column();
     } else {
         if (!s.exec("CREATE TEMP TABLE " + quote_ident(table) + " AS " + sql, &err)) {
+            /* BINARY-DECODE-1: a view with stages materialises HERE, before
+             * the planner runs, so a binary(text) column that is not valid
+             * UTF-8 fails this statement instead of the sizing pass. Same
+             * signature-matched rewrite and same rc 198 as the other two
+             * paths, so the user never reads decode()'s SQL advice or the
+             * generated query (v69). Nothing is staged either way. */
+            const bool decode_fail = rewrite_decode_failure(&err);
             cry(who + err);
-            return kRcEngine;
+            return decode_fail ? kRcUsage : kRcEngine;
         }
         vsrc.scan_sql = quote_ident(table);
         drop_source_after = true;
     }
     PlanContext ctx;
+    /* INT64-PROTECT-1: precedence for the >2^53 policy — the option on this
+     * command, else the one `parqit use using ..., int64()` opened the view
+     * with, else `parqit set int64`, else refuse. A PREVIEW (head/list) never
+     * refuses and never shows a rounded number: it prints the exact digits as
+     * text, whatever the setting, because a preview is there to show what is
+     * in the file and changes nothing in memory. */
+    if (!read_type_options(req, &ctx, &err)) {
+        cry(who + err);
+        if (drop_source_after) {
+            std::string derr;
+            s.exec("DROP TABLE IF EXISTS " + quote_ident(table), &derr);
+        }
+        return kRcUsage;
+    }
+    {
+        std::string explicit_mode;
+        if (!parqit::req_text(req, "int64", &explicit_mode, &err, /*required=*/false)) {
+            cry(who + err);
+            if (drop_source_after) {
+                std::string derr;
+                s.exec("DROP TABLE IF EXISTS " + quote_ident(table), &derr);
+            }
+            return kRcUsage;
+        }
+        if (explicit_mode.empty() && !g_view_ref().int64_mode().empty())
+            parqit::int64_mode_parse(g_view_ref().int64_mode(), &ctx.int64_mode);
+        if (label != "collect") ctx.int64_mode = parqit::Int64Mode::String;
+    }
     /* FLOAT-EXACT-1 / TYPE-PARITY-1 (V2.3): the view's carried Stata type and
      * display format per engine column, so the planner sizes a %tc float /
      * %td byte-int in-plan (float-exactness scan, range sizing) exactly as on
@@ -2087,6 +2240,83 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
         g_statamissing = (value == "on");
         return 0;
     }
+    if (what == "int64") {
+        /* INT64-PROTECT-1: the session default for columns beyond 2^53, for a
+         * user with many such files. An explicit int64() on a command still
+         * wins. The ado validates the spelling first; a bad value here can
+         * only come from a hand-built plugin call, so it is refused. */
+        if (!parqit::int64_mode_parse(value, &int64_session_default())) {
+            cry("parqit set int64: refuse, round or string");
+            return kRcUsage;
+        }
+        return 0;
+    }
+    /* CPUS-1: every thread count is bounded by the CPUs available to this
+     * process — never refused above it (a portable script may name more), but
+     * clamped, and said: the effective value and the note travel back in
+     * _parqit_set_value / _parqit_set_note, which the ado prints. */
+    const int cpus = parqit::available_cpus();
+    save_local("_parqit_set_note", "");
+    save_local("_parqit_set_value", "");
+    if (what == "fill_threads") {
+        /* FILL-THREADS-SET-1: the in-session counterpart of PARQIT_FILL_THREADS
+         * (which is read from the environment before Stata starts). `auto` or
+         * `0` returns to the automatic rule; `1` forces the serial fill; n
+         * forces n workers (clamped to the available CPUs, like the variable).
+         * Parsed strictly, exactly like `threads` below. */
+        if (value == "auto" || value == "0") {
+            fill_threads_session() = -1;
+            save_local("_parqit_set_value", "auto");
+            return 0;
+        }
+        bool ok = !value.empty();
+        for (size_t i = 0; ok && i < value.size(); i++)
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) ok = false;
+        errno = 0;
+        char *end = nullptr;
+        long long n = ok ? std::strtoll(value.c_str(), &end, 10) : 0;
+        if (!ok || errno == ERANGE || n < 1) {
+            cry("parqit set fill_threads: auto, or a whole number of fill workers (1 up "
+                "to the " + std::to_string(cpus) + " CPUs available to this process), got '" +
+                value + "'");
+            return kRcUsage;
+        }
+        if (n > cpus) {
+            save_local("_parqit_set_note", "fill_threads " + std::to_string(n) +
+                                               " exceeds the " + std::to_string(cpus) +
+                                               " CPUs available to this process; using " +
+                                               std::to_string(cpus));
+            n = cpus;
+        }
+        fill_threads_session() = static_cast<int>(n);
+        save_local("_parqit_set_value", std::to_string(n));
+        return 0;
+    }
+    if (what == "stream_buffer_mb") {
+        /* STREAM-BUFFER-SET-1: the in-session counterpart of
+         * PARQIT_STREAM_BUFFER_MB. `auto` returns to the per-read estimate (or
+         * the variable, if set); `0` leaves the engine's own default buffer; n
+         * caps the buffer at n megabytes. No upper bound: it is a cap. */
+        if (value == "auto") {
+            stream_buffer_session() = -1;
+            save_local("_parqit_set_value", "auto");
+            return 0;
+        }
+        bool ok = !value.empty();
+        for (size_t i = 0; ok && i < value.size(); i++)
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) ok = false;
+        errno = 0;
+        char *end = nullptr;
+        long long n = ok ? std::strtoll(value.c_str(), &end, 10) : 0;
+        if (!ok || errno == ERANGE || n < 0 || n > 1000000000LL) {
+            cry("parqit set stream_buffer_mb: auto, 0 (the engine's default buffer) or a "
+                "whole number of megabytes, got '" + value + "'");
+            return kRcUsage;
+        }
+        stream_buffer_session() = n;
+        save_local("_parqit_set_value", std::to_string(n));
+        return 0;
+    }
     if (what == "threads") {
         /* SET-THREADS-1/2: parse strictly. strtoll silently truncates "4.5"->4
          * and "4 8"->4, and an out-of-INT32 value reaches DuckDB as a raw
@@ -2102,14 +2332,23 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
         char *end = nullptr;
         long long n = ok ? std::strtoll(value.c_str(), &end, 10) : 0;
         if (!ok || errno == ERANGE || n < 1 || n > 2147483647LL) {
-            cry("parqit set threads: value must be a positive integer (1..2147483647), got '" +
+            cry("parqit set threads: value must be a positive integer (1 up to the " +
+                std::to_string(cpus) + " CPUs available to this process), got '" +
                 value + "'");
             return kRcUsage;
+        }
+        if (n > cpus) { /* CPUS-1 */
+            save_local("_parqit_set_note", "threads " + std::to_string(n) + " exceeds the " +
+                                               std::to_string(cpus) +
+                                               " CPUs available to this process; using " +
+                                               std::to_string(cpus));
+            n = cpus;
         }
         if (!s.set_threads(n, &err)) {
             cry("parqit set threads: " + err);
             return kRcUsage;
         }
+        save_local("_parqit_set_value", std::to_string(n));
         return 0;
     }
     if (what == "memory_limit") {
@@ -2127,7 +2366,7 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
         return 0;
     }
     cry("parqit set: unknown setting '" + what +
-        "' (statamissing threads memory_limit tempdir)");
+        "' (statamissing int64 fill_threads stream_buffer_mb threads memory_limit tempdir)");
     return kRcUsage;
 }
 
@@ -2529,16 +2768,17 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             cry("parqit " + kerr);
             return key_type_mismatch ? kRcTypeMismatch : kRcVarNotFound;
         }
-        /* Normalise each key exactly as the join does, so a "" / NaN key that
-         * the join folds to Stata-missing is folded here too (MERGE-1). Shared
-         * by the uniqueness contracts below (merge only) and by the
-         * missing-key disclosure (both verbs), which is why it is built here
-         * and not inside the merge branch. */
+        /* Normalise each key exactly as the join does, so a "" / NaN / ±Inf /
+         * |x| >= 2^1023 key that the join folds to Stata-missing is folded
+         * here too (MERGE-1, KEYFOLD-1). Shared by the uniqueness contracts
+         * below (merge only) and by the missing-key disclosure (both verbs),
+         * which is why it is built here and not inside the merge branch. The
+         * rule itself lives in ONE place (parqit::key_missing_fold_sql, the
+         * join's own): a local copy that folded only NaN once let a using key
+         * holding inf and 1e308 pass the uniqueness contract while the join
+         * matched both rows as one missing key (v102-F). */
         auto norm_key = [](const std::string &k, bool is_str) -> std::string {
-            std::string q = quote_ident(k);
-            if (is_str) return "nullif(" + q + ", '')";
-            return "(CASE WHEN isnan(CAST(" + q +
-                   " AS DOUBLE)) THEN NULL ELSE " + q + " END)";
+            return parqit::key_missing_fold_sql(quote_ident(k), is_str ? 's' : 'n');
         };
         std::map<std::string, char> mkind, ukind;
         for (const auto &c : g_view_ref().cols()) mkind[c.name] = c.kind;
@@ -2655,10 +2895,11 @@ static ST_retcode wide_j_scan(const std::string &jname,
     const std::string jq = quote_ident(jname);
 
     {
-        std::string jmiss = *j_is_string
-                                ? "coalesce(" + jq + ", '') = ''"
-                                : jq + " IS NULL OR isnan(CAST(" + jq +
-                                      " AS DOUBLE))";
+        /* KEYFOLD-1: "missing" here is what the join and the group keys call
+         * missing (NULL, NaN, ±Inf, |x| >= 2^1023 — none of which Stata could
+         * name a wide column after), through the one shared rule */
+        std::string jmiss = parqit::key_missing_fold_sql(jq, *j_is_string ? 's' : 'n') +
+                            " IS NULL";
         std::string nmiss;
         if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + jmiss,
                             &nmiss, &err)) {

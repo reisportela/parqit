@@ -28,6 +28,15 @@ notice delivery and absence of a separately installed DLL.
 
 ## One-command builds
 
+On Linux, `bash build.sh` provides a convenience wrapper around the existing
+CMake preset: it checks GCC/CMake, builds with two jobs and runs the C++ checks.
+Use `bash build.sh 4` to choose another job count, or `bash build.sh --help` for
+compiler and offline-archive settings. Run it in a fresh extracted source tree;
+the matching plugin and Stata files are placed in `ado/plus/p`.
+The official source archive includes this Linux wrapper from v0.2.0 onward.
+It is not a Windows or macOS wrapper; use the corresponding presets below.
+The original GitHub source ZIP for v0.1.37 predates it.
+
 ```bash
 # Linux
 cmake --preset linux && cmake --build --preset linux -j
@@ -88,7 +97,7 @@ parqit selftest
 
 Nothing else is needed: the ado finds the plugin in the same directory.
 Note that a running Stata keeps the plugin it already loaded — restart the
-session (or `discard`) after rebuilding.
+session after rebuilding. `discard` alone does not guarantee a plugin reload.
 
 ## Alternative: explicit dev override
 
@@ -155,7 +164,12 @@ The macOS link disables GCC's automatic runtime exports with `-nodefaultexport`,
 then uses a two-symbol strip keep-list and ad-hoc signing. Its check
 recognises Mach-O, verifies the signature and rejects leaked runtime exports;
 the Windows check recognises PE/COFF, the required exports and the absence of
-OpenMP imports or delay imports. Set the verifier path to
+OpenMP imports or delay imports, and rejects non-system DLL dependencies
+(including separately installed Microsoft, Intel or GNU runtime DLLs).
+The static MSVC runtime inside the plugin remains Microsoft code under its
+own redistribution terms; no additional runtime installer is required, but
+this is not a claim that every embedded component has the MIT license.
+Set the verifier path to
 `build/<preset>/parqit_runtime_probe` on macOS, or
 `build/windows/Release/parqit_runtime_probe.exe` on Windows.
 The verifier loads the exact collected plugin, checks its DuckDB backend and

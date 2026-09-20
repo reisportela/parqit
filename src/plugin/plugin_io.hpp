@@ -34,7 +34,44 @@ struct Source {
                                 * plan_columns can read the raw header names
                                 * the CSV reader deduplicated; "" for
                                 * Parquet/temp-table sources */
+    /* FILENAME-1: the name of the provenance column the scan carries for
+     * `filename(newvar)` (DuckDB `filename = '<name>'`); "" when off. DuckDB
+     * appends it AFTER the files' own columns and BEFORE the Hive partition
+     * keys, so every leaf alignment counts the scan without it and no Hive or
+     * name-clash check may see it. */
+    std::string filename_column;
+    /* CSV-OPT-1: the user's forced CSV dialect, so the CSV-HEADER-1
+     * raw-header probe reads the file exactly as the scan does */
+    struct CsvDialect {
+        bool has_delim = false, has_quote = false, has_escape = false;
+        std::string delim, quote, escape;
+        int header = -1; /* -1 not forced, 0 = header(off), 1 = header(on) */
+    } csv_dialect;
 };
+
+/* CSV-OPT-1: the validated `csv(...)` sub-options of `parqit use`. `sql` is
+ * the option fragment spliced into read_csv_auto(...) — every user string is
+ * a quote_literal'd SQL literal and every key comes from the whitelist in
+ * csv_options_from_request(). */
+struct CsvOptions {
+    std::string sql;
+    Source::CsvDialect dialect;
+};
+
+/* Decode and validate req["csvopts"] (hex-encoded values, whitelisted keys).
+ * Returns 198 with a message naming the offending key/value, 0 when absent.
+ * Needs the session: a types() type name is proved against the engine here,
+ * so an unknown type is parqit's own message and not the binder's SQL dump. */
+ST_retcode csv_options_from_request(parqit::Session &s, const parqit::json &req,
+                                    CsvOptions *out, std::string *err);
+
+/* FILENAME-1: refuse `filename(name)` when the source already exposes a column
+ * of that name (case-insensitively: DuckDB resolves identifiers
+ * case-insensitively, so two such columns could not both be addressed).
+ * `plain` must be the source built WITHOUT the filename option — the engine's
+ * own clash message names DuckDB syntax the Stata user never typed. */
+ST_retcode check_provenance_name(parqit::Session &s, const Source &plain,
+                                 const std::string &name, std::string *err);
 
 /* FP-2 (audit 2026-08-22, A4-2/A4-3): the identity of a source file. size +
  * mtime alone are not content-sensitive (a same-size rewrite with a restored
@@ -66,9 +103,13 @@ std::string friendly_engine_error(const std::string &err);
  * carries no Parquet footer, so paths_sql is left "[]" (the parquet_* metadata
  * paths — dup-name recovery, parqit.* labels, F2 stats sizing — are skipped and
  * columns size from a scan). .dta/.xlsx are not engine-scannable and are
- * converted to a Parquet bridge in the ado before reaching here. */
+ * converted to a Parquet bridge in the ado before reaching here.
+ * filename_column: FILENAME-1 — add the provenance column under this name.
+ * csv_opts: CSV-OPT-1 — the validated csv(...) fragment (csv sources only). */
 Source source_for(const std::vector<std::string> &files, bool relaxed = false,
-                  bool csv = false);
+                  bool csv = false,
+                  const std::string &filename_column = std::string(),
+                  const CsvOptions &csv_opts = CsvOptions());
 
 /* Parquet source gates. NM1 (all modes): a column name containing a NUL
  * byte is refused loudly — the SPI's C-string name APIs would truncate it
@@ -87,11 +128,16 @@ ST_retcode strict_schema_gate(parqit::Session &s, const Source &src,
 
 struct ParqitMeta {
     bool present = false;
+    std::string refusal; /* value metadata that cannot safely be discarded */
     parqit::json schema;
     parqit::json vallabs;
     parqit::json chars;
     std::string dtalabel;
     std::vector<std::string> sortedby;
+    /* XMISS-1: parqit.xmissing — primary column (true parquet name) ->
+     * companion column holding its extended-missing codes. Empty when the
+     * key is absent. */
+    std::map<std::string, std::string> xmissing;
 };
 
 struct PlanContext {
@@ -123,7 +169,63 @@ struct PlanContext {
      * range-sizing run in-plan exactly as on the eager path. Consulted only
      * for a column the manifest did not describe. */
     std::map<std::string, std::pair<std::string, std::string>> meta_hint; /* type, fmt */
+    /* INT64-PROTECT-1 / BINARY-DECODE-1 (INPUTS, set by the caller before
+     * plan_columns): what to do with an integer column whose values exceed
+     * 2^53, and with a BLOB column. The defaults are the protective ones —
+     * refuse the read, drop the blob — so every planner that does not know
+     * about the options (describe, the metadata-only probes) keeps the safe
+     * behaviour. */
+    parqit::Int64Mode int64_mode = parqit::Int64Mode::Refuse;
+    parqit::BinaryMode binary_mode = parqit::BinaryMode::Drop;
+    /* FILENAME-1: the scan's provenance column (filename()), copied from
+     * Source::filename_column. It is a first-class known column: excluded from
+     * the leaf alignment count, from Hive tagging, from the parqit.* manifest
+     * and from the Hive clash checks, and carries a Stata note instead. "" when
+     * the option is off or the column is not in this scan (a projection). */
+    std::string provenance_column;
+    /* XMISS-1: the Stata names of the active columns whose extended missings
+     * the eager fill restores from a companion column (ColumnPlan::xm_source
+     * set). The eager readers say so; the lazy open does NOT restore them and
+     * prints its own note instead. */
+    std::vector<std::string> xmissing_restored;
 };
+
+/* INT64-PROTECT-1: the session default for int64() (`parqit set int64
+ * refuse|round|string`), consulted by every read that does not carry an
+ * explicit option. Refuse until the user changes it. A reference to one
+ * function-local static: no static-init order to reason about, and both
+ * translation units (cmd_set lives with the views) see the same value. */
+parqit::Int64Mode &int64_session_default();
+
+/* FILL-THREADS-SET-1: the session's fill-worker count (`parqit set
+ * fill_threads auto|#`): -1 = not set (PARQIT_FILL_THREADS, then the automatic
+ * rule, decide), 0/1 = serial, n = that many workers (<= 1024). Same
+ * function-local-static idiom as int64_session_default(); read by
+ * fill_thread_count() at every fetch and reported by `parqit version`. */
+int &fill_threads_session();
+
+/* STREAM-BUFFER-SET-1: the session's streaming-buffer setting (`parqit set
+ * stream_buffer_mb auto|#`): -1 = not set (PARQIT_STREAM_BUFFER_MB, then the
+ * per-read estimate, decide), 0 = the engine's own default buffer, n = a cap of
+ * n megabytes. Same idiom as fill_threads_session(). */
+long long &stream_buffer_session();
+
+/* Read the `int64` / `binary` fields of a request into ctx (absent int64 =
+ * the session default; absent binary = drop). False with *err set when a
+ * field is present but not one of the documented values — the ado validates
+ * them first, so that can only be a corrupted request. */
+bool read_type_options(const parqit::json &req, PlanContext *ctx, std::string *err);
+
+/* BINARY-DECODE-1: decode() raises on an invalid UTF-8 byte sequence — the
+ * loud failure we want, but the engine's message names the function instead of
+ * the column and offers SQL advice (`try(decode(…))`, `decode(…, 'replace')`)
+ * that a Stata user cannot act on, followed by the generated query. Rewrite it
+ * into parqit's own remedy at every point where a binary(text) read can fail:
+ * the planner's sizing pass and the collect that materialises a multi-stage
+ * view into a temp table. Signature-matched — it returns false and leaves
+ * *err untouched for every other engine failure, which keeps its own message
+ * and its own rc (v69: no raw engine text on any public surface). */
+bool rewrite_decode_failure(std::string *err);
 
 /* Plan the columns of src (schema probe, sanitise, parqit.* metadata, range
  * pass when with_stats). paths_sql == "[]" skips file-metadata lookups —

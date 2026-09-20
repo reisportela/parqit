@@ -409,5 +409,77 @@ if (_rc) {
 }
 else di as txt "VERDICT(v102_joinby_missing_key_matches_native): PASS"
 
+* =====================================================================
+* F — KEYFOLD-1: the uniqueness contract and the missing-key note fold a
+*     key EXACTLY as the join does. A third-party using file whose numeric
+*     key holds NULL, inf and 1e308 — values Stata cannot hold, which the
+*     join reads as ONE missing key — is not unique for m:1: r(459), never a
+*     silent duplication of the master's missing-key row; the note counts
+*     all three; a master view over such a file is not unique for 1:1; and
+*     m:m (no contract) pairs the master's . with every one of them. The
+*     contract used to fold only NaN, so inf and 1e308 passed it while the
+*     join matched them (found 2026-09-20, reading the two predicates).
+* =====================================================================
+python:
+import pyarrow as pa, pyarrow.parquet as pq
+from sfi import Macro
+t = Macro.getLocal("t")
+pq.write_table(pa.table({
+    "k": pa.array([1.0, None, float("inf"), 1e308], pa.float64()),
+    "xu": pa.array([100.0, 200.0, 300.0, 400.0], pa.float64())}),
+    t + "_F_u.parquet")
+pq.write_table(pa.table({
+    "k": pa.array([1.0, None, float("inf")], pa.float64()),
+    "xm": pa.array([10.0, 20.0, 30.0], pa.float64())}),
+    t + "_F_m.parquet")
+end
+clear
+input double k double xm
+1 10
+. 20
+2 30
+end
+capture quietly parqit close _all
+parqit save `"`t'_F_m2.parquet"', replace data
+
+parqit use using `"`t'_F_m2.parquet"'
+capture noisily parqit merge m:1 k using `"`t'_F_u.parquet"'
+local F_using = _rc
+capture quietly parqit close _all
+
+parqit use using `"`t'_F_m.parquet"'
+capture noisily parqit merge 1:1 k using `"`t'_F_m2.parquet"'
+local F_master = _rc
+capture quietly parqit close _all
+
+* the join's own rule, materialised: joinby (no uniqueness contract, native
+* Cartesian pairing) pairs the master's . with NULL, inf and 1e308 alike —
+* every using row is delivered, the three land under a missing key, and the
+* disclosure counts all three (a refused merge prints no notes, so the count
+* is read here)
+parqit use using `"`t'_F_m2.parquet"'
+log using `"`t'_F.log"', replace text name(v102F)
+parqit joinby k using `"`t'_F_u.parquet"'
+log close v102F
+parqit collect, clear
+capture quietly parqit close _all
+_v102_loghas `"`t'_F.log"' key k: 1 master and 3 using row(s)
+local F_note = r(found)
+local F_jb_N = _N
+quietly count if missing(k)
+local F_jb_miss = r(N)
+quietly summarize xu
+local F_jb_sum = r(sum)
+
+capture assert `F_using' == 459 & `F_master' == 459 & `F_note' == 1 ///
+    & `F_jb_N' == 4 & `F_jb_miss' == 3 & `F_jb_sum' == 1000
+if (_rc) {
+    di as err "V102-F: using-side m:1 rc=`F_using' (expected 459); master-side 1:1" ///
+        " rc=`F_master' (expected 459); note=`F_note'; joinby N=`F_jb_N'" ///
+        " missing=`F_jb_miss' sum(xu)=`F_jb_sum' (expected 4/3/1000)"
+    di as err "VERDICT(v102_contract_folds_keys_as_the_join): FAIL"
+}
+else di as txt "VERDICT(v102_contract_folds_keys_as_the_join): PASS"
+
 capture quietly parqit close _all
 di as txt "V102-DONE"

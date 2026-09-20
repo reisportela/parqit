@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.37 07sep2026}{...}
+{* *! version 0.2.0 20sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -62,7 +62,23 @@ source names and the dataset's sort-order marker
 ({cmd:sortedby}, restored on read as far as Stata accepts it);
 {cmd:parqit.vallabs} carries the value-label definitions;
 {cmd:parqit.chars} carries characteristics and notes; and
-{cmd:parqit.dtalabel} carries the Stata data label.
+{cmd:parqit.dtalabel} carries the Stata data label. A file written with
+{cmd:parqit save ..., xmissing} also carries {cmd:parqit.xmissing}, a JSON
+object mapping each variable that held an extended missing value to its
+companion column {cmd:_parqit_xm_}{it:var}: an {cmd:int8} data column with the
+code of the cell (0 = not an extended missing, 1-26 = {cmd:.a}-{cmd:.z}; the
+variable's own cell is null in both cases). Only variables that actually held
+such a value get a companion. parqit's readers hide the companions and the
+eager ones ({cmd:use}, {cmd:mergein}, {cmd:appendin}) restore the cells from
+the codes; a companion whose code is outside 0-26, or that marks a cell
+holding a value, makes the load fail rather than guess. Other readers see the
+companions as ordinary columns.
+
+{pstd}A column cannot be declared both as a primary and as a companion.
+Sources with differing {cmd:parqit.*} metadata are refused when an
+extended-missing channel is present: discarding it would change values,
+not just labels or formats. This also applies to {opt relaxed} globs.
+Read the files individually and combine them with {cmd:parqit appendin}.
 
 {pstd}
 Third-party readers usually do not apply Stata labels automatically. For
@@ -76,25 +92,31 @@ Python, inspect them with {cmd:pyarrow}:
 {phang2}{cmd:vallabs = json.loads(md[b"parqit.vallabs"].decode())}{p_end}
 {phang2}{cmd:chars = json.loads(md[b"parqit.chars"].decode())}{p_end}
 {phang2}{cmd:dtalabel = json.loads(md[b"parqit.dtalabel"].decode())}{p_end}
+{phang2}{cmd:xmissing = json.loads(md[b"parqit.xmissing"].decode()) if b"parqit.xmissing" in md else dict()}{p_end}
 
 {pstd}
 When the file is read back with {cmd:parqit use} or materialised with
 {cmd:parqit collect}, parqit restores the metadata to Stata. Extended missing
-categories {cmd:.a}-{cmd:.z} become plain missing values in Parquet, because
-Parquet has one missing concept; their value-label definitions still survive
+categories {cmd:.a}-{cmd:.z} become plain missing values without {opt xmissing};
+that opt-in preserves their codes in companion columns for eager reads.
+Lazy views fold the categories to ordinary missing and announce it.
+Their value-label definitions still survive
 in {cmd:parqit.vallabs}. Value labels that are defined but attached to no
 variable ({cmd:label define} orphans) are written and restored too, like native
 {cmd:save}.
 
 {pstd}
-Restore is best-effort and loud: a metadata item Stata cannot accept is skipped
+Restoration of presentation metadata is best-effort and loud: an item Stata cannot accept is skipped
 or trimmed with a {cmd:note:} and never aborts the load — a display format Stata
 rejects, a value-label name or key that is not a legal Stata name/integer,
 value-label text over 32,000 bytes, a characteristic name that is not legal, a
 characteristic value over Stata's 67,783-byte limit (truncated), or a note/char
-whose variable is not in the result (dropped). A glob whose matched files carry
-{it:different} {cmd:parqit.*} metadata, or a malformed {cmd:parqit.*} key,
-restores no labels/formats and says so. In {cmd:merge}/{cmd:append}/{cmd:joinby}
+whose variable is not in the result (dropped). Without an extended-missing
+channel, a glob with {it:different} {cmd:parqit.*} metadata restores no
+labels/formats and says so; with that channel it is refused, as described above.
+Malformed JSON metadata is skipped with a note. The validated companion graph
+and cell codes are value-integrity contracts and can refuse the load.
+In {cmd:merge}/{cmd:append}/{cmd:joinby}
 a value label defined differently on both sides keeps the master definition with
 a note.
 
@@ -130,6 +152,37 @@ repeated name keeps the engine's numbered form ({cmd:a_1}, with
 case from another is exact in Stata (an alias inside the lazy view, with a
 note), an empty header cell becomes {cmd:v}{it:#}, and a file without a header
 keeps the engine's {cmd:column0}, {cmd:column1}, … names.
+
+{pstd}
+The delimited-text dialect and column types are inferred from a sample of the
+file. Inference is a guess, and a wrong guess changes values silently: text
+written as {cmd:1e5} becomes the number 100000, a decimal with more digits than
+a double holds is rounded, and {cmd:TRUE} becomes 1.
+{opt csv()} on {cmd:parqit use} replaces the guess with what you know — the
+dialect ({opt delim()}, {opt quote()}, {opt escape()}, {opt header()}), the
+temporal formats ({opt dateformat()}, {opt timestampformat()}), the sniffing
+sample ({opt sample()}), the missing-value text ({opt nullstr()}) and the
+column types ({opt types()}, or {opt allvarchar} for "everything is text").
+Only the names on the whitelist are accepted; anything else is refused by
+name. A {opt types()} type is checked for shape and then proved against the
+engine with one cast of a missing value, before any scan is built, so an
+unknown type is parqit's own message naming the type and the column — never
+the binder's error with its dump of the query. A
+forced dialect drives the header-name recovery above as well as the scan, so
+the names come back from the same split the data does; with {opt header(off)}
+there is no header line to recover from. {opt csv()} applies to the main
+{cmd:parqit use} source only — a {cmd:using}-side CSV is bridged through
+{cmd:import delimited}, which has its own options.
+
+{pstd}
+{opt filename(newvar)} on {cmd:parqit use} adds the engine's provenance column:
+one string variable holding the path each row was read from, as matched. In the
+scan it sits after the files' own columns and before any Hive partition keys,
+but it is not one of them — it takes no {cmd:parqit.*} metadata, is never
+mistaken for a partition key, and carries a note saying what it is. A name the
+source already loads is refused rather than quietly renamed, and a
+{cmd:.dta}/Excel source is refused because what it would report is the
+temporary bridge.
 
 {pstd}
 Because a bridge {it:is} a {cmd:parqit save} of the imported frame, the
@@ -470,29 +523,48 @@ budget. Sorting, joining and exact percentiles may need substantial scratch
 space; complex SQL aggregate states may not spill. Smaller result output alone
 does not guarantee a cheap query.{p_end}
 
-{phang}o {bf:Force a serial fill if you need to.} Reads of 50,000+ rows fill
-Stata's memory using up to {cmd:min(cores, 8)} worker threads (the per-cell
-fill dominates the cost). To force the single-threaded path — for example on a
-platform you have not yet verified — set the {it:operating-system} environment
-variable {cmd:PARQIT_FILL_THREADS=0} {it:before launching Stata} (e.g.
-{cmd:export PARQIT_FILL_THREADS=0} in your shell); {cmd:PARQIT_FILL_THREADS=}{it:n}
-pins {it:n} workers for atypical very wide or string-heavy reads. It is read by
-the plugin via {cmd:getenv}, so a Stata {cmd:global} does not reach it. The
+{phang}o {bf:Choose the fill workers, or force a serial fill.} Reads of 50,000+
+rows, or of 2 million+ cells, fill Stata's memory with one worker thread per
+CPU available to this process (on Linux the affinity mask — a SLURM/cgroup
+allocation or {cmd:taskset} — elsewhere the hardware count; nothing is
+hard-coded); each worker converts the engine chunk it fills and stores it cell
+by cell. {cmd:parqit set fill_threads} {it:#} chooses the count for the session
+({cmd:1} = the single-threaded path, for example on a platform you have not
+yet verified; any number up to the available CPUs; a larger number is clamped
+to them and said; {cmd:auto} returns to the environment override, if set,
+otherwise the size/CPU rule), and {cmd:parqit version}
+reports it as {cmd:r(fill_threads)} next to {cmd:r(cpus)}. The
+{it:operating-system} variable {cmd:PARQIT_FILL_THREADS} does the same from
+outside Stata ({cmd:export PARQIT_FILL_THREADS=0} before launching; read via
+{cmd:getenv}, so a Stata {cmd:global} does not reach it) and is outranked by the
+explicit positive session count. A session value of {cmd:0} is an alias for
+{cmd:auto}, whereas environment {cmd:PARQIT_FILL_THREADS=0} forces serial.
+Historical measurements on a 48-core machine as a matrix of engine threads
+(16/24/48) by fill workers, a 58.8M x 9 numeric read takes 1.2-1.3 s with 8
+workers, 0.9-1.0 s with 16, 0.7-0.8 s with 24-32 and 0.62-0.73 s with 48 at
+every tested engine thread count; no oversubscription penalty was observed
+in that workload, while a string-heavy read was scan-bound and flat. The
 parallel and serial fills are byte-identical.{p_end}
 
 {phang}o {bf:The fill reads a streamed result.} The engine's chunks are handed
 to the fill directly, instead of first being collected into a materialised
 result and copied out again. The buffer that holds them is sized for each read
-from the result's estimated size, so the scan never has to stop and wait and
-engine-side peak memory stays bounded by the result, as before (a little lower).
-{cmd:PARQIT_STREAM_BUFFER_MB=}{it:n} caps that buffer at {it:n} megabytes: on
-plain reads peak memory drops by up to about half, at the price of a slower,
-stop-and-go fill once the cap falls below roughly half the result;
-{cmd:0} leaves the engine's own 1 MB default, which uses the least memory and
-is the slowest on wide numeric reads. {cmd:PARQIT_FETCH_MATERIALIZED=1}
-restores the earlier materialised fetch. Both are operating-system variables
-read via {cmd:getenv}, like {cmd:PARQIT_FILL_THREADS}, and neither changes any
-value: the fetches are byte-identical.{p_end}
+from the result's estimated size to avoid repeated buffer stalls. This is a
+soft engine-buffer cap, not a limit on the complete process; underestimated
+variable-width payloads and execution state can require additional memory.
+{cmd:parqit set stream_buffer_mb} {it:n} (in-session; reported by
+{cmd:parqit version} as {cmd:r(stream_buffer_mb)}) or the operating-system
+variable {cmd:PARQIT_STREAM_BUFFER_MB=}{it:n} caps that buffer at {it:n}
+megabytes: on plain reads peak memory drops by up to about half, at the price
+of a slower, stop-and-go fill once the cap falls below roughly half the result;
+{cmd:0} restores the engine's own default before each fetch (normally 1 MB),
+including after a previous larger buffer. In the measured wide numeric reads,
+that setting used less memory and was slower. {cmd:auto} defers to the environment
+override, if set, otherwise per-read sizing. An explicit numeric session setting
+outranks the variable. {cmd:PARQIT_FETCH_MATERIALIZED=1}
+restores the earlier materialised fetch. The variables are read via
+{cmd:getenv}, like {cmd:PARQIT_FILL_THREADS}, and none of these changes any
+value: the fetches are byte-identical under every cap.{p_end}
 
 
 {marker expressions}{...}
@@ -602,11 +674,24 @@ The newline and Unicode differences above remain relevant.
 smallest exact Stata integer storage that contains the observed range and
 otherwise {cmd:double}; an all-missing integer column becomes an all-missing
 {cmd:byte} with a note. {cmd:UINT32} values above Stata {cmd:long}'s ceiling
-survive as {cmd:double}. {cmd:UINT64}/{cmd:HUGEINT}/{cmd:UHUGEINT} values beyond
-2^53 and wide {cmd:DECIMAL} values may round in binary64, so parqit loads them
-as {cmd:double} with an explicit precision note, never as silent missing.
+survive as {cmd:double}. {cmd:BIGINT}/{cmd:UINT64}/{cmd:HUGEINT}/{cmd:UHUGEINT}
+values beyond 2^53 and wide {cmd:DECIMAL} values are outside the protected
+consecutively exact integer range and are {bf:refused} by default,
+even when a particular larger integer is exactly representable
+({cmd:r(198)}, naming every such column, nothing staged).
+{opt int64(round)} loads them as {cmd:double} with the explicit precision note
+(never as silent missing), {opt int64(string)} loads only those columns as
+exact decimal text sized by the observed maximum, and
+{cmd:parqit set int64 refuse|round|string} moves the session default. The
+eager text conversion keeps preserved extended-missing codes as the strings
+{cmd:.a}-{cmd:.z}, with ordinary nulls becoming empty strings; corrupt codes
+still refuse the load. The
+trigger is the observed data, not the declared type: a 64-bit column whose
+values all fit is read exactly as before, with no option and no note. A
+preview ({cmd:parqit head}, {cmd:parqit list}) always shows the exact digits.
 A lazy plan keeps these source numerics in DuckDB until a Stata boundary is
-actually crossed.
+actually crossed, so join keys, {cmd:parqit save} and engine-side statistics
+are exact whatever the option says.
 
 {pstd}{it:Round-trip storage.} When a file was written by parqit, its metadata
 preserves the original storage floor (a {cmd:byte} comes back {cmd:byte}, a
@@ -646,7 +731,14 @@ not cross that boundary. Types with no Stata representation — {cmd:NULL},
 {cmd:BLOB}, {cmd:BIT}, {cmd:INTERVAL}, {cmd:LIST}/{cmd:ARRAY},
 {cmd:STRUCT}/{cmd:MAP}/{cmd:UNION}, {cmd:BIGNUM}, {cmd:GEOMETRY} and
 {cmd:VARIANT} — are dropped with a reason; a result containing no loadable
-columns is refused.
+columns is refused. A {cmd:BLOB} can be loaded on request:
+{opt binary(text)} decodes the bytes as UTF-8 (and refuses the read loudly,
+naming the column, if any row is not valid UTF-8 — never a replacement
+character), {opt binary(hex)} loads two UPPERCASE hex digits per byte. The
+column is then text sized like any other ({cmd:strL} beyond 2,045 bytes) and
+carries a note naming the mode. A lazy view's columns are fixed when it is
+opened, so the option belongs to {cmd:parqit use using}; giving it to
+{cmd:parqit collect} is refused with a message saying so.
 
 {pstd}{it:Column names.} At the Stata boundary, invalid name characters become
 underscores, a leading digit or reserved word gains an underscore (only
@@ -654,7 +746,7 @@ underscores, a leading digit or reserved word gains an underscore (only
 name), names are
 limited to 32 Unicode code points, empty names become {cmd:v}{it:position}
 (with a note; there is no source name to keep), and collisions gain
-deterministic numbered suffixes. The original file name is
+deterministic numbered suffixes. The original column name is
 retained in {cmd:char var[src_name]} and in the {cmd:parqit.*} metadata; a later
 {cmd:parqit save} writes the Stata names (the original stays recoverable from
 {cmd:parqit.chars}). This recovery works for a single file, a glob, a Hive tree
@@ -700,8 +792,10 @@ The following knobs live outside {cmd:parqit set}. The Stata global
 takes precedence over the adopath search for {cmd:parqit.plugin};
 {cmd:global PARQIT_NOTIPS 1} mutes the one-line performance tips; and the
 operating-system environment variable {cmd:PARQIT_FILL_THREADS} controls
-the parallel memory fill, {cmd:PARQIT_STREAM_BUFFER_MB} caps how much result
-the engine keeps buffered ahead of that fill and {cmd:PARQIT_FETCH_MATERIALIZED=1}
+the parallel memory fill (overridden by a positive {cmd:parqit set fill_threads} count),
+{cmd:PARQIT_STREAM_BUFFER_MB} caps how much result
+the engine keeps buffered ahead of that fill (overridden by an explicit numeric
+{cmd:parqit set stream_buffer_mb}) and {cmd:PARQIT_FETCH_MATERIALIZED=1}
 restores the earlier materialised fetch (see
 {help parqit_technical##perf:Performance tips}).
 The operating-system variable {cmd:PARQIT_SAVE_NOARROW} selects the batched
@@ -750,9 +844,10 @@ error 901; filter, aggregate or {cmd:save} the lazy result instead.{p_end}
 {cmd:.dta}/{cmd:.xls}/{cmd:.xlsx} require a full temporary Parquet bridge.
 Delimited text on a two-table {cmd:using} side is bridged too.
 {cmd:describe} with a source argument is Parquet-only.{p_end}
-{pstd}{cmd:•} Extended missings {cmd:.a}-{cmd:.z} become plain missing in
-Parquet (the format has one missing concept); parqit warns when they are
-written. Their literals are therefore rejected in lazy expressions; use
+{pstd}{cmd:•} Without {opt xmissing}, extended missings {cmd:.a}-{cmd:.z}
+become plain missing in Parquet, with a write-time note. With it, eager reads
+restore the codes; lazy views still fold them and announce that loss.
+Their literals are therefore rejected in lazy expressions; use
 {cmd:missing()} or the ordinary {cmd:.} value.{p_end}
 {pstd}{cmd:•} A slice over tied sort keys has no defined within-tie order.
 Add a unique key to {cmd:sort}/{cmd:gsort} before {cmd:keep in} or a sliced
@@ -775,8 +870,10 @@ particular {cmd:_n}/{cmd:_N} are unavailable in {cmd:replace}, in the
 {cmd:list if} filters; {cmd:egen} also refuses them.{p_end}
 {pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
 their format in metadata; third-party readers see the raw counts.{p_end}
-{pstd}{cmd:•} {cmd:discard} unloads the plugin and forgets an un-collected
-view (data on disk is never affected).{p_end}
+{pstd}{cmd:•} {cmd:discard} refreshes ado programs but does not guarantee a reset
+of the loaded plugin. Its views and settings may persist; close views explicitly
+with {cmd:parqit close _all}. Restart Stata after rebuilding the plugin or to
+restore fresh-session defaults.{p_end}
 {pstd}{cmd:•} A loaded result reports {cmd:c(filename)} empty and
 {cmd:c(changed)} 0 — like an import, the data is not backed by a
 .dta.{p_end}

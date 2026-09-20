@@ -34,6 +34,10 @@ class Session {
     bool set_threads(long long n, std::string *err);
     bool set_memory_limit(const std::string &limit, std::string *err);
     bool set_temp_directory(const std::string &dir, std::string *err);
+    /* CPUS-1: the engine thread count in force — the user's `parqit set
+     * threads`, else the CPUs available to this process (the default applied
+     * at open). Does not open the engine. */
+    long long threads() const;
 
     /* PERF-STREAM-1: how many bytes of result the engine may keep buffered
      * ahead of a streaming fetch (`streaming_buffer_size`, a LOCAL/connection
@@ -107,6 +111,16 @@ std::string quote_ident(const std::string &s);
  * (with optional leading blanks) using '.'. */
 std::string dtoa(double v);
 bool atod(const std::string &s, double *out);
+
+/* CPUS-1: the CPUs available to THIS process — on Linux the affinity mask
+ * (what a SLURM/cgroup allocation or `taskset` leaves visible; `nproc` and
+ * Stata's c(processors_mach) agree with it), std::thread::hardware_concurrency()
+ * elsewhere and as the fallback; never below 1. Every thread count in parqit
+ * (the engine's `threads`, the fill workers) defaults to it and is clamped to
+ * it: the machine is the only limit, nothing is hard-coded. DuckDB's own
+ * default ignores the mask (48 under `taskset -c 0-7` on a 48-core box), which
+ * is why the session applies this number at open. */
+int available_cpus();
 
 /* Per-process spill subdirectory ("/_parqit_spill_<pid>"). The default spill
  * lives under c(tmpdir), which is shared by every Stata instance on the

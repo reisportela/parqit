@@ -340,3 +340,165 @@ TEST_CASE("DFMT-1: the old-style %d daily date format is a date (audit 2026-09-0
     CHECK(classify_format("%d1") == FmtClass::None);
     CHECK(duck_type_for(StType::Long, classify_format("%d")) == "DATE");
 }
+
+TEST_CASE("INT64-PROTECT-1/BINARY-DECODE-1: the read-time type option spellings") {
+    Int64Mode i = Int64Mode::Round;
+    CHECK(int64_mode_parse("refuse", &i));
+    CHECK(i == Int64Mode::Refuse);
+    CHECK(int64_mode_parse("round", &i));
+    CHECK(i == Int64Mode::Round);
+    CHECK(int64_mode_parse("string", &i));
+    CHECK(i == Int64Mode::String);
+    /* an unknown value leaves the caller's mode alone: the plugin refuses it
+     * rather than silently downgrading the protection */
+    CHECK_FALSE(int64_mode_parse("Round", &i));
+    CHECK_FALSE(int64_mode_parse("", &i));
+    CHECK_FALSE(int64_mode_parse("text", &i));
+    CHECK(i == Int64Mode::String);
+
+    BinaryMode b = BinaryMode::Drop;
+    CHECK(binary_mode_parse("drop", &b));
+    CHECK(b == BinaryMode::Drop);
+    CHECK(binary_mode_parse("text", &b));
+    CHECK(b == BinaryMode::Text);
+    CHECK(binary_mode_parse("hex", &b));
+    CHECK(b == BinaryMode::Hex);
+    CHECK_FALSE(binary_mode_parse("HEX", &b));
+    CHECK_FALSE(binary_mode_parse("string", &b));
+    CHECK(b == BinaryMode::Hex);
+}
+
+TEST_CASE("BINARY-DECODE-1: a BLOB drops by default, naming both options") {
+    ColumnPlan d = plan_for(DUCKDB_TYPE_BLOB, "b");
+    CHECK(d.dropped);
+    CHECK(d.drop_reason.find("BLOB has no Stata representation") != std::string::npos);
+    CHECK(d.drop_reason.find("binary(text)") != std::string::npos);
+    CHECK(d.drop_reason.find("binary(hex)") != std::string::npos);
+
+    duckdb_logical_type lt = LT(DUCKDB_TYPE_BLOB);
+    ColumnPlan t = plan_read_column("b", lt, BinaryMode::Text);
+    ColumnPlan h = plan_read_column("b", lt, BinaryMode::Hex);
+    duckdb_destroy_logical_type(&lt);
+
+    CHECK_FALSE(t.dropped);
+    CHECK(t.cast_sql == "decode(\"b\")");
+    CHECK(t.transfer == Transfer::Utf8);
+    CHECK(t.stata_type == StType::Str);
+    CHECK(t.needs_strlen); /* sized like any other string, strL beyond 2045 */
+    CHECK(t.note.find("UTF-8") != std::string::npos);
+
+    CHECK_FALSE(h.dropped);
+    CHECK(h.cast_sql == "hex(\"b\")");
+    CHECK(h.transfer == Transfer::Utf8);
+    CHECK(h.stata_type == StType::Str);
+    CHECK(h.needs_strlen);
+    CHECK(h.note.find("hex") != std::string::npos);
+}
+
+TEST_CASE("INT64-PROTECT-1: int64(string) converts a >2^53 column to exact text") {
+    ColumnPlan p = plan_for(DUCKDB_TYPE_BIGINT, "bk");
+    REQUIRE(p.needs_big53);
+    p.stata_format = "%12.0g"; /* a numeric format cannot survive on a string */
+    p.vallab = "lbl";
+    p.meta_type = "double"; /* the manifest must not pull it back to numeric */
+
+    plan_big53_as_text(p);
+    CHECK(p.cast_sql == "CAST(\"bk\" AS VARCHAR)");
+    CHECK(p.transfer == Transfer::Utf8);
+    CHECK(p.stata_type == StType::Str);
+    CHECK(p.needs_strlen);
+    CHECK_FALSE(p.needs_big53); /* nothing rounds, so nothing may say it does */
+    CHECK_FALSE(p.needs_minmax);
+    CHECK(p.stata_format.empty());
+    CHECK(p.vallab.empty());
+    CHECK(p.note.find("exceed 2^53") != std::string::npos);
+
+    /* the ordinary strlen sizing then gives the exact width, and the rounding
+     * note of refine_plan is gone */
+    ColumnStats s;
+    s.any_beyond_2p53 = true;
+    s.max_strlen = 19;
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Str);
+    CHECK(p.str_bytes == 19);
+    CHECK(p.note.find("rounded to nearest double") == std::string::npos);
+    apply_meta_type(p);
+    CHECK(p.stata_type == StType::Str); /* meta_type "double" cannot undo it */
+    CHECK(p.str_bytes == 19);
+
+    /* a wide DECIMAL arrives carrying "decimal converted to double": that note
+     * must be REPLACED, not appended to, or the column claims both at once */
+    duckdb_logical_type dt = duckdb_create_decimal_type(20, 2);
+    ColumnPlan d = plan_read_column("d", dt);
+    duckdb_destroy_logical_type(&dt);
+    REQUIRE(d.needs_big53);
+    REQUIRE(d.note.find("converted to double") != std::string::npos);
+    plan_big53_as_text(d);
+    CHECK(d.note == "loaded as text because values exceed 2^53 (exact)");
+    CHECK(d.cast_sql == "CAST(\"d\" AS VARCHAR)");
+
+    /* the str#/strL boundary is the ordinary one */
+    ColumnPlan w = plan_for(DUCKDB_TYPE_HUGEINT, "h");
+    REQUIRE(w.needs_big53);
+    plan_big53_as_text(w);
+    ColumnStats ws;
+    ws.max_strlen = kStataStrMax + 1;
+    refine_plan(w, ws);
+    CHECK(w.stata_type == StType::StrL);
+}
+
+TEST_CASE("INT64-PROTECT-1: int64(round) is untouched — the note still fires") {
+    ColumnPlan p = plan_for(DUCKDB_TYPE_BIGINT, "bk");
+    ColumnStats s;
+    s.has_minmax = true;
+    s.min = 0;
+    s.max = 9007199254740993.0;
+    s.any_beyond_2p53 = true;
+    refine_plan(p, s);
+    CHECK(p.stata_type == StType::Double);
+    CHECK(p.note.find("values beyond 2^53 rounded to nearest double") !=
+          std::string::npos);
+
+    /* a column of the same family whose values all fit says nothing */
+    ColumnPlan q = plan_for(DUCKDB_TYPE_BIGINT, "ck");
+    ColumnStats t;
+    t.has_minmax = true;
+    t.min = 0;
+    t.max = 1000;
+    refine_plan(q, t);
+    CHECK(q.note.empty());
+    CHECK(q.stata_type == StType::Int);
+}
+
+#include <cstring>
+
+TEST_CASE("XMISS-1: extended missing codes round-trip Stata's bit patterns") {
+    /* Stata (%21x): . = +1.0000000000000X+3ff, .a = +1.0010000000000X+3ff,
+     * .z = +1.01a0000000000X+3ff — i.e. 0x7fe0000000000000 + (k << 40). */
+    for (int k = 0; k <= kStataExtMissMax; k++) {
+        const double d = stata_missing_value(k);
+        uint64_t bits = 0;
+        std::memcpy(&bits, &d, sizeof bits);
+        CHECK(bits == 0x7fe0000000000000ULL + (static_cast<uint64_t>(k) << 40));
+        CHECK(stata_missing_code(d) == k);
+        CHECK(d >= kStataMissThreshold);
+    }
+    CHECK(stata_missing_code(std::numeric_limits<double>::infinity()) == -1);
+    CHECK(stata_missing_code(-std::numeric_limits<double>::infinity()) == -1);
+    CHECK(stata_missing_code(std::numeric_limits<double>::quiet_NaN()) == -1);
+    CHECK(stata_missing_code(8.9884656743115785e307) == -1); /* maxdouble() */
+    CHECK(stata_missing_code(1e308) == -1);                   /* between codes */
+    CHECK(stata_missing_code(-stata_missing_value(1)) == -1);
+    CHECK(stata_missing_code(1.0) == -1);
+    /* one bit above .a is not a code either */
+    {
+        uint64_t bits = 0x7fe0100000000001ULL;
+        double d = 0;
+        std::memcpy(&d, &bits, sizeof d);
+        CHECK(stata_missing_code(d) == -1);
+    }
+    CHECK(std::isnan(stata_missing_value(27)));
+    CHECK(std::isnan(stata_missing_value(-1)));
+    CHECK(xmissing_companion_name("x") == "_parqit_xm_x");
+    CHECK(std::string(kXmissingMetaKey) == "parqit.xmissing");
+}

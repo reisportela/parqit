@@ -1,7 +1,7 @@
 /*
   parqit view - Manage views, run DuckDB SQL, and set engine options
 
-*!  VERSION 0.1.37  07sep2026
+*!  VERSION 0.2.0  20sep2026
 
   User > parqit > Views, SQL, and engine settings...
   Launch directly with:  db parqit_views      (menu installed by: parqit menu)
@@ -11,8 +11,7 @@
   command. The list box chooses the action that OK or Submit runs: switch,
   close, or close every view; run a parqit command on another view; open a
   view from a DuckDB SQL query or add a raw SQL fragment to the current
-  pipeline; or change an engine setting (statamissing, threads,
-  memory_limit, tempdir).
+  pipeline; or change any of the seven parqit session settings.
 */
 
 VERSION 16.0
@@ -107,6 +106,8 @@ BEGIN
 	label("statamissing")
   EDIT ed_value			315	@	275	.,		///
 	label("Value")
+  COMBOBOX cb_int64 315 @ _vnwd ., dropdownlist contents(i64_list) ///
+	default("refuse") label("Integer precision policy")
   TEXT tx_context _lft 325 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
@@ -125,6 +126,13 @@ BEGIN
 	off
 END
 
+LIST i64_list
+BEGIN
+	refuse
+	round
+	string
+END
+
 LIST op_words
 BEGIN
 	Switch to a view (view)
@@ -134,7 +142,10 @@ BEGIN
 	Open a view from a DuckDB SQL query (sql)
 	Add a SQL fragment to the pipeline (query)
 	Set missing-value mode (set statamissing)
+	Set integer precision (set int64)
 	Set engine threads (set threads)
+	Set fill workers (set fill_threads)
+	Set result buffer (set stream_buffer_mb)
 	Set memory limit (set memory_limit)
 	Set spill directory (set tempdir)
 END
@@ -148,7 +159,10 @@ BEGIN
 	sql
 	query
 	statamissing
+	int64
 	threads
+	fill_threads
+	stream_buffer_mb
 	memory_limit
 	tempdir
 END
@@ -162,7 +176,10 @@ BEGIN
 	script op_sql
 	script op_query
 	script op_statamissing
+	script op_int64
 	script op_threads
+	script op_fill_threads
+	script op_stream_buffer
 	script op_memory
 	script op_tempdir
 END
@@ -178,6 +195,7 @@ BEGIN
 	main.ck_sqlclear.disable
 	main.tx_value.disable
 	main.cb_sm.hide
+	main.cb_int64.hide
 	main.ed_value.hide
 	main.tx_name.setlabel "View name:"
 	main.tx_sql.setlabel "DuckDB SQL:"
@@ -258,6 +276,32 @@ BEGIN
 	main.ed_value.show
 END
 
+SCRIPT op_int64
+BEGIN
+	script all_off
+	main.tx_value.enable
+	main.tx_value.setlabel "Integers beyond 2^53:"
+	main.cb_int64.show
+END
+
+SCRIPT op_fill_threads
+BEGIN
+	script all_off
+	main.tx_value.enable
+	main.tx_value.setlabel "Fill workers (auto or count; 1 = serial):"
+	main.ed_value.setvalue "auto"
+	main.ed_value.show
+END
+
+SCRIPT op_stream_buffer
+BEGIN
+	script all_off
+	main.tx_value.enable
+	main.tx_value.setlabel "Buffer MB (auto, 0 = engine default, or MB):"
+	main.ed_value.setvalue "auto"
+	main.ed_value.show
+END
+
 SCRIPT op_memory
 BEGIN
 	script all_off
@@ -270,7 +314,7 @@ SCRIPT op_tempdir
 BEGIN
 	script all_off
 	main.tx_value.enable
-	main.tx_value.setlabel "Spill directory (existing path):"
+	main.tx_value.setlabel "Spill directory (may be created later):"
 	main.ed_value.show
 END
 
@@ -357,9 +401,20 @@ BEGIN
 	if main.lb_op.equals("statamissing") {
 		put "parqit set statamissing " main.cb_sm
 	}
+	if main.lb_op.equals("int64") {
+		put "parqit set int64 " main.cb_int64
+	}
 	if main.lb_op.equals("threads") {
 		require main.ed_value
 		put "parqit set threads " main.ed_value
+	}
+	if main.lb_op.equals("fill_threads") {
+		require main.ed_value
+		put "parqit set fill_threads " main.ed_value
+	}
+	if main.lb_op.equals("stream_buffer_mb") {
+		require main.ed_value
+		put "parqit set stream_buffer_mb " main.ed_value
 	}
 	if main.lb_op.equals("memory_limit") {
 		require main.ed_value

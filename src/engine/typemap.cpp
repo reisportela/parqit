@@ -1,10 +1,34 @@
 #include "engine/typemap.hpp"
 
 #include <cmath>
+#include <limits>
 
 #include "engine/session.hpp" /* quote_ident */
 
 namespace parqit {
+
+/* XMISS-1 (see typemap.hpp): the 27 Stata missing doubles and their codes.
+ * (1 + k/4096) and its product with 2^1023 are exact in binary64, so the
+ * round trip is bit-exact; anything that is not one of the 27 values (a
+ * magnitude between two codes, ±Inf, NaN, a value) yields -1 and is treated
+ * by the callers as it always was. */
+double stata_missing_value(int code) {
+    if (code < 0 || code > kStataExtMissMax)
+        return std::numeric_limits<double>::quiet_NaN();
+    return kStataMissThreshold * (1.0 + static_cast<double>(code) / 4096.0);
+}
+
+int stata_missing_code(double d) {
+    if (!(d >= kStataMissThreshold) || std::isinf(d)) return -1;
+    const double k = (d / kStataMissThreshold - 1.0) * 4096.0;
+    if (k < 0.0 || k > static_cast<double>(kStataExtMissMax)) return -1;
+    const int code = static_cast<int>(k);
+    return k == static_cast<double>(code) ? code : -1;
+}
+
+std::string xmissing_companion_name(const std::string &var) {
+    return std::string(kXmissingPrefix) + var;
+}
 
 std::string sttype_code(StType t, int str_bytes) {
     switch (t) {
@@ -91,7 +115,22 @@ StType integer_type_for_range(double min, double max) {
     return StType::Double;
 }
 
-ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type t) {
+bool int64_mode_parse(const std::string &s, Int64Mode *m) {
+    if (s == "refuse") { *m = Int64Mode::Refuse; return true; }
+    if (s == "round") { *m = Int64Mode::Round; return true; }
+    if (s == "string") { *m = Int64Mode::String; return true; }
+    return false;
+}
+
+bool binary_mode_parse(const std::string &s, BinaryMode *m) {
+    if (s == "drop") { *m = BinaryMode::Drop; return true; }
+    if (s == "text") { *m = BinaryMode::Text; return true; }
+    if (s == "hex") { *m = BinaryMode::Hex; return true; }
+    return false;
+}
+
+ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type t,
+                            BinaryMode binary) {
     ColumnPlan p;
     p.source_name = source_name;
     p.src_type = duckdb_get_type_id(t);
@@ -268,6 +307,35 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_type = StType::Str;
         p.needs_strlen = true;
         break;
+    case DUCKDB_TYPE_BLOB:
+        /* BINARY-DECODE-1: raw bytes have no Stata representation, so the
+         * default still drops the column with a message — but the message now
+         * names the two ways to load it, and both produce TEXT sized by the
+         * ordinary strlen pass (strL beyond 2045 bytes, as for any string).
+         *   decode(BLOB) -> VARCHAR, and THROWS a ConversionException on an
+         *     invalid UTF-8 byte sequence instead of substituting replacement
+         *     characters (verified in the fetched DuckDB v1.5.3 source:
+         *     extension/core_functions/scalar/blob/encode.cpp:36-51 for the
+         *     check/throw, :105-107 for the BLOB->VARCHAR signature);
+         *   hex(BLOB)    -> VARCHAR, two UPPERCASE hex digits per byte, never
+         *     fails (extension/core_functions/scalar/string/hex.cpp:66-85
+         *     HexStrOperator, registered at :394; the digits come from
+         *     Blob::HEX_TABLE = "0123456789ABCDEF",
+         *     src/include/duckdb/common/types/blob.hpp:21). */
+        if (binary == BinaryMode::Drop) {
+            p.dropped = true;
+            p.drop_reason = "BLOB has no Stata representation (add binary(text) "
+                            "or binary(hex) to load it)";
+            break;
+        }
+        p.cast_sql = (binary == BinaryMode::Text ? "decode(" : "hex(") + ref + ")";
+        p.transfer = Transfer::Utf8;
+        p.stata_type = StType::Str;
+        p.needs_strlen = true;
+        p.note = binary == BinaryMode::Text
+                     ? "binary column decoded as UTF-8 text (binary(text))"
+                     : "binary column loaded as uppercase hex text (binary(hex))";
+        break;
     default: {
         /* charter §6.11: unrepresentable types are dropped with a message
          * (the caller errors out if every column would be dropped). A
@@ -277,7 +345,8 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         const char *what = "unsupported";
         switch (p.src_type) {
         case DUCKDB_TYPE_SQLNULL: what = "NULL"; break;
-        case DUCKDB_TYPE_BLOB: what = "BLOB"; break;
+        /* BLOB no longer reaches here: it has its own case above, whose drop
+         * message also names binary(text)/binary(hex) */
         case DUCKDB_TYPE_BIT: what = "BIT"; break;
         case DUCKDB_TYPE_INTERVAL: what = "INTERVAL"; break;
         case DUCKDB_TYPE_LIST: what = "LIST"; break;
@@ -296,6 +365,40 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
     }
     }
     return p;
+}
+
+void plan_big53_as_text(ColumnPlan &p) {
+    /* INT64-PROTECT-1: the ONLY exact way into Stata for an integer beyond
+     * 2^53. CAST(<integer> AS VARCHAR) is digit-for-digit exact — DuckDB
+     * formats the integer value itself (NumericHelper::FormatSigned, fetched
+     * v1.5.3 src/include/duckdb/common/types/cast_helpers.hpp:64-78, with the
+     * hugeint_t specialisation declared at :107 and DecimalToString at
+     * :109-127) — no double is ever constructed, unlike __parqit_double().
+     * The width comes from the caller's max(strlen(...)) over the SAME
+     * expression, so str19/str20 (or wider for HUGEINT/DECIMAL) is exact. */
+    p.cast_sql = "CAST(" + quote_ident(p.source_name) + " AS VARCHAR)";
+    p.transfer = Transfer::Utf8;
+    p.stata_type = StType::Str;
+    p.str_bytes = 0;
+    p.needs_strlen = true;
+    /* the numeric range/precision passes no longer describe this column */
+    p.needs_minmax = false;
+    p.needs_big53 = false; /* nothing rounds: refine_plan must not say it does */
+    p.needs_float_range = false;
+    p.needs_float_exact = false;
+    p.float_exact_checked = false;
+    /* a numeric display format or a value label cannot be applied to a Stata
+     * string variable (both would abort the load); the exact digits are the
+     * payload */
+    p.stata_format.clear();
+    p.vallab.clear();
+    /* REPLACES any earlier note rather than appending to it: a wide DECIMAL
+     * arrives carrying "decimal converted to double", which is no longer true
+     * of this column and would contradict the line right after it. No other
+     * needs_big53 note exists at this point (BIGINT/UBIGINT/HUGEINT set none,
+     * and refine_plan's all-missing note comes later, from needs_minmax,
+     * which is cleared above). */
+    p.note = "loaded as text because values exceed 2^53 (exact)";
 }
 
 void refine_plan(ColumnPlan &p, const ColumnStats &s) {

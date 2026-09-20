@@ -1,4 +1,4 @@
-*! version 0.1.37 07sep2026
+*! version 0.2.0 20sep2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -107,6 +107,17 @@ program define _parqit_version, rclass
     return local parqit_version `"`parqit_plugin_version'"'
     return local duckdb_version `"`parqit_duckdb_version'"'
     return local parallel_backend "duckdb"
+    * FILL-THREADS-SET-1: "auto" unless parqit set fill_threads chose a number
+    return local fill_threads "`parqit_fill_threads'"
+    * CPUS-1 / STREAM-BUFFER-SET-1: the CPUs available to this process, the
+    * engine threads in force and the streaming-buffer setting
+    di as txt "CPUs available: " as res "`parqit_cpus'" ///
+        as txt "; engine threads: " as res "`parqit_threads'" ///
+        as txt "; fill workers: " as res "`parqit_fill_threads'" ///
+        as txt "; stream buffer (MB): " as res "`parqit_stream_buffer_mb'"
+    return scalar cpus = `parqit_cpus'
+    return scalar threads = `parqit_threads'
+    return local stream_buffer_mb "`parqit_stream_buffer_mb'"
     return scalar openmp = 0
     return scalar openmp_version = real("`parqit_openmp_version'")
     return scalar openmp_max_threads = real("`parqit_openmp_max_threads'")
@@ -517,32 +528,109 @@ program define _parqit_return_losses, rclass
     if (`"`enc'"' != "" & ("`tcells'" != "0" | "`tmeta'" != "0")) return local encoding `"`enc'"'
 end
 
+* CSV-OPT-1: parse `csv(...)` of parqit use into the caller's _sq_csv_* locals.
+* Every sub-option is a reader option of the embedded DuckDB CSV reader; the
+* plugin validates the keys again and quotes every value as an SQL literal. An
+* empty value counts as not given (each of these wants a character or a word).
+program define _parqit_csv_opts
+    version 16.0
+    local _opts DELIM(string) QUOTE(string) ESCape(string) HEADer(string) ///
+        DATEformat(string) TIMESTAMPformat(string) SAMPLE(string) ALLVARchar ///
+        TYPES(string) NULLSTR(string)
+    capture syntax [, `_opts']
+    if (_rc) {
+        * USE-OPT-1, inside csv(): name the sub-option, not "invalid syntax"
+        capture syntax [, `_opts' *]
+        if (!_rc & `"`options'"' != "") {
+            di as err `"parqit use: csv(): option `options' not allowed"'
+            exit 198
+        }
+        syntax [, `_opts']
+    }
+    if (`"`header'"' != "" & !inlist(lower(`"`header'"'), "on", "off")) {
+        di as err "parqit use: csv(): header() takes on or off"
+        exit 198
+    }
+    if (`"`sample'"' != "") {
+        capture confirm number `sample'
+        if (_rc) local _bad 1
+        else local _bad = (real("`sample'") != trunc(real("`sample'"))) | ///
+            (real("`sample'") < 1 & real("`sample'") != -1)
+        if (`_bad') {
+            di as err "parqit use: csv(): sample() takes the number of rows to" ///
+                " sniff (a positive integer), or -1 for the whole file"
+            exit 198
+        }
+    }
+    local keys ""
+    foreach k in delim quote escape header dateformat timestampformat sample nullstr types {
+        if (`"``k''"' != "") {
+            local keys `"`keys' `k'"'
+            c_local _sq_csv_v_`k' `"``k''"'
+        }
+    }
+    if ("`allvarchar'" != "") {
+        local keys `"`keys' allvarchar"'
+        c_local _sq_csv_v_allvarchar "1"
+    }
+    c_local _sq_csv_keys `"`=strtrim(`"`keys'"')'"'
+end
+
 * ----------------------------------------------------------------------------
 * parqit use — lazy view by default; , clear = read into memory now
 * ----------------------------------------------------------------------------
+
+* INT64-PROTECT-1 / BINARY-DECODE-1: one validator for the read-time type
+* options, so every command that accepts them refuses the same typos with the
+* same words (the plugin re-checks, but a user must never see a wire message).
+program define _parqit_typeopts
+    version 16.0
+    syntax , who(string) [ int64(string) binary(string) ]
+    if (`"`int64'"' != "" & !inlist(`"`int64'"', "refuse", "round", "string")) {
+        di as err `"`who': int64() must be refuse, round or string"'
+        exit 198
+    }
+    if (`"`binary'"' != "" & !inlist(`"`binary'"', "drop", "text", "hex")) {
+        di as err `"`who': binary() must be drop, text or hex"'
+        exit 198
+    }
+end
 
 program define _parqit_use, rclass
     version 16.0
     * owned is INTERNAL (not in the help): the view takes ownership of the
     * backing file and the plugin erases it on close/replace — only
     * parqit open _data passes it for its per-promotion bridge snapshots.
-    capture syntax [anything(name=namelist)] using/ [, clear Name(name) OWNed RELAXed ENCoding(string)]
+    capture syntax [anything(name=namelist)] using/ ///
+        [, clear Name(name) OWNed RELAXed ENCoding(string) INT64(string) BINARY(string) FILEname(name) CSV(string)]
     if (_rc) {
-        capture syntax anything(name=fileraw id="filename") [, clear Name(name) OWNed RELAXed ENCoding(string)]
+        capture syntax anything(name=fileraw id="filename") ///
+            [, clear Name(name) OWNed RELAXed ENCoding(string) INT64(string) BINARY(string) FILEname(name) CSV(string)]
         if (_rc) {
             * USE-OPT-1 (audit 2026-08-22, A5-13): an unknown option used to
             * surface as "filename required" — name the option instead
-            capture syntax [anything] [using/] [, clear Name(name) OWNed RELAXed ENCoding(string) *]
+            capture syntax [anything] [using/] ///
+                [, clear Name(name) OWNed RELAXed ENCoding(string) INT64(string) BINARY(string) FILEname(name) CSV(string) *]
             if (!_rc & `"`options'"' != "") {
                 di as err `"parqit use: option `options' not allowed"'
                 exit 198
             }
-            syntax anything(name=fileraw id="filename") [, clear Name(name) OWNed RELAXed ENCoding(string)]
+            syntax anything(name=fileraw id="filename") ///
+                [, clear Name(name) OWNed RELAXed ENCoding(string) INT64(string) BINARY(string) FILEname(name) CSV(string)]
         }
         local using `fileraw'
         local namelist
     }
+    * INT64-PROTECT-1 / BINARY-DECODE-1: read-time type options, validated
+    * here so a typo never reaches the plugin as a silent fallback
+    _parqit_typeopts, who("parqit use") int64(`"`int64'"') binary(`"`binary'"')
+    local _sq_int64 "`int64'"
+    local _sq_binary "`binary'"
     local _sq_relaxed = ("`relaxed'" != "")
+    * FILENAME-1: filename(newvar) adds a string column holding the path each
+    * row came from. syntax's `name' type already refuses an illegal or
+    * over-long variable name, loudly and by name.
+    local _sq_filename "`filename'"
     _parqit_ensure_plugin
     if ("`clear'" != "" & "`name'" != "") {
         di as err "parqit use: name() applies to lazy views; omit clear"
@@ -566,6 +654,28 @@ program define _parqit_use, rclass
         di as txt "note: encoding() applies to a .dta/Excel source bridged to Parquet; " ///
             "a Parquet/CSV source is read as UTF-8 (ignored)"
     }
+    * FILENAME-1: a .dta/Excel source is scanned through a package-owned
+    * Parquet bridge in the temporary directory, so the path the engine reports
+    * is that bridge, not the file the user named — refuse instead of handing
+    * back a meaningless path. The bridge is discarded; memory is untouched.
+    if ("`filename'" != "" & `"`_sq_bridge'"' != "") {
+        capture _parqit_bridge_discard `"`_sq_bridge'"'
+        di as err "parqit use: filename() reports the path the engine reads;" ///
+            " a .dta or Excel source is read through a temporary Parquet bridge," ///
+            " whose path says nothing about your file — write it with" ///
+            " {bf:parqit save} first and read the Parquet"
+        exit 198
+    }
+    * CSV-OPT-1: csv() changes how delimited text is parsed and typed, so it
+    * must never be ignored on a source that is not delimited text.
+    if (`"`csv'"' != "" & "`_sq_fmt'" != "csv") {
+        if (`"`_sq_bridge'"' != "") capture _parqit_bridge_discard `"`_sq_bridge'"'
+        di as err "parqit use: csv() applies to delimited text" ///
+            " (.csv, .tsv, .txt, .tab); this source is read as `_sq_fmt'"
+        exit 198
+    }
+    local _sq_csv_keys ""
+    if (`"`csv'"' != "") _parqit_csv_opts, `csv'
 
     if ("`clear'" == "") {
         * open (or replace) the named lazy view — schema probed, no rows loaded
@@ -1292,13 +1402,26 @@ end
 
 program define _parqit_collect, rclass
     version 16.0
-    syntax [, clear]
+    syntax [, clear INT64(string) BINARY(string)]
+    * INT64-PROTECT-1: int64() decides how a column beyond 2^53 reaches Stata
+    * memory, so it belongs on the materialiser as well as on use.
+    * BINARY-DECODE-1: binary() cannot act here — the lazy boundary decides a
+    * view's columns when it is OPENED, so a BLOB is already gone by now.
+    * Refuse it loudly, naming where it does work, instead of ignoring it.
+    if (`"`binary'"' != "") {
+        di as err "parqit collect: binary() is an option of parqit use " ///
+            "(the view's columns are decided when it is opened); reopen with " ///
+            "parqit use using ..., binary(text|hex)"
+        exit 198
+    }
+    _parqit_typeopts, who("parqit collect") int64(`"`int64'"')
     if ("`clear'" == "" & c(changed) & (c(N) > 0 | c(k) > 0)) {
         error 4
     }
     _parqit_ensure_plugin
     tempfile req resp strl
     local _sq_limit -1
+    local _sq_int64 "`int64'"
     local _sq_cmdlabel "collect"
     mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
     capture noisily plugin call parqit_plugin, view_collect_prepare `reqhex'
@@ -1758,7 +1881,8 @@ end
 program define _parqit_lossy_notes
     version 16.0
     syntax [, ext(string) frac(string) TRANSvars(string) ///
-        TRANScells(integer 0) TRANSmeta(integer 0) ENCoding(string) SOURCE(string)]
+        TRANScells(integer 0) TRANSmeta(integer 0) ENCoding(string) SOURCE(string) ///
+        XMvars(string) XMhint]
     * BRIDGE-LOSS-1: a source() names the bridged file so the reader knows the
     * conversions happened while snapshotting it, not to the dataset in memory
     if (`"`source'"' != "" & (`transcells' > 0 | `transmeta' > 0 | ///
@@ -1796,6 +1920,20 @@ program define _parqit_lossy_notes
             as res "." as txt ", so rows that native Stata did not match now " ///
             "match; the join reports it — see " ///
             "{help parqit##limitations:Limitations in the parqit help}"
+        * XMISS-1: the loss is now optional — say how to avoid it (only where
+        * the option exists: a save of the dataset in memory)
+        if ("`xmhint'" != "") {
+            di as txt "note: add the " as res "xmissing" as txt " option to " ///
+                as res "parqit save" as txt " to preserve them in companion " ///
+                "columns that parqit use restores"
+        }
+    }
+    if (`"`xmvars'"' != "") {
+        * XMISS-1: preserved, not lost — the reader restores them
+        di as txt "note: extended missing values (.a-.z) in " ///
+            as res `"`xmvars'"' ///
+            as txt " were preserved in companion columns (xmissing); " ///
+            "parqit use restores them, a lazy view reads them as ."
     }
     if (`"`frac'"' != "") {
         di as txt "note: non-integer date/period values in " ///
@@ -1807,9 +1945,21 @@ program define _parqit_save, rclass
     version 16.0
     syntax anything(name=target id="filename") [, replace Data ///
         COMPression(string) compression_level(integer -1) PARTition_by(string) ///
-        Chunk(integer -1) ENCoding(string) COPYsource partitions(string)]
+        Chunk(integer -1) ENCoding(string) COPYsource partitions(string) XMISSing]
 
     local dest `target'
+    * XMISS-1: xmissing preserves .a-.z in companion columns; it belongs to a
+    * save of the dataset in memory (a view carries no extended missings and
+    * copysource copies the file as it is) and to a whole-tree write
+    if ("`xmissing'" != "" & "`copysource'" != "") {
+        di as err "parqit save: xmissing is not available with copysource (the source file is copied as it is)"
+        exit 198
+    }
+    if ("`xmissing'" != "" & "`partitions'" != "") {
+        di as err "parqit save: xmissing is not available with partitions(`partitions');" ///
+            " every file of a Hive tree must carry the same parqit metadata — write the whole tree (replace)"
+        exit 198
+    }
     * PART-MODE-1: partitions(replace|append) updates an existing Hive tree
     * partition by partition; it needs partition_by() and excludes replace
     local partitions = strlower(strtrim("`partitions'"))
@@ -1839,6 +1989,11 @@ program define _parqit_save, rclass
         exit 198
     }
     if ("`parqit_view_alive'" == "1" & "`data'" == "") {
+        if ("`xmissing'" != "") {
+            di as err "parqit save: xmissing applies to a save of the dataset in memory" ///
+                " (a lazy view carries no extended missings); add the data option (or close the view)"
+            exit 198
+        }
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_current")))
         di as txt "(materialising view " as res "`vname'" ///
             as txt " — the dataset in memory is untouched; use the " ///
@@ -1890,6 +2045,7 @@ program define _parqit_save, rclass
     local _sq_dtalabel `: data label'
     local _sq_sortedby `: sortedby'
     local _sq_direct = 0
+    local _sq_xmissing = ("`xmissing'" != "")
     * COPYSOURCE-1 (audit 2026-08-22, A4-1/A4-2): the source-copy path never
     * runs automatically any more — c(changed) cannot prove the dataset equals
     * the file (Stata exempts sort/gsort and Mata st_store/st_view writes). It
@@ -1959,9 +2115,11 @@ program define _parqit_save, rclass
     mata: st_local("destabs", _parqit_unhex(st_local("parqit_dest")))
     _parqit_lossy_notes, ext(`"`parqit_ext_missing'"') frac(`"`parqit_frac_dates'"') ///
         transvars(`"`parqit_transcoded_vars'"') transcells(`parqit_transcoded_cells') ///
-        transmeta(`parqit_transcoded_meta') encoding(`"`parqit_encoding'"')
+        transmeta(`parqit_transcoded_meta') encoding(`"`parqit_encoding'"') ///
+        xmvars(`"`parqit_xm_vars'"') xmhint
     di as txt "(" as res "`parqit_written_n'" as txt " obs, " ///
         as res "`parqit_written_k'" as txt `" vars written to `destabs')"'
+    return local xmissing_vars `"`parqit_xm_vars'"'
     return local filename `"`destabs'"'
     return scalar N = `parqit_written_n'
     return scalar k = `parqit_written_k'
@@ -2138,12 +2296,29 @@ program define _parqit_set
      * the engine all receive the real path. */
     local value `0'
     local value = strtrim(`"`value'"')
-    if !inlist("`what'", "statamissing", "threads", "memory_limit", "tempdir") {
-        di as err "parqit set: expected statamissing|threads|memory_limit|tempdir <value>"
+    if !inlist("`what'", "statamissing", "int64", "fill_threads", "stream_buffer_mb", "threads", "memory_limit", "tempdir") {
+        di as err "parqit set: expected statamissing|int64|fill_threads|stream_buffer_mb|threads|memory_limit|tempdir <value>"
+        exit 198
+    }
+    * FILL-THREADS-SET-1 / CPUS-1: the in-session fill-worker count (auto, or a
+    * number up to the CPUs available to this process; larger is clamped and
+    * said); the plugin parses the number strictly and keeps it for the session
+    if ("`what'" == "fill_threads" & `"`value'"' == "") {
+        di as err "parqit set fill_threads: auto, or a whole number of fill workers (up to the CPUs available)"
+        exit 198
+    }
+    * STREAM-BUFFER-SET-1: the in-session streaming-buffer cap in megabytes
+    if ("`what'" == "stream_buffer_mb" & `"`value'"' == "") {
+        di as err "parqit set stream_buffer_mb: auto, 0 (the engine's default buffer) or a whole number of megabytes"
         exit 198
     }
     if ("`what'" == "statamissing" & !inlist("`value'", "on", "off")) {
         di as err "parqit set statamissing: on or off"
+        exit 198
+    }
+    * INT64-PROTECT-1: the session default for columns beyond 2^53
+    if ("`what'" == "int64" & !inlist(`"`value'"', "refuse", "round", "string")) {
+        di as err "parqit set int64: refuse, round or string"
         exit 198
     }
     * SET-TEMPDIR-1: DuckDB accepts a non-existent spill dir silently and only
@@ -2161,6 +2336,9 @@ program define _parqit_set
     mata: st_local("valhex", _parqit_hex(st_local("value")))
     capture noisily plugin call parqit_plugin, set `whathex' `valhex'
     if (_rc) exit _rc
+    * CPUS-1: a thread count above the CPUs available to this process is
+    * clamped, never refused — and always said
+    if (`"`parqit_set_note'"' != "") di as txt "note: parqit set `parqit_set_note'"
 end
 
 * ----------------------------------------------------------------------------
@@ -2424,15 +2602,20 @@ program define _parqit_mergein, rclass
     }
     syntax using/ [, KEEPUSing(string) keep(string) GENerate(name)       ///
         NOGENerate ASSERT(string) UPDATE replace NOLabel NONotes FORCE       ///
-        NOREPort]
+        NOREPort INT64(string)]
+    * INT64-PROTECT-1: the disk side is read by parqit use, so the protective
+    * default (and the remedy) apply here too — forward the option
+    _parqit_typeopts, who("parqit mergein") int64(`"`int64'"')
+    local i64
+    if ("`int64'" != "") local i64 int64(`int64')
 
     * read only keys + keepusing of the disk side (projection pushdown)
     tempname fr
     tempfile tmp
     frame create `fr'
     frame `fr' {
-        if ("`keepusing'" != "") qui parqit use `keys' `keepusing' using `"`using'"', clear
-        else                     qui parqit use using `"`using'"', clear
+        if ("`keepusing'" != "") qui parqit use `keys' `keepusing' using `"`using'"', clear `i64'
+        else                     qui parqit use using `"`using'"', clear `i64'
         local disk_n = _N
         qui save `"`tmp'"', replace
     }
@@ -2464,15 +2647,19 @@ program define _parqit_appendin
     * keep() names variables of the USING file (native append semantics), so it
     * must not be validated against the in-memory master — pass it through as a
     * string and let native append judge it
-    syntax using/ [, KEEP(string) FORCE]
+    syntax using/ [, KEEP(string) FORCE INT64(string)]
+    * INT64-PROTECT-1: the disk side is read by parqit use — forward the option
+    _parqit_typeopts, who("parqit appendin") int64(`"`int64'"')
+    local i64
+    if ("`int64'" != "") local i64 int64(`int64')
 
     * read only the keep() columns of the disk side (projection pushdown)
     tempname fr
     tempfile tmp
     frame create `fr'
     frame `fr' {
-        if ("`keep'" != "") qui parqit use `keep' using `"`using'"', clear
-        else                qui parqit use using `"`using'"', clear
+        if ("`keep'" != "") qui parqit use `keep' using `"`using'"', clear `i64'
+        else                qui parqit use using `"`using'"', clear `i64'
         local disk_n = _N
         qui save `"`tmp'"', replace
     }
@@ -2866,6 +3053,41 @@ void _parqit_emit(string scalar req, string scalar payload)
 
 // ---- request writers --------------------------------------------------
 
+// CSV-OPT-1: the csv(...) sub-options as a JSON object of hex-encoded values.
+// types() travels as an ARRAY of hex `name:TYPE` tokens, tokenised here, so a
+// column name is never whitespace-split on the plugin side. "" when unused.
+string scalar _parqit_csv_opts_json()
+{
+    string rowvector keys, p
+    real scalar      i
+
+    keys = tokens(st_local("_sq_csv_keys"))
+    if (cols(keys) == 0) return("")
+    p = J(1, 0, "")
+    for (i = 1; i <= cols(keys); i++) {
+        if (keys[i] == "types")
+            p = (p, _parqit_jpair("types",
+                     _parqit_jlist(tokens(st_local("_sq_csv_v_types")))))
+        else
+            p = (p, _parqit_jtext(keys[i],
+                     st_local("_sq_csv_v_" + keys[i])))
+    }
+    return(_parqit_jobj(p))
+}
+
+// FILENAME-1 / CSV-OPT-1: the source-side read options both `parqit use`
+// forms carry (the eager use_prepare and the lazy view_open).
+string rowvector _parqit_source_opts(string rowvector p)
+{
+    string scalar cj
+
+    if (st_local("_sq_filename") != "")
+        p = (p, _parqit_jtext("filename", st_local("_sq_filename")))
+    cj = _parqit_csv_opts_json()
+    if (cj != "") p = (p, _parqit_jpair("csvopts", cj))
+    return(p)
+}
+
 void _parqit_wr_use_request(string scalar req, string scalar resp,
                              string scalar strl)
 {
@@ -2884,6 +3106,15 @@ void _parqit_wr_use_request(string scalar req, string scalar resp,
     if (st_local("_sq_fmt") == "csv") {
         p = (p, _parqit_jpair("csv", "true"))
     }
+    /* INT64-PROTECT-1 / BINARY-DECODE-1: hex-encoded like every other
+     * user-originated string; absent means "the session default" */
+    if (st_local("_sq_int64") != "") {
+        p = (p, _parqit_jtext("int64", st_local("_sq_int64")))
+    }
+    if (st_local("_sq_binary") != "") {
+        p = (p, _parqit_jtext("binary", st_local("_sq_binary")))
+    }
+    p = _parqit_source_opts(p)
     p = (p, _parqit_jtext("respfile", resp),
             _parqit_jtext("strlfile", strl),
             _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
@@ -2912,6 +3143,15 @@ void _parqit_wr_view_open_request(string scalar req)
     if (st_local("_sq_fmt") == "csv") {
         p = (p, _parqit_jpair("csv", "true"))
     }
+    /* INT64-PROTECT-1: carried by the view and applied at collect.
+     * BINARY-DECODE-1: acts at the boundary, i.e. right here. */
+    if (st_local("_sq_int64") != "") {
+        p = (p, _parqit_jtext("int64", st_local("_sq_int64")))
+    }
+    if (st_local("_sq_binary") != "") {
+        p = (p, _parqit_jtext("binary", st_local("_sq_binary")))
+    }
+    p = _parqit_source_opts(p)
     p = (p, _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
     _parqit_emit(req, _parqit_jobj(p))
 }
@@ -2949,6 +3189,11 @@ void _parqit_wr_collect_request(string scalar req, string scalar resp,
     if (st_local("_sq_pf") != "" & st_local("_sq_pf") != "0") {
         p = (p, _parqit_jpair("f", st_local("_sq_pf")),
                 _parqit_jpair("l", st_local("_sq_pl")))
+    }
+    /* INT64-PROTECT-1: only `parqit collect` sets this; head/list leave it
+     * empty and the plugin previews >2^53 columns as exact text */
+    if (st_local("_sq_int64") != "") {
+        p = (p, _parqit_jtext("int64", st_local("_sq_int64")))
     }
     _parqit_emit(req, _parqit_jobj(p))
 }
@@ -3148,6 +3393,8 @@ void _parqit_wr_save_request(string scalar req)
                               _parqit_jlist(tokens(st_local("_sq_sortedby"))))
     j = j + "," + _parqit_jpair("replace",
                               st_local("_sq_replace") == "1" ? "true" : "false")
+    j = j + "," + _parqit_jpair("xmissing",
+                              st_local("_sq_xmissing") == "1" ? "true" : "false")
     j = j + "," + _parqit_jtext("compression",
                               strlower(strtrim(st_local("_sq_comp"))))
     j = j + "," + _parqit_jpair("compression_level", st_local("_sq_complevel"))
