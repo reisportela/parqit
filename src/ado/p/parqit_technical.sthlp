@@ -480,6 +480,20 @@ pins {it:n} workers for atypical very wide or string-heavy reads. It is read by
 the plugin via {cmd:getenv}, so a Stata {cmd:global} does not reach it. The
 parallel and serial fills are byte-identical.{p_end}
 
+{phang}o {bf:The fill reads a streamed result.} The engine's chunks are handed
+to the fill directly, instead of first being collected into a materialised
+result and copied out again. The buffer that holds them is sized for each read
+from the result's estimated size, so the scan never has to stop and wait and
+engine-side peak memory stays bounded by the result, as before (a little lower).
+{cmd:PARQIT_STREAM_BUFFER_MB=}{it:n} caps that buffer at {it:n} megabytes: on
+plain reads peak memory drops by up to about half, at the price of a slower,
+stop-and-go fill once the cap falls below roughly half the result;
+{cmd:0} leaves the engine's own 1 MB default, which uses the least memory and
+is the slowest on wide numeric reads. {cmd:PARQIT_FETCH_MATERIALIZED=1}
+restores the earlier materialised fetch. Both are operating-system variables
+read via {cmd:getenv}, like {cmd:PARQIT_FILL_THREADS}, and neither changes any
+value: the fetches are byte-identical.{p_end}
+
 
 {marker expressions}{...}
 {title:Expression dialect}
@@ -686,7 +700,10 @@ The following knobs live outside {cmd:parqit set}. The Stata global
 takes precedence over the adopath search for {cmd:parqit.plugin};
 {cmd:global PARQIT_NOTIPS 1} mutes the one-line performance tips; and the
 operating-system environment variable {cmd:PARQIT_FILL_THREADS} controls
-the parallel memory fill (see {help parqit_technical##perf:Performance tips}).
+the parallel memory fill, {cmd:PARQIT_STREAM_BUFFER_MB} caps how much result
+the engine keeps buffered ahead of that fill and {cmd:PARQIT_FETCH_MATERIALIZED=1}
+restores the earlier materialised fetch (see
+{help parqit_technical##perf:Performance tips}).
 The operating-system variable {cmd:PARQIT_SAVE_NOARROW} selects the batched
 memory writer (see {help parqit_technical##materialisers:Materialisers}).
 

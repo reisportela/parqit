@@ -306,6 +306,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_exprtrans.cpp
         tests/unit/test_view.cpp
         tests/unit/test_arrow_copy_bench.cpp
+        tests/unit/test_streaming.cpp
     )
     target_include_directories(parqit_tests PRIVATE
         src

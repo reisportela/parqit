@@ -553,6 +553,18 @@ your shell; the plugin reads it via `getenv`, so a Stata `global` will not reach
 it). `PARQIT_FILL_THREADS=n` pins `n` workers. The parallel and serial fills are
 byte-identical — only the scheduling differs.
 
+That fill reads a *streamed* engine result: the engine's chunks are handed to
+the fill directly instead of first being collected into a materialised result
+and copied out again. The buffer that holds them is sized per read from the
+result's estimated size, so the scan finishes without stalling and engine-side
+peak memory stays bounded by the result, as before (measured slightly lower).
+`PARQIT_STREAM_BUFFER_MB=n` caps that buffer at `n` MB: on plain reads peak
+memory drops by up to about half, at the price of a slower, stop-and-go fill
+once the cap falls below roughly half the result (`0` leaves the engine's own
+1 MB default: least memory, slowest wide numeric reads).
+`PARQIT_FETCH_MATERIALIZED=1` restores the earlier materialised fetch — a
+conservative fallback that changes no value.
+
 ## Examples
 
 ```stata

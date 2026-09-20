@@ -386,6 +386,33 @@ bool Session::set_temp_directory(const std::string &dir, std::string *err) {
     return true;
 }
 
+/* PERF-STREAM-1. `streaming_buffer_size` is a LOCAL (connection) setting whose
+ * engine default is 1,000,000 bytes (duckdb/main/client_config.hpp:83), split
+ * 60% read queue / 40% in-progress batches
+ * (main/buffered_data/batched_buffered_data.cpp:19-20). Once a producer's share
+ * is full its sink parks, and the consumer only unparks sinks when the read
+ * queue has gone completely EMPTY (BatchedBufferedData::ExecuteTaskInternal,
+ * batched_buffered_data.cpp:127-140 -> UnblockSinks, 42-60): every time the cap
+ * is reached the parallel scan stops and restarts. At the engine default a wide
+ * multi-row-group read spends most of its time in that cycle, which is why the
+ * fetch sizes this from the result it is about to read instead of using a fixed
+ * number. Note DuckDB may still let the read queue overshoot (its own FIXME in
+ * execution/operator/helper/physical_buffered_batch_collector.cpp:66-68), so
+ * this is a soft cap; and it is a cap, not a reservation — only chunks the
+ * engine actually produced occupy memory. */
+bool Session::set_streaming_buffer_bytes(long long bytes, std::string *err) {
+    if (!ensure_open()) {
+        if (err) *err = last_error_;
+        return false;
+    }
+    if (bytes < 1) bytes = 1;
+    /* 'B' is bytes: StringUtil::TryParseFormattedBytes accepts byte/bytes/b
+     * with multiplier 1 (duckdb src/common/string_util.cpp:316-317), and
+     * StreamingBufferSizeSetting::SetLocal parses the value with
+     * DBConfig::ParseMemoryLimit (src/main/settings/custom_settings.cpp:1600-1603). */
+    return exec("SET streaming_buffer_size = '" + std::to_string(bytes) + "B'", err);
+}
+
 bool Session::exec(const std::string &sql, std::string *err) {
     duckdb_result res;
     if (!query(sql, &res, err)) return false;
@@ -405,6 +432,68 @@ bool Session::query(const std::string &sql, duckdb_result *out, std::string *err
         duckdb_destroy_result(out);
         return false;
     }
+    return true;
+}
+
+bool Session::query_streaming(const std::string &sql, duckdb_result *out,
+                              std::string *err) {
+    if (!ensure_open()) {
+        if (err) *err = last_error_;
+        return false;
+    }
+    /* duckdb_prepare: duckdb.h:1899. On a throwing failure the out handle is
+     * left untouched and the C wrapper is deleted (capi/prepared-c.cpp:84-103),
+     * hence the nullptr init; duckdb_prepare_error (duckdb.h:1918,
+     * prepared-c.cpp:105-117) and duckdb_destroy_prepare (duckdb.h:1907,
+     * prepared-c.cpp:480-482) both accept a null handle. */
+    duckdb_prepared_statement stmt = nullptr;
+    if (duckdb_prepare(con_, sql.c_str(), &stmt) != DuckDBSuccess) {
+        const char *msg = duckdb_prepare_error(stmt);
+        last_error_ = (msg && *msg) ? msg : "unknown DuckDB error";
+        if (err) *err = last_error_;
+        duckdb_destroy_prepare(&stmt);
+        return false;
+    }
+    /* duckdb_pending_prepared_streaming: duckdb.h:2315 (carries a deprecation
+     * notice, so tests/unit/test_streaming.cpp pins it — a DuckDB bump that
+     * drops it fails there, never at a user). It is the only entry point that
+     * asks for a streaming result; capi/pending-c.cpp:41-44.
+     * duckdb_pending_error: duckdb.h:2335; duckdb_destroy_pending: duckdb.h:2325
+     * (required even when this returns DuckDBError). */
+    duckdb_pending_result pending = nullptr;
+    if (duckdb_pending_prepared_streaming(stmt, &pending) != DuckDBSuccess) {
+        const char *msg = duckdb_pending_error(pending);
+        last_error_ = (msg && *msg) ? msg : "unknown DuckDB error";
+        if (err) *err = last_error_;
+        duckdb_destroy_pending(&pending);
+        duckdb_destroy_prepare(&stmt);
+        return false;
+    }
+    /* duckdb_execute_pending: duckdb.h:2375. It returns as soon as the stream's
+     * collector has a chunk ready (or the query finished); the rest of the
+     * pipeline keeps running while the caller fetches. */
+    if (duckdb_execute_pending(pending, out) != DuckDBSuccess) {
+        const char *msg = duckdb_result_error(out); /* duckdb.h:1368 */
+        last_error_ = (msg && *msg) ? msg : "unknown DuckDB error";
+        if (err) *err = last_error_;
+        duckdb_destroy_result(out);
+        duckdb_destroy_pending(&pending);
+        duckdb_destroy_prepare(&stmt);
+        return false;
+    }
+    /* Both handles die here, while the stream stays live:
+     *  - duckdb_execute_pending resets the pending wrapper's PendingQueryResult
+     *    before translating the result (capi/pending-c.cpp:165), so
+     *    duckdb_destroy_pending has nothing left to Close (capi/pending-c.cpp:46-56);
+     *  - the C prepared-statement wrapper owns only a PreparedStatement
+     *    (capi_internal.hpp:50-57), which holds shared_ptrs and has an empty
+     *    destructor (prepared_statement.hpp:35-37, prepared_statement.cpp:18-19).
+     *    The running query keeps its own shared_ptr to the same
+     *    PreparedStatementData in the client context's active query
+     *    (client_context.cpp:604), so the plan the stream is executing cannot be
+     *    freed here. */
+    duckdb_destroy_pending(&pending);
+    duckdb_destroy_prepare(&stmt);
     return true;
 }
 

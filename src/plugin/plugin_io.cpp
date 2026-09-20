@@ -2888,6 +2888,20 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
  * fetch+convert with the fill instead of serialising them, and processes each
  * chunk while its Arrow buffers are still cache-warm.
  *
+ * PERF-STREAM-1: the chunks the producer pulls now come from a LIVE streaming
+ * result (Session::query_streaming), not from a finished in-memory collection.
+ * duckdb_query "stores the full (materialized) result" (duckdb.h:1209), so until
+ * now the engine's parallel scan ran to completion, into one extra full copy of
+ * the result, before the first cell was written to Stata; the pipeline only
+ * overlapped the *walk* of that copy with the fill. With a streaming result the
+ * engine's chunks reach the fill directly — no collection, no copy-out; with
+ * the default buffer (>= the estimated result) the scan still completes before
+ * the first fetch (parallel/executor.cpp:582-584: a streaming execute returns
+ * only when the collector is blocked or the query finished), so the gain is the
+ * removed copies, not overlap. Nothing else changes: same loops, same fill_column, same
+ * messages — only where a chunk comes from. PARQIT_FETCH_MATERIALIZED=1 restores
+ * the materialised fetch exactly (escape hatch and same-binary A/B switch).
+ *
  * Race-freedom of the shared state: the strL sidecar FILE is written under
  * strl_mu (rare, position-encoded headers, so the lock is cheap and order does
  * not matter); the Inf/NUL tallies are per-worker vectors reduced after the join;
@@ -2929,6 +2943,69 @@ int fill_thread_count(long long nrows) {
     if (hw == 0) hw = 4;
     int t = static_cast<int>(std::min<unsigned>(hw, kFillThreadCap));
     return t < 1 ? 1 : t;
+}
+
+/* PERF-STREAM-1 escape hatch: PARQIT_FETCH_MATERIALIZED=1 fetches through the
+ * pre-streaming duckdb_query path (a fully materialised result). Read with
+ * getenv, like PARQIT_FILL_THREADS, so it is set before Stata starts and a
+ * Stata `global` cannot reach it. */
+bool fetch_materialized() {
+    const char *e = std::getenv("PARQIT_FETCH_MATERIALIZED");
+    return e && std::strcmp(e, "1") == 0;
+}
+
+/* Smallest streaming buffer the fetch will ask for. Below roughly this the
+ * park/unpark cycle dominates even a small read, and because the buffer is a
+ * cap and not a reservation a floor above a tiny result costs nothing. */
+constexpr long long kStreamBufferFloor = 16LL * 1000 * 1000;
+
+/* PARQIT_STREAM_BUFFER_MB, the user's explicit ceiling on the streaming buffer:
+ *   unset / unparsable -> 0  : no ceiling beyond the estimated result size;
+ *   n > 0              -> n MB (capped at 4096), authoritative even below the
+ *                         floor — a smaller buffer is a deliberate memory/time
+ *                         trade, and is documented as such;
+ *   0                  -> -1 : leave DuckDB's own default (1 MB), i.e. minimum
+ *                         memory and the slowest fill-bound reads.
+ * Read with getenv, like PARQIT_FILL_THREADS, so a Stata `global` cannot set
+ * it and it is fixed for the whole session. */
+long long stream_buffer_cap_bytes() {
+    const char *e = std::getenv("PARQIT_STREAM_BUFFER_MB");
+    if (!e) return 0;
+    char *end = nullptr;
+    long long v = std::strtoll(e, &end, 10);
+    if (end == e || *end != '\0' || v < 0) return 0;
+    if (v == 0) return -1;
+    return (v > 4096 ? 4096 : v) * 1000000LL;
+}
+
+/* Test-only deterministic fetch failure (same idea as PARQIT_TEST_FAIL_THREAD_AT
+ * below): PARQIT_TEST_FAIL_FETCH_AT=<n> makes the n-th fetched chunk (0-based)
+ * behave like a failed fetch. -1 (unset or unparsable) = no injection. */
+long long fetch_fail_at() {
+    const char *e = std::getenv("PARQIT_TEST_FAIL_FETCH_AT");
+    if (!e) return -1;
+    char *end = nullptr;
+    long long v = std::strtoll(e, &end, 10);
+    return (end != e && *end == '\0' && v >= 0) ? v : -1;
+}
+
+/* One fetch step, shared by the serial and the parallel producer loop. Returns
+ * NULL at end-of-stream, on a DuckDB error (which the fetch records on the
+ * result — capi/stream-c.cpp:17-37, read afterwards with duckdb_result_error)
+ * and on an injected failure, whose message it writes to *injected. The
+ * injection destroys the chunk and reports nothing else, so the caller runs
+ * exactly the abort/join/cleanup code a real fetch error runs. When no hook is
+ * set (fail_at < 0) this is one predictable integer compare per chunk. */
+duckdb_data_chunk fetch_next(duckdb_result &res, long long fail_at,
+                             long long *nfetched, std::string *injected) {
+    duckdb_data_chunk chunk = duckdb_fetch_chunk(res);
+    if (chunk && (*nfetched)++ == fail_at) {
+        duckdb_destroy_data_chunk(&chunk);
+        *injected =
+            "deterministic test injection at chunk " + std::to_string(fail_at);
+        return nullptr;
+    }
+    return chunk;
 }
 
 /* Shared state of the fill pipeline: a bounded queue of converted chunks plus the
@@ -3088,7 +3165,40 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
     }
     Session &s = Session::instance();
     duckdb_result res;
-    if (!s.query("SELECT " + sel + " FROM " + prep.source_sql, &res, &err)) {
+    /* PERF-STREAM-1: stream the result instead of materialising it first (see
+     * the "parallel fill" note above). Either way the caller owns `res` and the
+     * loops below are unchanged; a streaming result only feeds them as the
+     * engine produces rows. An error the engine raises before the first chunk is
+     * ready (a corrupt page, a bad cast) still surfaces here, exactly as it did
+     * from duckdb_query, and takes the same branch. */
+    const bool materialized = fetch_materialized();
+    /* Size the streaming buffer for THIS result, before the stream exists (no
+     * statement may run on the connection once it does). The rule: normally at
+     * least the whole estimated result, because a cap the producers actually
+     * reach stops and restarts the parallel scan (see
+     * Session::set_streaming_buffer_bytes); the estimate is a cap, not a
+     * reservation, so peak memory is still bounded by the result itself —
+     * i.e. never more than the materialised copy this replaces (measured a
+     * little less; the whole result sits in chunks when the fetch starts). A
+     * user who wants less memory sets PARQIT_STREAM_BUFFER_MB and accepts a
+     * slower, stop-and-go fill-bound read. */
+    if (!materialized) {
+        const long long cap = stream_buffer_cap_bytes();
+        if (cap >= 0) {
+            long long want =
+                parqit::estimate_transfer_bytes(prep.plans, prep.nrows);
+            if (want < kStreamBufferFloor) want = kStreamBufferFloor;
+            if (cap > 0 && want > cap) want = cap;
+            std::string berr;
+            if (!s.set_streaming_buffer_bytes(want, &berr)) {
+                cry("parqit use: could not size the streaming buffer: " + berr);
+                return kRcEngine;
+            }
+        }
+    }
+    const std::string fetch_sql = "SELECT " + sel + " FROM " + prep.source_sql;
+    if (!(materialized ? s.query(fetch_sql, &res, &err)
+                       : s.query_streaming(fetch_sql, &res, &err))) {
         /* MSG-RACE-1 (audit 2026-08-22, V2.7): a source replaced between the
          * identity check above and this bind (a planned column no longer
          * exists) surfaced as a raw Binder Error; re-check the identities and
@@ -3157,21 +3267,42 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
         }
     }
 
-    duckdb_arrow_options aopts;
-    duckdb_connection_get_arrow_options(s.con(), &aopts);
+    /* The Arrow options come from the RESULT, not from the connection
+     * (duckdb.h:1281): while a streaming result is live no call may be made on
+     * its connection, and the result carries the very same snapshot — every
+     * collector builds its result with the context's GetClientProperties()
+     * (physical_buffered_batch_collector.cpp:103, physical_buffered_collector.cpp:65,
+     * physical_batch_collector.cpp:37, physical_materialized_collector.cpp:71),
+     * which is what duckdb_connection_get_arrow_options reads too
+     * (capi/duckdb-c.cpp:159-171). */
+    duckdb_arrow_options aopts = duckdb_result_get_arrow_options(&res);
 
     std::vector<long long> inf_counts(k, 0), nul_counts(k, 0), rng_counts(k, 0),
         subms_counts(k, 0);
     long long base = 0;
     ST_retcode rc = 0;
     const int nthreads = fill_thread_count(prep.nrows);
+    /* Streaming bookkeeping, shared by both fill paths: `end_of_stream` is true
+     * only when a fetch returned NULL with no error recorded — i.e. the result
+     * was drained to its end and DuckDB cleaned the query up itself
+     * (stream_query_result.cpp:82-85). Anything else leaves an abandoned
+     * executor to cancel after the destroy. */
+    const long long fail_fetch_at = fetch_fail_at();
+    long long nfetched = 0;
+    std::string injected_err;
+    bool end_of_stream = false;
 
     if (nthreads <= 1) {
         /* Serial path — unchanged: one chunk at a time, every column inline.
          * Used for small reads and as the PARQIT_FILL_THREADS=0 escape hatch. */
         while (true) {
-            duckdb_data_chunk chunk = duckdb_fetch_chunk(res);
-            if (!chunk) break;
+            duckdb_data_chunk chunk =
+                fetch_next(res, fail_fetch_at, &nfetched, &injected_err);
+            if (!chunk) {
+                end_of_stream =
+                    injected_err.empty() && duckdb_result_error(&res) == nullptr;
+                break;
+            }
             ArrowArray arr;
             std::memset(&arr, 0, sizeof(arr));
             duckdb_error_data ed = duckdb_data_chunk_to_arrow(aopts, chunk, &arr);
@@ -3294,8 +3425,13 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                     fq.cv_not_empty.notify_all();
                     break;
                 }
-                duckdb_data_chunk chunk = duckdb_fetch_chunk(res);
-                if (!chunk) break; /* end of stream */
+                duckdb_data_chunk chunk =
+                    fetch_next(res, fail_fetch_at, &nfetched, &injected_err);
+                if (!chunk) { /* end of stream, DuckDB error or test injection */
+                    end_of_stream = injected_err.empty() &&
+                                    duckdb_result_error(&res) == nullptr;
+                    break;
+                }
                 ChunkSlot slot;
                 std::memset(&slot.arr, 0, sizeof(slot.arr));
                 duckdb_error_data ed =
@@ -3381,8 +3517,40 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 subms_counts[c] += subms_locals[t][c];
             }
     }
+    /* PERF-STREAM-1: a NULL chunk ends either loop, and it means end-of-stream
+     * OR an error the fetch recorded on the result (capi/stream-c.cpp:31-35).
+     * Read that error BEFORE the result is destroyed: on the streaming path it
+     * is the PRIMARY failure signal — without it a mid-stream engine error (a
+     * corrupt page in a late row group) would look like a short read, and only
+     * the row-count net below would catch it, with a misleading message. That
+     * net stays as the secondary check. */
+    if (rc == 0 && !injected_err.empty()) {
+        rc = kRcEngine;
+        err = injected_err;
+    }
+    if (rc == 0) {
+        const char *fetch_err = duckdb_result_error(&res); /* duckdb.h:1368 */
+        if (fetch_err) {
+            rc = kRcEngine;
+            err = strip_sql_position(fetch_err);
+        }
+    }
     duckdb_destroy_arrow_options(&aopts);
     duckdb_destroy_result(&res);
+    /* A streaming result destroyed before end-of-stream leaves the executor
+     * with parked tasks and open Parquet handles until the NEXT statement on
+     * the connection cancels it (ClientContext::InitialCleanup -> CleanupInternal
+     * -> Executor::CancelTasks, client_context.cpp:689-693 and 311-318); a clean
+     * end-of-stream has already cleaned up by itself (stream_query_result.cpp:82-85).
+     * Force that cancel now with one trivial statement, so a failed or
+     * interrupted read never leaves a file handle open (which on Windows would
+     * block a later replace of the very file) or threads parked in the pool.
+     * Its outcome is deliberately ignored: this is cleanup, and rc/err already
+     * carry the real failure. */
+    if (!materialized && !end_of_stream) {
+        std::string cleanup_err;
+        Session::instance().exec("SELECT 1", &cleanup_err);
+    }
     if (strl_spill) {
         bool flush_ok = (std::fflush(strl_spill) == 0);
         flush_ok = (std::fclose(strl_spill) == 0) && flush_ok;

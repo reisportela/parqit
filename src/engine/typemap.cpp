@@ -453,4 +453,57 @@ std::string timestamp_ns_floor_us_sql(const std::string &ref) {
     return "make_timestamp(((" + ns + ") - (((" + ns + ") % 1000 + 1000) % 1000)) // 1000)";
 }
 
+namespace {
+
+constexpr long long kLLMax = 9223372036854775807LL; /* INT64_MAX */
+
+long long sat_mul(long long a, long long b) {
+    if (a <= 0 || b <= 0) return 0;
+    return a > kLLMax / b ? kLLMax : a * b;
+}
+
+long long sat_add(long long a, long long b) {
+    if (a < 0 || b < 0) return 0;
+    return a > kLLMax - b ? kLLMax : a + b;
+}
+
+/* Bytes one row of this column occupies in a DuckDB vector. */
+long long column_row_bytes(const ColumnPlan &p) {
+    switch (p.transfer) {
+    case Transfer::Int8: return 1;
+    case Transfer::Int16: return 2;
+    case Transfer::Int32:
+    case Transfer::Float32:
+    case Transfer::Date32: return 4;
+    case Transfer::Int64:
+    case Transfer::Float64:
+    case Transfer::TimestampUs:
+    case Transfer::TimeUs: return 8;
+    case Transfer::Utf8: {
+        /* duckdb_string_t is 16 bytes and inlines up to 12 payload bytes;
+         * anything longer also lives in the chunk's string heap. */
+        long long w = p.stata_type == StType::StrL ? kStataStrMax + 1 : p.str_bytes;
+        return w > 12 ? 16 + w : 16;
+    }
+    }
+    return 8; /* unreachable; the widest fixed width is the safe default */
+}
+
+} // namespace
+
+long long estimate_transfer_bytes(const std::vector<ColumnPlan> &plans,
+                                  long long nrows) {
+    if (nrows <= 0) return 0;
+    /* accumulate in eighths of a byte so the one validity bit per cell per
+     * column stays exact */
+    long long eighths = 0;
+    for (const ColumnPlan &p : plans) {
+        if (p.dropped) continue;
+        eighths = sat_add(eighths, sat_add(sat_mul(column_row_bytes(p), 8), 1));
+    }
+    if (eighths == 0) return 0;
+    const long long bytes = sat_mul(nrows, eighths) / 8;
+    return sat_mul(bytes, 5) / 4; /* 25% chunk-capacity slack */
+}
+
 } // namespace parqit

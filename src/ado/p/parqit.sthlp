@@ -1110,7 +1110,8 @@ Windows OpenMP DLL is required. {cmd:parqit set threads} controls DuckDB's worke
 session and refuses console/batch sessions.
 
 {pstd}The environment knobs outside {cmd:parqit set} ({cmd:PARQIT_PLUGIN_PATH},
-{cmd:PARQIT_NOTIPS}, {cmd:PARQIT_FILL_THREADS}) are described in
+{cmd:PARQIT_NOTIPS}, {cmd:PARQIT_FILL_THREADS},
+{cmd:PARQIT_STREAM_BUFFER_MB}, {cmd:PARQIT_FETCH_MATERIALIZED}) are described in
 {help parqit_technical##environment:the technical reference}.
 
 {pstd}Use matching ado and plugin files and restart Stata after an update.

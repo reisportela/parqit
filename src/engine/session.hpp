@@ -35,12 +35,32 @@ class Session {
     bool set_memory_limit(const std::string &limit, std::string *err);
     bool set_temp_directory(const std::string &dir, std::string *err);
 
+    /* PERF-STREAM-1: how many bytes of result the engine may keep buffered
+     * ahead of a streaming fetch (`streaming_buffer_size`, a LOCAL/connection
+     * setting). Sized per fetch from the result's estimated size — see
+     * estimate_transfer_bytes and the note on query_streaming below — and only
+     * ever while no stream is live. */
+    bool set_streaming_buffer_bytes(long long bytes, std::string *err);
+
     /* Runs SQL, discards the result. Returns false + error message. */
     bool exec(const std::string &sql, std::string *err);
 
     /* Runs SQL expecting a result; caller must duckdb_destroy_result.
      * Returns false + error message on failure (result already destroyed). */
     bool query(const std::string &sql, duckdb_result *out, std::string *err);
+
+    /* Runs SQL as a STREAMING result: the engine's pipeline produces chunks on
+     * demand for duckdb_fetch_chunk instead of materialising the whole result
+     * first (which is what duckdb_query does — duckdb.h:1209). On success the
+     * caller owns *out and must duckdb_destroy_result it.
+     * A NULL chunk from duckdb_fetch_chunk means end-of-stream OR an error set
+     * on the result (capi/stream-c.cpp:17-37): the caller MUST check
+     * duckdb_result_error(out) before destroying the result.
+     * While the stream is live no other statement may run on this connection —
+     * the next one cancels it (client_context.cpp:689-693, 311-318). A stream
+     * abandoned before end-of-stream should therefore be followed by one
+     * trivial statement so its parked tasks and file handles are released now. */
+    bool query_streaming(const std::string &sql, duckdb_result *out, std::string *err);
 
     /* Single string scalar convenience (first row, first column; "" for
      * NULL). */

@@ -186,4 +186,27 @@ bool stata_tc_ms_to_epoch_us(double stata_ms, long long *epoch_us);
  * TIMESTAMP expression over the quoted reference `ref` (TS-NS-FLOOR-1). */
 std::string timestamp_ns_floor_us_sql(const std::string &ref);
 
+/* PERF-STREAM-1: roughly how many bytes of DuckDB result these plans will
+ * produce for `nrows` rows — the size the streaming fetch uses to pick its
+ * buffer (`streaming_buffer_size`). Pure arithmetic over the manifest, no
+ * engine call, so the unit tests exercise it directly.
+ *
+ * Per column: the transfer type's vector width (Utf8 = the 16-byte
+ * duckdb_string_t plus, for values longer than its 12 inlined bytes, the
+ * planned octet width) plus one validity bit per cell; dropped columns
+ * contribute nothing; the total carries 25% slack because vectors are
+ * allocated in whole 2048-row chunks and the buffer accounting counts
+ * allocated capacity. Saturates instead of overflowing.
+ *
+ * Deliberately an over- rather than an under-estimate: the result is used as a
+ * *cap*, and memory is only ever occupied by chunks the engine actually
+ * produced, so a generous estimate costs nothing while a short one throttles
+ * the scan. Two known inexactitudes, both bounded: a `strL` column records no
+ * width (str_bytes == 0 by construction), so it is charged kStataStrMax + 1 —
+ * its floor, since that is why it became strL — which over-charges the usual
+ * "a few long rows" column and under-charges a uniformly huge one; and NULLs
+ * in a string column make the real payload smaller than the planned width. */
+long long estimate_transfer_bytes(const std::vector<ColumnPlan> &plans,
+                                  long long nrows);
+
 } // namespace parqit
