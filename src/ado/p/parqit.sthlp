@@ -689,7 +689,7 @@ publication). A partitioned target that already exists is overwritten only
 with {opt replace} (the new tree is built and verified first, then the old
 one is set aside until the new tree is in place); without {opt replace},
 or when the path exists as a plain file, the save is refused. Codecs:
-{cmd:snappy} (default) {cmd:zstd gzip lz4 lz4_raw brotli uncompressed};
+{cmd:zstd} (default) {cmd:snappy gzip lz4 lz4_raw brotli uncompressed};
 unknown codecs are rejected, never silently substituted. {opt chunk(#)}
 sets the target rows per Parquet row group (smaller groups = finer
 pushdown granularity for later reads; larger = better compression); the

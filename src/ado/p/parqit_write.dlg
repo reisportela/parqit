@@ -76,7 +76,7 @@ BEGIN
   COMBOBOX cb_comp		_ilft	_ss	120	.,		///
 	dropdownlist							///
 	contents(comp_list)						///
-	default("snappy")						///
+	default("zstd")							///
 	option(compression)						///
 	label("Compression")
   EDIT ed_level			160	@	80	.,		///
@@ -151,8 +151,8 @@ END
 
 LIST comp_list
 BEGIN
-	snappy
 	zstd
+	snappy
 	gzip
 	lz4
 	lz4_raw

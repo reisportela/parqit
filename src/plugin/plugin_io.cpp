@@ -2092,6 +2092,11 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                "' (snappy zstd gzip lz4 lz4_raw brotli uncompressed)";
         return kRcUsage;
     }
+    /* CODEC-DEFAULT-1 (2026-09-19): zstd is parqit's default codec. The COPY
+     * always names its codec, so an option-less save never depends on the
+     * engine's own default (snappy in DuckDB 1.5.3) and a DuckDB bump cannot
+     * change what is written. An explicit compression() still wins. */
+    const std::string codec = compression.empty() ? "zstd" : compression;
     /* PART-MODE-1 */
     if (!partition_mode.empty() && partition_mode != "replace" && partition_mode != "append") {
         *err = "partitions() must be replace or append; got '" + partition_mode + "'";
@@ -2211,7 +2216,7 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             copts += ", " + kv_metadata_sql_fragment;
         }
     }
-    if (!compression.empty()) copts += ", COMPRESSION " + quote_literal(compression);
+    copts += ", COMPRESSION " + quote_literal(codec); /* CODEC-DEFAULT-1 */
     if (comp_level >= 0) copts += ", COMPRESSION_LEVEL " + std::to_string(comp_level);
     if (row_group_size > 0)
         copts += ", ROW_GROUP_SIZE " + std::to_string(row_group_size);
