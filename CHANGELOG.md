@@ -6,6 +6,87 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Changed
+- `parqit use ..., clear` and `parqit collect` now fill Stata's memory from a
+  *streamed* engine result. The whole query used to be executed into a
+  materialised result collection and copied out chunk by chunk while the cells
+  reached Stata; the engine's chunks are now handed to the fill directly.
+  Same-binary A/B on a 48-core server (min of 3): `use` of 58.8M×9 numeric
+  rows 1.70 → 1.48 s, `keep`+`gen`+`collect` of that file 2.31 → 2.13 s,
+  `sort`+`collect` 4.41 → 4.07 s, two-file `append`+`collect` of 15.4M×15
+  rows 8.82 → 7.83 s, a string-heavy 7.9M×15 read unchanged. The streaming
+  buffer is capped at the result's estimated size, so engine-side peak memory
+  stays bounded by the result as before (measured 0.2–0.5 GB lower on those
+  reads — not a large saving) and, with that default, the engine still
+  completes its scan before the fill starts: the gain is the removed copies,
+  not scan/fill overlap. Values, types, metadata, messages, the
+  parallel/serial fill and every error path are unchanged.
+- A mid-stream engine failure (for example a corrupt page in a late row group)
+  is now reported with the engine's own message. It could previously only be
+  inferred from the row-count check, which named the wrong cause.
+- New environment knobs, read by the plugin with `getenv` like
+  `PARQIT_FILL_THREADS`: `PARQIT_FETCH_MATERIALIZED=1` restores the previous
+  materialised fetch exactly (conservative fallback and a same-binary A/B
+  switch), and `PARQIT_STREAM_BUFFER_MB=n` caps the streaming buffer explicitly
+  at `n` MB: on plain reads peak memory drops by up to about half (58.8M×9
+  read: +4.0 → +2.6 GB at 8 MB) at the price of a slower, stop-and-go fill once
+  the cap falls below roughly half the result (1.48 → 4.67 s on that read;
+  string-heavy reads are unaffected; `0` leaves the engine's own 1 MB default).
+  `PARQIT_TEST_FAIL_FETCH_AT` is a test-only deterministic fetch failure.
+- **`parqit save` writes zstd by default.** An option-less save (a view, `data`,
+  a partitioned tree, the internal `.dta`/Excel bridge snapshots) now names
+  `COMPRESSION zstd` explicitly instead of inheriting the engine's own default
+  (snappy). `compression()` still selects any of `zstd snappy gzip lz4 lz4_raw
+  brotli uncompressed`; `compression_level()` is unchanged (engine default for
+  the codec unless given). The help, the Write dialog (default and list order)
+  and the codec verify test `v101_save_default_codec` follow. Files written by
+  earlier versions read back exactly as before; a `partitions(append)` into a
+  snappy tree adds zstd files, which Parquet readers (including parqit) handle
+  per column chunk. See `ASSUMPTIONS.md` #139.
+- A `merge` whose key does not uniquely identify observations on the side the
+  kind requires to be unique now fails with **`r(459)`** instead of `r(198)`.
+  459 is native Stata's own code for this contract (and what `pq` returns,
+  since it delegates to native `merge`), so `capture ... if _rc == 459` now
+  catches parqit as it catches `merge`. The message is unchanged
+  (`the key does not uniquely identify observations in the <side> data`) and
+  the failure remains loud and before any plan mutation. This is a public
+  semantic change, declared here; no test asserted the old code.
+
+### Added
+- `parqit merge` and `parqit joinby` now disclose a **missing key** at join
+  time. When the same key carries missing values on *both* sides, the verb
+  prints a `note:` naming the key and the two counts. Stata matches missing
+  with missing and parqit must keep doing so, but Parquet has a single missing
+  concept: a side written from Stata has had its extended missings `.a`–`.z`
+  folded into a plain `.`, so a master row keyed `.a` matches a using row
+  keyed `.` that native Stata would never have paired. The write path already
+  warned; the person who suffers the false match is the *reader*, possibly in
+  another session over a file they did not write. The counts use the same
+  normalised key expressions the join and the uniqueness guards use, so a `""`
+  key counts as missing (MERGE-1); the note runs for every `merge` kind, not
+  only the ones that check uniqueness.
+- The `parqit save` extended-missing note gained a second line spelling out the
+  consequence in a `merge`/`joinby` key. The existing first line is unchanged.
+- `tests/verify_suite/v102_merge_key_contracts.do` pins, against native Stata
+  run inside the test: missing keys matching as native does; the announced
+  false match from the `.a`→`.` collapse, with its note; the order contract
+  (multiset equality with native, a true `sortedby` marker, determinism across
+  runs — never order equality with native, which is not reproducible); and
+  `r(459)` on both sides.
+- `tests/verify_suite/v103_bigint_exact_paths.do` pins the three `int64`
+  facts: the announced rounding above 2^53, the exact
+  `parqit sql ... CAST(col AS VARCHAR)` path (`str19`), and the exactness of a
+  lazy join over a `BIGINT` key. The source is generated by parqit's own SQL
+  and verified on disk with pyarrow.
+
+### Documentation
+- `README.md` and `help parqit` Limitations: the extended-missing bullet now
+  follows the loss into a `merge`/`joinby` key; two new bullets cover row order
+  after a lazy join (grouped by key, true `sortedby`, not native's order, and
+  why native's order cannot be a contract) and `int64`/`uint64` above 2^53
+  (announced rounding, the `CAST(... AS VARCHAR)` recipe, and the exactness of
+  the lazy join).
+
 ## [0.1.37] — 2026-09-07
 
 ### Changed

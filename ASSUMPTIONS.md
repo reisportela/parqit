@@ -1675,4 +1675,232 @@ entry notes the conservative fallback if the assumption proves wrong.
     remains the normative surface — the map deliberately shows verb *names*
     without their options so it stays one screen. Verified in the GUI Viewer,
     which is the release check for help layout (see #118).
-
+138. **The Stata fill drains a STREAMED engine result, not a materialised one
+    (2026-09-19, PERF-STREAM-1).** `cmd_use_fetch` — the single fetch behind
+    `parqit use …, clear` and `parqit collect` — ran its SELECT through
+    `duckdb_query`, which "stores the full (materialized) result"
+    (duckdb.h:1209). The whole query therefore executed into one extra
+    in-memory copy of the result *before* the first cell reached Stata, and
+    the producer/consumer pipeline (#37) only overlapped the *walk* of that
+    finished copy with the per-cell fill. It now runs through
+    `Session::query_streaming`: `duckdb_prepare` (duckdb.h:1899) →
+    `duckdb_pending_prepared_streaming` (duckdb.h:2315,
+    capi/pending-c.cpp:41-44) → `duckdb_execute_pending` (duckdb.h:2375) →
+    the same `duckdb_fetch_chunk` loops. The engine's chunks now reach the
+    fill directly — no materialised collection, no per-chunk copy-out. With
+    the default sizing (buffer ≥ the estimated result) the engine still
+    completes its scan before the first fetch: a streaming execute returns
+    only when the collector is blocked or the query has finished
+    (parallel/executor.cpp:582-584), so the gain is the removed copies, not
+    scan/fill overlap; overlap exists only in the explicitly capped mode, in
+    stop-and-go cycles (auditor's verification, 2026-09-20). Verified facts
+    and the rules that follow from them:
+    - *Order and values are not at risk.* The collector is chosen by the same
+      order predicates for streaming and materialised results — order-
+      preserving + batch index → buffered-batch vs batch collector, otherwise
+      buffered vs materialised
+      (execution/operator/helper/physical_result_collector.cpp:25-51). All four
+      build the result from the same `GetClientProperties()` snapshot, so the
+      Arrow options now come from the result (duckdb.h:1281) instead of the
+      connection — no call may be made on a connection whose stream is live.
+    - *A NULL chunk is ambiguous.* `duckdb_fetch_chunk` returns NULL at
+      end-of-stream **and** on an error, which it records on the result
+      (capi/stream-c.cpp:17-37). The fill therefore reads
+      `duckdb_result_error` (capi/result-c.cpp:526-532) after each loop and
+      **before** `duckdb_destroy_result`: that is the streaming path's primary
+      failure signal. Previously a mid-stream engine error could only be
+      inferred from the row-count check, which named the wrong cause; that
+      check stays as the secondary net. A failure raised before the first
+      chunk is ready still surfaces from the execute call and takes the
+      pre-existing error branch — both are loud.
+    - *An abandoned stream must be cancelled now.* A result destroyed before
+      end-of-stream leaves the executor with parked tasks and open Parquet
+      handles until the next statement on the connection cleans up
+      (`InitialCleanup` → `CleanupInternal` → `CancelTasks`,
+      main/client_context.cpp:689-693, 311-318); a clean end-of-stream cleans
+      up by itself (main/stream_query_result.cpp:82-85). The fill therefore
+      tracks end-of-stream explicitly and, when it was not reached, runs one
+      trivial statement right after the destroy. Without it an interrupted or
+      failed read would hold a file handle open — on Windows that blocks a
+      later replace of the very file being read.
+    - *The buffer is sized per fetch, from the result.* `streaming_buffer_size`
+      is a LOCAL (connection) setting defaulting to 1,000,000 bytes
+      (main/client_config.hpp:83), split 60% read queue / 40% in-progress
+      batches (main/buffered_data/batched_buffered_data.cpp:19-20). A producer
+      whose share is full parks its sink, and the consumer unparks sinks only
+      when the read queue has gone completely EMPTY
+      (`BatchedBufferedData::ExecuteTaskInternal`,
+      batched_buffered_data.cpp:127-140 → `UnblockSinks`, 42-60): **every time
+      the cap is reached the parallel scan stops and restarts**, and below
+      roughly one in-progress batch per scan thread the parallelism degrades
+      too. Measured on the 58.8M×9 / 478-row-group reference file (min of 3,
+      48 cores, same binary): 64 MB → 4.19 s, 256 MB → 3.67 s, 512 MB →
+      2.36 s, 1024 MB → 1.55 s, 2048 MB → 1.33 s, against 1.70 s for the
+      materialised fetch — i.e. a *fixed* 64 MB buffer would have been a 2.5×
+      regression on exactly the read this change is meant to speed up. Hence
+      the rule: **the buffer is normally at least the estimated size of the
+      result**. `cmd_use_fetch` computes that estimate from the manifest with
+      `typemap::estimate_transfer_bytes` (pure arithmetic, unit-tested: vector
+      width per transfer type, 16-byte `duckdb_string_t` with 12 inlined bytes
+      for strings, one validity bit per cell, 25% chunk-capacity slack, dropped
+      columns free, saturating) and applies it with one
+      `SET streaming_buffer_size = '<n>B'` *before* the stream exists —
+      `byte`/`bytes`/`b` parse with multiplier 1
+      (common/string_util.cpp:316-317) via `StreamingBufferSizeSetting::SetLocal`
+      (main/settings/custom_settings.cpp:1600-1603). A 16 MB floor keeps tiny
+      reads out of the park/unpark cycle. This costs no memory: the setting is
+      a *cap*, not a reservation, and only chunks the engine actually produced
+      occupy memory, so the peak is bounded by the result itself — never more
+      than the materialised copy it replaces, and measured a little less
+      (auditor, rep-1 RSS growth: 4.42 → 4.02 GB on the 58.8M×9 read, 6.67 →
+      6.14 GB on keep+gen+collect, +0.25 GB on the string-heavy read, i.e.
+      noise-level). It is not a large saving: with a buffer ≥ the result the
+      whole result sits in chunks when the fetch starts. It follows that the
+      estimate should err high, which is why a `strL` column (whose planned
+      width is 0 by construction) is charged `kStataStrMax + 1`.
+      `PARQIT_STREAM_BUFFER_MB=`{n} caps it explicitly — authoritative even
+      below the floor, because a smaller buffer is a memory/time trade the user
+      chooses — and `0` leaves the engine's 1 MB default (least memory, slowest
+      fill-bound reads). DuckDB may still let the read queue overshoot (its own
+      FIXME in
+      execution/operator/helper/physical_buffered_batch_collector.cpp:66-68),
+      so this is a soft cap and the real peak is measured, not assumed.
+    - *Two regimes, and only one of them is free.* A **fill-bound** read (narrow
+      numeric, many row groups, a scan far faster than the per-cell store — the
+      58.8M×9 file) only beats the materialised fetch when the buffer is about
+      the size of the result; a smaller cap buys memory at a real cost in time.
+      A **scan-bound** read (strings, few row groups — the 7.9M×15 trades file,
+      1 row group) keeps up with any buffer and is insensitive to it: measured
+      64/256/1024 MB all within a ±0.3 s noise band on a loaded machine. Sizing
+      from the result serves both, and the knob exists for the user who would
+      rather have the memory. Auditor's same-binary A/B on the merged tree
+      (min of 3; VmHWM growth of rep 1), streamed vs materialised: `use`
+      58.8M×9 1.48 vs 1.70 s (4.02 vs 4.42 GB); `use` strings 7.9M×15 2.73
+      vs 2.74 s (2.45 vs 2.20 GB); keep+gen+collect 58.8M×10 2.13 vs 2.31 s
+      (6.14 vs 6.67 GB); sort+collect 4.07 vs 4.41 s (2.29 vs 2.50 GB);
+      two-file append+collect 15.4M×15 7.83 vs 8.82 s (4.65 vs 4.85 GB).
+      Explicit caps of 256 MB / 8 MB: the numeric read 3.16 / 4.67 s with
+      2.83 / 2.58 GB, the string read unchanged in time with 1.13 / 0.92 GB;
+      on the temp-table scenarios a cap saves little (the temp table
+      dominates the peak) and costs time.
+    - *The deprecated entry point is pinned by an always-on test.*
+      `duckdb_pending_prepared_streaming` carries a deprecation notice
+      (duckdb.h:2308) and compiles only while `DUCKDB_API_NO_DEPRECATED` is
+      undefined, which parqit never defines. `tests/unit/test_streaming.cpp`
+      pins its presence *and* its semantics — identical values and ORDER BY
+      order as `duckdb_query` at 4 and 1 threads, a one-row result, an error
+      raised deep in the stream, a stream abandoned mid-way (at 1 MB, so
+      producers really are parked) followed by a healthy connection — exactly
+      the discipline `test_arrow_copy_bench.cpp` applies to
+      `duckdb_arrow_array_scan`. It also pins that `$`/`?` inside quotes stay
+      literal: `query_streaming` runs a *prepared* statement, where they would
+      otherwise become bind parameters and a Parquet path containing one would
+      stop loading.
+    - *Conservative fallback.* `PARQIT_FETCH_MATERIALIZED=1` restores the
+      exact `duckdb_query` fetch (and skips the cleanup statement), so a
+      platform where streaming ever misbehaves has a one-variable escape hatch
+      and the two paths can be A/B'd in the same binary. Verify test
+      **V100_COLLECT_STREAMING** proves the streamed read matches an
+      independent pyarrow oracle cell for cell over a 300k-row, 5-row-group,
+      8-column file (NULLs, 1.7e300 extremes, date/timestamp, emoji, empty
+      strings, strL over the 2045-byte boundary), the lazy filter+gen+sort+
+      collect path matches an independent duckdb-CLI oracle, the hatch is
+      byte-identical (`cf _all`), and an injected fetch failure
+      (`PARQIT_TEST_FAIL_FETCH_AT`, test-only) is loud on both the parallel
+      and the serial path, leaves the dataset in memory untouched and leaves
+      the session able to read again.
+139. **zstd is the default Parquet codec (2026-09-19, maintainer's decision).**
+    Until v0.1.37 an option-less `parqit save` emitted no `COMPRESSION` clause
+    and therefore wrote whatever the pinned engine defaulted to (snappy). The
+    COPY now always names the codec (CODEC-DEFAULT-1 in `copy_out_parquet`):
+    `zstd` unless `compression()` says otherwise, so the on-disk default is
+    parqit's own and survives an engine upgrade. It applies to every writer
+    that reaches `copy_out_parquet` — view saves, `data` saves, partitioned
+    trees and the package-owned bridge snapshots of `.dta`/Excel sources (one
+    rule, no internal exception; the bridge's cost is dominated by the Stata
+    import, not the codec). Not affected: `copysource` (a byte copy of the
+    loaded file keeps its codec) and reading (the reader takes any codec per
+    column chunk, so `partitions(append)` into an older snappy tree yields a
+    valid mixed tree). Verify test **V101_SAVE_DEFAULT_CODEC** checks the
+    written codec with a pyarrow oracle for the option-less, explicit-snappy,
+    `data` and partitioned forms. Side observation from the same day's audit
+    fixture work: a 64-byte corruption inside a snappy or zstd page decoded to
+    garbage with rc 0 in the DuckDB CLI itself (no content checksum in either
+    codec as Parquet writers emit them), while gzip and a damaged page header
+    raise — an engine property, recorded here so nobody reads the codec change
+    as an integrity feature.
+140. **The triple-precision audit's key contracts (2026-09-19/20).** The
+    adversarial audit of v0.1.37 against native Stata and `pq` 4.0.2
+    (`docs/audits/AUDITORIA_TRIPLA_PRECISAO_PARQIT_NATIVO_PQ_2026-09-19.md`,
+    evidence in `audit_repro/triple_precision_20260919/`) left four decisions,
+    all pinned by `tests/verify_suite/v102_merge_key_contracts.do` and
+    `v103_bigint_exact_paths.do`, whose native-parity claims are re-run
+    natively inside the tests themselves.
+    (i) **The join, not only the write, discloses a missing key.** Stata
+    matches missing with missing in `merge` and in `joinby` (verified
+    natively: `merge 1:1` and `merge m:1` pair `.` with `.`; `joinby` pairs
+    them Cartesian-style), and parqit does the same. Parquet has one missing
+    concept, so a side written from Stata arrives with `.a`–`.z` already
+    folded into `.` and a master row keyed `.a` matches a using row keyed `.`
+    that native Stata kept apart — `pq` does the same when both sides cross
+    the bridge, so this is a hazard of any Stata↔columnar bridge, not of
+    parqit. The `save` warning reaches the writer; the false match is suffered
+    by the *reader*, possibly in another session over a file they did not
+    write. `merge`/`joinby` therefore emit a `note:` when the same key carries
+    missing on *both* sides — the only case in which a pairing can happen. It
+    stays a note, never an error: matching missing with missing is the Stata
+    behaviour and must not change. The counts use the same normalised key
+    expressions the join and the uniqueness guards use (`nullif(k,'')` for
+    text, NaN→NULL for numbers), so a `""` key counts as missing (MERGE-1);
+    counting the raw column would make the note lie in exactly the case that
+    contract exists for. Known one-sided gap: the engine's `key_value` also
+    folds ±Inf and |x| ≥ Stata's missing threshold to missing and the
+    plugin's `norm_key` does not, so such a key — reachable only from a
+    foreign file — is under-counted, never over-counted.
+    (ii) **Cost was measured before the shape was fixed, not assumed.** The
+    master-side count executes the compiled view plan at *plan* time, which
+    before this change happened only for the `1:1`/`1:m` uniqueness guard. One
+    statement per side (`count(*) FILTER (WHERE <key> IS NULL)` per key), so
+    per-key counts cost one scan per side, not one per key. Measured with
+    `parqit use using <f>` + `parqit merge m:1 … ` and no `collect`, three runs
+    each, StataNow MP 19.5 / Linux: a 7 940 851-row file keyed on a `VARCHAR`
+    went from 0.062 / 0.026 / 0.018 s to 0.162 / 0.088 / 0.084 s, and a
+    58 800 107-row file keyed on an `INTEGER` from 0.058 / 0.072 / 0.068 s to
+    0.223 / 0.114 / 0.181 s (first run of each triple is cold-cache). Roughly
+    +0.06 s and +0.05–0.11 s on warm runs. `EXPLAIN` on the generated query
+    shows why it stays cheap and where it does not: `READ_PARQUET` carries
+    `Projections: idcode`, so only the key column is read, but the normalising
+    `CASE` is evaluated row by row (the plan estimates the full 58 800 107
+    rows) — this is a real single-column scan, not a row-group-statistics
+    shortcut, and it does not materialise the join. The per-key form was
+    therefore kept and no side is skipped: a note that silently omitted a side
+    would be worse than the scan it saves. On a file whose key column is wide
+    or badly compressed the cost will be higher than measured here.
+    (iii) **`r(459)` for a non-unique key.** Native Stata and `pq` both return
+    459; parqit returned 198. The three implementations all failed loudly, so
+    this was compatibility, not correctness: `capture … if _rc == 459` did not
+    catch parqit. `check_unique` now returns 459, the message is unchanged,
+    and the change is declared in `CHANGELOG.md` under `### Changed` because
+    it is public semantics. No test asserted the old code.
+    (iv) **The merge contract is multiset equality, not row order.** parqit
+    returns the result grouped by the key and declares a `sortedby` marker
+    that was verified true; native `merge` returns an interleaved order and
+    declares nothing. Order is not a contract because native `merge`'s own
+    within-key order is not reproducible — changing only the physical row
+    order of the *using* file made native `merge m:1` return the master as
+    `2 1 3 4 6 5 8 7` and as `1 2 3 4 5 6 8 7`. What parqit guarantees, and
+    v102 pins, is cell-exact equality with native as a multiset plus
+    determinism between runs of the same plan. Documented in the README and
+    `help parqit` so users who depend on `_n`/`by:` sort explicitly.
+    (v) **No lossless-read option for `int64`/`uint64` was added.** `pq` has
+    `safe_int64`; parqit documents `parqit sql "SELECT …, CAST(col AS VARCHAR)
+    …"`, which the audit verified returns `9007199254740993` and
+    `9223372036854775807` exactly (`str19`). A new read option is plugin + ado
+    + help + dialog + type contract + tests, and the mandate of this round was
+    to pin and disclose, not to widen the public surface; the recipe is now in
+    Limitations and the option is proposed for `ToDo.md`. The loss itself is
+    already loud (`note: <var>: values beyond 2^53 rounded to nearest
+    double`), and a *lazy* join over such a key is exact because it runs in
+    the engine before any Stata `double` exists — v103 pins all three.
+    Entry **138** is the streamed fill (PERF-STREAM-1), merged into `main` the
+    same day from a separate worktree; the numbering 138/139/140 is complete.
