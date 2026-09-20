@@ -36,6 +36,10 @@ the matching plugin and Stata files are placed in `ado/plus/p`.
 The official source archive includes this Linux wrapper from v0.2.0 onward.
 It is not a Windows or macOS wrapper; use the corresponding presets below.
 The original GitHub source ZIP for v0.1.37 predates it.
+An existing Linux build tree must use the same compilers: equivalent aliases
+such as `cc`/`gcc` are retained, but a different toolchain requires a fresh
+source tree. The helper does not clear the CMake cache or silently lose the
+Release/test settings while changing compilers.
 
 ```bash
 # Linux

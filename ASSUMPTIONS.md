@@ -2581,3 +2581,8 @@ entry notes the conservative fallback if the assumption proves wrong.
     not personal examples, manuscripts, logs or local audit kits. Include the
     Linux build helper in the official sources without claiming it supports
     the other platforms; their presets remain available.
+    The first preflight exposed a helper/CI interaction: forcing `gcc/g++`
+    paths over cached `cc/c++` paths made CMake reset the preset configuration,
+    build without tests and fail on the missing `test` target. The helper now
+    selects compilers through CC/CXX for a new tree, preserves equivalent
+    cached aliases, and refuses a different compiler without clearing cache.

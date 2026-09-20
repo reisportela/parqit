@@ -243,7 +243,9 @@ development snapshots and workloads, not universal timing guarantees.
 
 ### Documentation
 - The official source archive now includes the existing Linux `build.sh`
-  helper. Windows and both macOS architectures retain their CMake presets.
+  helper. It preserves cached compiler aliases and refuses a different
+  toolchain instead of silently resetting Release/test settings. Windows and
+  both macOS architectures retain their CMake presets.
 - Release branches receive the same four-platform checks before tagging.
   The collected Windows plugin must import only reviewed system DLLs, with
   no separately installed compiler/OpenMP runtime; embedded MSVC runtime

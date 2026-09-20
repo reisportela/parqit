@@ -56,8 +56,19 @@ for compiler in "$CC" "$CXX"; do
         die "$compiler is too old; activate GCC >= 10 (gcc-toolset/devtoolset on Red Hat)"
 done
 
-configure=(--preset linux "-DCMAKE_C_COMPILER=$(command -v "$CC")"
-                         "-DCMAKE_CXX_COMPILER=$(command -v "$CXX")")
+# CMake ignores CC/CXX for an existing tree. Preserve equivalent cached aliases
+# (cc/gcc, c++/g++); forcing a different path resets the cache and loses presets.
+if [[ -f build/linux/CMakeCache.txt ]]; then
+    for compiler_setting in "C=$CC" "CXX=$CXX"; do
+        build_lang=${compiler_setting%%=*}
+        requested_compiler=$(command -v "${compiler_setting#*=}")
+        cached_compiler=$(awk -v key="CMAKE_${build_lang}_COMPILER:" \
+            'index($0,key)==1 {sub(/^[^=]*=/, ""); print; exit}' build/linux/CMakeCache.txt)
+        [[ -n $cached_compiler && $cached_compiler -ef $requested_compiler ]] || \
+            die "cached $build_lang compiler differs; use the same CC/CXX or a fresh source tree"
+    done
+fi
+configure=(--preset linux)
 if [[ -n ${PARQIT_DUCKDB_ARCHIVE:-} ]]; then
     configure+=("-DPARQIT_DUCKDB_ARCHIVE=$PARQIT_DUCKDB_ARCHIVE")
 fi
