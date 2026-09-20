@@ -6,7 +6,26 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-20
+
+### Fixed
+- Preserve the original error type and message when a DuckDB worker failure
+  interrupts a streaming fetch. The pinned engine's buffer shortcut could
+  replace the cause with `Interrupted!`, depending on scheduling. A hash-guarded
+  dependency patch restores the worker error on that path; genuine user
+  cancellation remains an interruption. A deterministic test covers both
+  cases without weakening the existing streaming-error assertion.
+
+### Documentation
+- Review README installation and compiler guidance, runtime notices, CPU and
+  buffer tuning, precision-policy wording and ordering limitations. Restart
+  Stata after upgrading a loaded plugin. The 0.2.0 tag remains an unpublished
+  candidate; 0.2.1 includes its input/fidelity/menu features and the correction.
+
 ## [0.2.0] — 2026-09-20
+
+Unpublished candidate: the tag is retained, but publication was withheld after
+CI exposed the streaming-error race fixed in 0.2.1.
 
 This minor release combines new fidelity/input controls, streamed parallel
 collection and the audit-derived fixes below. Compatibility changes are

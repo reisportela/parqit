@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.2.0 LANGUAGES C CXX)
+project(parqit VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -98,6 +98,7 @@ FetchContent_MakeAvailable(duckdb)
 include(cmake/PatchDuckDBSampling.cmake)
 include(cmake/PatchDuckDBCapi.cmake)
 include(cmake/PatchDuckDBLifetime.cmake)
+include(cmake/PatchDuckDBStreaming.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 

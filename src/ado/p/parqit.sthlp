@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0 20sep2026}{...}
+{* *! version 0.2.1 20sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -1474,8 +1474,8 @@ values on {it:both} sides.{p_end}
 {pstd}{cmd:•} A lazy {cmd:merge}/{cmd:joinby} returns its result grouped by the
 key, with a true {cmd:sortedby} marker, in an order that is not native Stata's.
 Guaranteed are the content (the same rows and cells as native {cmd:merge}, as a
-multiset) and determinism: the same plan twice gives the same order. Order
-cannot be a contract because native {cmd:merge}'s own within-key order changes
+multiset); order within tied keys is not guaranteed, including on repeated
+execution. Native {cmd:merge}'s own within-key order also changes
 with the physical order of the {it:using} file. Sort explicitly after
 collecting if {cmd:_n} or {cmd:by:} depends on it.{p_end}
 {pstd}{cmd:•} {cmd:int64}/{cmd:uint64} values outside +/-2^53 are conservatively

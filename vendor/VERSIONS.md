@@ -32,6 +32,11 @@ Pins:
   Both source edits are hash-checked; the close/reopen/shutdown regression runs
   under Valgrind in Linux CI.
 - `stata/stplugin.h` md5 `5916aa9797bdb05e9bdc0f5b2920dbaf`.
+- `cmake/PatchDuckDBStreaming.cmake` preserves an executor worker's error when
+  that error sets the stream's interrupt flag. Genuine user cancellation still
+  reports interruption. An acquire fence on the interrupted path pairs with
+  error publication; the successful fetch path is unchanged. The original and
+  corrected source hashes are checked before any write.
 
 Why a source build rather than the released amalgamation: verified on
 2026-06-12 that `libduckdb-src.zip` for 1.5.x is the **bare engine** — the

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.0 20sep2026}{...}
+{* *! version 0.2.1 20sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}

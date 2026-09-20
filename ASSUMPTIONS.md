@@ -2586,3 +2586,18 @@ entry notes the conservative fallback if the assumption proves wrong.
     build without tests and fail on the missing `test` target. The helper now
     selects compilers through CC/CXX for a new tree, preserves equivalent
     cached aliases, and refuses a different compiler without clearing cache.
+155. **Preserve streaming worker failures (0.2.1, 2026-09-20).** A worker's
+    `Executor::PushError` records its exception and then sets `interrupted`.
+    DuckDB 1.5.3's simple-buffer shortcut threw a generic interruption first,
+    masking the original type/message. The hash-guarded streaming patch checks
+    the executor only after observing interruption and rethrows its error;
+    an acquire fence on that error path pairs with publication of the flag.
+    Genuine user cancellation is unchanged, as is the successful fetch path.
+    The deterministic regression injects the actual executor error state
+    between opening and fetching, using the verified pinned C API connection
+    representation; it separately exercises `duckdb_interrupt`. The original
+    scheduling-sensitive regression remains intact. The user authorised this
+    correction, README review and a new release; preserve the unpublished
+    v0.2.0 tag and publish v0.2.1 only after fresh local/CI/exact-asset gates.
+    No OpenMP is introduced. README does not promise ordering within tied
+    merge/join keys: the view orders by keys, not a unique tie-breaker.

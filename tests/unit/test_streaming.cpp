@@ -21,6 +21,9 @@
 #include <vector>
 
 #include "duckdb.h"
+#include "duckdb/execution/executor.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/connection.hpp"
 #include "engine/session.hpp"
 #include "engine/typemap.hpp"
 #include "test_tmp.hpp"
@@ -173,11 +176,56 @@ TEST_CASE("an error mid-stream is reported with the engine's text") {
     } else {
         reported = err;
     }
+    CAPTURE(reported);
     CHECK(reported.find("parqit-test-boom") != std::string::npos);
 
     std::string v, e;
     REQUIRE(s.query_scalar("SELECT 1", &v, &e));
     CHECK(v == "1");
+}
+
+TEST_CASE("stream interruption distinguishes worker failure from user cancellation") {
+    Session &s = Session::instance();
+    s.close();
+    REQUIRE(s.ensure_open());
+    std::string error;
+    REQUIRE(s.exec("SET threads=1", &error));
+    REQUIRE(s.exec("SET streaming_buffer_size='1MB'", &error));
+    REQUIRE(s.exec("SET preserve_insertion_order=false", &error));
+
+    for (bool worker_failure : {true, false}) {
+        duckdb_result result{};
+        REQUIRE(s.query_streaming("SELECT i FROM range(300000) t(i)", &result, &error));
+        REQUIRE(duckdb_result_is_streaming(result));
+        if (worker_failure) {
+            // The pinned C API's connection handle is a Connection*. Inject the
+            // real worker error state before fetching: no scheduling lottery.
+            auto &context = *reinterpret_cast<duckdb::Connection *>(s.con())->context;
+            context.GetExecutor().PushError(duckdb::ErrorData(
+                duckdb::ExceptionType::INVALID_INPUT, "parqit-worker-original-error"));
+        } else {
+            duckdb_interrupt(s.con());
+        }
+        std::string reported;
+        const auto rows = drain_bigints(&result, nullptr, nullptr, &reported);
+        const auto type = duckdb_result_error_type(&result);
+        duckdb_destroy_result(&result);
+        CAPTURE(worker_failure);
+        CAPTURE(reported);
+        CHECK(rows == 0);
+        if (worker_failure) {
+            CHECK(type == DUCKDB_ERROR_INVALID_INPUT);
+            CHECK(reported.find("parqit-worker-original-error") != std::string::npos);
+        } else {
+            CHECK(type == DUCKDB_ERROR_INTERRUPT);
+            CHECK(reported.find("parqit-worker-original-error") == std::string::npos);
+        }
+        std::string value;
+        REQUIRE(s.query_scalar("SELECT 42", &value, &error));
+        CHECK(value == "42");
+    }
+    s.close();
+    REQUIRE(s.ensure_open());
 }
 
 /* 6. A stream destroyed before end-of-stream leaves parked tasks behind until

@@ -58,9 +58,13 @@ DuckDB from source and takes several minutes; afterwards only parqit's own
 files recompile. The pinned engine also receives hash-checked local fixes:
 uniform SQL reservoir sampling, C-API aggregate state flattening for windows,
 safe block-allocator shutdown and initialized transaction error-policy flags.
+The streaming buffer also preserves the executor's original worker error
+instead of misreporting it as user cancellation; genuine cancellation is
+unchanged and both paths have a deterministic regression test.
 See [PatchDuckDBSampling.cmake](cmake/PatchDuckDBSampling.cmake),
 [PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake) and
-[PatchDuckDBLifetime.cmake](cmake/PatchDuckDBLifetime.cmake). Configure refuses an
+[PatchDuckDBLifetime.cmake](cmake/PatchDuckDBLifetime.cmake) and
+[PatchDuckDBStreaming.cmake](cmake/PatchDuckDBStreaming.cmake). Configure refuses an
 unexpected edited dependency file instead of overwriting it.
 
 The statistics implementation requires IEEE binary64 evaluation without
