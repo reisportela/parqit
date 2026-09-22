@@ -694,8 +694,8 @@ and no precision-loss note. The full signed and unsigned 128-bit ranges are
 accepted with {opt int64(string)} or {opt int64(round)}; protective refusal
 also handles their extreme values without an arithmetic overflow.
 For wide decimals, the threshold test rounds the observed extrema to integers
-using the engine's DECIMAL-to-HUGEINT cast. Thus +/-2^53+0.4 in magnitude does
-not trigger this guard, while +/-2^53+0.5 does. Decimal-to-double conversion
+using the engine's DECIMAL-to-HUGEINT cast. Thus a magnitude of 2^53+0.4 does
+not trigger this guard, while 2^53+0.5 does. Decimal-to-double conversion
 can still round fractional values below the threshold and carries its own
 conversion note. A
 preview ({cmd:parqit head}, {cmd:parqit list}) always shows the exact digits.
