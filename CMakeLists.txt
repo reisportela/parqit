@@ -99,6 +99,7 @@ include(cmake/PatchDuckDBSampling.cmake)
 include(cmake/PatchDuckDBCapi.cmake)
 include(cmake/PatchDuckDBLifetime.cmake)
 include(cmake/PatchDuckDBStreaming.cmake)
+include(cmake/VerifyDuckDBScalarAPI.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 

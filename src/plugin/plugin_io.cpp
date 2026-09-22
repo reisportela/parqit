@@ -2011,6 +2011,13 @@ ST_retcode plan_columns(Session &s, const Source &src,
             }
         }
         if (!sel.empty()) {
+            /* Precision checks must inspect values: DuckDB can otherwise
+             * answer bare min/max from "exact" Parquet footer statistics.
+             * Keep first(1) in this final SELECT to prevent that substitution;
+             * its constant update is O(1) per chunk. It has no response slot. */
+            if (std::any_of(slots.begin(), slots.end(),
+                            [](const auto &slot) { return slot.second == 'b'; }))
+                sel += ", first(1)";
             duckdb_result sres;
             if (!s.query("SELECT " + sel + " FROM " + src.scan_sql, &sres, err)) {
                 /* BINARY-DECODE-1: decode() raises on an invalid UTF-8 byte

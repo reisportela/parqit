@@ -11,6 +11,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <memory>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "abi.h" /* Arrow C Data Interface */
@@ -589,4 +591,244 @@ TEST_CASE("vectorized temporal boundaries handle constants nulls and filtered mu
         "SELECT sum(__parqit_timestamp_ns_ms(CASE WHEN i=4500 THEN TIMESTAMP_NS 'infinity' "
         "ELSE make_timestamp_ns(i*1000) END)) FROM range(5003) t(i)", &result, &error));
     CHECK(error.find("infinite TIMESTAMP_NS cannot be represented in Stata") != std::string::npos);
+}
+
+TEST_CASE("temporal executors preserve NULL masks at word and chunk boundaries") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    const idx_t sizes[] = {0, 1, 63, 64, 65, 2048, 2049, 4097};
+    for (const idx_t count : sizes) {
+        for (const bool mixed_nulls : {true, false}) {
+            INFO("count=" << count << " mixed_nulls=" << mixed_nulls);
+            const std::string missing = mixed_nulls
+                ? "i % 64 IN (0,63) OR i = " + std::to_string(count) + " - 1"
+                : "false";
+            const std::string sql =
+                "WITH inputs AS MATERIALIZED (SELECT i, CASE WHEN " + missing +
+                " THEN NULL ELSE DATE '1970-01-01' + CAST(i-32 AS INTEGER) END d, "
+                "CASE WHEN " + missing + " THEN NULL ELSE make_timestamp((i-32)*1001) END ts, "
+                "CASE WHEN " + missing + " THEN NULL ELSE make_timestamp_ns((i-32)*1001) END ns "
+                "FROM range(" + std::to_string(count) + ") t(i)) "
+                "SELECT i, __parqit_date_days(d), __parqit_timestamp_ms(ts), "
+                "__parqit_timestamp_ns_ms(ns), epoch_us(__parqit_timestamp_ns_us(ns)), "
+                "__parqit_date_days(NULL::DATE), __parqit_timestamp_ms(NULL::TIMESTAMP), "
+                "__parqit_timestamp_ns_ms(NULL::TIMESTAMP_NS), "
+                "epoch_us(__parqit_timestamp_ns_us(NULL::TIMESTAMP_NS)) "
+                "FROM inputs ORDER BY i";
+            duckdb_result result{};
+            std::string error;
+            REQUIRE_MESSAGE(s.query(sql, &result, &error), error);
+            REQUIRE(duckdb_row_count(&result) == count);
+            REQUIRE(duckdb_column_count(&result) == 9);
+            for (idx_t col = 1; col < 9; ++col)
+                CHECK(duckdb_column_type(&result, col) == DUCKDB_TYPE_BIGINT);
+            for (idx_t row = 0; row < count; ++row) {
+                const int64_t i = static_cast<int64_t>(row);
+                CHECK(duckdb_value_int64(&result, 0, row) == i);
+                const bool missing_expected = mixed_nulls &&
+                    (row % 64 == 0 || row % 64 == 63 || row + 1 == count);
+                for (idx_t col = 1; col <= 4; ++col)
+                    CHECK(duckdb_value_is_null(&result, col, row) == missing_expected);
+                for (idx_t col = 5; col < 9; ++col)
+                    CHECK(duckdb_value_is_null(&result, col, row));
+                if (missing_expected) continue;
+                const int64_t raw = (i - 32) * 1001;
+                const int64_t microseconds = raw < 0 ? -((-raw + 999) / 1000) : raw / 1000;
+                const int64_t milliseconds = raw < 0 ? -((-raw + 999999) / 1000000) : raw / 1000000;
+                CHECK(duckdb_value_int64(&result, 1, row) == i - 32 + 3653);
+                CHECK(duckdb_value_int64(&result, 2, row) == microseconds + 315619200000LL);
+                CHECK(duckdb_value_int64(&result, 3, row) == milliseconds + 315619200000LL);
+                CHECK(duckdb_value_int64(&result, 4, row) == microseconds);
+            }
+            duckdb_destroy_result(&result);
+        }
+    }
+}
+
+TEST_CASE("temporal executors skip filtered infinities and recover after selected errors") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    struct Function {
+        const char *name, *type, *finite, *error;
+        int64_t expected;
+        bool timestamp_result;
+    };
+    const Function functions[] = {
+        {"__parqit_date_days", "DATE", "DATE '1969-12-31'", "infinite DATE", 3652, false},
+        {"__parqit_timestamp_ms", "TIMESTAMP", "TIMESTAMP '1969-12-31 23:59:59.999999'",
+         "infinite TIMESTAMP", 315619199999LL, false},
+        {"__parqit_timestamp_ns_ms", "TIMESTAMP_NS", "TIMESTAMP_NS '1969-12-31 23:59:59.999999999'",
+         "infinite TIMESTAMP_NS", 315619199999LL, false},
+        {"__parqit_timestamp_ns_us", "TIMESTAMP_NS", "TIMESTAMP_NS '1969-12-31 23:59:59.999999999'",
+         "infinite TIMESTAMP_NS", -1, true}
+    };
+    for (const auto &f : functions) {
+        INFO(f.name);
+        /* Low-cardinality input contains both infinities. Filtering selects
+         * only finite/NULL rows before the fallible projection is evaluated. */
+        const std::string source =
+            "WITH inputs AS MATERIALIZED (SELECT i, CASE WHEN i%8=0 THEN " +
+            std::string(f.type) + " 'infinity' WHEN i%8=1 THEN " + f.type +
+            " '-infinity' WHEN i%8=2 THEN NULL::" + f.type + " ELSE " + f.finite +
+            " END v FROM range(4101) t(i)) ";
+        std::string value = std::string(f.name) + "(v)";
+        if (f.timestamp_result) value = "epoch_us(" + value + ")";
+        const std::string filtered = source + "SELECT i, " + value +
+            " FROM inputs WHERE i%8>=2 ORDER BY i DESC";
+        auto check_filtered = [&]() {
+            duckdb_result result{};
+            std::string error;
+            REQUIRE_MESSAGE(s.query(filtered, &result, &error), error);
+            REQUIRE(duckdb_row_count(&result) == 3075);
+            REQUIRE(duckdb_column_type(&result, 1) == DUCKDB_TYPE_BIGINT);
+            int64_t expected_i = 4100;
+            for (idx_t row = 0; row < duckdb_row_count(&result); ++row) {
+                while (expected_i % 8 < 2) --expected_i;
+                CHECK(duckdb_value_int64(&result, 0, row) == expected_i);
+                const bool missing = expected_i % 8 == 2;
+                CHECK(duckdb_value_is_null(&result, 1, row) == missing);
+                if (!missing)
+                    CHECK(duckdb_value_int64(&result, 1, row) == f.expected);
+                --expected_i;
+            }
+            duckdb_destroy_result(&result);
+        };
+        check_filtered();
+        for (const int64_t included : {4096LL, 4097LL}) {
+            duckdb_result result{};
+            std::string error;
+            const bool ok = s.query(source + "SELECT sum(" + value +
+                ") FROM inputs WHERE i%8>=2 OR i=" + std::to_string(included),
+                &result, &error);
+            CHECK_FALSE(ok);
+            CHECK(error.find(f.error) != std::string::npos);
+            if (ok) duckdb_destroy_result(&result);
+            check_filtered();
+        }
+    }
+}
+
+TEST_CASE("precision extrema fence reads payload despite dishonest exact footer statistics") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    const std::string honest = parqit_test::tmp_path("precision_footer_honest.parquet");
+    const std::string forged = parqit_test::tmp_path("precision_footer_forged.parquet");
+    std::remove(honest.c_str());
+    std::remove(forged.c_str());
+    std::string error;
+    REQUIRE_MESSAGE(s.exec(
+        "COPY (SELECT v FROM (VALUES (2147483648::BIGINT), "
+        "(9007199254740993::BIGINT)) t(v)) TO " + parqit::quote_literal(honest) +
+        " (FORMAT PARQUET, COMPRESSION UNCOMPRESSED)", &error), error);
+
+    auto read_bytes = [](const std::string &path) {
+        std::ifstream input(path, std::ios::binary);
+        REQUIRE(input.good());
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    const std::string original = read_bytes(honest);
+    REQUIRE(original.size() >= 12);
+    REQUIRE(original.compare(0, 4, "PAR1") == 0);
+    REQUIRE(original.compare(original.size() - 4, 4, "PAR1") == 0);
+    uint32_t footer_size = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        footer_size |= uint32_t(static_cast<unsigned char>(original[original.size() - 8 + i])) << (8 * i);
+    REQUIRE(footer_size <= original.size() - 12);
+    const size_t footer_begin = original.size() - 8 - footer_size;
+    const size_t footer_end = original.size() - 8;
+    auto little_endian = [](uint64_t value) {
+        std::string bytes(8, '\0');
+        for (unsigned i = 0; i < 8; ++i) bytes[i] = static_cast<char>((value >> (8 * i)) & 255);
+        return bytes;
+    };
+    const std::string true_max = little_endian(9007199254740993ULL);
+    const std::string false_max = little_endian(9007199254740992ULL);
+    std::string altered = original;
+    size_t replacements = 0, position = footer_begin;
+    while ((position = altered.find(true_max, position)) != std::string::npos &&
+           position + true_max.size() <= footer_end) {
+        altered.replace(position, true_max.size(), false_max);
+        position += false_max.size();
+        ++replacements;
+    }
+    REQUIRE(replacements > 0);
+    REQUIRE(altered.substr(0, footer_begin) == original.substr(0, footer_begin));
+    REQUIRE(altered.substr(footer_end) == original.substr(footer_end));
+    {
+        std::ofstream output(forged, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output.write(altered.data(), static_cast<std::streamsize>(altered.size()));
+        output.close();
+        REQUIRE(output.good());
+    }
+    REQUIRE(read_bytes(forged) == altered);
+
+    duckdb_result result{};
+    const std::string path = parqit::quote_literal(forged);
+    REQUIRE_MESSAGE(s.query(
+        "SELECT stats_min_value, stats_max_value, min_is_exact, max_is_exact "
+        "FROM parquet_metadata(" + path + ")", &result, &error), error);
+    REQUIRE(duckdb_row_count(&result) == 1);
+    REQUIRE(duckdb_column_count(&result) == 4);
+    for (idx_t column = 0; column < 2; ++column)
+        CHECK(duckdb_column_type(&result, column) == DUCKDB_TYPE_VARCHAR);
+    const char *expected_stats[] = {"2147483648", "9007199254740992"};
+    for (idx_t column = 0; column < 2; ++column) {
+        char *text = duckdb_value_varchar(&result, column, 0);
+        REQUIRE(text != nullptr);
+        CHECK(std::string(text) == expected_stats[column]);
+        duckdb_free(text);
+    }
+    for (idx_t column = 2; column < 4; ++column) {
+        CHECK(duckdb_column_type(&result, column) == DUCKDB_TYPE_BOOLEAN);
+        CHECK_FALSE(duckdb_value_is_null(&result, column, 0));
+        CHECK(duckdb_value_boolean(&result, column, 0));
+    }
+    duckdb_destroy_result(&result);
+
+    /* The projection reads the actual two values independently of extrema
+     * aggregation; the dishonest footer still claims both extrema are exact. */
+    REQUIRE_MESSAGE(s.query("SELECT CAST(v AS VARCHAR) FROM read_parquet(" + path + ")",
+                            &result, &error), error);
+    REQUIRE(duckdb_row_count(&result) == 2);
+    REQUIRE(duckdb_column_type(&result, 0) == DUCKDB_TYPE_VARCHAR);
+    std::vector<std::string> payload;
+    for (idx_t row = 0; row < 2; ++row) {
+        char *text = duckdb_value_varchar(&result, 0, row);
+        REQUIRE(text != nullptr);
+        payload.emplace_back(text);
+        duckdb_free(text);
+    }
+    duckdb_destroy_result(&result);
+    std::sort(payload.begin(), payload.end());
+    CHECK(payload == std::vector<std::string>{"2147483648", "9007199254740993"});
+
+    std::string bare_max;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT max(v)::VARCHAR FROM read_parquet(" + path + ")",
+                                   &bare_max, &error), error);
+    INFO("unfenced max=" << bare_max << "; a future engine may independently read the true maximum");
+
+    /* This is the production precision predicate and its scan fence. A
+     * future optimizer must not replace it with the dishonest footer. */
+    REQUIRE_MESSAGE(s.query(
+        "SELECT coalesce(min(v)::HUGEINT < -9007199254740992::HUGEINT OR "
+        "max(v)::HUGEINT > 9007199254740992::HUGEINT, false), "
+        "min(v), max(v), first(1) FROM read_parquet(" + path + ")",
+        &result, &error), error);
+    REQUIRE(duckdb_row_count(&result) == 1);
+    REQUIRE(duckdb_column_count(&result) == 4);
+    CHECK(duckdb_column_type(&result, 0) == DUCKDB_TYPE_BOOLEAN);
+    CHECK(duckdb_column_type(&result, 1) == DUCKDB_TYPE_BIGINT);
+    CHECK(duckdb_column_type(&result, 2) == DUCKDB_TYPE_BIGINT);
+    CHECK(duckdb_column_type(&result, 3) == DUCKDB_TYPE_INTEGER);
+    for (idx_t column = 0; column < 4; ++column)
+        CHECK_FALSE(duckdb_value_is_null(&result, column, 0));
+    CHECK(duckdb_value_boolean(&result, 0, 0));
+    CHECK(duckdb_value_int64(&result, 1, 0) == 2147483648LL);
+    CHECK(duckdb_value_int64(&result, 2, 0) == 9007199254740993LL);
+    CHECK(duckdb_value_int32(&result, 3, 0) == 1);
+    duckdb_destroy_result(&result);
+    CHECK(read_bytes(forged) == altered);
+    std::remove(honest.c_str());
+    std::remove(forged.c_str());
 }

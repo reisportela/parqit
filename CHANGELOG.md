@@ -6,6 +6,18 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Fixed
+- Validate the wide-integer precision policy against values even when Parquet
+  footer extrema are marked exact. Incorrect extrema could bypass
+  `int64(refuse)` or suppress the rounding note; exact-text reads remain exact.
+
+### Performance
+- Convert temporal boundaries with DuckDB's native vector executor, avoiding
+  the C API's unconditional input flattening and per-row validity updates.
+  Keep infinity refusals, integer flooring, binary64 checks and fallible
+  evaluation of selected rows. The native callback integration is checked
+  against the pinned DuckDB source when configuring a build.
+
 ## [0.2.2] — 2026-09-22
 
 ### Fixed

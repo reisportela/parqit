@@ -2695,3 +2695,30 @@ entry notes the conservative fallback if the assumption proves wrong.
     without signed overflow. Share this gate between eager timestamp filling
     and the vectorized us-to-ms kernel. Keep the failing Windows assertions;
     add direct positive/negative thresholds and signed-int64 endpoint tests.
+162. **Native temporal execution (2026-09-22).** Keep the four temporal
+    declarations and callback metadata in the C API registration, but use
+    DuckDB's native UnaryExecutor for their execution. It consumes constants,
+    flat vectors and selections without the C API's unconditional Flatten().
+    Both ScalarFunction::SetFallible and CAN_THROW_RUNTIME_ERROR remain:
+    a dictionary entry excluded by a selection must not raise an error.
+    Types, NULLs, infinity sentinels, integer floors and the binary64 gate
+    retain the 0.2.2 contract. These callbacks need neither C API bind data
+    nor local execution state; the catalog retains the shared function_info.
+    VerifyDuckDBScalarAPI.cmake checks the pinned version and scalar C API
+    source before allowing the handle/callback integration to build. Review
+    that contract explicitly when upgrading DuckDB. Tests exercise validity
+    word/chunk boundaries, selected infinities and recovery after errors.
+163. **Precision must inspect payloads (2026-09-22).** DuckDB 1.5.3 can
+    replace bare MIN/MAX aggregates with footer extrema marked exact. A
+    forged BIGINT maximum of 2^53, with a real value of 2^53+1, exposed a
+    0.2.2 regression: refuse could succeed with rounding and round could
+    omit its note. Positive/negative BIGINT, UBIGINT and DECIMAL probes
+    reproduce the issue. Keep casts after the extrema, but include first(1)
+    as an extra final SELECT field whenever the precision predicate is
+    present. Its constant update is O(1) per chunk and prevents the pinned
+    metadata-only aggregate substitution. It has no response slot: ignore
+    the extra result in C++, not through an outer SQL projection, which
+    would let the optimizer remove it. The portable C++ gate checks this
+    engine behavior; v124 verifies refusal, exact text, rounding disclosure
+    and dataset atomicity against payloads checked with PyArrow. This does
+    not extend trust in footers or change the existing 32-bit sizing policy.
