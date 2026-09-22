@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.2 22sep2026}{...}
+{* *! version 0.2.3 23sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}

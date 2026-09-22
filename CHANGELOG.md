@@ -6,6 +6,8 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-23
+
 ### Fixed
 - Validate the wide-integer precision policy against values even when Parquet
   footer extrema are marked exact. Incorrect extrema could bypass
