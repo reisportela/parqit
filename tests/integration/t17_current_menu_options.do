@@ -56,4 +56,19 @@ parqit set fill_threads auto
 parqit set stream_buffer_mb auto
 parqit version
 assert `"`r(fill_threads)'"' == "auto" & `"`r(stream_buffer_mb)'"' == "auto"
+* The dialog's omitted type is a default, not an explicit double for egen.
+clear
+set obs 3
+gen byte x = _n
+parqit open _data
+parqit gen generated = x
+parqit egen counted = count(x)
+parqit egen minimum = min(x)
+parqit egen double explicit = count(x)
+parqit collect, clear
+assert generated == x & counted == 3 & minimum == 1 & explicit == 3
+assert "`: type generated'" == "double"
+assert "`: type counted'" == "byte" & "`: type minimum'" == "byte"
+assert "`: type explicit'" == "double"
+parqit close _all
 di "VERDICT(T17_CURRENT_MENU_OPTIONS): PASS"

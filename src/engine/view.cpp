@@ -171,7 +171,13 @@ std::string View::fresh_helper(const std::string &hint,
         std::string cand = "__parqit_" + hint + "_" + std::to_string(++helper_counter_);
         /* charter §6.12: never collide — with the live manifest, nor with any
          * extra names the caller must dodge (a two-table verb's using side) */
-        if (col_index(cand) < 0 && !taken.count(cand)) return cand;
+        const auto collides = [&](const std::string &name) {
+            return name == cand || ci_clash(name, cand);
+        };
+        const bool live_collision = std::any_of(cols_.begin(), cols_.end(),
+            [&](const ViewCol &c) { return collides(c.name); });
+        if (!live_collision && !std::any_of(taken.begin(), taken.end(), collides))
+            return cand;
     }
 }
 
@@ -1536,11 +1542,15 @@ std::string View::merge_with(const std::string &kind,
     if (!nogen) {
         const std::string cig = ci_guard(mname);
         if (!cig.empty()) return "merge: " + cig;
-        for (const auto *c : brought)
+        for (const auto *c : brought) {
+            if (c->name == mname || c->exposed() == mname)
+                return "merge: variable " + mname +
+                       " already exists in using data (use gen() or nogenerate)";
             if (ci_clash(c->name, mname))
                 return "merge: variable " + mname + " differs only by case from the "
                        "using variable " + c->name +
                        ", which the engine cannot hold in one view (use gen())";
+        }
     }
 
     const std::string prev = prev_name(stages_.size());
@@ -1777,7 +1787,7 @@ std::string View::append_with(std::vector<UsingSide> sources,
     if (!gen_name.empty())
         for (size_t s = 0; s < sources.size(); s++)
             for (const auto &c : sources[s].cols) {
-                if (c.name == gen_name)
+                if (c.name == gen_name || c.exposed() == gen_name)
                     return "append: generate() variable " + gen_name +
                            " already exists in using file " + std::to_string(s + 1);
                 /* A2-6 (audit 2026-08-22): a case-only clash with a using column
@@ -2076,16 +2086,25 @@ std::string View::reshape_long(const std::vector<std::string> &stubs,
      * same-named columns — silent corruption / data loss where Stata stops with
      * rc 110 (RESHAPE-5). */
     {
-        std::set<std::string> seen;
-        std::vector<std::string> outnames;
-        for (const auto *c : carried) outnames.push_back(c->name);
-        outnames.push_back(jname);
-        for (const auto &st : stubs) outnames.push_back(st);
-        for (const auto &nm : outnames)
-            if (!seen.insert(nm).second)
+        std::set<std::string> exposed;
+        std::map<std::string, std::string> engine_names;
+        for (const auto *c : carried) {
+            engine_names.emplace(ascii_lower(c->name), c->name);
+            exposed.insert(c->exposed());
+        }
+        std::vector<std::string> generated{jname};
+        generated.insert(generated.end(), stubs.begin(), stubs.end());
+        for (const auto &nm : generated) {
+            if (!exposed.insert(nm).second)
                 return "reshape long: variable " + nm +
                        " already defined (a kept column collides with a long "
                        "stub or with j)";
+            const auto inserted = engine_names.emplace(ascii_lower(nm), nm);
+            if (!inserted.second)
+                return "reshape long: generated name " + nm +
+                       " collides with " + inserted.first->second +
+                       " under the engine's case-insensitive identifiers";
+        }
     }
 
     const std::string prev = prev_name(stages_.size());

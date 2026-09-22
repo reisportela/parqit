@@ -2601,3 +2601,55 @@ entry notes the conservative fallback if the assumption proves wrong.
     v0.2.0 tag and publish v0.2.1 only after fresh local/CI/exact-asset gates.
     No OpenMP is introduced. README does not promise ordering within tied
     merge/join keys: the view orders by keys, not a unique tie-breaker.
+156. **Adversarial boundary and name audit (2026-09-22).** Internal helpers
+    must avoid ASCII case variants in every engine-visible namespace. Names
+    produced by reshape and merge/append markers must be unique both as engine
+    identifiers and as exact Stata output names. Existing distinct aliases may
+    still restore case-distinct Stata names. Reject an ambiguous candidate before
+    changing the view; retain the public name-error code r(198), rather than
+    claiming native r(110) parity. Append retains its existing conservative
+    refusal of a generate() name already present in a using source.
+    For integer protection, compute min/max in the source type and compare their
+    HUGEINT conversions with strict +/-2^53 bounds; UHUGEINT uses an unsigned
+    maximum and unsigned bound. Mixed signed/unsigned 128-bit comparisons can
+    promote to DOUBLE and miss 2^53+1. DECIMAL casts remain after the extrema:
+    this preserves the previous monotone rounding decision, including +/-0.5
+    ties, while removing per-row casts and abs(). Null and empty inputs remain
+    within the protected range. Exact statistical accumulators are unchanged.
+    Floor nanoseconds by dividing before correcting negative remainders, so
+    finite values near INT64_MIN do not underflow. An environment buffer cap
+    that cannot be represented in bytes follows the existing invalid-input
+    automatic fallback, with no signed multiplication overflow.
+    Regression oracles include native Stata, Python integer/binary64 arithmetic,
+    PyArrow timestamps, raw typed DuckDB bindings, and abnormal process exits.
+    Validation is Linux-local; neither a new release nor cross-platform runtime
+    certification follows from these checks. Preserve the pre-existing local
+    missing-key scan optimization unchanged and report its provenance separately.
+157. **Missing-key scan contract and 0.2.2 release (2026-09-22).** The
+    missing-match note requires missing values on both sides of the same key.
+    Count using first, then only the master keys with nonzero using counts;
+    retain a position map to preserve note names, counts and requested order.
+    With no using missings, m:1 and joinby no longer execute the master just
+    for this diagnostic. A master execution error is therefore deferred to
+    collect/save, which still fail loudly and preserve the in-memory dataset.
+    Master uniqueness checks for 1:1 and 1:m remain eager. If both missing-count
+    queries fail, the using error now wins. These timing/diagnostic changes
+    are explicit release behavior, not a promise that every lazy verb avoids
+    validation queries. Regression v121 covers composite subsets, reversed
+    key order, exact payloads and both early and deferred failures.
+    The release includes the previously local MISSKEY-SCAN-1 change alongside
+    the validated audit fixes. Build and publish GitHub-produced plugins only;
+    verify the exact staged package and public installation after all four
+    platform builds pass. Preserve the original dirty checkout and old tags.
+158. **Help/menu contract for 0.2.2 (2026-09-22).** The two help files
+    distinguish the default storage of numeric gen (double) from untyped egen
+    (the aggregate's inferred engine type until materialisation). The shared
+    dialog uses the label (default) and still omits the type via isdefault();
+    choosing double continues to emit an explicit double. The shared selector
+    explains that string types apply only to gen; egen refuses them in a
+    dialog stopbox before command submission. A command-level
+    regression verifies gen, inferred count/min and explicit double count.
+    Help covers name identities and atomic refusals, full 128-bit boundaries,
+    the existing DECIMAL threshold rounding, negative nanosecond flooring,
+    malformed environment limits and lazy join error timing. The seven engine
+    settings and current input/materialisation options remain unchanged.

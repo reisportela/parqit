@@ -238,7 +238,7 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
          * TIMESTAMP) truncates toward ZERO, so a pre-1970 instant within 1 us
          * below a millisecond boundary landed 1 ms LATER than the documented
          * floor. Floor the nanosecond count to microseconds in integer
-         * arithmetic (positive-modulus form: DuckDB's // truncates) and rebuild
+         * arithmetic (correcting DuckDB's // toward zero) and rebuild
          * the instant; the ms floor then happens in the fill/ts_ms_sql. */
         p.cast_sql = timestamp_ns_floor_us_sql(ref);
         p.transfer = Transfer::TimestampUs;
@@ -553,7 +553,10 @@ bool stata_tc_ms_to_epoch_us(double stata_ms, long long *epoch_us) {
 
 std::string timestamp_ns_floor_us_sql(const std::string &ref) {
     const std::string ns = "epoch_ns(" + ref + ")";
-    return "make_timestamp(((" + ns + ") - (((" + ns + ") % 1000 + 1000) % 1000)) // 1000)";
+    /* Divide before the correction: subtracting the positive remainder
+     * first underflows for valid TIMESTAMP_NS values near INT64_MIN. */
+    return "make_timestamp(((" + ns + ") // 1000) - CASE WHEN (" + ns +
+           ") % 1000 < 0 THEN 1 ELSE 0 END)";
 }
 
 namespace {

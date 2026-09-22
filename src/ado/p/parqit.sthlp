@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.1 20sep2026}{...}
+{* *! version 0.2.2 22sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -80,8 +80,9 @@ for a Parquet/CSV source (read as UTF-8).
 
 {pstd}{opt int64(refuse|round|string)} says what to do with a column whose
 integers go beyond 2^53, outside the consecutively exact integer range of a
-Stata {cmd:double}. The protection is conservative, even if a particular
-larger integer happens to be representable exactly.
+Stata {cmd:double}. The protection covers signed and unsigned 64-bit and 128-bit integers
+and wide decimals. It is conservative, even if a particular larger integer
+happens to be representable exactly.
 {cmd:refuse} (the default) stops the read with {cmd:r(198)}, naming every such
 column; nothing is staged and the data in memory is untouched. {cmd:round}
 accepts the nearest double and says so per column — two distinct keys can then
@@ -612,10 +613,13 @@ the renamed column. {cmd:sort} is ascending, while {cmd:gsort} accepts a
 {cmd:+}/{cmd:-} prefix per key. Sorting records plan order and is applied when
 the plan runs; it does not scan the source when typed.
 
-{pstd}{cmd:gen} and {cmd:egen} accept {cmd:byte int long float double str# strL}.
-The declared type is value semantics: numeric narrowing truncates toward zero
-and makes out-of-range values missing, and {cmd:str#} enforces its byte width.
-An untyped numeric result is {cmd:double}. In {cmd:gen ... if}, observations
+{pstd}{cmd:gen} accepts {cmd:byte int long float double str# strL};
+{cmd:egen} accepts numeric storage types. The declared type is value semantics:
+numeric narrowing truncates toward zero and makes out-of-range values missing,
+and {cmd:str#} enforces its byte width. An untyped numeric {cmd:gen} result is
+{cmd:double}; an untyped {cmd:egen} retains the aggregate's engine type until
+materialisation, including exact integer or decimal totals. Use
+{cmd:egen double} to request a double result. In {cmd:gen ... if}, observations
 outside the qualifier receive missing; in {cmd:replace ... if}, they retain the
 old value. {cmd:replace} preserves a contractual {cmd:float}/{cmd:double} storage
 type when possible and otherwise re-infers it safely. {cmd:egen} functions are
@@ -667,6 +671,10 @@ must not mix string and numeric source columns. Native Stata's leading-zero
 rule is preserved: {cmd:inc01} signals that numeric {cmd:j=1} exists but is
 carried as an ordinary column; {cmd:inc1}, when present, supplies the long
 value, and otherwise that value is missing. Other columns are carried.
+The long stubs and {opt j()} must not collide with carried columns or with
+each other, either under the engine's case-insensitive identifiers or under
+the exact Stata names exposed by aliases. A collision is refused before the
+view changes; rename the conflicting column first.
 {cmd:reshape wide} requires unique ({opt i()},{opt j()}) cells, refuses missing
 {opt j()} values, and requires every other column to be an {opt i()} variable,
 the {opt j()} variable or a listed stub. Generated {it:stub}{it:jvalue} names
@@ -708,14 +716,24 @@ order-dependent sequential behaviour is deliberately required.
 
 {pstd}The default merge marker is {cmd:_merge}, with byte values and labels
 1 master only, 2 using only and 3 matched; {opt generate()} renames it and
-{opt nogenerate} omits it. {opt keep()} accepts names or codes
+{opt nogenerate} omits it. Its name must be absent from the master and the
+using columns retained in the result, including their exposed Stata names.
+A collision is refused with {cmd:r(198)} before changing the view. Choose a
+fresh {opt generate()} name, omit the marker, or exclude the conflicting
+using column with {opt keepusing()}.
+{opt keep()} accepts names or codes
 ({cmd:master}/{cmd:1}, {cmd:using}/{cmd:2}, {cmd:match}/{cmd:matched}/{cmd:3})
 and repeated tokens do not change their meaning. {opt keepusing()} accepts
 wildcards. A nonkey name present on both sides keeps the master column and
 prints a note. Empty-string keys and numeric NULL, NaN, infinities and
 magnitudes at or above 2^1023 are folded to the same ordinary missing key
 before uniqueness tests and matching. The result
-is ordered by the merge keys.
+is ordered by the merge keys. Missing-key disclosure checks the using side
+first. With no missing using keys, {cmd:merge m:1} and {cmd:joinby} need not
+execute the master plan at this step; data-dependent master errors may then
+surface when {cmd:collect}, {cmd:save} or an exploratory query executes it.
+The uniqueness checks required by {cmd:merge 1:1} and {cmd:merge 1:m} still
+execute the master before the merge is accepted.
 
 {pstd}{cmd:append} accepts one or more file or {cmd:view:}{it:name} sources and
 performs a union by column name in the stated source order. Columns absent from
@@ -727,7 +745,9 @@ execution if the conversion would lose its original precision; make an
 explicit conversion first when that loss is intended. Derived non-finite
 values are normalized to missing before the appended column is used.
 With {opt generate(newvar)}, master rows receive 0 and each using source receives
-1, 2, ... . The marker must not collide on any side. {cmd:joinby} is an inner
+1, 2, ... . The marker must not collide on any side, including an exposed
+Stata name carried under a different engine alias. A collision is refused
+before changing the view. {cmd:joinby} is an inner
 Cartesian match within each key tuple; same-named nonkey using columns are not
 added and produce a note. Append clears the declared sort; merge and joinby
 declare their keys as the result order.
@@ -1183,7 +1203,9 @@ a larger one is clamped and said; an explicit positive count outranks
 engine result buffered ahead of that fill ({cmd:auto} = environment override, otherwise sized per read;
 {cmd:0} restores the engine's own default before fetching; an explicit number
 outranks {cmd:PARQIT_STREAM_BUFFER_MB}; reported as
-{cmd:r(stream_buffer_mb)}){p_end}
+{cmd:r(stream_buffer_mb)}). Malformed, negative or overflowing environment
+values are ignored, leaving automatic per-read sizing; explicit session
+values are validated by {cmd:parqit set}.{p_end}
 {p 8 12 2}{cmd:parqit set threads} {it:#}{space 14}engine threads, 1 up to the CPUs available to this
 process (the default; a larger number is clamped to them and said){p_end}
 {p 8 12 2}{cmd:parqit set memory_limit} {it:value}{space 4}e.g. {cmd:8GB}{p_end}
@@ -1478,7 +1500,8 @@ multiset); order within tied keys is not guaranteed, including on repeated
 execution. Native {cmd:merge}'s own within-key order also changes
 with the physical order of the {it:using} file. Sort explicitly after
 collecting if {cmd:_n} or {cmd:by:} depends on it.{p_end}
-{pstd}{cmd:•} {cmd:int64}/{cmd:uint64} values outside +/-2^53 are conservatively
+{pstd}{cmd:•} Signed and unsigned 64-bit and 128-bit integers outside +/-2^53
+are conservatively
 {bf:refused} by default, even if a particular larger integer is exactly
 representable ({cmd:r(198)}, naming
 every such column; nothing is staged). {opt int64(string)} loads them as exact

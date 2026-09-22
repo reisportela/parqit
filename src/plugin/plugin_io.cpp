@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <set>
@@ -1979,9 +1980,19 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 add("coalesce(max(strlen(" + sref + ")), 0)::BIGINT", i, 'l');
             }
             if (p.needs_big53) {
-                add("coalesce(max(abs(" + ref +
-                        "::HUGEINT)) > 9007199254740992::HUGEINT, false)",
-                    i, 'b');
+                /* Compare extrema, not abs(value): abs(HUGEINT_MIN) and a
+                 * signed cast of large UHUGEINT overflow. Keep the unsigned
+                 * threshold unsigned too; mixed 128-bit signs promote to
+                 * DOUBLE. Casting only the extrema preserves DECIMAL's
+                 * existing rounding policy without converting every row. */
+                if (p.src_type == DUCKDB_TYPE_UHUGEINT)
+                    add("coalesce(max(" + ref +
+                            ") > 9007199254740992::UHUGEINT, false)", i, 'b');
+                else
+                    add("coalesce(min(" + ref +
+                            ")::HUGEINT < -9007199254740992::HUGEINT OR max(" +
+                            ref + ")::HUGEINT > 9007199254740992::HUGEINT, false)",
+                        i, 'b');
                 /* INT64-PROTECT-1: under int64(string) the affected columns
                  * become exact text, and their width must be measured over
                  * the very expression plan_big53_as_text() will project. The
@@ -3666,7 +3677,8 @@ long long stream_buffer_cap_bytes() {
     if (!e) return 0;
     char *end = nullptr;
     long long v = std::strtoll(e, &end, 10);
-    if (end == e || *end != '\0' || v < 0) return 0;
+    if (end == e || *end != '\0' || v < 0 ||
+        v > std::numeric_limits<long long>::max() / 1000000LL) return 0;
     if (v == 0) return -1;
     return v * 1000000LL;
 }

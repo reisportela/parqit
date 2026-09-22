@@ -2632,8 +2632,27 @@ ST_retcode missing_key_notes(Session &s, const std::string &mrel,
         duckdb_destroy_result(&res);
         return true;
     };
-    std::vector<long long> mn, un;
-    if (!counts(mrel, mkeys, &mn) || !counts(urel, ukeys, &un)) return kRcEngine;
+    /* MISSKEY-SCAN-1 (2026-09-22): count the using side first (usually the
+     * small lookup) and count the master only on the keys that have a missing
+     * value there. The note needs missing on BOTH sides of the same key, so the
+     * notes, their counts and their order are unchanged. What does change: for
+     * m:1 and joinby with no missing key on the using side, the master plan is
+     * no longer executed at verb time (+0.3 s on a 100M-row master in
+     * 0.2.0/0.2.1), so an execution error in the master surfaces at
+     * collect/save, as for any lazy verb, instead of at the merge; 1:1 and 1:m
+     * still execute the master in the caller's uniqueness contract. When both
+     * counts fail, the message now quotes the using query rather than the
+     * master's. */
+    std::vector<long long> un;
+    if (!counts(urel, ukeys, &un)) return kRcEngine;
+    std::vector<std::string> mneed;
+    std::vector<size_t> at;
+    for (size_t i = 0; i < keys.size(); i++)
+        if (un[i] != 0) { mneed.push_back(mkeys[i]); at.push_back(i); }
+    if (mneed.empty()) return 0;
+    std::vector<long long> found, mn(keys.size(), 0);
+    if (!counts(mrel, mneed, &found)) return kRcEngine;
+    for (size_t j = 0; j < at.size(); j++) mn[at[j]] = found[j];
     for (size_t i = 0; i < keys.size(); i++) {
         if (mn[i] == 0 || un[i] == 0) continue;
         warns->push_back(

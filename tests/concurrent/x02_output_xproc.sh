@@ -78,10 +78,14 @@ for _ in $(seq 1 800); do
     sleep 0.05
 done
 [ "$timed_out" -eq 0 ] || fail "timeout waiting for the two Stata sessions"
-wait "$PID_A" 2>/dev/null || true
-wait "$PID_B" 2>/dev/null || true
+wait "$PID_A" 2>/dev/null
+status_a=$?
+wait "$PID_B" 2>/dev/null
+status_b=$?
 PID_A=""
 PID_B=""
+[ "$status_a" -eq 0 ] || fail "session A exited with status $status_a"
+[ "$status_b" -eq 0 ] || fail "session B exited with status $status_b"
 
 inspect_log() {
     local log="$1" verdict="$2" last_verdict last_abort

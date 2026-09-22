@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.2.1 — the full surface below is implemented and covered by a
+> **Status:** v0.2.2 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -31,7 +31,13 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
-Version 0.2.1 includes protective integer reads with exact-text alternatives,
+Version 0.2.2 fixes ambiguous helper/output names and extreme integer and
+nanosecond reads, strengthens failure detection in the test runner, and reduces
+the cost of wide-integer checks and missing-key diagnostics. The command grammar
+and exact statistical algorithms are unchanged. See the [changelog](CHANGELOG.md)
+for the documented timing of errors in lazy joins.
+
+Version 0.2.1 introduced protective integer reads with exact-text alternatives,
 opt-in extended-missing preservation, binary and CSV controls, source-file
 provenance, streamed parallel collection, and aligned menus/help. It also
 changes two defaults: wide integers are refused unless their conversion is
@@ -182,7 +188,7 @@ running the checks below. `discard` alone does not guarantee a plugin reload.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.2.1`).
+  `download/vX.Y.Z` (for example, `download/v0.2.2`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -834,9 +840,11 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   kinds, count, the sort marker and the first/last 64 observations only; an
   edit confined to the middle rows is not detected (you assert nothing
   changed).
-- **`reshape wide`/`pivot` generated names** must not clash with a live name
+- **`reshape long`/`reshape wide`/`pivot` generated names** must not clash with a live engine name
   even when differing only by case (`x1` vs `X1`): such a spread is refused
-  rather than written as a duplicate-name file.
+  rather than written as a duplicate-name file. The exact names restored in
+  Stata must also remain unique; distinct existing aliases may still restore
+  case-distinct Stata names.
 - **Slices need a total order when tied rows matter.** `keep in`, `list in` and
   sliced previews cannot reconstruct Stata's physical within-tie order from a
   Parquet-backed plan. Add a unique tiebreaker to `parqit sort`/`gsort` before

@@ -36,6 +36,7 @@ if [ ${#RUNDIR} -gt 100 ]; then
 fi
 
 declare -a logs=()
+declare -a process_status=()
 selected=0
 for suite in integration verify_suite roundtrip; do
     for f in "$REPO/tests/$suite"/*.do; do
@@ -61,6 +62,7 @@ for suite in integration verify_suite roundtrip; do
             exit 2
         fi
         TMPDIR="$test_tmp" "$STATA" -b do "$RUNDIR/$base.do"
+        process_status+=("$?")
         rm -rf -- "$test_tmp"
         logs+=("$RUNDIR/$base.log")
     done
@@ -77,7 +79,8 @@ if [ -z "$FILTER" ] || [[ "$xproc_base" == *"$FILTER"* ]]; then
     echo "running concurrent/$xproc_base ..."
     xproc_log="$RUNDIR/$xproc_base.log"
     TMPDIR="$RUNDIR" STATA="$STATA" BUILD_DIR="$BUILD_DIR" \
-        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1 || true
+        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1
+    process_status+=("$?")
     logs+=("$xproc_log")
 fi
 
@@ -91,7 +94,8 @@ if [ -z "$FILTER" ] || [[ "$xproc_base" == *"$FILTER"* ]]; then
     echo "running concurrent/$xproc_base ..."
     xproc_log="$RUNDIR/$xproc_base.log"
     TMPDIR="$RUNDIR" STATA="$STATA" BUILD_DIR="$BUILD_DIR" \
-        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1 || true
+        bash "$REPO/tests/concurrent/$xproc_base.sh" >"$xproc_log" 2>&1
+    process_status+=("$?")
     logs+=("$xproc_log")
 fi
 
@@ -104,8 +108,15 @@ fi
 echo
 echo "================ VERDICT SUMMARY ================" | tee VERDICTS_SUMMARY.txt
 fail=0
-for log in "${logs[@]}"; do
+for index in "${!logs[@]}"; do
+    log="${logs[$index]}"
     name="$(basename "$log" .log)"
+    # Stata often exits 0 after a do-file error, so logs remain authoritative
+    # too. A nonzero process status must never be hidden by an earlier PASS.
+    if [ "${process_status[$index]}" -ne 0 ]; then
+        echo "VERDICT($name): *** PROCESS EXIT ${process_status[$index]} - inspect $log ***" | tee -a VERDICTS_SUMMARY.txt
+        fail=1
+    fi
     if [ -f "$log" ]; then
         verdicts="$(grep -h "^VERDICT" "$log" || true)"
         if [ -n "$verdicts" ]; then

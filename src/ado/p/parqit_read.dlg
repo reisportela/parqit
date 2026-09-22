@@ -1,7 +1,7 @@
 /*
   parqit use - Open a lazy view or load data into memory
 
-*!  VERSION 0.2.1  20sep2026
+*!  VERSION 0.2.2  22sep2026
 
   User > parqit > Read data (lazy view or into memory)...
   Launch directly with:  db parqit_read      (menu installed by: parqit menu)

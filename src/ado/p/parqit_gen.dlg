@@ -1,15 +1,15 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.2.1  20sep2026
+*!  VERSION 0.2.2  22sep2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)
 
   Builds parqit gen / egen / replace. Both Create... buttons open Stata's
-  expression builder (dates via td(), tm(), year(), mdy(), ...). An untyped
-  result is stored as double; choose a type to control storage, exactly like a
-  typed native generate. Lazy: the view's plan changes, not the data in memory.
+  expression builder (dates via td(), tm(), year(), mdy(), ...). Untyped numeric
+  gen uses double; egen infers its result type. Choose a type to request explicit
+  storage. Lazy: the view's plan changes, not the data in memory.
 */
 
 VERSION 16.0
@@ -61,7 +61,8 @@ BEGIN
   COMBOBOX cb_type		_lft	_ss	_vnwd	.,		///
 	dropdown							///
 	contents(type_list)						///
-	default("(double)")						///
+	default("(default)")						///
+	tooltip("String types apply to generate only; egen requires a numeric type") ///
 	label("Variable type")
   EDIT ed_name			140	@	160	.,		///
 	max(32)								///
@@ -94,7 +95,7 @@ BEGIN
 	label("Group variables")
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
-	label("An untyped result is stored as double (native generate defaults to float); choose a type to control storage.")
+	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
   TEXT tx_context _lft 335 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
@@ -113,7 +114,7 @@ END
 
 LIST type_list
 BEGIN
-	"(double)"
+	"(default)"
 	byte
 	int
 	long
@@ -201,6 +202,10 @@ BEGIN
 		}
 	}
 	if main.rb_egen {
+		if main.cb_type.startswith("str") {
+			stopbox stop "egen functions produce numeric results." ///
+				"Choose (default), byte, int, long, float, or double."
+		}
 		put "parqit egen "
 		if !main.cb_type.isdefault() {
 			put main.cb_type " "

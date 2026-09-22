@@ -77,7 +77,7 @@ does not require an FMA-capable CPU. Other toolchains retain the generic path.
 
 ```bash
 cmake --preset dev
-cmake --build build/dev --target parqit_plugin parqit_tests -j
+cmake --build build/dev --target parqit_plugin parqit_tests parqit_runtime_probe -j
 ctest --preset dev          # C++ unit tests (doctest)
 ```
 

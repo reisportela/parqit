@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.1 20sep2026}{...}
+{* *! version 0.2.2 22sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -561,7 +561,9 @@ of a slower, stop-and-go fill once the cap falls below roughly half the result;
 including after a previous larger buffer. In the measured wide numeric reads,
 that setting used less memory and was slower. {cmd:auto} defers to the environment
 override, if set, otherwise per-read sizing. An explicit numeric session setting
-outranks the variable. {cmd:PARQIT_FETCH_MATERIALIZED=1}
+outranks the variable. A malformed or negative environment value, or one
+whose megabyte-to-byte conversion would overflow, is ignored and automatic
+per-read sizing is used. {cmd:PARQIT_FETCH_MATERIALIZED=1}
 restores the earlier materialised fetch. The variables are read via
 {cmd:getenv}, like {cmd:PARQIT_FILL_THREADS}, and none of these changes any
 value: the fetches are byte-identical under every cap.{p_end}
@@ -636,8 +638,8 @@ Arithmetic operators evaluate in double precision, and guarded out-of-range
 values become missing: an overflowing
 result ({cmd:exp(800)}, {cmd:1e300*1e300}) or an out-of-range literal
 ({cmd:1e309}) is {cmd:.} in filters, assignments and aggregates alike —
-never an IEEE infinity. Because untyped results are double, control the
-storage of a generated column with a typed {cmd:parqit gen} (e.g.
+never an IEEE infinity. Untyped numeric {cmd:gen} results are double;
+control their storage with a typed {cmd:parqit gen} (e.g.
 {cmd:parqit gen byte flag = ...}); native Stata's untyped {cmd:gen} default
 is {cmd:float}. For an explicit {cmd:float} target, a finite value outside
 Stata's ±1.70e38 storage range becomes missing, as in native assignment.
@@ -686,8 +688,16 @@ exact decimal text sized by the observed maximum, and
 eager text conversion keeps preserved extended-missing codes as the strings
 {cmd:.a}-{cmd:.z}, with ordinary nulls becoming empty strings; corrupt codes
 still refuse the load. The
-trigger is the observed data, not the declared type: a 64-bit column whose
-values all fit is read exactly as before, with no option and no note. A
+trigger is the observed data, not the declared type: a 64-bit or 128-bit
+integer column whose values all fit is read exactly as before, with no option
+and no precision-loss note. The full signed and unsigned 128-bit ranges are
+accepted with {opt int64(string)} or {opt int64(round)}; protective refusal
+also handles their extreme values without an arithmetic overflow.
+For wide decimals, the threshold test rounds the observed extrema to integers
+using the engine's DECIMAL-to-HUGEINT cast. Thus +/-2^53+0.4 in magnitude does
+not trigger this guard, while +/-2^53+0.5 does. Decimal-to-double conversion
+can still round fractional values below the threshold and carries its own
+conversion note. A
 preview ({cmd:parqit head}, {cmd:parqit list}) always shows the exact digits.
 A lazy plan keeps these source numerics in DuckDB until a Stata boundary is
 actually crossed, so join keys, {cmd:parqit save} and engine-side statistics
@@ -714,7 +724,9 @@ representable as a float — on eager, lazy and view-save reads — and
 {cmd:double} otherwise) unless the observed values require wider. Foreign
 {cmd:TIME} values become milliseconds since midnight with
 {cmd:%tcHH:MM:SS}; nanosecond time/timestamps are truncated (toward the earlier
-millisecond, including before 1970) with a note. A timezone-aware timestamp keeps its UTC instant;
+millisecond, including before 1970) with a note. This includes finite
+nanosecond timestamps near the signed 64-bit limits; negative values use
+floor, not truncation toward zero. A timezone-aware timestamp keeps its UTC instant;
 a time-of-day offset is discarded with a note. Inside a pipeline dates are
 their Stata day or millisecond counts, so date arithmetic is ordinary
 arithmetic. Saving a fractional day, millisecond or period count rounds to the
@@ -831,7 +843,10 @@ must remain stable throughout the command.{p_end}
 kinds, count, {cmd:sortedby} and the first and last 64 observations only; an
 edit confined to the middle rows is not detected and the copy carries the
 source file's content (see {help parqit_technical##materialisers:Materialisers}).{p_end}
-{pstd}{cmd:•} {cmd:reshape wide}/{cmd:pivot} refuse a generated name that
+{pstd}{cmd:•} {cmd:reshape long} refuses output names that collide with
+carried columns or each other, checking both the engine's case-insensitive
+names and exact exposed Stata names before changing the view.
+{cmd:reshape wide}/{cmd:pivot} refuse a generated name that
 differs only by case from a live or another generated name ({cmd:x1} beside
 {cmd:X1}); a {opt relaxed} union refuses a name the engine's case-insensitive
 union would split across two columns, and a Hive tree whose partition key
@@ -848,7 +863,11 @@ Delimited text on a two-table {cmd:using} side is bridged too.
 become plain missing in Parquet, with a write-time note. With it, eager reads
 restore the codes; lazy views still fold them and announce that loss.
 Their literals are therefore rejected in lazy expressions; use
-{cmd:missing()} or the ordinary {cmd:.} value.{p_end}
+{cmd:missing()} or the ordinary {cmd:.} value. Merge/joinby disclose missing
+keys on both sides. They inspect using keys first and scan master keys only
+where using has missing values; {cmd:merge m:1}/{cmd:joinby} can consequently
+defer a data-dependent master failure until execution. The uniqueness checks
+of {cmd:merge 1:1}/{cmd:merge 1:m} still inspect the master.{p_end}
 {pstd}{cmd:•} A slice over tied sort keys has no defined within-tie order.
 Add a unique key to {cmd:sort}/{cmd:gsort} before {cmd:keep in} or a sliced
 preview when row identity must be reproducible.{p_end}

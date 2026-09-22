@@ -6,6 +6,51 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-22
+
+### Fixed
+- Keep internal helper names distinct from user columns under DuckDB's ASCII
+  case folding, including the using side of a merge. Case variants of row or
+  join markers could otherwise change `_n`, `_N` or `_merge` values.
+- Refuse conflicting `reshape long` output names and merge/append markers
+  before changing the view. Check both engine aliases and the names restored
+  in Stata; preserve valid case-distinct Stata names with separate aliases.
+- Read the full signed/unsigned 128-bit integer range under the chosen
+  `int64()` policy. Protective refusal returns the intended error; text mode
+  keeps exact digits. Range checks no longer overflow on the signed minimum
+  or cast large unsigned integers to a signed type.
+- Floor valid nanosecond timestamps near the lower int64 boundary without
+  arithmetic overflow on read, collect or lazy save.
+- Ignore environment streaming-buffer limits whose conversion to bytes would
+  overflow, using the existing automatic fallback for invalid input.
+- Fail the Stata test runner on any nonzero process exit, including concurrent
+  test wrappers, even if the log contains an earlier PASS.
+
+### Performance
+- Check missing join keys on the using side first, and inspect only the
+  corresponding master keys when that side contains missings. An `m:1` merge
+  or `joinby` can therefore avoid executing the master plan at verb time when
+  no using key is missing. Execution errors in that master then appear at
+  `collect` or `save`; `1:1` and `1:m` still validate master uniqueness early.
+  If both missing-key count queries would fail, the using-side diagnostic now
+  takes precedence. Warning text, counts, key order and matching rules remain
+  unchanged. A permanent regression covers composite-key subsets and errors.
+- Check the wide-integer precision policy over aggregate extrema instead of
+  casting and taking the absolute value of every row. Retain exact unsigned
+  comparisons, empty/null behavior and the existing DECIMAL rounding rule.
+  This adds no scan and leaves the statistical aggregators unchanged.
+
+### Documentation
+- Align both help files and the variable-creation dialog with current type
+  inference, name guards, integer/timestamp boundaries, streaming-buffer input
+  validation and lazy join error timing. The dialog's omitted type is labelled
+  `(default)`: untyped numeric `gen` uses double, while `egen` infers its type.
+  This label correction does not change the generated command. The dialog
+  explains that string types apply only to `gen` and refuses them for `egen`
+  before submitting an invalid command.
+- Include the runtime-probe target in the documented developer build so a
+  fresh build contains every executable required by CTest.
+
 ## [0.2.1] — 2026-09-20
 
 ### Fixed

@@ -253,6 +253,49 @@ TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infi
     CHECK(p.transfer == Transfer::TimestampUs);
 }
 
+TEST_CASE("TS-NS-MIN-1: nanosecond floor covers every finite int64 boundary") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    const std::string sql = "SELECT epoch_us(" + timestamp_ns_floor_us_sql("ns") +
+                            ") FROM (SELECT $1::TIMESTAMP_NS AS ns)";
+    duckdb_prepared_statement stmt = nullptr;
+    REQUIRE(duckdb_prepare(s.con(), sql.c_str(), &stmt) == DuckDBSuccess);
+    struct Sample { int64_t ns; int64_t us; };
+    const Sample samples[] = {
+        {-9223372036854775807LL, -9223372036854776LL},
+        {-9223372036854775500LL, -9223372036854776LL},
+        {-9223372036854775001LL, -9223372036854776LL},
+        {-9223372036854775000LL, -9223372036854775LL},
+        {-1001, -2}, {-1000, -1}, {-999, -1}, {-1, -1}, {0, 0},
+        {1, 0}, {999, 0}, {1000, 1}, {1001, 1},
+        {9223372036854775806LL, 9223372036854775LL}
+    };
+    for (const auto &sample : samples) {
+        INFO("nanoseconds = " << sample.ns);
+        /* Bind the raw typed value: DuckDB's text constructor itself rejects
+         * the earliest finite nanoseconds, although Parquet stores them. */
+        duckdb_value value = duckdb_create_timestamp_ns({sample.ns});
+        const duckdb_state bound = duckdb_bind_value(stmt, 1, value);
+        duckdb_destroy_value(&value);
+        CHECK(bound == DuckDBSuccess);
+        duckdb_result result;
+        const duckdb_state rc = duckdb_execute_prepared(stmt, &result);
+        CHECK_MESSAGE(rc == DuckDBSuccess, duckdb_result_error(&result));
+        if (rc == DuckDBSuccess) {
+            CHECK_FALSE(duckdb_value_is_null(&result, 0, 0));
+            CHECK(duckdb_value_int64(&result, 0, 0) == sample.us);
+        }
+        duckdb_destroy_result(&result);
+    }
+    CHECK(duckdb_bind_null(stmt, 1) == DuckDBSuccess);
+    duckdb_result result;
+    const duckdb_state rc = duckdb_execute_prepared(stmt, &result);
+    CHECK(rc == DuckDBSuccess);
+    if (rc == DuckDBSuccess) CHECK(duckdb_value_is_null(&result, 0, 0));
+    duckdb_destroy_result(&result);
+    duckdb_destroy_prepare(&stmt);
+}
+
 TEST_CASE("FLOAT-EXACT-1: a manifest float held in a non-FLOAT column is float only when proven exact (V2.3)") {
     /* a %tc written from a float variable is a TIMESTAMP on disk; its ms range
      * (≈1.8e12) exceeds long, so range sizing says double — the recorded float

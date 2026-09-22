@@ -1061,3 +1061,144 @@ TEST_CASE("KEYFOLD-1: group keys fold NaN, Inf and the missing range like the jo
     CHECK(run_scalar("SELECT sx FROM (" + sql + ") WHERE k IS NULL") == "4");
     CHECK(run_scalar("SELECT sx FROM (" + sql + ") WHERE k = 1") == "1");
 }
+
+
+TEST_CASE("NAME-GUARD-117: helpers dodge case variants after keep and rename") {
+    for (const auto &spec : std::vector<std::pair<std::string, std::string>>{
+             {"__PARQIT_RN_1", "_n"}, {"__PARQIT_NN_1", "_N"}}) {
+        View v = make_view();
+        REQUIRE(v.rename("year", spec.first).empty());
+        REQUIRE(v.keep_vars({"id", spec.first}).empty());
+        REQUIRE(v.gen("seq", "double", spec.second, "", false).empty());
+        const auto sql = v.compile(false);
+        CHECK(run_scalar("SELECT sum(seq) FROM (" + sql + ")") ==
+              (spec.second == "_n" ? "21.0" : "36.0"));
+        CHECK(run_scalar("SELECT sum(" + quote_ident(spec.first) + ") FROM (" + sql + ")") == "12117");
+    }
+    View dropped = make_view();
+    REQUIRE(dropped.rename("year", "__PARQIT_RN_1").empty());
+    REQUIRE(dropped.drop_in(1, 1).empty());
+    CHECK(run_count(dropped) == 5);
+}
+
+TEST_CASE("NAME-GUARD-117: helpers dodge using-side case variants") {
+    View v = make_view();
+    auto u = make_using("SELECT 1 AS id, NULL::DOUBLE AS __PARQIT_UM_2",
+                        {{"id", 'n'}, {"__PARQIT_UM_2", 'n'}});
+    std::vector<std::string> warns;
+    REQUIRE(v.merge_with("m:1", {"id"}, u, {}, 0, "", false, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE _merge = 3") == "2");
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE _merge = 1") == "4");
+}
+
+TEST_CASE("NAME-GUARD-117: reshape refuses output collisions atomically") {
+    auto fixture = [](const std::string &engine, const std::string &exposed) {
+        View v;
+        std::vector<ViewCol> cols(4);
+        cols[0].name = "id";
+        cols[1].name = engine;
+        cols[1].stata = exposed;
+        cols[2].name = "x1";
+        cols[3].name = "x2";
+        v.open("SELECT 1 AS id, 999 AS " + quote_ident(engine) + ", 10 AS x1, 20 AS x2",
+               cols, nlohmann::json::object(), nlohmann::json::object(), "", "names fixture");
+        return v;
+    };
+    for (const auto &names : std::vector<std::pair<std::string, std::string>>{
+             {"X", ""}, {"alias_x", "x"}}) {
+        auto v = fixture(names.first, names.second);
+        const auto before = v.compile();
+        CHECK_FALSE(v.reshape_long({"x"}, {"id"}, "j").empty());
+        CHECK(v.compile() == before);
+        CHECK(v.n_stages() == 0);
+        CHECK(v.cols().size() == 4);
+    }
+    auto valid = fixture("alias_X", "X");
+    REQUIRE(valid.reshape_long({"x"}, {"id"}, "j").empty());
+    CHECK(valid.cols()[1].exposed() == "X");
+    REQUIRE(valid.gen("got", "double", "x", "", false).empty());
+    CHECK(run_scalar("SELECT sum(got) FROM (" + valid.compile(false) + ")") == "30.0");
+    CHECK(run_scalar("SELECT sum(alias_X) FROM (" + valid.compile(false) + ")") == "1998");
+
+    auto jcarried = fixture("J", "");
+    const auto jbefore = jcarried.compile();
+    CHECK_FALSE(jcarried.reshape_long({"x"}, {"id"}, "j").empty());
+    CHECK(jcarried.compile() == jbefore);
+
+    auto jstub = fixture("unrelated", "");
+    const auto sbefore = jstub.compile();
+    CHECK_FALSE(jstub.reshape_long({"x"}, {"id"}, "X").empty());
+    CHECK(jstub.compile() == sbefore);
+
+    View stubs;
+    std::vector<ViewCol> stubcols(3);
+    stubcols[0].name = "id";
+    stubcols[1].name = "x1";
+    stubcols[2].name = "X1";
+    stubs.open("SELECT 1 AS id, 10 AS x1, 20 AS X1", stubcols,
+               nlohmann::json::object(), nlohmann::json::object(), "", "stub case fixture");
+    const auto cbefore = stubs.compile();
+    const auto error = stubs.reshape_long({"x", "X"}, {"id"}, "j");
+    CHECK(error.find("case-insensitive") != std::string::npos);
+    CHECK(stubs.compile() == cbefore);
+}
+
+TEST_CASE("NAME-GUARD-117: merge marker rejects a using collision before mutation") {
+    View v = make_view();
+    auto u = make_using("SELECT 1 AS id, 99 AS _merge", {{"id", 'n'}, {"_merge", 'n'}});
+    std::vector<std::string> warns;
+    const auto before = v.compile();
+    CHECK_FALSE(v.merge_with("m:1", {"id"}, u, {}, 0, "", false, &warns).empty());
+    CHECK(v.compile() == before);
+    CHECK(v.n_stages() == 0);
+    CHECK(v.vallabs().empty());
+    REQUIRE(v.merge_with("m:1", {"id"}, u, {}, 0, "matched", false, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE matched = 3 AND _merge = 99") == "2");
+    View n = make_view();
+    REQUIRE(n.merge_with("m:1", {"id"}, u, {}, 0, "", true, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + n.compile(false) + ") WHERE _merge = 99") == "2");
+}
+
+
+TEST_CASE("NAME-GUARD-117: append marker rejects a using exposed-name collision") {
+    auto u = make_using("SELECT 4 AS id, 888 AS x_1", {{"id", 'n'}, {"x_1", 'n'}});
+    u.cols[1].stata = "x";
+    View v = make_view();
+    std::vector<std::string> warns;
+    const auto before = v.compile();
+    CHECK_FALSE(v.append_with({u}, "x", &warns).empty());
+    CHECK(v.compile() == before);
+    CHECK(v.n_stages() == 0);
+    CHECK(v.vallabs().empty());
+    REQUIRE(v.append_with({u}, "source", &warns).empty());
+    CHECK(run_count(v) == 7);
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE source = 1 AND x_1 = 888") == "1");
+    View plain = make_view();
+    REQUIRE(plain.append_with({u}, "", &warns).empty());
+    CHECK(run_count(plain) == 7);
+}
+
+TEST_CASE("NAME-GUARD-117: merge marker honours keepusing and exposed aliases") {
+    std::vector<std::string> warns;
+    auto excluded = make_using("SELECT 1 AS id, 99 AS _merge, 17 AS z",
+                              {{"id", 'n'}, {"_merge", 'n'}, {"z", 'n'}});
+    View kept = make_view();
+    REQUIRE(kept.merge_with("m:1", {"id"}, excluded, {"z"}, 0, "", false, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + kept.compile(false) + ") WHERE _merge = 3 AND z = 17") == "2");
+
+    auto aliased = make_using("SELECT 1 AS id, 99 AS _merge_1",
+                             {{"id", 'n'}, {"_merge_1", 'n'}});
+    aliased.cols[1].stata = "_merge";
+    View v = make_view();
+    const auto before = v.compile();
+    CHECK_FALSE(v.merge_with("m:1", {"id"}, aliased, {}, 0, "", false, &warns).empty());
+    CHECK(v.compile() == before);
+    CHECK(v.n_stages() == 0);
+    REQUIRE(v.merge_with("m:1", {"id"}, aliased, {}, 0, "matched", false, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE matched = 3 AND _merge_1 = 99") == "2");
+
+    aliased.cols[1].stata = "_MERGE";
+    View case_distinct = make_view();
+    REQUIRE(case_distinct.merge_with("m:1", {"id"}, aliased, {}, 0, "", false, &warns).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + case_distinct.compile(false) + ") WHERE _merge = 3 AND _merge_1 = 99") == "2");
+}
