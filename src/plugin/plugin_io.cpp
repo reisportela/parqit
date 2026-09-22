@@ -3458,8 +3458,7 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                     (*subms_seen)++;
                 long long ms = parqit::floordiv(v[off + r], 1000);
                 const long long stata_ms = ms + parqit::kEpochShiftMs;
-                const double stored = static_cast<double>(stata_ms);
-                if (static_cast<long long>(stored) != stata_ms) {
+                if (!parqit::integer_exact_in_binary64(stata_ms)) {
                     *err = "column " + p.stata_name + " observation " +
                            std::to_string(base + r + 1) +
                            " has a timestamp millisecond count that is not "
@@ -3467,7 +3466,7 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                            "to move the instant silently";
                     return false;
                 }
-                if (!store_num(r, stored))
+                if (!store_num(r, static_cast<double>(stata_ms)))
                     return false;
             }
         return true;

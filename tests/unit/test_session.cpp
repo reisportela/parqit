@@ -472,7 +472,7 @@ TEST_CASE("vectorized temporal boundaries preserve finite extrema and reject inf
     };
     auto check_raw = [&](size_t index, int64_t raw, int64_t expected, const char *expected_error = nullptr) {
         const auto &f = functions[index];
-        INFO(f.name << " raw=" << raw);
+        INFO(std::string(f.name) << " raw=" << raw);
         duckdb_prepared_statement stmt = nullptr;
         const std::string sql = "SELECT " + std::string(f.name) + "($1)";
         REQUIRE(duckdb_prepare(s.con(), sql.c_str(), &stmt) == DuckDBSuccess);
@@ -488,6 +488,8 @@ TEST_CASE("vectorized temporal boundaries preserve finite extrema and reject inf
         const char *message = duckdb_result_error(&result);
         const std::string error = message ? message : "";
         if (expected_error) {
+            INFO("unexpected integer result=" << (rc == DuckDBSuccess && f.output == DUCKDB_TYPE_BIGINT
+                 ? duckdb_value_int64(&result, 0, 0) : 0));
             CHECK(rc == DuckDBError);
             CHECK(error.find(expected_error) != std::string::npos);
         } else {

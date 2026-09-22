@@ -210,6 +210,20 @@ inline long long floordiv(long long a, long long b) {
     return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
 }
 
+/* Exact integer representability, without a floating cast round-trip that
+ * an optimizer may fold. Magnitude uses unsigned arithmetic even at INT64_MIN. */
+inline bool integer_exact_in_binary64(long long value) {
+    const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value)
+                                         : static_cast<uint64_t>(value);
+    uint64_t high = magnitude >> 53;
+    uint64_t mask = 0;
+    while (high) {
+        mask = (mask << 1) | 1;
+        high >>= 1;
+    }
+    return (magnitude & mask) == 0;
+}
+
 /* ---- temporal write conversions shared by every writer ------------------ */
 
 /* Native Stata's round() resolves exact half ties toward +infinity:

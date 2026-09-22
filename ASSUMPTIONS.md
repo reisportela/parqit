@@ -2685,3 +2685,13 @@ entry notes the conservative fallback if the assumption proves wrong.
     flattening and callback error-message ownership were checked in source.
     Seventy filter/projection cases match the SQL-guard candidate exactly;
     independent temporal payload, boundary and ABBA performance gates passed.
+161. **Compiler-independent binary64 gate (2026-09-22).** Windows CI
+    reproduced successful conversion of the two odd millisecond counts that
+    must fail the temporal precision contract. A floating cast round-trip is
+    not a reliable predicate under the release compiler's optimizations.
+    Use an integer-only representability test: compute unsigned magnitude,
+    find the low bits discarded beyond the 53 significant binary64 bits,
+    and require them all to be zero. Unsigned subtraction handles INT64_MIN
+    without signed overflow. Share this gate between eager timestamp filling
+    and the vectorized us-to-ms kernel. Keep the failing Windows assertions;
+    add direct positive/negative thresholds and signed-int64 endpoint tests.

@@ -294,7 +294,7 @@ static void temporal_boundary_fn(duckdb_function_info info, duckdb_data_chunk in
         }
         const int64_t value = raw / Divisor - (raw % Divisor < 0) + Shift;
         if constexpr (CheckBinary64) {
-            if (static_cast<int64_t>(static_cast<double>(value)) != value) {
+            if (!integer_exact_in_binary64(value)) {
                 duckdb_scalar_function_set_error(info,
                     "timestamp millisecond is not exactly representable in Stata binary64");
                 return;

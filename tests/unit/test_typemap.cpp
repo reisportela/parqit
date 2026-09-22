@@ -232,6 +232,23 @@ TEST_CASE("TEMPORAL-ROUND-1: integer-valued counts pass through, ties round up (
     CHECK(sql_round("NULL::DOUBLE") == "");
 }
 
+TEST_CASE("integer binary64 exactness remains independent of floating optimizations") {
+    for (const long long exact : {0LL, 1LL, (1LL << 53) - 1, 1LL << 53,
+                                 (1LL << 53) + 2, 1LL << 54, (1LL << 54) + 4,
+                                 (1LL << 62) + 1024}) {
+        CHECK(integer_exact_in_binary64(exact));
+        CHECK(integer_exact_in_binary64(-exact));
+    }
+    for (const long long rounded : {(1LL << 53) + 1, (1LL << 54) + 2,
+                                   (1LL << 62) + 512,
+                                   std::numeric_limits<long long>::max()}) {
+        CHECK_FALSE(integer_exact_in_binary64(rounded));
+        CHECK_FALSE(integer_exact_in_binary64(-rounded));
+    }
+    CHECK(integer_exact_in_binary64(std::numeric_limits<long long>::min()));
+    CHECK_FALSE(integer_exact_in_binary64(std::numeric_limits<long long>::min() + 1));
+}
+
 TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infinity (A1-9)") {
     parqit::Session &s = parqit::Session::instance();
     std::string v, err;
