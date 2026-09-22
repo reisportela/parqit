@@ -21,12 +21,22 @@ semantic versioning once `v0.1.0` is tagged.
   or cast large unsigned integers to a signed type.
 - Floor valid nanosecond timestamps near the lower int64 boundary without
   arithmetic overflow on read, collect or lazy save.
+- Floor finite microsecond timestamps near the lower int64 boundary without
+  subtracting from an extreme input. Keep the binary64 representability check
+  and refuse saves when millisecond flooring would exceed the timestamp range.
+- Refuse infinite DATE/TIMESTAMP values explicitly on eager and lazy Stata
+  boundaries, including nanosecond timestamps. They could previously turn
+  into finite numbers or nulls depending on the route. Failed reads preserve
+  the current dataset and failed saves preserve the previous destination.
 - Ignore environment streaming-buffer limits whose conversion to bytes would
   overflow, using the existing automatic fallback for invalid input.
 - Fail the Stata test runner on any nonzero process exit, including concurrent
   test wrappers, even if the log contains an earlier PASS.
 
 ### Performance
+- Validate and convert temporal columns in one vectorized pass, retaining
+  infinity refusal, exact integer flooring and binary64 checks without
+  repeatedly evaluating nested boundary expressions.
 - Check missing join keys on the using side first, and inspect only the
   corresponding master keys when that side contains missings. An `m:1` merge
   or `joinby` can therefore avoid executing the master plan at verb time when

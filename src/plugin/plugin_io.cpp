@@ -3426,6 +3426,13 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         const int32_t *v = static_cast<const int32_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
             if (valid(r)) {
+                if (v[off + r] == std::numeric_limits<int32_t>::max() ||
+                    v[off + r] == -std::numeric_limits<int32_t>::max()) {
+                    *err = "column " + p.stata_name + " observation " +
+                           std::to_string(base + r + 1) +
+                           ": infinite DATE cannot be represented in Stata";
+                    return false;
+                }
                 double d = static_cast<double>(v[off + r]) +
                            parqit::kEpochShiftDays;
                 if (!store_num(r, in_range(d) ? d : SV_missval)) return false;
@@ -3436,6 +3443,13 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         const int64_t *v = static_cast<const int64_t *>(col->buffers[1]);
         for (int64_t r = 0; r < col->length; r++)
             if (valid(r)) {
+                if (v[off + r] == std::numeric_limits<int64_t>::max() ||
+                    v[off + r] == -std::numeric_limits<int64_t>::max()) {
+                    *err = "column " + p.stata_name + " observation " +
+                           std::to_string(base + r + 1) +
+                           ": infinite TIMESTAMP cannot be represented in Stata";
+                    return false;
+                }
                 /* T1: a plain us TIMESTAMP silently dropped sub-ms precision
                  * with no note (unlike the NS/TZ paths). Count a real drop so
                  * the load says so — only when it actually happens, never a

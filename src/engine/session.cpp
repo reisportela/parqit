@@ -1,12 +1,16 @@
 #include "engine/session.hpp"
+#include "engine/typemap.hpp"
 #include "engine/stats_overflow.hpp"
 #include "engine/statistics.hpp"
+#include "duckdb/function/scalar_function.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <locale>
+#include <limits>
+#include <type_traits>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -252,10 +256,60 @@ static void parqit_finite_fn(duckdb_function_info, duckdb_data_chunk input,
     }
 }
 
+/* The C API flattens scalar inputs before calling us (DuckDB 1.5.3,
+ * scalar_function-c.cpp:CAPIScalarFunction), including constants/selections.
+ * Convert once per cell: nested SQL guards repeat temporal operands and work.
+ * All quotients plus shifts fit int64; nanoseconds -> ms also stays below 2^53. */
+template <class Input, class Output, int64_t Divisor, int64_t Shift,
+          bool CheckBinary64 = false>
+static void temporal_boundary_fn(duckdb_function_info info, duckdb_data_chunk input,
+                                  duckdb_vector output) {
+    const idx_t n = duckdb_data_chunk_get_size(input);
+    const duckdb_vector in = duckdb_data_chunk_get_vector(input, 0);
+    const auto *values = static_cast<const Input *>(duckdb_vector_get_data(in));
+    const uint64_t *validity = duckdb_vector_get_validity(in);
+    auto *out = static_cast<Output *>(duckdb_vector_get_data(output));
+    duckdb_vector_ensure_validity_writable(output);
+    uint64_t *out_validity = duckdb_vector_get_validity(output);
+    constexpr int64_t infinity = std::is_same_v<Input, duckdb_date>
+        ? std::numeric_limits<int32_t>::max() : std::numeric_limits<int64_t>::max();
+    constexpr const char *infinite_error = std::is_same_v<Input, duckdb_date>
+        ? "infinite DATE cannot be represented in Stata"
+        : std::is_same_v<Input, duckdb_timestamp>
+            ? "infinite TIMESTAMP cannot be represented in Stata"
+            : "infinite TIMESTAMP_NS cannot be represented in Stata";
+    for (idx_t r = 0; r < n; ++r) {
+        const uint64_t bit = uint64_t(1) << (r & 63);
+        if (validity && !(validity[r >> 6] & bit)) {
+            out_validity[r >> 6] &= ~bit;
+            continue;
+        }
+        int64_t raw;
+        if constexpr (std::is_same_v<Input, duckdb_date>) raw = values[r].days;
+        else if constexpr (std::is_same_v<Input, duckdb_timestamp>) raw = values[r].micros;
+        else raw = values[r].nanos;
+        if (raw == infinity || raw == -infinity) {
+            duckdb_scalar_function_set_error(info, infinite_error);
+            return;
+        }
+        const int64_t value = raw / Divisor - (raw % Divisor < 0) + Shift;
+        if constexpr (CheckBinary64) {
+            if (static_cast<int64_t>(static_cast<double>(value)) != value) {
+                duckdb_scalar_function_set_error(info,
+                    "timestamp millisecond is not exactly representable in Stata binary64");
+                return;
+            }
+        }
+        if constexpr (std::is_same_v<Output, duckdb_timestamp>) out[r].micros = value;
+        else out[r] = value;
+        out_validity[r >> 6] |= bit;
+    }
+}
+
 static bool register_scalar(duckdb_connection con, const char *name,
                             const std::vector<duckdb_type> &params,
                             duckdb_type ret_type, duckdb_scalar_function_t fn,
-                            std::string *err) {
+                            std::string *err, bool fallible = false) {
     duckdb_scalar_function f = duckdb_create_scalar_function();
     if (!f) {
         if (err) *err = std::string("could not create internal function ") + name;
@@ -272,6 +326,10 @@ static bool register_scalar(duckdb_connection con, const char *name,
     duckdb_destroy_logical_type(&ret);
     duckdb_scalar_function_set_special_handling(f);
     duckdb_scalar_function_set_function(f, fn);
+    /* DuckDB 1.5.3's C API handle is a ScalarFunction pointer (verified in
+     * scalar_function-c.cpp), but the C API has no error-mode setter. Keep
+     * optimizer error ordering consistent with the former SQL error() guards. */
+    if (fallible) reinterpret_cast<duckdb::ScalarFunction *>(f)->SetFallible();
     duckdb_state st = duckdb_register_scalar_function(con, f);
     duckdb_destroy_scalar_function(&f);
     if (st != DuckDBSuccess) {
@@ -290,6 +348,18 @@ static bool register_internal_functions(duckdb_connection con, std::string *err)
                            DUCKDB_TYPE_VARCHAR, parqit_substr_bytes_fn, err) &&
            register_scalar(con, "parqit_finite", {DUCKDB_TYPE_DOUBLE},
                            DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err) &&
+           register_scalar(con, "__parqit_date_days", {DUCKDB_TYPE_DATE},
+                           DUCKDB_TYPE_BIGINT,
+                           temporal_boundary_fn<duckdb_date, int64_t, 1, kEpochShiftDays>, err, true) &&
+           register_scalar(con, "__parqit_timestamp_ms", {DUCKDB_TYPE_TIMESTAMP},
+                           DUCKDB_TYPE_BIGINT,
+                           temporal_boundary_fn<duckdb_timestamp, int64_t, 1000, kEpochShiftMs, true>, err, true) &&
+           register_scalar(con, "__parqit_timestamp_ns_ms", {DUCKDB_TYPE_TIMESTAMP_NS},
+                           DUCKDB_TYPE_BIGINT,
+                           temporal_boundary_fn<duckdb_timestamp_ns, int64_t, 1000000, kEpochShiftMs>, err, true) &&
+           register_scalar(con, "__parqit_timestamp_ns_us", {DUCKDB_TYPE_TIMESTAMP_NS},
+                           DUCKDB_TYPE_TIMESTAMP,
+                           temporal_boundary_fn<duckdb_timestamp_ns, duckdb_timestamp, 1000, 0>, err, true) &&
            statistics::register_functions(con, err);
 }
 

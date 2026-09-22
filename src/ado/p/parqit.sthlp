@@ -1500,6 +1500,11 @@ multiset); order within tied keys is not guaranteed, including on repeated
 execution. Native {cmd:merge}'s own within-key order also changes
 with the physical order of the {it:using} file. Sort explicitly after
 collecting if {cmd:_n} or {cmd:by:} depends on it.{p_end}
+{pstd}{cmd:•} Infinite source dates and timestamps, including nanosecond
+timestamps, are refused because Stata cannot represent them. Eager and lazy
+failures preserve the current data. A save whose temporal result is outside
+the writer's range also refuses, preserving an existing destination. See
+{help parqit_technical##types:Type fidelity} for extreme finite values.{p_end}
 {pstd}{cmd:•} Signed and unsigned 64-bit and 128-bit integers outside +/-2^53
 are conservatively
 {bf:refused} by default, even if a particular larger integer is exactly

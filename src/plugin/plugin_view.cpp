@@ -250,17 +250,9 @@ bool load_req(const std::vector<std::string> &args, json *req, std::string *err)
     return parqit::load_request(reqpath, req, err);
 }
 
-/* the exact integer-ms expression for a timestamp column (negative-safe
- * floor to ms; DuckDB // truncates, so use the positive-modulus form) */
+/* The vectorized boundary validates infinity, flooring and binary64 once. */
 std::string ts_ms_sql(const std::string &inner) {
-    std::string us = "epoch_us(" + inner + ")";
-    std::string ms = "((" + us + " - (((" + us + ") % 1000 + 1000) % 1000)) // "
-                     "1000 + " + std::to_string(parqit::kEpochShiftMs) + ")";
-    /* DATA-005: refuse an instant whose exact Stata millisecond count changes
-     * when represented as binary64.  The eager fill applies the same gate. */
-    return "(CASE WHEN CAST(CAST(" + ms + " AS DOUBLE) AS BIGINT) <> " + ms +
-           " THEN error('timestamp millisecond is not exactly representable "
-           "in Stata binary64') ELSE " + ms + " END)";
+    return "__parqit_timestamp_ms(" + inner + ")";
 }
 
 /* boundary cast for the lazy view: every column becomes a Stata-semantics
@@ -394,7 +386,7 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt,
         b.sql = ref;
         break;
     case DUCKDB_TYPE_DATE:
-        b.sql = "(" + ref + " - DATE '1960-01-01')";
+        b.sql = "__parqit_date_days(" + ref + ")";
         b.fmt = "%td";
         break;
     case DUCKDB_TYPE_TIMESTAMP:
@@ -408,9 +400,8 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt,
         b.fmt = "%tc";
         break;
     case DUCKDB_TYPE_TIMESTAMP_NS:
-        /* TS-NS-FLOOR-1: floor the ns count to us toward -infinity (the plain
-         * CAST truncates toward zero) — identical to the eager typemap plan */
-        b.sql = ts_ms_sql(parqit::timestamp_ns_floor_us_sql(ref));
+        /* One pass from ns to Stata ms; no intermediate us expression. */
+        b.sql = "__parqit_timestamp_ns_ms(" + ref + ")";
         b.fmt = "%tc";
         break;
     case DUCKDB_TYPE_TIME:

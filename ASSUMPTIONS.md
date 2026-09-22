@@ -2653,3 +2653,35 @@ entry notes the conservative fallback if the assumption proves wrong.
     the existing DECIMAL threshold rounding, negative nanosecond flooring,
     malformed environment limits and lazy join error timing. The seven engine
     settings and current input/materialisation options remain unchanged.
+159. **Final temporal boundary gate (2026-09-22).** The pre-tag review
+    reproduced the subtraction-before-division overflow for finite
+    TIMESTAMP(us), not only TIMESTAMP_NS. Divide first in ts_ms_sql, then
+    subtract the negative-remainder indicator. Preserve the independent
+    binary64 gate and the conservative int64 policy on lazy integer counts.
+    A millisecond-floored instant outside timestamp_us cannot be saved;
+    that refusal must preserve the destination and report a range error.
+    Pinned headers and C API checks identify DATE +/-INT32_MAX and timestamp
+    +/-INT64_MAX as infinities. Nanosecond epoch_ns copies those sentinel
+    bits without filtering them; isfinite and VARCHAR confirm their meaning.
+    Therefore reject infinite dates/timestamps on both read paths, with an
+    early guard before NS conversion. The minimum finite NS test uses
+    -INT64_MAX+1, while separate tests require the two sentinels to fail.
+    Raw fill guards add no scan, and lazy guards share the existing boundary
+    expression. v122/v123 compare finite payloads to Python/PyArrow and
+    verify error messages, dataset atomicity and existing-destination hashes.
+160. **Vectorized temporal conversion (2026-09-22).** Nested SQL
+    infinity/floor/precision guards passed correctness but failed the temporal
+    performance gate. Four private scalar functions now perform each boundary
+    conversion and its validation once per input cell. DATE/us/ns inputs use
+    the public C API structs and flattened chunks, preserve NULL validity,
+    reject infinity sentinels and use integer quotient/remainder arithmetic.
+    The us-to-ms path retains the binary64 exactness gate; ns-to-ms counts
+    are always within 2^53. No materialized intermediate or extra scan is added.
+    DuckDB 1.5.3 has no C API error-mode setter: its scalar handle is a verified
+    ScalarFunction pointer, so registration uses its public SetFallible()
+    before copying into the catalog. Keep these four functions fallible and
+    deterministic; the former SQL error() boundaries could throw too. This
+    pinned representation must be reviewed on a DuckDB upgrade. Scalar C API
+    flattening and callback error-message ownership were checked in source.
+    Seventy filter/projection cases match the SQL-guard candidate exactly;
+    independent temporal payload, boundary and ABBA performance gates passed.

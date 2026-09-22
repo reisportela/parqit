@@ -552,11 +552,7 @@ bool stata_tc_ms_to_epoch_us(double stata_ms, long long *epoch_us) {
 }
 
 std::string timestamp_ns_floor_us_sql(const std::string &ref) {
-    const std::string ns = "epoch_ns(" + ref + ")";
-    /* Divide before the correction: subtracting the positive remainder
-     * first underflows for valid TIMESTAMP_NS values near INT64_MIN. */
-    return "make_timestamp(((" + ns + ") // 1000) - CASE WHEN (" + ns +
-           ") % 1000 < 0 THEN 1 ELSE 0 END)";
+    return "__parqit_timestamp_ns_us(" + ref + ")";
 }
 
 namespace {

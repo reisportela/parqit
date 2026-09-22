@@ -249,7 +249,7 @@ TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infi
                     err);
     CHECK(v == "1");
     ColumnPlan p = plan_for(DUCKDB_TYPE_TIMESTAMP_NS, "t");
-    CHECK(p.cast_sql.find("epoch_ns") != std::string::npos);
+    CHECK(p.cast_sql.find("__parqit_timestamp_ns_us") != std::string::npos);
     CHECK(p.transfer == Transfer::TimestampUs);
 }
 
@@ -262,7 +262,7 @@ TEST_CASE("TS-NS-MIN-1: nanosecond floor covers every finite int64 boundary") {
     REQUIRE(duckdb_prepare(s.con(), sql.c_str(), &stmt) == DuckDBSuccess);
     struct Sample { int64_t ns; int64_t us; };
     const Sample samples[] = {
-        {-9223372036854775807LL, -9223372036854776LL},
+        {-9223372036854775806LL, -9223372036854776LL},
         {-9223372036854775500LL, -9223372036854776LL},
         {-9223372036854775001LL, -9223372036854776LL},
         {-9223372036854775000LL, -9223372036854775LL},
@@ -293,6 +293,17 @@ TEST_CASE("TS-NS-MIN-1: nanosecond floor covers every finite int64 boundary") {
     CHECK(rc == DuckDBSuccess);
     if (rc == DuckDBSuccess) CHECK(duckdb_value_is_null(&result, 0, 0));
     duckdb_destroy_result(&result);
+    for (const int64_t infinity : {-9223372036854775807LL, 9223372036854775807LL}) {
+        duckdb_value value = duckdb_create_timestamp_ns({infinity});
+        CHECK(duckdb_bind_value(stmt, 1, value) == DuckDBSuccess);
+        duckdb_destroy_value(&value);
+        duckdb_result failed;
+        const auto failure = duckdb_execute_prepared(stmt, &failed);
+        CHECK(failure == DuckDBError);
+        if (failure == DuckDBError)
+            CHECK(std::string(duckdb_result_error(&failed)).find("infinite TIMESTAMP_NS") != std::string::npos);
+        duckdb_destroy_result(&failed);
+    }
     duckdb_destroy_prepare(&stmt);
 }
 

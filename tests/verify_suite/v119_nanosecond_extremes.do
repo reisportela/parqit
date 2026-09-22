@@ -11,7 +11,7 @@ local fails 0
 python:
 import pyarrow as pa, pyarrow.parquet as pq
 from sfi import Macro
-ns = [-9223372036854775807,-9223372036854775500,-9223372036854775001,-9223372036854775000,-1000001,-1000000,-1001,-1000,-999,-1,0,1,999,1000,1001,999999,1000000,1000001,9223372036854775806,None]
+ns = [-9223372036854775806,-9223372036854775500,-9223372036854775001,-9223372036854775000,-1000001,-1000000,-1001,-1000,-999,-1,0,1,999,1000,1001,999999,1000000,1000001,9223372036854775806,None]
 pq.write_table(pa.table({'id':range(1,len(ns)+1),'ts':pa.array(ns,pa.timestamp('ns'))}),Macro.getLocal('source')+'.parquet')
 assert pq.read_table(Macro.getLocal('source')+'.parquet')['ts'].cast(pa.int64()).to_pylist() == ns
 end

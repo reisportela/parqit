@@ -733,9 +733,21 @@ arithmetic. Saving a fractional day, millisecond or period count rounds to the
 nearest integer using native Stata's exact-half rule (toward +infinity), on
 both memory and lazy paths, and names the affected column.
 
+{pstd}Finite microsecond timestamps near the signed 64-bit limits also use
+integer flooring without an intermediate subtraction overflow. Their Stata
+millisecond counts can exceed 2^53: a lazy {cmd:collect} may require
+{opt int64(round)} even when the particular count is exactly representable.
+A count that is not exactly representable in binary64 is always refused.
+If flooring the earliest instant to milliseconds puts it outside the
+timestamp writer's range, {cmd:save} refuses and preserves an existing target.
+
 {pstd}{it:Special and unsupported values.} IEEE NaN loads as missing;
 {cmd:±Inf}, and any finite magnitude at or above Stata's missing sentinel
-(≈ 8.99e307), load as missing with a per-column note. A foreign float32 column
+(≈ 8.99e307), load as missing with a per-column note. Source DATE/TIMESTAMP
+infinities, including nanosecond timestamps, have no Stata representation and
+are refused explicitly on eager and lazy paths. Convert them to text or map
+them to ordinary missing explicitly in SQL if that is the intended meaning.
+A foreign float32 column
 whose finite range exceeds Stata float's ±1.70e38 ceiling widens to
 {cmd:double}. String values containing NUL are truncated at the first NUL when
 loaded into Stata, with a per-column note; a lazy Parquet-to-Parquet save does

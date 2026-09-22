@@ -33,7 +33,7 @@ the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md
 
 Version 0.2.2 fixes ambiguous helper/output names and extreme integer and
 nanosecond reads, strengthens failure detection in the test runner, and reduces
-the cost of wide-integer checks and missing-key diagnostics. The command grammar
+the cost of temporal conversion, wide-integer checks and missing-key diagnostics. The command grammar
 and exact statistical algorithms are unchanged. See the [changelog](CHANGELOG.md)
 for the documented timing of errors in lazy joins.
 

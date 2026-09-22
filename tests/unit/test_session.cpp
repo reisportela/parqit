@@ -458,3 +458,133 @@ TEST_CASE("parallel integer decimal and boolean aggregate states match centered 
         duckdb_destroy_result(&result);
     }
 }
+
+
+TEST_CASE("vectorized temporal boundaries preserve finite extrema and reject infinities") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    struct Function { const char *name; duckdb_type input, output; const char *type, *error; };
+    const Function functions[] = {
+        {"__parqit_date_days", DUCKDB_TYPE_DATE, DUCKDB_TYPE_BIGINT, "DATE", "infinite DATE"},
+        {"__parqit_timestamp_ms", DUCKDB_TYPE_TIMESTAMP, DUCKDB_TYPE_BIGINT, "TIMESTAMP", "infinite TIMESTAMP"},
+        {"__parqit_timestamp_ns_ms", DUCKDB_TYPE_TIMESTAMP_NS, DUCKDB_TYPE_BIGINT, "TIMESTAMP_NS", "infinite TIMESTAMP_NS"},
+        {"__parqit_timestamp_ns_us", DUCKDB_TYPE_TIMESTAMP_NS, DUCKDB_TYPE_TIMESTAMP, "TIMESTAMP_NS", "infinite TIMESTAMP_NS"}
+    };
+    auto check_raw = [&](size_t index, int64_t raw, int64_t expected, const char *expected_error = nullptr) {
+        const auto &f = functions[index];
+        INFO(f.name << " raw=" << raw);
+        duckdb_prepared_statement stmt = nullptr;
+        const std::string sql = "SELECT " + std::string(f.name) + "($1)";
+        REQUIRE(duckdb_prepare(s.con(), sql.c_str(), &stmt) == DuckDBSuccess);
+        duckdb_value value;
+        if (f.input == DUCKDB_TYPE_DATE) value = duckdb_create_date({static_cast<int32_t>(raw)});
+        else if (f.input == DUCKDB_TYPE_TIMESTAMP) value = duckdb_create_timestamp({raw});
+        else value = duckdb_create_timestamp_ns({raw});
+        const auto bound = duckdb_bind_value(stmt, 1, value);
+        duckdb_destroy_value(&value);
+        CHECK(bound == DuckDBSuccess);
+        duckdb_result result{};
+        const auto rc = duckdb_execute_prepared(stmt, &result);
+        const char *message = duckdb_result_error(&result);
+        const std::string error = message ? message : "";
+        if (expected_error) {
+            CHECK(rc == DuckDBError);
+            CHECK(error.find(expected_error) != std::string::npos);
+        } else {
+            CHECK_MESSAGE(rc == DuckDBSuccess, error);
+            if (rc == DuckDBSuccess) {
+                CHECK(duckdb_column_type(&result, 0) == f.output);
+                CHECK_FALSE(duckdb_value_is_null(&result, 0, 0));
+                if (f.output == DUCKDB_TYPE_TIMESTAMP)
+                    CHECK(duckdb_value_timestamp(&result, 0, 0).micros == expected);
+                else CHECK(duckdb_value_int64(&result, 0, 0) == expected);
+            }
+        }
+        duckdb_destroy_result(&result);
+        duckdb_destroy_prepare(&stmt);
+    };
+    check_raw(0, -2147483646LL, -2147479993LL);
+    check_raw(0, 2147483646LL, 2147487299LL);
+    check_raw(0, -3653, 0);
+    check_raw(1, -9223372036854775806LL, -9223056417654776LL);
+    check_raw(1, 9223372036854774999LL, 9223687656054774LL);
+    check_raw(1, -9223372036854775000LL, 0, "not exactly representable");
+    check_raw(1, 9223372036854775806LL, 0, "not exactly representable");
+    check_raw(2, -9223372036854775806LL, -8907752836855LL);
+    check_raw(2, 9223372036854775806LL, 9538991236854LL);
+    check_raw(3, -9223372036854775806LL, -9223372036854776LL);
+    check_raw(3, 9223372036854775806LL, 9223372036854775LL);
+    for (int64_t raw : {-1001LL, -1000LL, -999LL, -1LL, 0LL, 1LL, 999LL, 1000LL, 1001LL}) {
+        const int64_t micros = raw < 0 ? -((-raw + 999) / 1000) : raw / 1000;
+        const int64_t millis = raw < 0 ? -((-raw + 999999) / 1000000) : raw / 1000000;
+        check_raw(1, raw, micros + 315619200000LL);
+        check_raw(2, raw, millis + 315619200000LL);
+        check_raw(3, raw, micros);
+    }
+    for (size_t i = 0; i < 4; ++i) {
+        const auto &f = functions[i];
+        const int64_t limit = i == 0 ? 2147483647LL : 9223372036854775807LL;
+        check_raw(i, -limit, 0, f.error);
+        check_raw(i, limit, 0, f.error);
+        duckdb_result result{};
+        std::string error;
+        REQUIRE_MESSAGE(s.query("SELECT " + std::string(f.name) + "(NULL::" + f.type + ")",
+                                &result, &error), error);
+        CHECK(duckdb_column_type(&result, 0) == f.output);
+        CHECK(duckdb_value_is_null(&result, 0, 0));
+        duckdb_destroy_result(&result);
+    }
+}
+
+TEST_CASE("vectorized temporal boundaries handle constants nulls and filtered multi-chunk vectors") {
+    Session &s = Session::instance();
+    std::string error;
+    duckdb_result result{};
+    REQUIRE_MESSAGE(s.query(
+        "SELECT __parqit_date_days(DATE '1960-01-01'), "
+        "__parqit_timestamp_ms(TIMESTAMP '1960-01-01'), "
+        "__parqit_timestamp_ns_ms(TIMESTAMP_NS '1960-01-01'), "
+        "epoch_us(__parqit_timestamp_ns_us(TIMESTAMP_NS '1969-12-31 23:59:59.999999999')) "
+        "FROM range(5003)", &result, &error), error);
+    CHECK(duckdb_row_count(&result) == 5003);
+    for (idx_t row = 0; row < duckdb_row_count(&result); ++row) {
+        CHECK(duckdb_value_int64(&result, 0, row) == 0);
+        CHECK(duckdb_value_int64(&result, 1, row) == 0);
+        CHECK(duckdb_value_int64(&result, 2, row) == 0);
+        CHECK(duckdb_value_int64(&result, 3, row) == -1);
+    }
+    duckdb_destroy_result(&result);
+    REQUIRE_MESSAGE(s.query(
+        "WITH temporal_values AS MATERIALIZED (SELECT i, "
+        "CASE WHEN i%7=0 THEN NULL ELSE DATE '1970-01-01'+CAST(i-4000 AS INTEGER) END d, "
+        "CASE WHEN i%7=0 THEN NULL ELSE make_timestamp((i-4000)*1001) END ts, "
+        "CASE WHEN i%7=0 THEN NULL ELSE make_timestamp_ns((i-4000)*1001) END ns "
+        "FROM range(9001) t(i)) "
+        "SELECT i, __parqit_date_days(d), __parqit_timestamp_ms(ts), "
+        "__parqit_timestamp_ns_ms(ns), epoch_us(__parqit_timestamp_ns_us(ns)) "
+        "FROM temporal_values WHERE i%3<>0 ORDER BY i DESC", &result, &error), error);
+    REQUIRE(duckdb_row_count(&result) == 6000);
+    for (idx_t row = 0; row < duckdb_row_count(&result); ++row) {
+        const int64_t i = duckdb_value_int64(&result, 0, row);
+        CHECK(i % 3 != 0);
+        for (idx_t col = 1; col <= 4; ++col)
+            CHECK(duckdb_value_is_null(&result, col, row) == (i % 7 == 0));
+        if (i % 7 == 0) continue;
+        const int64_t raw = (i - 4000) * 1001;
+        const int64_t us = raw < 0 ? -((-raw + 999) / 1000) : raw / 1000;
+        const int64_t ms = raw < 0 ? -((-raw + 999999) / 1000000) : raw / 1000000;
+        CHECK(duckdb_value_int64(&result, 1, row) == i - 4000 + 3653);
+        CHECK(duckdb_value_int64(&result, 2, row) == us + 315619200000LL);
+        CHECK(duckdb_value_int64(&result, 3, row) == ms + 315619200000LL);
+        CHECK(duckdb_value_int64(&result, 4, row) == us);
+    }
+    duckdb_destroy_result(&result);
+    CHECK_FALSE(s.query(
+        "SELECT sum(__parqit_timestamp_ms(CASE WHEN i=4500 THEN TIMESTAMP '-infinity' "
+        "ELSE make_timestamp(i*1000) END)) FROM range(5003) t(i)", &result, &error));
+    CHECK(error.find("infinite TIMESTAMP cannot be represented in Stata") != std::string::npos);
+    CHECK_FALSE(s.query(
+        "SELECT sum(__parqit_timestamp_ns_ms(CASE WHEN i=4500 THEN TIMESTAMP_NS 'infinity' "
+        "ELSE make_timestamp_ns(i*1000) END)) FROM range(5003) t(i)", &result, &error));
+    CHECK(error.find("infinite TIMESTAMP_NS cannot be represented in Stata") != std::string::npos);
+}
