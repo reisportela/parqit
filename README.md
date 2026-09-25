@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.2.3 — the full surface below is implemented and covered by a
+> **Status:** v0.2.4 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,14 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.2.4 adds view copies (`parqit use [varlist] using view:<name>, name(<new>)`),
+which let you try verbs on a copy of a plan while the source view stays as it
+was, and sampling designs after `sample2` for `parqit sample`: an `if` frame,
+strata, whole clusters and a 0/1 indicator (see [Sampling designs](#sampling-designs)).
+It also refuses `name(_all)`, always restores the previous view after a
+`parqit view <name>:` prefix, and keeps long names readable in `parqit views`.
+The metadata format is unchanged.
 
 Version 0.2.3 checks wide-integer precision against Parquet values even when
 footer extrema are incorrect, and uses DuckDB's native vector executor for
@@ -200,7 +208,7 @@ running the checks below. `discard` alone does not guarantee a plugin reload.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.2.3`).
+  `download/vX.Y.Z` (for example, `download/v0.2.4`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 

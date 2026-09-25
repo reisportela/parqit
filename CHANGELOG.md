@@ -6,6 +6,8 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-25
+
 ### Added
 - `parqit use [varlist] using view:<name>, name(<new>)` copies the plan of an open
   view into a new view, optionally keeping a variable list, without reading rows or
