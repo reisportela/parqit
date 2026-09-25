@@ -6,7 +6,9 @@
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)
 
-  Builds parqit keep if / drop if / keep in / drop in / sample. The Create... button
+  Builds parqit keep if / drop if / keep in / drop in / sample. For sample, the
+  if expression is the sampling frame, and strata, whole clusters and an
+  indicator follow sample2. The Create... button
   opens Stata's expression builder (date functions td(), tm(), year(), ...
   included); Variables lists the names of the current view (parqit ds).
   These verbs are lazy: they change the view's plan, not the data in memory.
@@ -15,7 +17,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 355
+DEFINE _dlght 435
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -88,11 +90,46 @@ BEGIN
 	numonly								///
 	option(seed)							///
 	label("Random-number seed")
+  TEXT tx_by			_ilft	_ms	140	.,		///
+	label("Strata (by):") right
+  EDIT ed_by			165	@	420	.,		///
+	option(by)							///
+	label("Strata")
+  TEXT tx_cluster		_ilft	_ms	140	.,		///
+	label("Whole clusters of:") right
+  EDIT ed_cluster		165	@	160	.,		///
+	option(cluster)							///
+	label("Cluster variable")
+  COMBOBOX cb_rule		335	@	250	.,		///
+	dropdownlist							///
+	contents(rule_words)						///
+	values(rule_vals)						///
+	label("Clusters that if splits")
+  TEXT tx_gen			_ilft	_ms	140	.,		///
+	label("Flag, do not drop:") right
+  EDIT ed_gen			165	@	160	.,		///
+	max(32)								///
+	option(generate)						///
+	label("Indicator variable")
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("These verbs change the view's plan only; materialise the result with parqit collect or parqit save.")
-  TEXT tx_context _lft 310 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 390 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
+END
+
+LIST rule_words
+BEGIN
+	A cluster split by if is an error
+	Any selected row places it (any)
+	Only all rows place it (all)
+END
+
+LIST rule_vals
+BEGIN
+	strict
+	any
+	all
 END
 
 PROGRAM main_context
@@ -117,6 +154,13 @@ BEGIN
 	call main.ck_count.disable
 	call main.tx_seed.disable
 	call main.ed_seed.disable
+	call main.tx_by.disable
+	call main.ed_by.disable
+	call main.tx_cluster.disable
+	call main.ed_cluster.disable
+	call main.cb_rule.disable
+	call main.tx_gen.disable
+	call main.ed_gen.disable
 	if main.rb_keepif | main.rb_dropif {
 		call main.tx_if.enable
 		call main.ex_if.enable
@@ -129,11 +173,20 @@ BEGIN
 		call main.tx_fl.enable
 	}
 	if main.rb_sample {
+		call main.tx_if.enable
+		call main.ex_if.enable
 		call main.tx_amount.enable
 		call main.ed_amount.enable
 		call main.ck_count.enable
 		call main.tx_seed.enable
 		call main.ed_seed.enable
+		call main.tx_by.enable
+		call main.ed_by.enable
+		call main.tx_cluster.enable
+		call main.ed_cluster.enable
+		call main.cb_rule.enable
+		call main.tx_gen.enable
+		call main.ed_gen.enable
 	}
 END
 
@@ -166,9 +219,18 @@ BEGIN
 	if main.rb_sample {
 		require main.ed_amount
 		put "parqit sample " main.ed_amount
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			option main.ck_count
 			optionarg main.ed_seed
+			optionarg main.ed_by
+			optionarg main.ed_cluster
+			if main.ed_cluster & !main.cb_rule.equals("strict") {
+				put " " main.cb_rule
+			}
+			optionarg main.ed_gen
 		endoptions
 	}
 END

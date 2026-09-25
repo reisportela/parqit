@@ -6,6 +6,33 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Added
+- `parqit use [varlist] using view:<name>, name(<new>)` copies the plan of an open
+  view into a new view, optionally keeping a variable list, without reading rows or
+  changing the source view. Later verbs on either view do not reach the other; the
+  copy shares the source's temporary bridges until the last view using them closes,
+  and repeats the note on extended missing values read as `.`. `parqit mergein` and
+  `parqit appendin` refuse a `view:` source by name and point to the out-of-core
+  alternative instead of reporting a missing file.
+- Sampling designs after `sample2`: `parqit sample # [if] [, by() cluster() any all
+  generate()]`. `if` defines the sampling frame and keeps the rows outside it,
+  `by()` stratifies, `cluster()` draws whole clusters, `any`/`all` place the
+  clusters that `if` splits, and `generate()` (or `keep()`) flags instead of
+  dropping. A cluster's rank comes from a parqit-owned function of the seed and the
+  cluster's value, so the draw does not depend on row order, file layout, threads or
+  the engine version. The existing forms without these options are unchanged.
+
+### Fixed
+- `name(_all)` is refused by `parqit use`, `parqit sql` and `parqit open _data`:
+  `parqit close _all` reserves the word, so such a view could not be closed alone.
+- `parqit view <name>: <command>` restores the previously current view whenever the
+  command leaves another view current, also when `<name>` was already current; a
+  prefixed `use ..., name()` used to stay current in that case.
+
+### Changed
+- `parqit views` keeps both ends of a long source (its start, `~`, and its last 26
+  characters), so the file name and a copy's `view:<origin>` stay visible.
+
 ## [0.2.3] — 2026-09-23
 
 ### Fixed

@@ -1359,6 +1359,198 @@ static std::string key_value(const std::string &ref, const ViewCol &c) {
     return key_missing_fold_sql(ref, c.kind);
 }
 
+/* SAMPLE-DESIGN-1: the SQL pieces shared by sample_design and its probe. The
+ * frame is coalesce(if, FALSE): a row whose condition is missing is outside
+ * the frame and kept, as in sample2. Strata and the cluster are folded keys
+ * (KEYFOLD-1), so '' and NULL, or NaN and NULL, are one missing value. */
+struct SampleDesign {
+    std::string frame = "TRUE";
+    std::vector<std::string> strata;
+    std::string cluster;
+    char cluster_kind = 'n';
+};
+
+static std::string sample_design_parts(const View &v, const std::string &if_expr,
+                                       const std::vector<std::string> &by,
+                                       const std::string &cluster, bool statamissing,
+                                       SampleDesign *out) {
+    const auto &cols = v.cols();
+    auto column = [&](const std::string &name) -> const ViewCol & {
+        for (const auto &c : cols)
+            if (c.name == name) return c;
+        return cols.front(); /* unreachable: expand_patterns returns live names */
+    };
+    if (!if_expr.empty()) {
+        ExprResult c = translate_filter(if_expr, schema_of(cols), statamissing);
+        if (!c.ok) return c.error;
+        if (uses_rowctx(c.sql)) return "_n and _N are not supported in the if of sample";
+        out->frame = "coalesce(" + c.sql + ", FALSE)";
+    }
+    if (!by.empty()) {
+        std::vector<std::string> names;
+        std::string err = v.expand_patterns(by, &names);
+        if (!err.empty()) return err;
+        for (const auto &n : names) out->strata.push_back(key_value(quote_ident(n), column(n)));
+    }
+    if (!cluster.empty()) {
+        std::vector<std::string> names;
+        std::string err = v.expand_patterns({cluster}, &names);
+        if (!err.empty()) return err;
+        if (names.size() != 1) return "cluster() takes one variable";
+        out->cluster = key_value(quote_ident(names[0]), column(names[0]));
+        out->cluster_kind = column(names[0]).kind;
+    }
+    return "";
+}
+
+std::string View::sample_design_probe(const std::string &if_expr,
+                                      const std::vector<std::string> &by,
+                                      const std::string &cluster, bool statamissing,
+                                      std::string *sql) {
+    SampleDesign d;
+    std::string err = sample_design_parts(*this, if_expr, by, cluster, statamissing, &d);
+    if (!err.empty()) return err;
+    if (d.cluster.empty()) return "the sample design probe needs cluster()";
+    std::string tuple = "0";
+    if (!d.strata.empty()) {
+        tuple = "row(";
+        for (size_t i = 0; i < d.strata.size(); i++) tuple += (i ? ", " : "") + d.strata[i];
+        tuple += ")";
+    }
+    const std::string p = quote_ident(fresh_helper("sample_probe")),
+                      c = quote_ident(fresh_helper("sample_cluster")),
+                      f = quote_ident(fresh_helper("sample_frame")),
+                      s = quote_ident(fresh_helper("sample_stratum"));
+    *sql = "WITH " + p + " AS (SELECT " + d.cluster + " AS " + c + ", " + d.frame + " AS " + f +
+           ", " + tuple + " AS " + s + " FROM (" + compile(false) + ")) SELECT "
+           "CAST((SELECT count(*) FROM (SELECT " + c + " FROM " + p + " WHERE " + c +
+           " IS NOT NULL GROUP BY " + c + " HAVING count(DISTINCT " + s + ") > 1)) AS VARCHAR)"
+           " || '|' || CAST((SELECT count(*) FROM (SELECT " + c + " FROM " + p + " WHERE " + c +
+           " IS NOT NULL GROUP BY " + c + " HAVING bool_or(" + f + ") <> bool_and(" + f +
+           "))) AS VARCHAR) || '|' || CAST((SELECT count(*) FROM " + p + " WHERE " + c +
+           " IS NULL AND " + f + ") AS VARCHAR)";
+    return "";
+}
+
+std::string View::sample_design(double amount, bool is_count, long long seed,
+                                const std::string &if_expr,
+                                const std::vector<std::string> &by,
+                                const std::string &cluster, const std::string &frame_rule,
+                                const std::string &generate, bool statamissing) {
+    if (!std::isfinite(amount)) return "sample amount must be finite";
+    if (is_count) {
+        if (amount < 0 || amount >= 0x1p63 || amount != std::floor(amount))
+            return "sample, count needs a nonnegative integer below 2^63";
+    } else if (amount <= 0 || amount > 100) {
+        return "sample percentage out of range";
+    }
+    if (frame_rule != "strict" && frame_rule != "any" && frame_rule != "all")
+        return "unknown sampling frame rule " + frame_rule;
+    std::set<std::string> taken; /* no helper may take the indicator's name */
+    if (!generate.empty()) {
+        if (generate == "_n" || generate == "_N")
+            return generate + " is a reserved word: expressions read it as the row number";
+        if (col_index(generate) >= 0) return "variable " + generate + " already defined";
+        const std::string cig = ci_guard(generate);
+        if (!cig.empty()) return cig;
+        taken.insert(generate);
+    }
+    SampleDesign d;
+    std::string err = sample_design_parts(*this, if_expr, by, cluster, statamissing, &d);
+    if (!err.empty()) return err;
+    if (seed < 0) {
+        static std::mt19937 seeds(std::random_device{}());
+        seed = seeds() & 0x7fffffffU;
+    }
+    /* units to draw in a stratum of n: sample()'s rule (#134) or the count */
+    auto quota = [&](const std::string &n) {
+        return is_count ? "least(" + n + ", " + std::to_string(static_cast<long long>(amount)) + ")"
+                        : "__parqit_sample_count(CAST(" + n + " AS UBIGINT), CAST(" +
+                              quote_literal(dtoa(amount)) + " AS DOUBLE))";
+    };
+    const std::string prev = prev_name(stages_.size());
+    std::vector<std::string> s;
+    std::string partition;
+    for (size_t i = 0; i < d.strata.size(); i++) {
+        s.push_back(quote_ident(fresh_helper("sample_stratum", taken)));
+        partition += (i ? ", " : "PARTITION BY ") + s[i];
+    }
+    const std::string lead = partition.empty() ? "" : partition + " ";
+    std::string body, kept, from;
+    if (!d.cluster.empty()) {
+        /* whole clusters: one row per cluster, ranked by a key that depends
+         * only on the seed and the cluster's value, joined back to the rows */
+        const std::string units = quote_ident(fresh_helper("sample_units", taken)),
+                          ranked = quote_ident(fresh_helper("sample_ranked", taken)),
+                          flags = quote_ident(fresh_helper("sample_flags", taken)),
+                          c = quote_ident(fresh_helper("sample_cluster", taken)),
+                          a = quote_ident(fresh_helper("sample_any", taken)),
+                          l = quote_ident(fresh_helper("sample_all", taken)),
+                          r = quote_ident(fresh_helper("sample_rank", taken)),
+                          n = quote_ident(fresh_helper("sample_n", taken)),
+                          drawn = quote_ident(fresh_helper("sample_drawn", taken));
+        std::string strata;
+        for (size_t i = 0; i < s.size(); i++)
+            strata += ", any_value(" + d.strata[i] + ") AS " + s[i];
+        const std::string key = d.cluster_kind == 's'
+            ? "__parqit_sample_key_s(CAST(" + std::to_string(seed) + " AS UBIGINT), CAST(" + c + " AS VARCHAR))"
+            : "__parqit_sample_key_d(CAST(" + std::to_string(seed) + " AS UBIGINT), __parqit_double(" + c + "))";
+        body = "WITH " + units + " AS (SELECT " + d.cluster + " AS " + c + strata +
+               ", bool_or(" + d.frame + ") AS " + a + ", bool_and(" + d.frame + ") AS " + l +
+               " FROM " + prev + " WHERE " + d.cluster + " IS NOT NULL GROUP BY 1), " +
+               ranked + " AS (SELECT " + c + ", row_number() OVER (" + lead + "ORDER BY " + key +
+               ", " + c + ") AS " + r + ", count(*) OVER (" + partition + ") AS " + n + " FROM " +
+               units + " WHERE " + (frame_rule == "any" ? a : l) + "), " +
+               flags + " AS (SELECT " + c + ", (" + r + " <= " + quota(n) + ") AS " + drawn +
+               " FROM " + ranked + ") ";
+        kept = "(" + flags + "." + c + " IS NULL OR " + flags + "." + drawn + ")";
+        from = " FROM " + prev + " LEFT JOIN " + flags + " ON " + d.cluster + " = " + flags + "." + c;
+    } else {
+        /* rows: the priority of sample()'s percentage form over the same row
+         * numbers, so generate() alone flags exactly the rows it keeps */
+        const std::string source = quote_ident(fresh_helper("sample_source", taken)),
+                          ranked = quote_ident(fresh_helper("sample_ranked", taken)),
+                          picked = quote_ident(fresh_helper("sample_picked", taken)),
+                          f = quote_ident(fresh_helper("sample_frame", taken)),
+                          row = quote_ident(fresh_helper("sample_row", taken)),
+                          q = quote_ident(fresh_helper("sample_rank", taken)),
+                          n = quote_ident(fresh_helper("sample_n", taken));
+        std::string strata;
+        for (size_t i = 0; i < s.size(); i++) strata += ", " + d.strata[i] + " AS " + s[i];
+        const std::string order = order_by_sql();
+        body = "WITH " + source + " AS MATERIALIZED (SELECT " + select_list() + ", " + d.frame +
+               " AS " + f + strata + ", row_number() OVER (" +
+               (order.empty() ? "" : order.substr(1)) + ") AS " + row + " FROM " + prev + "), " +
+               ranked + " AS (SELECT " + row + ", row_number() OVER (" + lead +
+               "ORDER BY hash(hash(" + row + ", " + std::to_string(seed) + ")), " + row +
+               ") AS " + q + ", count(*) OVER (" + partition + ") AS " + n + " FROM " + source +
+               " WHERE " + f + "), " + picked + " AS (SELECT " + row + " FROM " + ranked +
+               " WHERE " + q + " <= " + quota(n) + ") ";
+        kept = "(NOT " + f + " OR " + row + " IN (SELECT " + row + " FROM " + picked + "))";
+        from = " FROM " + source;
+    }
+    std::string desc = "sample " + dtoa(amount) + (is_count ? ", count" : "") +
+                       " (design" + (if_expr.empty() ? "" : ", if") +
+                       (by.empty() ? "" : ", by") + (cluster.empty() ? "" : ", cluster " + frame_rule) +
+                       (generate.empty() ? "" : ", generate " + generate) +
+                       ", seed " + std::to_string(seed) + ")";
+    if (generate.empty()) {
+        body += "SELECT " + select_list() + from + " WHERE " + kept;
+    } else {
+        body += "SELECT " + select_list() + ", " +
+                coerce_storage("CASE WHEN " + kept + " THEN 1 ELSE 0 END", "byte", 'n') + " AS " +
+                quote_ident(generate) + from;
+        ViewCol nc;
+        nc.name = generate;
+        nc.kind = 'n';
+        nc.meta_type = "byte";
+        nc.normalized = true;
+        cols_.push_back(nc);
+    }
+    push_stage(body, desc);
+    return "";
+}
+
 static std::string key_equality(const std::string &left, const ViewCol &lc,
                                 const std::string &right, const ViewCol &rc) {
     const std::string a = key_value(left, lc), b = key_value(right, rc);

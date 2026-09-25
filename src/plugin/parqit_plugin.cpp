@@ -186,6 +186,7 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "save_data") return parqit_plugin::cmd_save_data(args);
     if (cmd == "save_data_direct") return parqit_plugin::cmd_save_data_direct(args);
     if (cmd == "view_open") return parqit_plugin::cmd_view_open(args);
+    if (cmd == "view_copy") return parqit_plugin::cmd_view_copy(args);
     if (cmd == "view_op") return parqit_plugin::cmd_view_op(args);
     if (cmd == "view_twotable") return parqit_plugin::cmd_view_twotable(args);
     if (cmd == "view_reshape") return parqit_plugin::cmd_view_reshape(args);

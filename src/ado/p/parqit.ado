@@ -580,6 +580,29 @@ end
 * parqit use — lazy view by default; , clear = read into memory now
 * ----------------------------------------------------------------------------
 
+* VIEWNAME-ALL-1: parqit close _all reserves _all, so a view with that name
+* could never be closed on its own
+program define _parqit_check_viewname
+    version 16.0
+    args who name
+    if ("`name'" != "_all") exit
+    di as err "`who': _all is reserved by parqit close _all; choose another name()"
+    exit 198
+end
+
+* VIEW-COPY-1: mergein/appendin join memory with a FILE; an open view is
+* refused by name instead of reaching parqit use as a file to read
+program define _parqit_no_view_using
+    version 16.0
+    args who using lazyverb
+    if (substr(`"`using'"', 1, 5) != "view:") exit
+    local v = substr(`"`using'"', 6, .)
+    di as err `"parqit `who': the using side is a file on disk, not the open view `v';"' ///
+        `" save it first (parqit view `v': save <file>) and `who' that file, or join"' ///
+        `" out of core: parqit open _data, parqit `lazyverb' ... using view:`v', parqit collect, clear"'
+    exit 198
+end
+
 * INT64-PROTECT-1 / BINARY-DECODE-1: one validator for the read-time type
 * options, so every command that accepts them refuses the same typos with the
 * same words (the plugin re-checks, but a user must never see a wire message).
@@ -620,6 +643,46 @@ program define _parqit_use, rclass
         }
         local using `fileraw'
         local namelist
+    }
+    _parqit_check_viewname "parqit use" "`name'"
+    * VIEW-COPY-1: view:<name> copies the plan of an open view instead of
+    * reading a file, so it is settled before any file option is validated or
+    * the source is resolved by extension
+    if (substr(`"`using'"', 1, 5) == "view:") {
+        local src = substr(`"`using'"', 6, .)
+        if (`"`src'"' == "" | wordcount(`"`src'"') != 1) {
+            di as err `"parqit use: `using' does not name an open view"'
+            exit 198
+        }
+        foreach o in clear relaxed owned encoding int64 binary filename csv {
+            if (`"``o''"' == "") continue
+            local oname = cond(inlist("`o'", "clear", "relaxed", "owned"), "`o'", "`o'()")
+            local hint
+            if ("`o'" == "clear") local hint "; load it with parqit view `src': collect, clear"
+            if ("`o'" == "int64") local hint "; give int64() to parqit collect"
+            di as err "parqit use: `oname' describes how to read a file; view:`src'" ///
+                " copies that view's plan as it is`hint'"
+            exit 198
+        }
+        if ("`name'" == "") {
+            di as err "parqit use: view:`src' needs name(): the copy is a new view"
+            exit 198
+        }
+        _parqit_ensure_plugin
+        tempfile req
+        local _sq_src "`src'"
+        local _sq_vname "`name'"
+        local _sq_namelist `"`namelist'"'
+        mata: _parqit_wr_view_copy_request("`req'")
+        capture noisily plugin call parqit_plugin, view_copy `reqhex'
+        if (_rc) exit _rc
+        di as txt "(lazy view " as res "`name'" as txt " copied from view " as res "`src'" ///
+            as txt ": " as res "`parqit_view_k'" as txt " columns; plan copied, no rows read" ///
+            " — later verbs on either view do not affect the other)"
+        return scalar k = `parqit_view_k'
+        return local view "`name'"
+        return local source_view "`src'"
+        exit
     }
     * INT64-PROTECT-1 / BINARY-DECODE-1: read-time type options, validated
     * here so a typo never reaches the plugin as a silent fallback
@@ -1380,17 +1443,64 @@ end
 
 program define _parqit_sample
     version 16.0
-    syntax anything(name=amount) [, Count seed(integer -1)]
+    * SAMPLE-DESIGN-1: # [if exp] [, count seed() by() cluster() any all
+    * generate()|keep()]. The if expression and the variables belong to the
+    * view, so they travel as text and are never evaluated in memory.
+    mata: _parqit_split_opts(st_local("0"))
+    mata: _parqit_split_if(st_local("parqit_head"))
+    local amount `"`parqit_expr'"'
+    local ifexp `"`parqit_ifexpr'"'
+    local 0
+    if (`"`parqit_opts'"' != "") local 0 `", `parqit_opts'"'
+    syntax [, Count seed(integer -1) BY(string) CLuster(string) ANY ALL ///
+        GENerate(name) KEEP(name)]
+    if (`"`amount'"' == "") {
+        di as err "parqit sample: # is required (a percentage, or a number with count)"
+        exit 198
+    }
+    gettoken first rest : amount
+    if (`"`rest'"' != "" | `"`parqit_head'"' != `"`parqit_expr'"' & `"`ifexp'"' == "") {
+        gettoken word : rest
+        if ("`word'" == "in") di as err "parqit sample: in is not supported on a lazy view; use parqit keep in first"
+        else if ("`word'" == "if" | `"`rest'"' == "") di as err "parqit sample: if requires an expression"
+        else di as err `"parqit sample: `amount' is not a number"'
+        exit 198
+    }
     confirm number `amount'
     if missing(`amount') {
         di as err "parqit sample: amount must be a finite number"
         exit 198
+    }
+    if ("`generate'" != "" & "`keep'" != "") {
+        di as err "parqit sample: specify generate() or keep(), not both"
+        exit 198
+    }
+    if ("`keep'" != "") local generate `keep'
+    * a reserved word such as _n or _N would name a column no expression reaches
+    if ("`generate'" != "") confirm name `generate'
+    if ("`any'" != "" & "`all'" != "") {
+        di as err "parqit sample: specify any or all, not both"
+        exit 198
+    }
+    if (`: word count `cluster'' > 1) {
+        di as err "parqit sample: cluster() takes one variable"
+        exit 198
+    }
+    local rule
+    if ("`any'`all'" != "") {
+        if (`"`cluster'"' == "") di as txt "note: option `any'`all' ignored (no cluster())"
+        else local rule `any'`all'
     }
     _parqit_ensure_plugin
     tempfile req
     local _sq_amount : display %24.17e (`amount')
     local _sq_count = cond("`count'" != "", "true", "false")
     local _sq_seed `seed'
+    local _sq_ifexpr `"`ifexp'"'
+    local _sq_by `"`by'"'
+    local _sq_cluster `"`cluster'"'
+    local _sq_rule "`rule'"
+    local _sq_generate "`generate'"
     mata: _parqit_wr_op_sample_request("`req'")
     capture noisily plugin call parqit_plugin, view_op `reqhex'
     if (_rc) exit _rc
@@ -2142,6 +2252,7 @@ program define _parqit_open, rclass
         di as err "parqit open: only {bf:parqit open _data} is supported"
         exit 198
     }
+    _parqit_check_viewname "parqit open" "`name'"
     if (c(k) == 0) {
         di as err "no variables defined"
         exit 111
@@ -2251,13 +2362,19 @@ program define _parqit_view, rclass
     if (_rc) exit _rc
     capture noisily parqit `0'
     local rc = _rc
-    if ("`prev'" != "" & "`prev'" != "`name'") {
+    * PREFIX-RESTORE-1: restore the previous view whenever the command left
+    * another one current (use or a view copy with name() switches too), unless
+    * the command closed the prefixed view that was itself the previous one
+    plugin call parqit_plugin, view_alive
+    mata: st_local("now", _parqit_unhex(st_local("parqit_view_current")))
+    if ("`prev'" != "" & "`now'" != "`prev'" & !("`now'" == "" & "`prev'" == "`name'")) {
+        local left = cond("`now'" != "", "`now'", "`name'")
         mata: st_local("phex", _parqit_hex(st_local("prev")))
         capture plugin call parqit_plugin, view_switch `phex'
         if (_rc) {
             local swrc = _rc
             di as err "parqit view: could not switch back to view `prev'; "  ///
-                "the current view is now `name' — use {bf:parqit view `prev'} to return"
+                "the current view is now `left' — use {bf:parqit view `prev'} to return"
             exit `swrc'
         }
     }
@@ -2603,6 +2720,7 @@ program define _parqit_mergein, rclass
     syntax using/ [, KEEPUSing(string) keep(string) GENerate(name)       ///
         NOGENerate ASSERT(string) UPDATE replace NOLabel NONotes FORCE       ///
         NOREPort INT64(string)]
+    _parqit_no_view_using mergein `"`using'"' merge
     * INT64-PROTECT-1: the disk side is read by parqit use, so the protective
     * default (and the remedy) apply here too — forward the option
     _parqit_typeopts, who("parqit mergein") int64(`"`int64'"')
@@ -2648,6 +2766,7 @@ program define _parqit_appendin
     * must not be validated against the in-memory master — pass it through as a
     * string and let native append judge it
     syntax using/ [, KEEP(string) FORCE INT64(string)]
+    _parqit_no_view_using appendin `"`using'"' append
     * INT64-PROTECT-1: the disk side is read by parqit use — forward the option
     _parqit_typeopts, who("parqit appendin") int64(`"`int64'"')
     local i64
@@ -2731,6 +2850,7 @@ program define _parqit_sql, rclass
         exit 198
     }
     syntax [, clear Name(name)]
+    _parqit_check_viewname "parqit sql" "`name'"
     if ("`name'" != "" & "`clear'" != "") {
         di as err "parqit sql: name() applies to lazy views; omit clear"
         exit 198
@@ -3156,6 +3276,22 @@ void _parqit_wr_view_open_request(string scalar req)
     _parqit_emit(req, _parqit_jobj(p))
 }
 
+// VIEW-COPY-1: copy an open view's plan into a new view
+void _parqit_wr_view_copy_request(string scalar req)
+{
+    string rowvector p
+    string scalar    vl
+
+    p = (_parqit_jtext("cmd", "view_copy"),
+         _parqit_jtext("source", st_local("_sq_src")),
+         _parqit_jtext("name", st_local("_sq_vname")))
+    vl = st_local("_sq_namelist")
+    if (strtrim(vl) != "") {
+        p = (p, _parqit_jpair("varlist", _parqit_jlist(tokens(vl))))
+    }
+    _parqit_emit(req, _parqit_jobj(p))
+}
+
 void _parqit_wr_describe_request(string scalar req, string scalar resp)
 {
     _parqit_emit(req, _parqit_jobj((
@@ -3243,12 +3379,22 @@ void _parqit_wr_rename_many(string scalar req)
 
 void _parqit_wr_op_sample_request(string scalar req)
 {
-    _parqit_emit(req, _parqit_jobj((
-        _parqit_jtext("cmd", "view_op"),
-        _parqit_jtext("op", "sample"),
-        _parqit_jpair("amount", st_local("_sq_amount")),
-        _parqit_jpair("count", st_local("_sq_count")),
-        _parqit_jpair("seed", st_local("_sq_seed")))))
+    string rowvector p
+
+    p = (_parqit_jtext("cmd", "view_op"),
+         _parqit_jtext("op", "sample"),
+         _parqit_jpair("amount", st_local("_sq_amount")),
+         _parqit_jpair("count", st_local("_sq_count")),
+         _parqit_jpair("seed", st_local("_sq_seed")))
+    // SAMPLE-DESIGN-1: the design travels only when given
+    if (st_local("_sq_ifexpr") != "") p = (p, _parqit_jtext("ifexpr", st_local("_sq_ifexpr")))
+    if (strtrim(st_local("_sq_by")) != "") {
+        p = (p, _parqit_jpair("by", _parqit_jlist(tokens(st_local("_sq_by")))))
+    }
+    if (st_local("_sq_cluster") != "") p = (p, _parqit_jtext("cluster", st_local("_sq_cluster")))
+    if (st_local("_sq_rule") != "") p = (p, _parqit_jtext("frame_rule", st_local("_sq_rule")))
+    if (st_local("_sq_generate") != "") p = (p, _parqit_jtext("generate", st_local("_sq_generate")))
+    _parqit_emit(req, _parqit_jobj(p))
 }
 
 void _parqit_wr_op_gen_request(string scalar req, string scalar op)
@@ -3480,6 +3626,49 @@ void _parqit_wr_save_request(string scalar req)
 }
 
 // split "expr [if cond]" at the first top-level bare `if'
+// SAMPLE-DESIGN-1: split "<head>, <options>" at the first comma outside
+// parentheses, double quotes and (nested) compound quotes, so an if
+// expression may hold commas
+void _parqit_split_opts(string scalar src)
+{
+    real scalar   i, n, depth, instr, comp
+    string scalar c
+
+    n = strlen(src)
+    depth = 0
+    instr = 0
+    comp = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(src, i, 1)
+        if (c == char(96) & substr(src, i + 1, 1) == char(34)) {
+            comp++
+            i++
+            continue
+        }
+        if (comp) {
+            if (c == char(34) & substr(src, i + 1, 1) == char(39)) {
+                comp--
+                i++
+            }
+            continue
+        }
+        if (instr) {
+            if (c == char(34)) instr = 0
+            continue
+        }
+        if (c == char(34)) instr = 1
+        else if (c == "(") depth++
+        else if (c == ")") depth--
+        else if (c == "," & depth == 0) {
+            st_local("parqit_head", strtrim(substr(src, 1, i - 1)))
+            st_local("parqit_opts", strtrim(substr(src, i + 1, .)))
+            return
+        }
+    }
+    st_local("parqit_head", strtrim(src))
+    st_local("parqit_opts", "")
+}
+
 void _parqit_split_if(string scalar src)
 {
     real scalar      i, n, depth, instr
@@ -4072,6 +4261,18 @@ string scalar _parqit_clip(string scalar src, real scalar width)
     return(udsubstr(s,1,width-1)+"~")
 }
 
+// VIEW-COPY-1: a long view source keeps both ends, so the listing still shows
+// the file name and a copy's view:<origin> prefix
+string scalar _parqit_clip_mid(string scalar src, real scalar width)
+{
+    string scalar s
+    real scalar   head
+    s = _parqit_controls(src)
+    if (udstrlen(s)<=width) return(s)
+    head = floor((width-1)/3)
+    return(udsubstr(s,1,head)+"~"+udsubstr(s,udstrlen(s)-(width-1-head)+1,.))
+}
+
 transmorphic scalar _parqit_statsmeta(string scalar resp)
 {
     real scalar fh
@@ -4262,7 +4463,7 @@ void _parqit_print_views(string scalar resp)
         if (f[1] != "view") continue
         cur = (f[2] == "1" ? "* " : "  ")
         printf("  %s%-20s %8s %8s   %s\n", cur, _parqit_unhex(f[5]), f[3], f[4],
-               _parqit_text(_parqit_clip(_parqit_unhex(f[6]),40)))
+               _parqit_text(_parqit_clip_mid(_parqit_unhex(f[6]),40)))
     }
     fclose(fh)
     printf("    (* = current)\n\n")

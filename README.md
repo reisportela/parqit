@@ -110,8 +110,10 @@ they cannot match.
 Two habits complete the picture. `parqit show` prints the SQL your pipeline
 compiled to (`parqit explain`, the engine's plan), so the invisible work is one
 command away from visible. And because a view is a plan, not data, experiments
-are cheap: a verb that errors leaves the view exactly as it was, and
-`parqit close` + `parqit use` starts a fresh plan with no big read to redo.
+are cheap: a verb that errors leaves the view exactly as it was,
+`parqit use using view:panel, name(try)` copies the plan so you can try verbs
+on the copy while `panel` stays as it was, and `parqit close` + `parqit use`
+starts a fresh plan with no big read to redo.
 
 ## Why parqit
 
@@ -137,6 +139,12 @@ reader**. Its identity is the layer above I/O:
   (`parqit collect`); large transformation → **Parquet → Parquet without loading the
   result into Stata** (`parqit save`). The second is where the out-of-core story
   actually pays off.
+- **Sample before you load.** `parqit sample` draws on disk, in the manner of
+  `sample2`: a percentage or a count of rows, or of whole clusters (workers
+  with all their spells, households with all their members), within strata and
+  inside an `if` frame. A cluster's rank depends only on the seed and the
+  cluster's value, so the same seed draws the same clusters whatever the row
+  order, file layout or thread count. Only the sample reaches Stata.
 - **Lossless metadata round-trips.** Variable labels, value labels, notes, display
   formats and characteristics survive a `parqit save` / `parqit use` cycle (stored in
   standard Parquet key–value metadata), while remaining plain Parquet for pandas,
@@ -384,12 +392,13 @@ scratch data; lazy verbs build the plan while the current dataset stays in place
 │
 │    parqit use <file>        a Parquet file, glob or Hive directory,
 │                             or .csv .tsv .txt .tab .dta .xls .xlsx
+│    parqit use view:<name>   a copy of an open view's plan (with name())
 │    parqit open _data        the dataset already in Stata's memory
 │    parqit sql "SELECT ..."  any DuckDB query
 │
 ├─ 2  SHAPE ─ lazy verbs; each one extends the plan
 │
-│    rows         keep  drop  sample  duplicates drop
+│    rows         keep  drop  sample (strata, whole clusters)  duplicates drop
 │    columns      gen  egen  replace  rename  order
 │    order        sort  gsort
 │    aggregate    collapse  contract  pivot
@@ -423,14 +432,19 @@ re-executes each time. Alongside the four moves, at any point in the session:
 | | |
 |---|---|
 | the plan | `parqit show` `parqit explain` |
-| views | `parqit views` `parqit view` `parqit close` |
+| views | `parqit views` `parqit view` `parqit use … using view:` `parqit close` |
 | engine | `parqit set` `parqit path` |
 | install | `parqit version` `parqit selftest` `parqit menu` |
 
 Views are named (`default` unless `name()` says otherwise) and several can be
 open at once, like frames. Verbs act on the *current* view; `parqit view <name>`
 switches, and `parqit view <name>: <command>` runs one command against another
-view and switches back.
+view and switches back (also when the command opens or copies a view). A verb
+always changes the view it runs on; to try verbs without changing a view, copy
+its plan first with `parqit use [varlist] using view:<name>, name(<new>)`. The
+copy is a plan, not data: no rows are read, later verbs on either view do not
+reach the other, closing either leaves the other usable, and both read the same
+files when they execute.
 
 Two commands are deliberately *not* view verbs: `parqit mergein` and
 `parqit appendin` join the dataset *already in Stata's memory* with a disk file
@@ -443,6 +457,7 @@ need. Use them when the disk side is a small lookup; use `parqit use` +
 | Command | Compiles to | Notes |
 |---|---|---|
 | `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge; `int64(refuse|round|string)` says what to do with integers outside the protected +/-2^53 range (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
+| `parqit use [varlist] using view:<name>, name(<new>)` | a copy of that view's plan | Copy the plan of an open view into a new view, optionally keeping only `varlist` (without a varlist, `using` may be omitted: `parqit use view:<name>, name(<new>)`); `name()` is required and must differ from the source. The copy reads no rows and leaves the source view unchanged: later verbs on either view do not reach the other, the copy shares the source's temporary bridges, and an unseeded `sample` step keeps its draw. |
 | `parqit open _data [, name() encoding()]` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
 
 **Input formats.** Parquet and delimited text are scanned *out of core* (the
@@ -499,8 +514,72 @@ matches one Unicode character; the same expansion is used by lazy projections,
 | `parqit duplicates drop [varlist] [, force]` | `DISTINCT` / dedup |
 | `parqit keep in <range>` / `parqit drop in <range>` | validated `LIMIT/OFFSET` and its complement (`f`/`l` and negative bounds accepted) |
 | `parqit sample # [, count seed()]` | globally rounded percentage sample, or reservoir rows with `count`; seeded reproducibility requires stable inputs/settings |
+| `parqit sample # [if] [, count seed() by() cluster() any all generate()]` | sampling designs after `sample2` (see [Sampling designs](#sampling-designs)): `if` frame, strata, whole clusters, and an indicator instead of dropping |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
+
+### Sampling designs
+
+`parqit sample # [if] [, count seed() by() cluster() any all generate()]` follows
+Weesie's `sample2` (STB-37 dm46) and draws on disk, so only the sample has to fit
+in Stata:
+
+```stata
+* a tenth of the workers, each with all their years
+parqit use using /data/qp_*.parquet
+parqit sample 10, cluster(worker) seed(20260925)
+parqit collect, clear
+
+* a tenth of the households of each region, with all their members
+parqit use using households.parquet
+parqit sample 10, cluster(hh) by(region) seed(20260925)
+parqit collect, clear
+
+* half of the households with someone over 60, flagged instead of dropped
+parqit use using households.parquet
+parqit sample 50 if age > 60, cluster(hh) any generate(pick)
+parqit collect, clear                       // pick = 0: not drawn
+```
+
+- **Frame.** `if <exp>` chooses the rows that can be drawn; every other row is
+  kept. Under the default SQL missing semantics a missing condition leaves the
+  row outside; with `parqit set statamissing on`, `x > 60` holds for a missing
+  `x`, as in `sample2`.
+- **Strata.** `by()` draws # percent (or, with `count`, # units) in each
+  stratum; a missing value is its own stratum.
+- **Clusters.** `cluster()` draws whole clusters: every row of a drawn cluster
+  stays, the others go. The strata must be constant within clusters. A cluster
+  that `if` splits is an error, unless `any` (any selected row places it in the
+  frame) or `all` (only all of them). Without `cluster()`, `any` and `all` are
+  ignored with a note. Rows whose cluster is missing are outside the frame and
+  kept, and a note says how many.
+- **Indicator.** `generate(newvar)`, or `keep(newvar)` as in `sample2`, adds a
+  0/1 byte (1 = kept) instead of dropping rows.
+- **Counts.** Each stratum draws n × # / 100 rounded to the nearest whole
+  number, half up, as the plain percentage form does. For whole-number
+  percentages this is `sample`'s and `sample2`'s `int(n*#/100+.5)`. A
+  fractional percentage can differ from them by one unit at a tie: 0.3 percent
+  of 500 draws 1, they draw 2.
+- **Reproducible draws.** A cluster's rank is a parqit function of the seed and
+  the cluster's value (splitmix64 over its binary64 value, or its UTF-8 bytes).
+  The same seed therefore draws the same clusters whatever the row order,
+  file layout, thread count or DuckDB version. 1 stored as an integer or as a
+  double is one cluster. Integers beyond 2^53 rank by their binary64
+  approximation, with ties broken by value. The draw never matches `sample2`'s,
+  which uses Stata's random numbers.
+- **Rows.** Without `cluster()`, rows use the plain form's priority, so
+  `generate()` alone flags exactly the rows the plain percentage form keeps.
+  As in the plain form, rows are numbered in the view's sort order (input
+  order when there is none), so the same seed draws the same rows only over
+  the same order. With `count`, a design keeps # rows per stratum by that
+  priority, while the plain count form keeps its reservoir.
+- **Checks and cost.** The cluster checks (constant strata, split clusters) run
+  once over the current plan when `sample` is issued, like `merge`'s key
+  checks, and also validate a pending `keep in` at that point. A cluster
+  design reads its input twice (one pass to rank the clusters, one to join the
+  decision back) and materialises nothing. A design without clusters
+  materialises its input once, like the percentage form. `in` is not
+  supported, and `seed()` goes from 0 to 2,147,483,647.
 
 ### Two-table verbs (lazy)
 
@@ -519,8 +598,8 @@ lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` p
 
 | Command | Effect |
 |---|---|
-| `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts> int64()]` | Native `merge` of the in-memory data with a disk lookup (read via parqit) |
-| `parqit appendin using <file> [, keep() force int64()]` | Native `append` of a disk file onto the in-memory data |
+| `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts> int64()]` | Native `merge` of the in-memory data with a disk lookup (read via parqit); the using side is a file, and a `view:` source is refused with the out-of-core alternative |
+| `parqit appendin using <file> [, keep() force int64()]` | Native `append` of a disk file onto the in-memory data; a `view:` source is refused likewise |
 
 ### Materialisers and engine-side result commands
 
@@ -577,10 +656,12 @@ Labels come from the view, and the current dataset stays unchanged.
 
 `parqit menu` adds **User > parqit** to GUI Stata: Read data (lazy
 view or into memory); Describe and explore data; Summary statistics, tables,
-and correlations; Keep or drop observations, or draw a sample; Keep, drop,
+and correlations; Keep or drop observations, or draw a sample (with an `if`
+frame, strata, whole clusters and an indicator); Keep, drop,
 order, sort, or rename variables; Create or change variables; Collapse,
 contract, pivot table, or reshape; Combine datasets (merge, append, joinby);
-Save as Parquet or collect into memory; Views, SQL, and engine settings;
+Save as Parquet or collect into memory; Views, SQL, and engine settings
+(including copying a view into a new view);
 Version; Self-test; Help; Technical reference. Every dialog builds an ordinary `parqit` command,
 echoed to the Results and Review windows like a typed command, and follows
 Stata's own dialog conventions: a **Populate** button fills the variable
@@ -661,6 +742,19 @@ parqit collect, clear                       // wage2019 n2019 wage2020 n2020 ...
 parqit use using spells.parquet
 parqit query "qualify row_number() over (partition by id order by start) = 1"
 parqit collect, clear
+
+* A 10% sample of workers with all their years since 2010, drawn on disk
+parqit use using /data/qp_2002_2023/*.parquet
+parqit keep if year >= 2010
+parqit sample 10, cluster(id) seed(20260925)
+parqit collect, clear
+
+* Branch a pipeline: collect a narrow copy, keep the full view for later
+parqit use using /data/qp_2002_2023/*.parquet, name(panel)
+parqit keep if year >= 2010
+parqit use id firmid year using view:panel, name(ids)
+parqit collect, clear                       // three columns only
+parqit view panel                           // all columns, still 2010 on
 ```
 
 ## Tour & examples
@@ -751,7 +845,12 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   `parqit collect` materialises the current view and keeps it open
   (re-collecting re-executes). With a view open, `parqit save` materialises
   the current view (and says so); `parqit save ..., data` exports the
-  in-memory dataset instead.
+  in-memory dataset instead. A copy (`parqit use … using view:qp, name(q2)`)
+  copies the plan, not the data: if the files change, both views see the
+  change. `parqit mergein`/`appendin` read a file, not a view.
+- **Sampling designs** draw with parqit's own random numbers, so they never
+  reproduce `sample2`'s draw, only its rules. See [Sampling designs](#sampling-designs)
+  for the other differences: fractional-percentage ties, missing clusters and `count`.
 - **Stata `if` vs SQL semantics.** By default, expressions follow SQL semantics
   (missing is `NULL`, not "larger than everything"); `x < .`-style idioms are
   translated faithfully either way. `parqit set statamissing on` emulates Stata's

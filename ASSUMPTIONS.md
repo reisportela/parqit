@@ -2722,3 +2722,107 @@ entry notes the conservative fallback if the assumption proves wrong.
     engine behavior; v124 verifies refusal, exact text, rounding disclosure
     and dataset atomicity against payloads checked with PyArrow. This does
     not extend trust in footers or change the existing 32-bit sizing policy.
+164. **Copied views share the plan, not the data (2026-09-25, VIEW-COPY-1;
+    extends #21 and #74).** `parqit use [varlist] using view:<source>,
+    name(<target>)` assigns a copy of the source `View` (scan, stages, column
+    manifest, labels, characteristics, sort keys, pending `keep in` ranges,
+    int64 mode, direct-read source paths) to the target, applies an optional
+    varlist with `View::keep_vars` exactly as `parqit keep`, and makes the
+    target current. The copy is a snapshot of the plan: later verbs on either
+    view never reach the other, and both read the same source files when they
+    execute. A live reference to the source plan was rejected because one
+    view's result would depend on commands issued to another. Pending ranges
+    are copied unvalidated and checked when the target materialises, like the
+    source's; an unseeded `sample` step keeps the seed already written into its
+    stage, so both views draw the same realisation. A copy without a varlist
+    of an untouched file view keeps `n_stages()==0` and its source paths, so
+    #38's direct-read collect applies unchanged. The target adds a reference
+    to every bridge the source depends on, so closing or replacing either view
+    never deletes a file the other still uses. `name()` is required:
+    defaulting to `default` would silently replace a view, which is what the
+    copy exists to avoid. A missing or equal `name()`, an unknown source, a
+    varlist naming no column, and the file-reading options (`clear`,
+    `relaxed`, `encoding()`, `int64()`, `binary()`, `filename()`, `csv()`)
+    are refused before any state changes; the ado settles `view:` before it
+    validates or resolves any file option. The copy's source description reads
+    `view:<source> (<the source's own description>)`, for display only. The
+    form reuses `use` and `view:` instead of a `parqit view copy` verb, because
+    Stata's `frame copy` copies data and this operation does not; v125 pins it.
+    The view records at open the file columns whose .a-.z it reads as `.`
+    (XMISS-1) and a copy repeats that note. `mergein`/`appendin` join memory
+    with a file, so a `view:` source is refused by name before their internal
+    read, instead of reaching the copy's refusal of `clear` or a missing file.
+165. **Audit of VIEW-COPY-1 (2026-09-25; Fable; report in
+    `docs/audits/AUDITORIA_FABLE_VIEW_COPY_2026-09-25.md`).** Two pre-existing behaviours
+    changed with it. VIEWNAME-ALL-1: `use`, `sql` and `open _data` refuse
+    `name(_all)`, because `close _all` reserves the word and such a view could
+    not be closed alone. PREFIX-RESTORE-1: `parqit view <name>: <command>`
+    restores the previously current view whenever the command leaves another
+    view current, including when `<name>` was already current, except when the
+    command closed that very view; this is the documented "run, then restore"
+    contract, which a prefixed `use ..., name()` used to break. The views
+    listing keeps both ends of a long source (display only). The audit's
+    suspicion that `sample N, count` could draw differently between executions
+    does not hold for the pinned engine: `PhysicalReservoirSample::ParallelSink`
+    returns `!repeatable`, parqit always passes REPEATABLE, and
+    `Pipeline::ScheduleParallel` returns false for a non-parallel sink, so
+    DuckDB runs the whole scan-to-sample pipeline on one thread and the chunks
+    arrive in a fixed order. Four repeats over 40 row groups with 8 threads drew
+    the same rows; v125 pins the repeat across 30 row groups with 4 threads.
+    Recheck both engine functions when upgrading DuckDB.
+166. **Sampling designs after sample2 (2026-09-25, SAMPLE-DESIGN-1).**
+    `parqit sample # [if] [, count seed() by() cluster() any all generate()]`
+    follows Weesie's `sample2` (STB-37 dm46). `if` is the sampling frame: rows
+    outside it are kept and never drawn. The condition follows the session's
+    missing semantics, as every `keep if` does. Under the default SQL mode a
+    missing condition puts the row outside the frame. With `statamissing on`,
+    `x > 60` holds for a missing `x`, as in `sample2`'s `mark`. The splitter
+    that separates the `if` from the options respects parentheses, double
+    quotes and nested compound quotes. The expression translator accepts one
+    level of compound quote, as in `keep if`. `by()` stratifies, missing forming
+    its own stratum (KEYFOLD-1).
+    `cluster()` draws whole clusters, the strata must be constant within them,
+    and a cluster split by `if` is an error unless `any` or `all` places it.
+    `generate()` adds a 0/1 byte instead of dropping. The existing forms, `#`
+    and `#, count` with or without `seed()`, compile exactly as before. Four
+    decisions, taken by the implementer at the maintainer's request:
+    (1) Counts per stratum keep #134's exact rule, which the plain percentage
+    form already uses, rather than `sample`'s `int(n*#/100+.5)` in binary64. One
+    verb keeps one rule, and #134 is the maintainer's precision decision. For
+    whole-number percentages below about 10^12 units the two agree, because n*#
+    is exact and /100 cannot cross a tie. For fractional ones they differ by one
+    unit at knife-edge ties: 6,214 of 36.3M grid cases, e.g. 0.3 percent of 500
+    gives 1 against 2. No exact rule reproduces `sample` there: rounding the typed
+    decimal still differs in 839 cases.
+    (2) A missing cluster (`''`, `NULL`, NaN or a Stata missing value) is outside
+    the frame and kept, with a note counting the in-frame rows affected, as in
+    xsamplefe. `sample2`'s help requires non-missing clusters, while its ado
+    silently makes missing one more cluster.
+    (3) A cluster's rank is parqit's own function of the seed and the cluster's
+    value (engine/sample_key.hpp; numbers by binary64 bits, text by UTF-8
+    bytes), not DuckDB's `hash()`. The drawn clusters therefore survive engine
+    upgrades and do not depend on row order, file layout or threads. Fixed test
+    vectors guard it, and v126 re-derives the draw in Python.
+    (4) `keep()` is accepted as a synonym of `generate()`, as in xsamplefe and
+    `sample2`.
+    Rows (a design without clusters) use the plain percentage form's priority
+    over the same row numbers, so `generate()` alone flags exactly the rows
+    that form keeps; with `count`, a design keeps # rows per stratum by that
+    priority, not by the plain count form's reservoir. The cluster checks run
+    once over the current plan when the verb is issued, like merge's key
+    checks (sources must stay stable). The cluster path aggregates and joins
+    back without materializing its input, reading it twice. `in` is not
+    supported: `sample2` refuses it with `by()`, and a lazy view has no
+    physical order to cut. v126 compares frames, per-stratum counts and errors
+    with native `sample` and `sample2` on the same data. A second Fable audit
+    (`docs/audits/AUDITORIA_FABLE_SAMPLE_DESIGN_2026-09-25.md`) led to these
+    changes:
+    - `generate()`/`keep()` refuse reserved words such as `_n` and `_N`: the ado
+      runs `confirm name`, and the engine refuses them, because expressions read
+      those words as row context;
+    - the indicator's name is excluded from the stage's helper names;
+    - `in` and an empty `if` get parqit messages;
+    - the documentation now says that integers beyond 2^53 rank by their binary64
+      approximation, with ties broken by value;
+    - it also says that only the cluster checks validate a pending `keep in` when
+      the verb is issued.

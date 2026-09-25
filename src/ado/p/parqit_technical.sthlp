@@ -208,7 +208,9 @@ of the in-memory dataset and opens a lazy view over it; it does not clear or
 otherwise change the in-memory dataset. The plugin atomically reserves every bridge, so concurrent Stata
 processes sharing a temp directory cannot choose the same path. A failed
 operation removes its package-owned bridge; after success, the bridge lives
-until the last view whose plan references it is closed or replaced.
+until the last view whose plan references it is closed or replaced. A view
+copied with {cmd:parqit use} ... {cmd:using view:}{it:name} references every
+bridge of its source, so either view can be closed first.
 {cmd:parqit close _all} remains the final package-owned cleanup sweep.
 
 {pstd}
@@ -331,6 +333,20 @@ row count (half ties upward), and selects that many rows by a seeded hash
 priority with row-index tie-breaking. Its materialization and sort can spill;
 it may need substantially more time and scratch than a small fixed-count sample.
 Reproducibility requires unchanged input order, engine and execution settings.
+A sampling design with {opt cluster()} does not materialize its input: it
+aggregates one row per cluster, ranks the clusters within each stratum and
+joins the decision back to the rows. It therefore reads its input twice, and
+repeats any work in the view's plan. The rank is
+{it:mix(bits(x) ^ mix(seed))} for a number {it:x} (its binary64 bits, with
+-0 read as +0) and {it:mix(fnv1a64(s) ^ mix(seed ^ 0x5bd1e9955bd1e995))} for
+text {it:s}, where {it:mix} is splitmix64's finalizer; ties are broken by the
+cluster's value. Integers beyond 2^53 are ranked by their binary64
+approximation, so two that round to the same double share a key and are
+ordered by value. A design without clusters materializes its input once, like the
+percentage form. The strata and split-cluster checks run one query over the
+current plan when {cmd:sample} is issued, and so validate a pending
+{cmd:keep in} range at that point; a design without clusters leaves that range
+to materialization, like every other verb.
 
 {pstd}Statistics read complete response records even when a string or label
 exceeds 32 KiB. Each duplicate-preview cell has its own encoded field, and

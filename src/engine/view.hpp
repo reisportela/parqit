@@ -101,6 +101,8 @@ class View {
     std::vector<std::string> sortedby_names() const;
     const std::vector<PendingRange> &pending_ranges() const { return ranges_; }
     const std::string &source_desc() const { return source_desc_; }
+    /* VIEW-COPY-1: a copied view names its origin; display only (views, show) */
+    void set_source_desc(const std::string &desc) { source_desc_ = desc; }
     size_t n_stages() const { return stages_.size(); }
 
     /* Footer paths of the backing Parquet file(s), as a DuckDB list literal
@@ -131,6 +133,10 @@ class View {
         src_filename_col_ = name;
     }
     const std::string &source_filename_column() const { return src_filename_col_; }
+    /* VIEW-COPY-1: the file columns whose .a-.z codes the lazy view reads as
+     * plain . (XMISS-1), recorded at open so a copy can repeat the note */
+    void set_xmissing_folded(const std::vector<std::string> &names) { xm_folded_ = names; }
+    const std::vector<std::string> &xmissing_folded() const { return xm_folded_; }
 
     /* expand Stata varlist wildcards (*, ?) against the live schema, in
      * pattern order, deduplicated; "" or an error for a no-match pattern.
@@ -169,6 +175,24 @@ class View {
      * engine) order, validated against the real count the same way. */
     std::string drop_in(long long f, long long l);
     std::string sample(double amount, bool is_count, long long seed /* <0 none */);
+    /* SAMPLE-DESIGN-1, sample2's philosophy: if_expr defines the sampling frame
+     * (rows outside it are kept), by() stratifies, cluster() draws whole
+     * clusters (a missing cluster is outside the frame), frame_rule (strict,
+     * any, all) places the clusters that if splits, and generate() adds a 0/1
+     * indicator instead of dropping rows. Counts per stratum use the rule of
+     * sample(); a cluster's priority depends only on the seed and its value. */
+    std::string sample_design(double amount, bool is_count, long long seed,
+                              const std::string &if_expr,
+                              const std::vector<std::string> &by,
+                              const std::string &cluster, const std::string &frame_rule,
+                              const std::string &generate, bool statamissing);
+    /* the verb-time checks of a cluster design over the current plan: one text
+     * value "<clusters with several strata>|<split clusters>|<in-frame rows
+     * with a missing cluster>" */
+    std::string sample_design_probe(const std::string &if_expr,
+                                    const std::vector<std::string> &by,
+                                    const std::string &cluster, bool statamissing,
+                                    std::string *sql);
     std::string egen(const std::string &name, const std::string &fcn,
                      const std::string &arg_expr, const std::vector<std::string> &by,
                      bool statamissing, const std::string &type_req = "",
@@ -276,6 +300,7 @@ class View {
     std::string src_paths_sql_; /* Parquet footer paths, "" unless file-backed */
     std::string int64_mode_;    /* int64() carried from the open; "" = session */
     std::string src_filename_col_; /* FILENAME-1 provenance column, "" if none */
+    std::vector<std::string> xm_folded_; /* XMISS-1 columns read as plain . */
     std::vector<std::string> stages_; /* each a full SELECT … FROM <prev> */
     std::vector<std::string> descs_;
     std::vector<ViewCol> cols_;

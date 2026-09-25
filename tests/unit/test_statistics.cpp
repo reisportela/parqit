@@ -1,6 +1,8 @@
 #include "doctest.h"
+#include "engine/sample_key.hpp"
 #include "engine/statistics_math.hpp"
 
+#include <cstring>
 #include <random>
 
 using namespace parqit::statistics;
@@ -64,6 +66,25 @@ TEST_CASE("sample size rounds the exact global proportion once") {
     CHECK(sample_count(UINT64_MAX, 50) == (1ULL << 63));
     CHECK(sample_count(UINT64_MAX, 0x1p-1074) == 0);
     CHECK(sample_count(UINT64_MAX, 100) == UINT64_MAX);
+}
+
+/* SAMPLE-DESIGN-1: fixed vectors, computed independently in Python from the
+ * documented rule, so a change to the mixing constants cannot pass silently */
+TEST_CASE("cluster sampling keys are the documented splitmix64 rule") {
+    using namespace parqit::sample_key;
+    CHECK(of_double(0, 1.0) == 258181728628715636ULL);
+    CHECK(of_double(1, 1.0) == 13482269005145962642ULL);
+    CHECK(of_double(0, -0.0) == 12035550249420947055ULL);
+    CHECK(of_double(0, 0.0) == of_double(0, -0.0));
+    CHECK(of_double(7, 2.5) == 3475726179698553490ULL);
+    CHECK(of_bytes(0, "", 0) == 6214086819679966137ULL);
+    CHECK(of_bytes(0, "1", 1) == 7076828570760510544ULL);
+    const char *evora = "\xC3\x89vora";
+    CHECK(of_bytes(1, evora, std::strlen(evora)) == 8350063622925145315ULL);
+    /* the number 1 and the text "1" are different clusters with different keys */
+    CHECK(of_double(0, 1.0) != of_bytes(0, "1", 1));
+    /* 2^53 + 1 has no binary64 of its own: it is ranked as 2^53 (documented) */
+    CHECK(of_double(0, 0x1p53 + 1.0) == of_double(0, 0x1p53));
 }
 
 TEST_CASE("DD renormalization preserves exact 96-bit integer cancellation") {

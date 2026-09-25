@@ -9,9 +9,10 @@
   The report buttons run at once with the dialog open (views, show, explain,
   describe, ds, version, selftest), echoed to the Results window like a typed
   command. The list box chooses the action that OK or Submit runs: switch,
-  close, or close every view; run a parqit command on another view; open a
-  view from a DuckDB SQL query or add a raw SQL fragment to the current
-  pipeline; or change any of the seven parqit session settings.
+  close, or close every view; run a parqit command on another view; copy a
+  view's plan into a new view; open a view from a DuckDB SQL query or add a
+  raw SQL fragment to the current pipeline; or change any of the seven parqit
+  session settings.
 */
 
 VERSION 16.0
@@ -108,6 +109,9 @@ BEGIN
 	label("Value")
   COMBOBOX cb_int64 315 @ _vnwd ., dropdownlist contents(i64_list) ///
 	default("refuse") label("Integer precision policy")
+  EDIT ed_newname		315	@	_vnwd	.,		///
+	max(32)								///
+	label("Name of the new view")
   TEXT tx_context _lft 325 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
@@ -139,6 +143,7 @@ BEGIN
 	Close a view (close)
 	Close every view (close _all)
 	Run a command on another view (view name:)
+	Copy a view into a new view (use ... using view:)
 	Open a view from a DuckDB SQL query (sql)
 	Add a SQL fragment to the pipeline (query)
 	Set missing-value mode (set statamissing)
@@ -156,6 +161,7 @@ BEGIN
 	close
 	closeall
 	run
+	copy
 	sql
 	query
 	statamissing
@@ -173,6 +179,7 @@ BEGIN
 	script op_close
 	script op_closeall
 	script op_run
+	script op_copy
 	script op_sql
 	script op_query
 	script op_statamissing
@@ -197,7 +204,9 @@ BEGIN
 	main.cb_sm.hide
 	main.cb_int64.hide
 	main.ed_value.hide
+	main.ed_newname.hide
 	main.tx_name.setlabel "View name:"
+	main.tx_cmd.setlabel "Command to run on it (e.g., count):"
 	main.tx_sql.setlabel "DuckDB SQL:"
 	main.tx_value.setlabel "Value:"
 END
@@ -229,6 +238,20 @@ BEGIN
 	main.ed_name.enable
 	main.tx_cmd.enable
 	main.ed_cmd.enable
+END
+
+SCRIPT op_copy
+BEGIN
+	script all_off
+	main.tx_name.enable
+	main.ed_name.enable
+	main.tx_name.setlabel "View to copy (it stays unchanged):"
+	main.tx_cmd.enable
+	main.ed_cmd.enable
+	main.tx_cmd.setlabel "Variables to keep (blank = all):"
+	main.tx_value.enable
+	main.tx_value.setlabel "Name of the new view:"
+	main.ed_newname.show
 END
 
 SCRIPT op_sql
@@ -379,6 +402,15 @@ BEGIN
 		require main.ed_name
 		require main.ed_cmd
 		put "parqit view " main.ed_name ": " main.ed_cmd
+	}
+	if main.lb_op.equals("copy") {
+		require main.ed_name
+		require main.ed_newname
+		put "parqit use "
+		if main.ed_cmd {
+			put main.ed_cmd " "
+		}
+		put "using view:" main.ed_name ", name(" main.ed_newname ")"
 	}
 	if main.lb_op.equals("sql") {
 		require main.ed_sql

@@ -21,7 +21,9 @@
 {viewerjumpto "Quick start" "parqit##quickstart"}{...}
 {viewerjumpto "The view at a glance" "parqit##map"}{...}
 {viewerjumpto "The lazy view" "parqit##lazy"}{...}
+{viewerjumpto "Copying a view" "parqit##copy"}{...}
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
+{viewerjumpto "Sampling designs" "parqit##sampledesign"}{...}
 {viewerjumpto "Materialisers" "parqit##materialisers"}{...}
 {viewerjumpto "Exploring a view" "parqit##explore"}{...}
 {viewerjumpto "Expressions" "parqit##expressions"}{...}
@@ -57,9 +59,19 @@ into memory:
 {cmd:parqit use} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)} {opt relax:ed} {opt enc:oding(name)}
 {opt int64(refuse|round|string)} {opt binary(text|hex)} {opt file:name(newvar)} {opt csv(read_options)}]
 
+{p 8 16 2}
+{cmd:parqit use} [{it:varlist-patterns}] {cmd:using view:}{it:viewname}{cmd:,} {opt n:ame(newview)}
+
+{p 8 16 2}
+{cmd:parqit use view:}{it:viewname}{cmd:,} {opt n:ame(newview)}
+
 {pstd}The second form is the first without a {it:varlist}: {cmd:using} may be
 omitted only when no variable list is given, and the two forms are otherwise
 identical — {opt clear} reads into memory, its absence opens a lazy view.
+
+{pstd}With {cmd:view:}{it:viewname} as the source (lowercase {cmd:view:}, as for the
+two-table sources), {cmd:parqit use} copies the plan of an open view into a new view
+instead of reading a file; see {help parqit##copy:Copying a view}.
 
 {pstd}{it:filename} may be a Parquet file, a glob such as {it:data_*.parquet}
 (wildcards are {cmd:*} and {cmd:?}; a {cmd:[} is a literal character, and a
@@ -165,7 +177,8 @@ under the engine's {cmd:column0}, {cmd:column1}, ... names.
 {p 8 16 2}{cmd:parqit collapse} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... [{cmd:,} {opt by(varlist)}]{p_end}
 {p 8 16 2}{cmd:parqit contract} {it:varlist} [{cmd:,} {opt f:req(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit duplicates drop} [{it:varlist}{cmd:,} {opt force}]{p_end}
-{p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:,} {opt c:ount} {opt seed(#)}]{p_end}
+{p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:if} {it:exp}] [{cmd:,} {opt c:ount} {opt seed(#)} {opt by(varlist)}
+{opt cl:uster(varname)} {opt any} {opt all} {opt gen:erate(newvar)} {opt keep(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit reshape} {cmd:long}|{cmd:wide} {it:stubs}{cmd:,} {opt i(varlist)} {opt j(name)}{p_end}
 {p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
 {p 8 16 2}{cmd:parqit merge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source}
@@ -298,7 +311,8 @@ the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
 
 {phang2}{bf:User > parqit > Keep or drop observations, or draw a sample...}{p_end}
 {p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if}, {cmd:keep in}, {cmd:drop in}
-({cmd:f}, {cmd:l} and negative bounds accepted) and {cmd:sample}; the
+({cmd:f}, {cmd:l} and negative bounds accepted) and {cmd:sample}, with its
+{cmd:if} frame, strata, whole clusters and indicator; the
 {bf:Create...} button opens Stata's expression builder.{p_end}
 
 {phang2}{bf:User > parqit > Keep, drop, order, sort, or rename variables...}{p_end}
@@ -345,7 +359,8 @@ when {opt data} is selected.{p_end}
 {p 12 12 2}({cmd:db parqit_views}) buttons that report on the current view at
 once ({cmd:views}, {cmd:show}, {cmd:explain}, {cmd:describe}, {cmd:ds},
 {cmd:version}, {cmd:selftest}); the actions {cmd:view}, {cmd:close},
-{cmd:view} {it:name}{cmd::} {it:command}, {cmd:sql}, {cmd:query} and all seven
+{cmd:view} {it:name}{cmd::} {it:command}, a copy of a view ({cmd:use} ...
+{cmd:using view:}{it:name}), {cmd:sql}, {cmd:query} and all seven
 {cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:threads},
 {cmd:fill_threads}, {cmd:stream_buffer_mb}, {cmd:memory_limit}, {cmd:tempdir}.{p_end}
 
@@ -462,6 +477,12 @@ notes, formats and characteristics, and stay plain Parquet for other tools.
 Two runnable courses ship with the package, {cmd:parqit_basics.do} and
 {cmd:parqit_tour.do} (see {help parqit##examples:Examples}).
 
+{pstd}To load only a sample, draw it in the view: {cmd:parqit sample 10, cluster(hh) by(region)}
+keeps a tenth of the households of each region, with all their members
+({help parqit##sampledesign:Sampling designs}). To try verbs without changing a
+view, copy its plan first: {cmd:parqit use view:default, name(try)}
+({help parqit##copy:Copying a view}).
+
 {pstd}Three rules of thumb: put {cmd:keep}/{cmd:keep if} early so the engine
 reads less; never expect a lazy verb to change the data in memory (only
 {cmd:collect} does, and only with a complete result); and read
@@ -487,12 +508,13 @@ current Stata dataset stays unchanged until an explicit collection.
    {c |}
    {c |}{space 4}{cmd:parqit use} {it:file}{space 11}a Parquet file, glob or Hive directory,
    {c |}{space 30}or {cmd:.csv} {cmd:.tsv} {cmd:.txt} {cmd:.tab} {cmd:.dta} {cmd:.xls} {cmd:.xlsx}
+   {c |}{space 4}{cmd:parqit use view:}{it:name}{space 6}a copy of an open view's plan, with {opt name()}
    {c |}{space 4}{cmd:parqit open _data}{space 9}the dataset already in Stata's memory
    {c |}{space 4}{cmd:parqit sql} {cmd:"}{it:SELECT ...}{cmd:"}{space 3}any DuckDB query
    {c |}
    {c LT}{c -} {bf:2  SHAPE} {c -} lazy verbs; each one extends the plan {c -} {help parqit##verbs:[more]}
    {c |}
-   {c |}{space 4}rows{space 9}{cmd:keep} {cmd:drop} {cmd:sample} {cmd:duplicates drop}
+   {c |}{space 4}rows{space 9}{cmd:keep} {cmd:drop} {cmd:sample} ({help parqit##sampledesign:strata, clusters}) {cmd:duplicates drop}
    {c |}{space 4}columns{space 6}{cmd:gen} {cmd:egen} {cmd:replace} {cmd:rename} {cmd:order}
    {c |}{space 4}order{space 8}{cmd:sort} {cmd:gsort}
    {c |}{space 4}aggregate{space 4}{cmd:collapse} {cmd:contract} {cmd:pivot}
@@ -523,7 +545,7 @@ re-executes each time.
 Alongside the four moves, at any point in the session:
 
    {space 5}the plan{space 5}{cmd:parqit show} {cmd:parqit explain}
-   {space 5}views{space 8}{cmd:parqit views} {cmd:parqit view} {cmd:parqit close}
+   {space 5}views{space 8}{cmd:parqit views} {cmd:parqit view} {cmd:parqit close}; a copy: {cmd:parqit use view:}{it:name}
    {space 5}engine{space 7}{cmd:parqit set} {cmd:parqit path}
    {space 5}install{space 6}{cmd:parqit version} {cmd:parqit selftest} {cmd:parqit menu}
 
@@ -552,11 +574,13 @@ sampled for type inference, and adapter inputs are bridged as described below.
 Views are
 named (default name: {cmd:default}) and several can be open at once — the
 vocabulary mirrors frames. {opt name()} opens under a name; opening a name that
-already exists replaces that plan only and makes it current. {cmd:parqit view}
+already exists replaces that plan only and makes it current. {cmd:_all} is not a
+view name: it is reserved by {cmd:parqit close _all}. {cmd:parqit view}
 {it:name} switches the current view. {cmd:parqit view} {it:name}{cmd::}
 {it:command} temporarily targets another view and then restores the previously
-current view, even when the command fails; a lazy verb still changes the
-{it:target} view, so "temporary" describes the switch, not the mutation.
+current view, even when the command fails or opens another view; a lazy verb
+still changes the {it:target} view, so "temporary" describes the switch, not the
+mutation.
 {cmd:parqit views} lists them (bare {cmd:parqit view} does too) and
 {cmd:parqit close}
 [{it:name}|{cmd:_all}] closes a named view or every view — bare, the
@@ -566,6 +590,23 @@ snapshot. A {cmd:view:}{it:name} two-table source embeds
 the source view's current compiled plan and retains any package-owned bridge it
 needs; later changing or closing the source view does not invalidate the
 derived plan.
+
+{marker copy}{...}
+{pstd}{bf:Copying a view.} {cmd:parqit use} [{it:varlist}] {cmd:using view:}{it:viewname}{cmd:,}
+{opt name(newview)} opens {it:newview} as a copy of the plan of {it:viewname} as it stands and
+makes it current; a {it:varlist} keeps only those variables, as {cmd:parqit keep} would. No rows
+are read. The copy is a plan, not data: later verbs on either view do not reach the other,
+closing either leaves the other usable, and both read the same files when they execute. A
+{cmd:parqit sample} step keeps its seed, so both views draw the same sample, and a pending
+{cmd:keep in} range is checked when the copy is collected or saved. {cmd:parqit view}
+{it:name}{cmd::} {it:command} still changes {it:name}; copy it first to try verbs without
+changing it. {opt name()} is required and must differ from {it:viewname}; the options that
+describe how to read a file are refused. Under a {cmd:parqit view} {it:name}{cmd::} prefix the
+previously current view is restored afterwards, as for any prefixed command. {cmd:parqit views}
+and {cmd:parqit show} name the source as {cmd:view:}{it:viewname} followed by that view's own
+source, and a copy of a view that reads extended missing values as {cmd:.} repeats that note.
+{cmd:parqit mergein} and {cmd:parqit appendin} read a file, not a view: give them a
+{cmd:view:} source and they refuse it and name the out-of-core alternative.{p_end}
 
 {pstd}
 A typical first session: open the view, explore it engine-side
@@ -651,9 +692,9 @@ variable {cmd:_freq} by default, accepts another noncolliding name through
 
 {pstd}{cmd:sample} draws an engine-side random sample: {it:#} is a
 percentage in (0,100]; with {opt count}, {it:#} is a number of rows.
-The count must be a nonnegative integer below 2^63 (zero is allowed). A nonnegative
-{opt seed(#)} makes the draw reproducible with unchanged input order, engine
-and execution settings. The percentage form selects the nearest whole number
+The count must be a nonnegative integer below 2^63 (zero is allowed). A
+{opt seed(#)} from 0 to 2,147,483,647 makes the draw reproducible with unchanged
+input order, engine and execution settings. The percentage form selects the nearest whole number
 to N times the stored percentage divided by 100, with half ties rounded upward;
 it computes that count globally. The count form uses a reservoir. If the seed is omitted
 or negative, parqit chooses one when the sample step is added to the plan;
@@ -662,6 +703,40 @@ a fresh draw. Sampling remains lazy, and statistical commands that need
 several passes use one realization of a sampled input.
 Percentage sampling can require a source-sized engine temporary table and a
 spillable sort; a small fixed-count sample is usually cheaper.
+
+{marker sampledesign}{...}
+{pstd}{bf:Sampling designs}, after Weesie's {cmd:sample2} (STB-37 dm46). {cmd:if} {it:exp}
+defines the sampling frame: rows outside it are kept and never drawn. Under the default
+SQL missing semantics a row whose {it:exp} is missing is outside the frame; with
+{cmd:parqit set statamissing on} comparisons follow Stata, so {cmd:x > 60} holds for a
+missing {cmd:x}, as in {cmd:sample2}. {opt by()} draws # percent (or, with {opt count}, # units)
+within each stratum; missing values form their own stratum. {opt cluster()} draws
+whole clusters instead of rows: all rows of a drawn cluster are kept, the others are
+dropped. Rows with a missing cluster are outside the frame and kept; a note says how
+many. The strata must be constant within clusters. A cluster that {cmd:if} splits is
+an error, unless {opt any} places it in the frame when any of its rows satisfies
+{it:exp}, or {opt all} only when every row does; without {opt cluster()}, {opt any}
+and {opt all} are ignored with a note, as in {cmd:sample2}. {opt generate()} (or its synonym
+{opt keep()}, as in {cmd:sample2}) adds a 0/1 variable, 1 for the rows that would be
+kept, instead of dropping rows.{p_end}
+
+{pstd}Each stratum draws the nearest whole number to n times the stored percentage
+divided by 100, with half ties rounded upward, as the plain percentage form does:
+for a whole-number percentage this is {cmd:sample}'s and {cmd:sample2}'s
+{cmd:int(n*#/100+.5)}, and for a fractional one it can differ from them by one unit
+at a tie (0.3 percent of 500 draws 1, where they draw 2). A cluster's rank comes from a
+parqit function of the seed and the cluster's value only, so the drawn clusters do
+not depend on row order, on how the source is split into files, on the number of
+threads or on the DuckDB version; a number hashes its binary64 value, so 1 stored as
+an integer or as a double is one cluster. Without {opt cluster()}, rows use the plain form's priority, so
+{opt generate()} alone flags exactly the rows the plain percentage form keeps; with
+{opt count}, a design keeps # rows per stratum by that priority, while the plain
+count form keeps its reservoir. The draw never matches {cmd:sample2}'s, which uses
+Stata's random numbers. The checks on clusters (constant strata, split clusters)
+read the current plan once when {cmd:sample} is issued, like {cmd:merge}'s key
+checks. A design without {opt cluster()} numbers rows in the view's sort order, or in
+input order when there is none, and its draw depends on that numbering, as the plain
+form's does. {cmd:in} is not supported.{p_end}
 
 {pstd}{cmd:reshape long} requires {opt i()} to identify wide rows uniquely. For
 each stub it discovers columns named {it:stub}{it:suffix}; if any suffix is
@@ -1256,7 +1331,8 @@ memory to a package-owned temporary Parquet bridge, opens/replaces the named
 view (default {cmd:default}), leaves memory in place, and reports any extended-
 missing collapse or fractional-date rounding caused by that snapshot.
 {cmd:close} releases a view and deletes a bridge only after its last dependent
-view closes; {cmd:close _all} closes every view and performs the final owned-
+view closes, and a copied view depends on every bridge of its source;
+{cmd:close _all} closes every view and performs the final owned-
 bridge sweep. {cmd:show} prints compiled SQL; {cmd:explain} asks DuckDB for its
 plan. {cmd:path} resolves a path to an absolute spelling and reports whether it
 exists, without creating it. {cmd:version} reports the parqit and embedded
@@ -1394,6 +1470,16 @@ loading the result into Stata's current dataset:{p_end}
 {phang2}{cmd:. parqit sample 1, seed(42)}{space 13}({it:1% engine-side sample; count for # of rows}){p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
 
+{pstd}{bf:Sampling designs} — whole households within regions; then half of the
+households with someone over 60, flagged instead of dropped (see
+{help parqit##sampledesign:Sampling designs}):{p_end}
+{phang2}{cmd:. parqit use using households.parquet}{p_end}
+{phang2}{cmd:. parqit sample 10, cluster(hh) by(region) seed(42)}{space 2}({it:10% of each region's households, all members}){p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit use using households.parquet}{p_end}
+{phang2}{cmd:. parqit sample 50 if age > 60, cluster(hh) any generate(pick)}{space 2}({it:pick = 0: not drawn}){p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+
 {pstd}{bf:Expressions, types and dates.} Untyped results are double (like
 Stata's evaluator); type the {cmd:gen} to control storage. Dates are their
 Stata numbers inside the pipeline:{p_end}
@@ -1426,6 +1512,14 @@ materialising either side ({cmd:view:}{it:name} as a {cmd:using} source):{p_end}
 {phang2}{cmd:. parqit merge m:1 firmid using view:stats, keep(match)}{p_end}
 {phang2}{cmd:. parqit collect, clear}{p_end}
 {phang2}{cmd:. parqit close _all}{p_end}
+
+{pstd}{bf:Copying a view} to branch a pipeline without changing it:{p_end}
+{phang2}{cmd:. parqit use using qp_*.parquet, name(panel)}{p_end}
+{phang2}{cmd:. parqit keep if year >= 2018}{p_end}
+{phang2}{cmd:. parqit use firmid wage using view:panel, name(firms)}{space 2}({it:copy; panel is unchanged}){p_end}
+{phang2}{cmd:. parqit collapse (mean) mw=wage, by(firmid)}{p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit view panel}{space 25}({it:all columns, 2018 on}){p_end}
 
 {pstd}{bf:SQL escape hatches} — inject a fragment into the pipeline
 ({cmd:query}), or run a standalone statement ({cmd:sql}); {cmd:show} and
@@ -1472,13 +1566,21 @@ dialogs; neither file is exhaustive.{p_end}
 again re-executes it. Eager and direct-read paths check file identity during
 the read; this is not a snapshot guarantee for every engine query. Keep
 sources stable throughout a transformation or statistical command; see
-{help parqit_technical##limitations:the exact read-path scope}.{p_end}
+{help parqit_technical##limitations:the exact read-path scope}. A copy made with
+{cmd:parqit use} ... {cmd:using view:}{it:name} copies the plan, not the data, so
+both views read the same files.{p_end}
 {pstd}{cmd:•} Expressions use SQL missing-value semantics unless
 {cmd:parqit set statamissing on}; {cmd:_n}/{cmd:_N} work in {cmd:keep if},
 {cmd:drop if} and in the main expression of {cmd:gen} only.{p_end}
 {pstd}{cmd:•} Lazy {cmd:merge m:m} is refused ({cmd:joinby} or
 {cmd:mergein m:m} instead); {cmd:collapse}/{cmd:pivot} take no weights;
 {cmd:reshape wide}/{cmd:pivot} spread at most 2,000 values.{p_end}
+{pstd}{cmd:•} {help parqit##sampledesign:Sampling designs} use parqit's own random
+numbers, so they follow {cmd:sample2}'s rules but never reproduce its draw. A
+fractional percentage can draw one unit fewer or more than {cmd:sample2} at a
+tie. A missing cluster is outside the frame and kept, where {cmd:sample2} treats
+it as one more cluster. With {opt count}, a design ranks rows by priority rather
+than by the plain count form's reservoir. {cmd:in} is not supported.{p_end}
 {pstd}{cmd:•} Eager {cmd:use, clear} and {cmd:collect} refuse more than
 2,147,483,647 observations; the lazy path and {cmd:save} are not so
 bounded.{p_end}
@@ -1538,7 +1640,8 @@ the contract behind each item, is in
 
 {pstd}{it:Opening and materialising.} Eager {cmd:parqit use ..., clear} and
 {cmd:collect} return scalars {cmd:r(N)} and {cmd:r(k)}. Lazy {cmd:use} returns
-{cmd:r(k)} and local {cmd:r(view)}; when a {cmd:.dta} or Excel adapter was
+{cmd:r(k)} and local {cmd:r(view)}; a copy ({cmd:using view:}) also returns the
+source view's name in {cmd:r(source_view)}. When a {cmd:.dta} or Excel adapter was
 needed it also returns the package-owned temporary path in {cmd:r(bridge)}.
 {cmd:open _data} returns its snapshot path in {cmd:r(bridge)}. Lazy
 {cmd:sql} returns {cmd:r(k)} and {cmd:r(view)}; {cmd:sql ..., clear} returns

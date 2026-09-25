@@ -9,6 +9,8 @@
 namespace parqit_plugin {
 
 ST_retcode cmd_view_open(const std::vector<std::string> &args);
+/* VIEW-COPY-1: `parqit use [varlist] using view:<source>, name(<target>)` */
+ST_retcode cmd_view_copy(const std::vector<std::string> &args);
 ST_retcode cmd_view_op(const std::vector<std::string> &args);
 ST_retcode cmd_view_twotable(const std::vector<std::string> &args);
 ST_retcode cmd_view_reshape(const std::vector<std::string> &args);

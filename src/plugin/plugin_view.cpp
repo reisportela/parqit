@@ -1099,6 +1099,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
      * column is the provenance one so it stays out of the leaf alignment and
      * out of the Hive partition keys */
     candidate.set_source_filename_column(prov_alias);
+    candidate.set_xmissing_folded(xm_folded); /* VIEW-COPY-1: a copy repeats XMISS-1 */
 
     /* optional initial projection (named columns, named order) */
     if (!varlist.empty()) {
@@ -1132,6 +1133,102 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     return 0;
 }
 
+/* ======================================================== view_copy ===== */
+
+/* VIEW-COPY-1: `parqit use [varlist] using view:<source>, name(<target>)`.
+ * The target receives a copy of the source's plan (View is a value type:
+ * stages, columns, labels, sort keys, unvalidated pending ranges, the seed
+ * already written into a sample stage), optionally narrowed by keep_vars
+ * exactly as `parqit keep`, and shares every bridge the source depends on.
+ * No engine call is made; later verbs on either view never reach the other.
+ * The copy is built aside and committed only once every check has passed. */
+ST_retcode cmd_view_copy(const std::vector<std::string> &args) {
+    std::string err, source, target;
+    json req;
+    if (!load_req(args, &req, &err) || !parqit::req_text(req, "source", &source, &err) ||
+        !parqit::req_text(req, "name", &target, &err)) {
+        cry(err);
+        return kRcUsage;
+    }
+    const std::vector<std::string> varlist = req_list_or_empty(req, "varlist");
+    if (target.empty() || target == source) {
+        cry("parqit use: view:" + source + " cannot be copied onto itself; name the "
+            "copy with another name()");
+        return kRcUsage;
+    }
+    auto it = g_views.find(source);
+    if (it == g_views.end() || !it->second.live()) {
+        cry("parqit use: no view named " + source + " is open");
+        return kRcUsage;
+    }
+    View copy = it->second;
+    if (!varlist.empty()) {
+        const std::string verr = copy.keep_vars(varlist);
+        if (!verr.empty()) {
+            cry("parqit use: " + verr);
+            return kRcUsage;
+        }
+    }
+    copy.set_source_desc("view:" + source + " (" + it->second.source_desc() + ")");
+    std::set<std::string> inherited;
+    auto bit = g_view_bridges.find(source);
+    if (bit != g_view_bridges.end()) inherited = bit->second;
+
+    std::string cleanup_err;
+    if (!drop_owned(target, &cleanup_err))
+        cry("warning: parqit use: " + cleanup_err);
+    g_views[target] = std::move(copy);
+    add_bridge_refs(target, inherited);
+    g_current = target;
+    const std::vector<std::string> &xm = g_view_ref().xmissing_folded();
+    if (!xm.empty()) { /* XMISS-1, repeated for the copy */
+        std::string names;
+        for (size_t i = 0; i < xm.size(); i++) names += (i ? " " : "") + xm[i];
+        cry("note: view:" + source + " reads a file that keeps extended missing values "
+            "(.a-.z) for " + names + "; like that view, the copy reads those cells as "
+            "plain . (the companion columns are hidden); parqit use <file>, clear "
+            "restores them");
+    }
+
+    save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
+    save_local("_parqit_view_src", parqit::hex_encode(g_view_ref().source_desc()));
+    save_local("_parqit_view_name", parqit::hex_encode(g_current));
+    return 0;
+}
+
+/* SAMPLE-DESIGN-1: the checks of a cluster design run once over the current
+ * plan when the verb is issued, like merge's uniqueness probe: loud, and
+ * before the view changes. They also count the in-frame rows whose cluster is
+ * missing, which stay outside the frame and are reported in a note. */
+std::string sample_design_checks(View &candidate, const std::string &ifx,
+                                 const std::vector<std::string> &by,
+                                 const std::string &cluster, const std::string &rule,
+                                 std::string *note) {
+    Session &s = Session::instance();
+    std::string err;
+    if (validate_ranges(s, candidate, &err) != 0) return err;
+    std::string sql;
+    err = candidate.sample_design_probe(ifx, by, cluster, g_statamissing, &sql);
+    if (!err.empty()) return err;
+    std::string out;
+    if (!s.query_scalar(sql, &out, &err)) return "sample design check failed: " + err;
+    const size_t p1 = out.find('|'), p2 = out.find('|', p1 == std::string::npos ? 0 : p1 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos)
+        return "sample design check returned " + out;
+    const std::string conflicts = out.substr(0, p1), split = out.substr(p1 + 1, p2 - p1 - 1),
+                      missing = out.substr(p2 + 1);
+    if (conflicts != "0")
+        return "by() must be constant within clusters: " + conflicts + " value(s) of " +
+               cluster + " span several strata";
+    if (split != "0" && rule != "any" && rule != "all")
+        return "the if condition selects only part of " + split + " cluster(s) of " + cluster +
+               "; specify any (a cluster enters with any selected row) or all (only with every row)";
+    if (missing != "0")
+        *note = missing + " observation(s) with a missing " + cluster +
+                " are outside the sampling frame and kept";
+    return "";
+}
+
 /* ========================================================== view_op ===== */
 
 ST_retcode cmd_view_op(const std::vector<std::string> &args) {
@@ -1151,6 +1248,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     std::string e;
+    std::string sample_note; /* SAMPLE-DESIGN-1: printed only after the commit */
     std::string replace_storage_name, replace_storage_type;
     auto bind_and_commit = [&](View candidate) -> std::string {
         duckdb_result probe;
@@ -1300,8 +1398,28 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
     } else if (op == "drop_in") {
         e = candidate.drop_in(req.value("f", 0LL), req.value("l", 0LL));
     } else if (op == "sample") {
-        e = candidate.sample(req.value("amount", 0.0), req.value("count", false),
-                             req.value("seed", -1LL));
+        std::string ifx, cluster, rule, gen;
+        if (!parqit::req_text(req, "ifexpr", &ifx, &err, false) ||
+            !parqit::req_text(req, "cluster", &cluster, &err, false) ||
+            !parqit::req_text(req, "frame_rule", &rule, &err, false) ||
+            !parqit::req_text(req, "generate", &gen, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        const std::vector<std::string> by = req_list_or_empty(req, "by");
+        const double amount = req.value("amount", 0.0);
+        const bool count = req.value("count", false);
+        const long long seed = req.value("seed", -1LL);
+        if (ifx.empty() && by.empty() && cluster.empty() && gen.empty()) {
+            e = candidate.sample(amount, count, seed); /* the existing forms, unchanged */
+        } else {
+            if (rule.empty()) rule = "strict";
+            if (!cluster.empty())
+                e = sample_design_checks(candidate, ifx, by, cluster, rule, &sample_note);
+            if (e.empty())
+                e = candidate.sample_design(amount, count, seed, ifx, by, cluster, rule, gen,
+                                            g_statamissing);
+        }
     } else if (op == "egen") {
         std::string name, fcn, ex, ty;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -1346,6 +1464,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         cry("parqit: " + e);
         return kRcUsage;
     }
+    if (!sample_note.empty()) cry("note: " + sample_note);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }

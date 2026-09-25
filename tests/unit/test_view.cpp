@@ -1202,3 +1202,113 @@ TEST_CASE("NAME-GUARD-117: merge marker honours keepusing and exposed aliases") 
     REQUIRE(case_distinct.merge_with("m:1", {"id"}, aliased, {}, 0, "", false, &warns).empty());
     CHECK(run_scalar("SELECT count(*) FROM (" + case_distinct.compile(false) + ") WHERE _merge = 3 AND _merge_1 = 99") == "2");
 }
+
+/* VIEW-COPY-1: cmd_view_copy assigns a View by value; the copy and its source
+ * must never share a stage, a column, a sort key or a pending range. */
+TEST_CASE("a copied view is an independent plan") {
+    View a = make_view();
+    REQUIRE(a.filter("year == 2020", false, false).empty());
+    REQUIRE(a.sort({"id"}, {false}).empty());
+    REQUIRE(a.keep_in(1, 2).empty());
+    View b = a;
+    CHECK(b.compile(true) == a.compile(true));
+    CHECK(b.sort_keys() == a.sort_keys());
+    CHECK(b.pending_ranges().size() == 1);
+
+    const std::string a_sql = a.compile(true);
+    const size_t a_stages = a.n_stages();
+    REQUIRE(b.keep_vars({"id", "wage"}).empty());
+    CHECK(b.pending_ranges().size() == 1); /* the range survives the projection */
+    REQUIRE(b.filter("id == 1", false, false).empty());
+    CHECK(a.compile(true) == a_sql);
+    CHECK(a.n_stages() == a_stages);
+    CHECK(a.cols().size() == 4);
+    CHECK(b.cols().size() == 2);
+    CHECK(run_count(a) == 2); /* 2020 rows by id, in 1/2: ids 1 and 2 */
+    CHECK(run_count(b) == 1);
+
+    const std::string b_sql = b.compile(true);
+    REQUIRE(a.gen("w2", "double", "wage * 2", "", false).empty());
+    CHECK(b.compile(true) == b_sql);
+    CHECK(b.cols().size() == 2);
+
+    b.set_source_desc("view:a (test fixture)");
+    CHECK(b.source_desc() == "view:a (test fixture)");
+    CHECK(a.source_desc() == "test fixture");
+}
+
+/* SAMPLE-DESIGN-1: sample2's frame, strata, clusters and indicator on the
+ * worker fixture (ids 1-3, two rows each; firm a/b/a is constant within id) */
+TEST_CASE("sample designs draw whole clusters, keep rows outside the frame, flag instead") {
+    /* 34% of 3 clusters is one cluster: its two rows */
+    View c = make_view();
+    REQUIRE(c.sample_design(34, false, 5, "", {}, "id", "strict", "", false).empty());
+    CHECK(run_count(c) == 2);
+    CHECK(run_scalar("SELECT count(DISTINCT id) FROM (" + c.compile(false) + ")") == "1");
+
+    /* generate() keeps every row and flags the two drawn clusters (50% of 3) */
+    View g = make_view();
+    REQUIRE(g.sample_design(50, false, 5, "", {}, "id", "strict", "g", false).empty());
+    CHECK(run_count(g) == 6);
+    CHECK(g.cols().back().name == "g");
+    CHECK(run_scalar("SELECT sum(g) FROM (" + g.compile(false) + ")") == "4");
+    CHECK(run_scalar("SELECT count(*) FROM (SELECT id FROM (" + g.compile(false) +
+                     ") GROUP BY id HAVING min(g) <> max(g))") == "0");
+    CHECK_FALSE(g.sample_design(50, false, 5, "", {}, "id", "strict", "g", false).empty());
+
+    /* rows outside the if frame stay: 2019 rows kept, one 2020 row drawn */
+    View f = make_view();
+    REQUIRE(f.sample_design(34, false, 3, "year == 2020", {}, "", "strict", "", false).empty());
+    CHECK(run_count(f) == 4);
+    CHECK(run_scalar("SELECT count(*) FROM (" + f.compile(false) + ") WHERE year = 2019") == "3");
+
+    /* generate() alone flags exactly the rows the plain percentage form keeps */
+    View plain = make_view(), flagged = make_view();
+    REQUIRE(plain.sample(50, false, 11).empty());
+    REQUIRE(flagged.sample_design(50, false, 11, "", {}, "", "strict", "g", false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM ((SELECT id, year FROM (" + plain.compile(false) +
+                     ")) EXCEPT (SELECT id, year FROM (" + flagged.compile(false) +
+                     ") WHERE g = 1))") == "0");
+    CHECK(run_scalar("SELECT sum(g) FROM (" + flagged.compile(false) + ")") ==
+          std::to_string(run_count(plain)));
+
+    /* the verb-time checks: strata per cluster, split clusters, missing clusters */
+    std::string sql;
+    View p = make_view();
+    REQUIRE(p.sample_design_probe("", {"firm"}, "id", false, &sql).empty());
+    CHECK(run_scalar(sql) == "0|0|0");
+    REQUIRE(p.sample_design_probe("", {"year"}, "id", false, &sql).empty());
+    CHECK(run_scalar(sql) == "3|0|0");
+    REQUIRE(p.sample_design_probe("year == 2020", {}, "id", false, &sql).empty());
+    CHECK(run_scalar(sql) == "0|3|0");
+    CHECK_FALSE(p.sample_design(10, false, 1, "", {}, "nope", "strict", "", false).empty());
+    CHECK_FALSE(p.sample_design(10, false, 1, "", {}, "id", "sometimes", "", false).empty());
+
+    /* the reserved words that expressions read as row context never name a column */
+    View reserved = make_view();
+    CHECK_FALSE(reserved.sample_design(50, false, 1, "", {}, "id", "strict", "_n", false).empty());
+    CHECK_FALSE(reserved.sample_design(50, false, 1, "", {}, "id", "strict", "_N", false).empty());
+
+    /* the indicator's name is never handed to a helper, even the next one's */
+    View named = make_view();
+    REQUIRE(named.sample_design(50, false, 11, "", {}, "", "strict", "__parqit_sample_source_1",
+                                false).empty());
+    CHECK(named.compile(false).find("\"__parqit_sample_source_1\" AS MATERIALIZED") ==
+          std::string::npos);
+    CHECK(run_scalar("SELECT sum(\"__parqit_sample_source_1\") FROM (" + named.compile(false) +
+                     ")") == "3");
+
+    /* integers beyond 2^53 that round to one binary64 share a key; value breaks the tie */
+    View big;
+    std::vector<ViewCol> bc(2);
+    bc[0].name = "id";
+    bc[0].kind = 'n';
+    bc[1].name = "x";
+    bc[1].kind = 'n';
+    big.open("SELECT * FROM (VALUES (9007199254740993::BIGINT, 1), "
+             "(9007199254740992::BIGINT, 2)) t(id, x)",
+             bc, nlohmann::json::object(), nlohmann::json::object(), "", "wide ids");
+    REQUIRE(big.sample_design(50, false, 7, "", {}, "id", "strict", "", false).empty());
+    CHECK(run_scalar("SELECT CAST(id AS VARCHAR) FROM (" + big.compile(false) + ")") ==
+          "9007199254740992");
+}

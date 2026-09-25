@@ -1,4 +1,5 @@
 #include "engine/statistics.hpp"
+#include "engine/sample_key.hpp"
 #include "engine/statistics_math.hpp"
 #include "engine/typemap.hpp"
 
@@ -413,6 +414,33 @@ void scalar_sample_count(duckdb_function_info info, duckdb_data_chunk chunk, duc
     }
 }
 
+/* SAMPLE-DESIGN-1: the priority of a sampling cluster (engine/sample_key.hpp);
+ * __parqit_sample_key_d takes the binary64 value, __parqit_sample_key_s the text */
+template <bool text>
+void scalar_sample_key(duckdb_function_info, duckdb_data_chunk chunk, duckdb_vector output) {
+    auto sv = duckdb_data_chunk_get_vector(chunk, 0), xv = duckdb_data_chunk_get_vector(chunk, 1);
+    auto *seed = static_cast<uint64_t *>(duckdb_vector_get_data(sv));
+    auto *sm = duckdb_vector_get_validity(sv), *xm = duckdb_vector_get_validity(xv);
+    duckdb_vector_ensure_validity_writable(output);
+    auto *out = static_cast<uint64_t *>(duckdb_vector_get_data(output));
+    auto *mask = duckdb_vector_get_validity(output);
+    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+        if ((sm && !(sm[i / 64] & (1ULL << (i % 64)))) ||
+            (xm && !(xm[i / 64] & (1ULL << (i % 64))))) {
+            duckdb_validity_set_row_invalid(mask, i);
+            continue;
+        }
+        if constexpr (text) {
+            auto *s = static_cast<duckdb_string_t *>(duckdb_vector_get_data(xv));
+            out[i] = sample_key::of_bytes(seed[i], duckdb_string_t_data(&s[i]),
+                                          duckdb_string_t_length(s[i]));
+        } else {
+            out[i] = sample_key::of_double(seed[i], static_cast<double *>(duckdb_vector_get_data(xv))[i]);
+        }
+        duckdb_validity_set_row_valid(mask, i);
+    }
+}
+
 template<bool floating>
 void histogram_bins(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_vector output,
                     const Input &values, const Input &low, const Input &high) {
@@ -616,6 +644,9 @@ bool register_functions(duckdb_connection connection, std::string *error) {
            register_scalar(connection, "__parqit_mod", {any, any}, d,
                            scalar_binary<BinaryOperation::Mod>, error) &&
            register_scalar(connection, "__parqit_sample_count", {n, d}, n, scalar_sample_count, error) &&
+           register_scalar(connection, "__parqit_sample_key_d", {n, d}, n, scalar_sample_key<false>, error) &&
+           register_scalar(connection, "__parqit_sample_key_s", {n, DUCKDB_TYPE_VARCHAR}, n,
+                           scalar_sample_key<true>, error) &&
            register_scalar(connection, "__parqit_histbin", {any, any, any, n}, DUCKDB_TYPE_BIGINT,
                            scalar_histogram, error) &&
            register_aggregate<Total>(connection, "__parqit_total", 1,
