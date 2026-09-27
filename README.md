@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.2.4 — the full surface below is implemented and covered by a
+> **Status:** v0.2.5 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -31,12 +31,14 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
-**In development (not yet in a release):** parqit reads SPSS system files
-(`.sav`, `.zsav`) with its own out-of-core reader and writes the corresponding
-Parquet file with the whole SPSS dictionary — labels, user-missing values (as
-`.a`–`.z`), formats, documents and the SPSS-only properties:
-`parqit save survey.parquet using survey.sav`. See
-[SPSS files](#spss-files-sav-zsav).
+Version 0.2.5 reads SPSS system files (`.sav`, and ZLIB-compressed `.zsav`)
+with parqit's own out-of-core reader, and writes the corresponding Parquet file
+with the whole SPSS dictionary — variable and value labels, user-missing values
+(as `.a`–`.z`), formats, documents and the SPSS-only properties:
+`parqit save survey.parquet using survey.sav`. A `.sav` is also accepted by
+`parqit use`, the two-table verbs and `mergein`/`appendin`. See
+[SPSS files](#spss-files-sav-zsav). Existing commands and the metadata format
+are unchanged.
 
 Version 0.2.4 adds view copies (`parqit use [varlist] using view:<name>, name(<new>)`),
 which let you try verbs on a copy of a plan while the source view stays as it
@@ -215,7 +217,7 @@ running the checks below. `discard` alone does not guarantee a plugin reload.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.2.4`).
+  `download/vX.Y.Z` (for example, `download/v0.2.5`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 

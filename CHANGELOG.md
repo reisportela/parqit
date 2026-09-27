@@ -6,6 +6,8 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-27
+
 ### Added
 - **SPSS system files** (`.sav`, uncompressed or bytecode-compressed, and
   ZLIB-compressed `.zsav`, either byte order) are read by parqit's own reader
