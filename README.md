@@ -890,6 +890,12 @@ of `examples/make_data.py` — workers, firms, patents, wide incomes and a
 deliberately hostile file — each asserted against a native twin). Both run
 under `bash tests/run_stata.sh` and end in `VERDICT(...): PASS`.
 
+The repository also holds two executed Jupyter notebooks, in
+[`examples/notebooks/`](examples/notebooks/), that teach the same material step
+by step on Stata's `nlsw88` data. The output of every cell is stored (produced
+with parqit 0.2.1), so they can be read on GitHub without Stata; their README
+explains how to rerun them in the nbstata kernel.
+
 ## Type mapping
 
 `parqit` keeps an explicit, tested map between Stata types/formats and DuckDB/Arrow
