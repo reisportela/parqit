@@ -30,6 +30,7 @@ BEGIN
 		"Delimited text (*.csv *.tsv *.txt *.tab)|*.csv;*.tsv;*.txt;*.tab|" ///
 		"Stata data (*.dta)|*.dta|"				///
 		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
+		"SPSS (*.sav *.zsav)|*.sav;*.zsav|"			///
 		"All files (*.*)|*.*"
 END
 
@@ -94,7 +95,7 @@ BEGIN
 	label("View name")
 
   TEXT tx_enc			_lft2	-20	_cwd1	.,		///
-	label("Code page of legacy text (.dta or Excel source):")
+	label("Code page of legacy text (.dta, Excel or SPSS source):")
   COMBOBOX cb_enc		@	_ss	_vnwd	.,		///
 	dropdownlist							///
 	contents(enc_list)						///
@@ -126,7 +127,7 @@ BEGIN
 	label("Binary columns")
 
   TEXT tx_srcvar		_lft	_ls	_iwd	.,		///
-	label("Variable to hold the source file of each observation (optional; not for a .dta or Excel source):")
+	label("Variable to hold the source file of each observation (optional; not for .dta, Excel or SPSS):")
   EDIT ed_srcvar		@	_ss	_vnwd	.,		///
 	max(32)								///
 	option(filename)						///

@@ -2826,3 +2826,120 @@ entry notes the conservative fallback if the assumption proves wrong.
       approximation, with ties broken by value;
     - it also says that only the cluster checks validate a pending `keep in` when
       the verb is issued.
+167. **SPSS system files, read natively (2026-09-26, SPSS-READ-1).** The build
+    brief and #41/#140 kept SAS and SPSS out of scope; on 2026-09-26 the
+    maintainer asked parqit to read `.sav` files, keep all their features and
+    write the corresponding Parquet file. SAS stays out. The decisions:
+    (1) **An own reader, no dependency.** `src/engine/spss_reader.cpp` is written
+    from the published format (GNU PSPP, "System File Format") and was checked
+    against ReadStat's source for the details the PSPP pages reached do not show
+    (the very-long-string segment arithmetic, records 7/21 and 7/22, the ZLIB
+    trailer); no code was copied. It reads every record (2, 3/4, 6, 7/3, 7/4,
+    7/5, 7/7, 7/10, 7/11, 7/13, 7/14, 7/16, 7/17, 7/18, 7/19, 7/20, 7/21, 7/22,
+    999), both byte orders, and the three data layouts; `.zsav` blocks are
+    inflated with DuckDB's bundled miniz (`duckdb_miniz`, already inside
+    `libduckdb_static.a`). EBCDIC, IBM/VAX floating point, portable `.por` and
+    encrypted files are refused by name.
+    (2) **A native bridge, not a lazy scan of the `.sav`.** The plugin converts
+    the file to Parquet (`spss_convert`) and every reader path then reads that
+    Parquet: `plan_columns`, the manifest and the `parqit.*` restore stay
+    untouched, and later verbs get Parquet's pushdown and parallel scans instead
+    of a sequential bytecode decode per query. The conversion decodes the data
+    twice: a profile pass (engine code, no DuckDB) validates the whole file
+    before anything is written and settles what only the data can settle; the
+    second pass streams the cases through the `parqit_read_sav(token)` DuckDB
+    table function (C API; errors through the C error setters; one thread)
+    into `copy_out_parquet`. The table function finds its plan through a
+    mutex-guarded registry keyed by a token, so the SQL never carries a path.
+    Before publishing, the rows written must equal the cases profiled and the
+    source's size and modification time must be unchanged.
+    (3) **Types.** Numbers are `DOUBLE` (SPSS has no other numeric type) and
+    are recorded as Stata `double`: a narrower type from the profile would be
+    a hint the loader does not re-verify against a later edit. Dates (`DATE`,
+    `ADATE`, `EDATE`, `JDATE`, `SDATE`, `QYR`, `MOYR`, `WKYR`) become `DATE`
+    with a `%td` mask when every value is a whole day, else `TIMESTAMP` with the
+    `%tc` mask and a note; `DATETIME`/`YMDHMS` become `TIMESTAMP` (microseconds,
+    rounded half away from zero from the exact double); `TIME`/`MTIME` become
+    `TIME` when every value lies in [0, 86400), else `DOUBLE` seconds with a
+    note; `DTIME` is always seconds; a date or date-time that no temporal type
+    holds (NaN, beyond the range) stays `DOUBLE` SPSS seconds with a note. Stata's
+    `import spss` uses `%tc` for every date format; parqit prefers `%td` when it
+    is exact, which gives Parquet readers a real `DATE` — a deliberate deviation,
+    documented in the help. The type decision depends on the data, so two files of
+    a series can differ; the note says so.
+    (4) **User-missing values become `.a`-`.z`** in the `parqit save, xmissing`
+    layout (null cell + TINYINT companion, `parqit.xmissing`), so every Parquet
+    reader sees a missing value, `parqit use`/`mergein`/`appendin` restore the
+    codes and the lazy view folds them to `.` with XMISS-1's note plus one naming
+    the direct conversion. Stata's `import spss` makes them `.` and loses the
+    codes; pyreadstat and haven keep raw values or make them missing. Letters are
+    assigned per variable: discrete missing values ascending, then labelled values
+    inside the range ascending — both from the dictionary, so a survey series with
+    the same definitions keeps its letters — then observed range values ascending.
+    Beyond 26 codes, the 26th and later share `.z` (a note; the char lists the
+    shared values). String user-missing values stay text: Stata has no missing
+    string, and blanking them (as `import spss` does) would lose the value.
+    (5) **Value labels.** One Stata value label per variable, named after its
+    Stata name, instead of SPSS's shared label sets: the extended-missing codes are
+    per variable, so a shared label could not carry them, and a label never
+    conflicts. Integer keys within Stata's range go native (the original key is
+    kept beside its `.x` entry); a set with a key Stata cannot hold (a string
+    variable, a non-integer or out-of-range key, or any label on a
+    date/time-typed column, whose keys are SPSS seconds) is also kept whole in
+    `char var[spss_value_labels]` as JSON pairs, never through a loader note per
+    entry. PSPP's rule for ReadStat-written short-string keys wider than the
+    variable (drop them) is applied, with a note.
+    (6) **Everything else is a characteristic**, keyed by the Stata name the
+    loader will give the column: the sanitiser (`sanitize_unique`) is run at
+    conversion over the output columns in scan order, SPSS names then companions,
+    exactly as `plan_columns` and `view_open` run it; v130 pins that the chars land
+    on the right variables in a varlist-projected load. A variable whose Stata name
+    would be `_dta` records no characteristics (a note). Variable labels longer
+    than 80 characters are kept whole in `char var[spss_label]`, because
+    `st_varlabel()` silently keeps only 80 characters (verified on StataNow 19.5).
+    (7) **Encoding.** Text follows the declaration (record 7/20, else the 7/3
+    character code): UTF-8, windows-1252, latin1, latin9 or macroman; ASCII
+    declarations (codes 2, 3, 20127) read as windows-1252, as ReadStat does; a
+    file with no declaration reads as windows-1252 with a note; any other code
+    page is refused with the remedy (`encoding()` or re-saving in Unicode mode).
+    `encoding()` replaces the declaration. Invalid UTF-8 in a UTF-8 file is
+    transcoded item by item from the fallback code page (ENC-2) and counted in a
+    note. Trailing blanks and NULs are removed (SPSS pads with blanks; some writers
+    with NULs); inner blanks and NULs are kept.
+    (8) **Loud on data, tolerant on presentation.** A truncated file, a bytecode
+    that contradicts the variable type (254 for a number, 255 or a compressed
+    number for a string, 252 inside a case), a case count shorter than declared,
+    a broken ZLIB block or block map, a very-long-string record that does not fit
+    the dictionary, or a missing continuation record fails the conversion, naming
+    the case or the record and the byte offset. A dictionary anomaly that does
+    not touch the data (a display record of the wrong length, an attribute that
+    does not parse, a label set on variables of both kinds, an unknown record
+    7/xx) is skipped with a note, and the records not carried (7/6 date
+    information, 7/24 Data Editor settings) are listed in one note. The 7/16
+    64-bit case count wins over the header's; exactly that many cases are read.
+    The notes are printed through Mata's `printf`, which interprets SMCL like
+    every other parqit note, so a brace inside a decoded SPSS text quoted by a
+    warning can render as SMCL; this affects the display only, never what is
+    stored. The header's own texts (product, creation stamp, encoding name) are
+    decoded like the rest, and the metadata JSON is serialised with invalid
+    sequences replaced rather than thrown on, so a damaged text can never turn
+    into the JSON library's error.
+    (9) **Surface.** `parqit save <file> using <x.sav>` (the complete file; it
+    ignores the open views and the data in memory, and refuses `data`,
+    `copysource`, `xmissing`, `partition_by()`, `partitions()`, `chunk()` by
+    name); `.sav`/`.zsav` by extension in `_parqit_resolve_source` for every
+    reader; `describe` refuses them like the other non-Parquet inputs;
+    `filename()` refuses them like the other bridged inputs. Return codes: 601
+    missing file, 610 not an SPSS file or a malformed one, 198 usage.
+    (10) **Evidence.** C++ unit tests on hand-built files; v127 (values against
+    pyreadstat, the three layouts), v128 (dictionary against pyreadstat), v129
+    (the eager read against Stata's `import spss` after the documented
+    differences, and every numeric value against R's `foreign::read.spss`),
+    v130 (paths, cleanup and refusals). Stata's `export spss` writes with ReadStat
+    (its header says so) and `import spss` names label sets like ReadStat, so
+    those two oracles are not independent of pyreadstat; R's `foreign` (derived
+    from PSPP) is, for the numeric values it reads correctly (it splits very
+    long strings and keeps string padding, so it is not used for strings). The
+    fixtures are written by pyreadstat and committed; ReadStat cannot write a
+    non-UTF-8 file, so legacy code pages, big-endian files and the malformations
+    are covered by the unit tests only.

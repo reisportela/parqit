@@ -8,11 +8,11 @@
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
 
   Main tab: the lazy two-table verbs (merge, append, joinby) whose using side
-  is a Parquet file, glob, Hive directory, delimited text, .dta, Excel (the
-  last three bridged) or another open view typed as view:name; and the
-  native in-memory routes (mergein, appendin). Options tab: the native merge
-  options forwarded by mergein, appendin's force, and the code page of a
-  legacy .dta/Excel using source. Populate fills the key pickers from the
+  is a Parquet file, glob, Hive directory, delimited text, .dta, Excel, SPSS
+  .sav/.zsav (the last four bridged) or another open view typed as view:name;
+  and the native in-memory routes (mergein, appendin). Options tab: the native
+  merge options forwarded by mergein, appendin's force, and the code page of a
+  legacy .dta/Excel/SPSS using source. Populate fills the key pickers from the
   current view (lazy verbs) or from the using file (memory verbs), and the
   using-variable picker from the Parquet footer of the using file.
 */
@@ -35,6 +35,7 @@ BEGIN
 		"Delimited text (*.csv *.tsv *.txt *.tab)|*.csv;*.tsv;*.txt;*.tab|" ///
 		"Stata data (*.dta)|*.dta|"				///
 		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
+		"SPSS (*.sav *.zsav)|*.sav;*.zsav|"			///
 		"All files (*.*)|*.*"
 END
 
@@ -178,7 +179,7 @@ BEGIN
 	label("Append string variables to numeric or numeric to string without error (appendin; force)")
 
   TEXT tx_enc			_lft	_ls	_iwd	.,		///
-	label("Code page of legacy (non-UTF-8) text in a .dta or Excel using source (lazy merge, append, joinby):")
+	label("Code page of legacy (non-UTF-8) text in a .dta, Excel or SPSS using source (lazy merge, append, joinby):")
   COMBOBOX cb_enc		@	_ss	_vnwd	.,		///
 	dropdownlist							///
 	contents(enc_list)						///
@@ -290,7 +291,7 @@ BEGIN
 		call opt.cb_enc.enable
 	}
 	if main.rb_mergein {
-		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, or Excel):"
+		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, Excel, or SPSS):"
 		call opt.tx_int64.enable
 		call opt.cb_int64.enable
 		call opt.gb_native.enable
@@ -306,7 +307,7 @@ BEGIN
 		}
 	}
 	if main.rb_appendin {
-		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, or Excel):"
+		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, Excel, or SPSS):"
 		call opt.tx_int64.enable
 		call opt.cb_int64.enable
 		call main.tx_keepus.enable

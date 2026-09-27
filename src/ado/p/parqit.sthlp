@@ -77,7 +77,8 @@ instead of reading a file; see {help parqit##copy:Copying a view}.
 (wildcards are {cmd:*} and {cmd:?}; a {cmd:[} is a literal character, and a
 filename that exists is always read as itself, never as a pattern),
 a Hive-partitioned directory, a delimited-text file ({cmd:.csv}, {cmd:.tsv},
-{cmd:.txt} or {cmd:.tab}), or a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file — see
+{cmd:.txt} or {cmd:.tab}), a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file, or an
+SPSS system file ({cmd:.sav} or {cmd:.zsav}; see {help parqit##spss:SPSS files}) — see
 {help parqit_technical##formats:Input formats}. Without {opt clear} a lazy view opens over
 the file(s), replaces any existing view with the same name and becomes current;
 the current in-memory dataset is unchanged. With {opt clear} the whole result is
@@ -87,7 +88,8 @@ is then invalid.
 column names (columns absent from a file arrive missing); without it a schema
 mismatch across the matched files is a loud error. {opt encoding(name)} names
 the legacy 8-bit code page for a {cmd:.dta}/Excel source that must be bridged to
-Parquet (see {help parqit_technical##formats:Input formats}); it is ignored, with a note,
+Parquet (see {help parqit_technical##formats:Input formats}), and for an SPSS file the
+code page that replaces the one the file declares; it is ignored, with a note,
 for a Parquet/CSV source (read as UTF-8).
 
 {pstd}{opt int64(refuse|round|string)} says what to do with a column whose
@@ -130,8 +132,8 @@ variable: lazy verbs can filter on it, {cmd:collect} and {cmd:save} carry it,
 and a saved file holds it as plain text. It is added even when a
 {it:varlist} selects only some columns; naming it in the {it:varlist} places it
 where you put it. The name must not be one the source already loads (including
-a Hive partition key) — that refuses, naming the clash — and a {cmd:.dta} or
-Excel source refuses too, because such a source is read through a temporary
+a Hive partition key) — that refuses, naming the clash — and a {cmd:.dta},
+Excel or SPSS source refuses too, because such a source is read through a temporary
 Parquet bridge whose path says nothing about your file.
 
 {pstd}{opt csv(read_options)} hands the reader the dialect and the types of a
@@ -209,7 +211,7 @@ only the options shown in its own syntax line; any other native
 {cmd:merge} option is rejected.
 
 {pstd}where each {it:source} is any supported disk input (Parquet file, glob or
-Hive directory; delimited text; Stata; or Excel) or
+Hive directory; delimited text; Stata; Excel; or SPSS) or
 {cmd:view:}{it:viewname} — another open view whose plan is embedded without
 materialising either view. Non-Parquet file sources follow the adapter rules
 in {help parqit_technical##formats:Input formats}.
@@ -222,6 +224,9 @@ pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)}
 {opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}
 {opt xmiss:ing}]{p_end}
+{p 8 16 2}{cmd:parqit save} {it:filename} {cmd:using} {it:spssfile} [{cmd:,} {opt replace}
+{opt comp:ression(codec)} {opt compression_level(#)} {opt enc:oding(name)}]{space 2}convert an
+SPSS {cmd:.sav}/{cmd:.zsav} file to Parquet ({help parqit##spss:SPSS files}){p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}
@@ -284,7 +289,7 @@ launched directly with {cmd:db} {it:name}.
 memory with {opt clear} — {cmd:open _data}, and {cmd:path}; {bf:Populate}
 lists the variables recorded in the Parquet footer of the source, and
 {bf:Describe} runs {cmd:describe} on it. These two footer-inspection buttons
-are disabled for recognized delimited-text, Stata and Excel inputs; those
+are disabled for recognized delimited-text, Stata, Excel and SPSS inputs; those
 sources can still be opened, and variable names can be typed. The
 {opt int64()}, {opt binary()}, {opt filename()} and {opt csv()} options have
 their own fields (the last a free-text field for the delimited-text reader's
@@ -435,6 +440,13 @@ Parquet key-value metadata under a {cmd:parqit.*} namespace and restored on
 read, while the file remains plain Parquet for pandas, polars, R and Spark.
 
 {pstd}
+SPSS system files ({cmd:.sav}, {cmd:.zsav}) are read by parqit's own reader,
+out of core, with their dictionary: variable and value labels, user-missing
+values (as {cmd:.a}-{cmd:.z}), formats, documents and the SPSS-only properties.
+{cmd:parqit save} {it:file}{cmd:.parquet using} {it:file}{cmd:.sav} writes the
+corresponding Parquet file; see {help parqit##spss:SPSS files}.
+
+{pstd}
 StataNow (Stata 19.5) ships a native {cmd:import parquet} that reads a Parquet
 file into memory ({bf:File > Import > Parquet data}). {cmd:parqit} is
 complementary to it, not a replacement: its contribution is the lazy verb
@@ -508,6 +520,7 @@ current Stata dataset stays unchanged until an explicit collection.
    {c |}
    {c |}{space 4}{cmd:parqit use} {it:file}{space 11}a Parquet file, glob or Hive directory,
    {c |}{space 30}or {cmd:.csv} {cmd:.tsv} {cmd:.txt} {cmd:.tab} {cmd:.dta} {cmd:.xls} {cmd:.xlsx}
+   {c |}{space 30}or an SPSS {cmd:.sav} {cmd:.zsav}
    {c |}{space 4}{cmd:parqit use view:}{it:name}{space 6}a copy of an open view's plan, with {opt name()}
    {c |}{space 4}{cmd:parqit open _data}{space 9}the dataset already in Stata's memory
    {c |}{space 4}{cmd:parqit sql} {cmd:"}{it:SELECT ...}{cmd:"}{space 3}any DuckDB query
@@ -985,6 +998,107 @@ serializes writers, and the full string-encoding rules — are in
 {help parqit_technical##materialisers:the technical reference}.
 
 
+{marker spss}{...}
+{title:SPSS files}
+
+{pstd}parqit reads SPSS system files — {cmd:.sav}, uncompressed or
+bytecode-compressed, and ZLIB-compressed {cmd:.zsav} — with its own reader and
+out of core: the file is decoded straight into Parquet and never passes through
+a Stata frame. To write the corresponding Parquet file, with every SPSS property
+kept:
+
+{phang2}{cmd:. parqit save survey.parquet using survey.sav, replace}{p_end}
+
+{pstd}The whole file is decoded and checked first — a truncated or corrupt file
+is refused, naming the case or record, before anything is written — then
+written through the same staged, verified writer as every {cmd:parqit save}.
+The dataset in memory and the open views stay as they were; {opt replace},
+{opt compression()}, {opt compression_level()} and {opt encoding()} work as for
+any save, and options that describe other saves ({opt data}, {opt xmissing},
+{opt partition_by()}, ...) are refused by name. A {cmd:.sav}/{cmd:.zsav} is also
+accepted wherever parqit reads a file — {cmd:parqit use} (lazy or with
+{opt clear}), the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, and
+{cmd:mergein}/{cmd:appendin}: parqit converts it the same way into a
+package-owned temporary Parquet file (a bridge) and reads that.
+
+{pstd}{bf:What is kept, and where.}
+
+{p2colset 5 30 32 2}{...}
+{p2col:{it:SPSS}}{it:Parquet file, and Stata after} {cmd:parqit use}{p_end}
+{p2line}
+{p2col:variable names}the SPSS names are the column names; a name Stata cannot
+hold (longer than 32 characters, or with {cmd:.} {cmd:@} {cmd:#} {cmd:$}) loads
+under a sanitised name, the SPSS name in {cmd:char} {it:var}{cmd:[src_name]}{p_end}
+{p2col:numbers}{cmd:DOUBLE}; system-missing is missing{p_end}
+{p2col:user-missing values}extended missing values {cmd:.a}-{cmd:.z} (below){p_end}
+{p2col:strings}text, the blank padding removed; beyond 2045 bytes a {cmd:strL}{p_end}
+{p2col:dates}{cmd:DATE}, {cmd:%td} with the SPSS look ({cmd:%tdDD-Mon-CCYY},
+{cmd:%tdNN/DD/CCYY}, {cmd:%tdMon_CCYY}, {cmd:%tdq_!Q_CCYY}, ...); a date that holds a
+time of day becomes a {cmd:TIMESTAMP} ({cmd:%tc}, same look, with a note){p_end}
+{p2col:date-times}{cmd:TIMESTAMP}, {cmd:%tcDD-Mon-CCYY_HH:MM:SS} (DATETIME) or
+{cmd:%tcCCYY-NN-DD_HH:MM:SS} (YMDHMS){p_end}
+{p2col:times}{cmd:TIME} ({cmd:%tcHH:MM:SS}) when every value lies within a day;
+{cmd:DTIME} and longer durations as seconds{p_end}
+{p2col:display formats}{cmd:F} {it:w.d} as {cmd:%}{it:w.d}{cmd:f}, {cmd:COMMA}/{cmd:DOLLAR} as
+{cmd:%}{it:w.d}{cmd:fc}, {cmd:DOT} as {cmd:%}{it:w}{cmd:,}{it:d}{cmd:fc}, {cmd:E} as
+{cmd:%}{it:w.d}{cmd:e}, {cmd:N} as {cmd:%0}{it:w}{cmd:.0f}; the SPSS format itself in
+{cmd:char} {it:var}{cmd:[spss_format]}{p_end}
+{p2col:variable labels}variable labels; Stata keeps 80 characters, a longer
+label is kept whole in {cmd:char} {it:var}{cmd:[spss_label]}{p_end}
+{p2col:value labels}a value label named after the variable, with every integer
+key; what Stata cannot hold (labels of strings, of non-integer values, of
+dates) whole in {cmd:char} {it:var}{cmd:[spss_value_labels]} as JSON pairs{p_end}
+{p2col:file label, documents}dataset label; notes on {cmd:_dta}{p_end}
+{p2col:measure, width, ...}{cmd:char} {it:var}{cmd:[spss_measure]},
+{cmd:[spss_display_width]}, {cmd:[spss_alignment]}, {cmd:[spss_role]},
+{cmd:[spss_attributes]}{p_end}
+{p2col:file properties}{cmd:char _dta[spss_weight]}, {cmd:[spss_encoding]},
+{cmd:[spss_product]}, {cmd:[spss_creation]}, {cmd:[spss_attributes]},
+{cmd:[spss_mrsets]} (multiple-response sets), {cmd:[spss_varsets]}{p_end}
+{p2line}
+{p2colreset}{...}
+
+{pstd}{bf:User-missing values.} Every user-missing value becomes an extended
+missing value, so it is missing in every Stata computation and keeps its
+identity. The codes are assigned per variable in a fixed order: the discrete
+missing values (ascending), then the labelled values inside the missing range
+(ascending) — both taken from the SPSS dictionary, so a survey series with the
+same definitions gets the same codes in every file — then any other value
+observed inside the range (ascending). {cmd:char} {it:var}{cmd:[spss_missing]}
+holds the SPSS definition (e.g. {cmd:LO THRU -1, 99}) and
+{it:var}{cmd:[spss_missing_map]} the codes (e.g. {cmd:.a=99 .b=-9 .c=-8}); the
+SPSS labels of those values are attached to their codes as well. In the Parquet
+file the cell is null — every Parquet reader sees a missing value — and its code
+sits in a companion column (the {help parqit##materialisers:xmissing} layout),
+which {cmd:parqit use}, {cmd:mergein} and {cmd:appendin} restore. A variable
+with more than 26 distinct user-missing values gives the 26th and later ones a
+shared {cmd:.z}, and says so. A lazy view reads the codes as plain {cmd:.} and
+says so: to write a Parquet file that keeps them, convert the SPSS file with
+{cmd:parqit save} ... {cmd:using}, not by saving a lazy view. String
+user-missing values stay text (Stata has no missing strings), with their
+definition in {cmd:char} {it:var}{cmd:[spss_missing]}. Before appending files
+converted one by one, compare their {cmd:spss_missing_map}: a value observed in
+only some files can get a different code in each.
+
+{pstd}{bf:Character encoding.} Text is decoded from the encoding the file
+declares: UTF-8, windows-1252, latin1, latin9 or macroman (a file that declares
+another code page is refused with a message). {opt encoding()} replaces a
+missing or wrong declaration. In a UTF-8 file, text that is not valid UTF-8 is
+transcoded from windows-1252 (or the {opt encoding()} code page), item by item,
+and a note counts it.
+
+{pstd}{bf:Not read.} SPSS portable files ({cmd:.por}), encrypted
+(password-protected) files, and EBCDIC or non-IEEE files are refused with a
+message. The Data Editor's view settings and the obsolete date information
+records are not carried, and the conversion says so. Compared with Stata's
+{helpb import spss}, which also reads these files: user-missing values stay
+distinct ({cmd:.a}-{cmd:.z}, not {cmd:.}), string user-missing values are kept,
+dates are {cmd:%td} days rather than {cmd:%tc} milliseconds, a time of day is
+counted from 01jan1960, and value labels Stata cannot hold are kept in
+characteristics instead of being dropped. {cmd:parqit describe} reads Parquet
+footers only; describe the converted file or a view opened over the SPSS file.
+
+
 {marker explore}{...}
 {title:Exploring a view (current dataset unchanged)}
 
@@ -1398,6 +1512,14 @@ conversion is two lines, metadata included:{p_end}
 {phang2}{cmd:. parqit use using big_archive.dta, clear}{p_end}
 {phang2}{cmd:. parqit save big_archive.parquet, replace data compression(zstd)}{p_end}
 
+{pstd}{bf:An SPSS survey to Parquet, with its dictionary.} One command, out of
+core; the labels, the user-missing codes and the SPSS properties travel with
+the file ({help parqit##spss:SPSS files}):{p_end}
+{phang2}{cmd:. parqit save ess_round10.parquet using ess_round10.sav, replace}{p_end}
+{phang2}{cmd:. parqit use using ess_round10.parquet, clear}{p_end}
+{phang2}{cmd:. tabulate trstprl, missing}{space 10}({it:refusals and don't-knows are .a, .b, … with their labels}){p_end}
+{phang2}{cmd:. char list trstprl[]}{space 16}({it:the SPSS definition, codes, format and measurement level}){p_end}
+
 {pstd}{bf:Out-of-core panel build} — filter, derive, aggregate on disk; only
 the firm-year result enters Stata:{p_end}
 {phang2}{cmd:. parqit use using /data/qp_*.parquet}{p_end}
@@ -1623,8 +1745,15 @@ exists.{p_end}
 on invalid UTF-8) and {opt binary(hex)} as uppercase hex digits. Give the
 option to {cmd:parqit use}, which is where a view's columns are decided.{p_end}
 {pstd}{cmd:•} Stata {cmd:.dta} and Excel inputs are bridged through memory;
-Parquet and delimited text are scanned out of core. {cmd:describe} with a file
-argument is Parquet-only.{p_end}
+SPSS files are converted out of core into a bridge; Parquet and delimited text
+are scanned out of core. {cmd:describe} with a file argument is
+Parquet-only.{p_end}
+{pstd}{cmd:•} SPSS user-missing values are {cmd:.a}-{cmd:.z} after
+{cmd:parqit use} but plain {cmd:.} in a lazy view (convert with
+{cmd:parqit save} ... {cmd:using} to keep them in Parquet); more than 26 in one
+variable share {cmd:.z}; string user-missing values stay text. Portable
+({cmd:.por}) and encrypted SPSS files are not read; see
+{help parqit##spss:SPSS files}.{p_end}
 {pstd}{cmd:•} Names that differ only by case are kept exact, but a lazy name
 the engine could not tell apart from a live one is refused (a generated
 {cmd:x1} beside {cmd:X1}, some {opt relaxed} unions, a Hive key clashing with a
@@ -1641,7 +1770,7 @@ the contract behind each item, is in
 {pstd}{it:Opening and materialising.} Eager {cmd:parqit use ..., clear} and
 {cmd:collect} return scalars {cmd:r(N)} and {cmd:r(k)}. Lazy {cmd:use} returns
 {cmd:r(k)} and local {cmd:r(view)}; a copy ({cmd:using view:}) also returns the
-source view's name in {cmd:r(source_view)}. When a {cmd:.dta} or Excel adapter was
+source view's name in {cmd:r(source_view)}. When a {cmd:.dta}, Excel or SPSS adapter was
 needed it also returns the package-owned temporary path in {cmd:r(bridge)}.
 {cmd:open _data} returns its snapshot path in {cmd:r(bridge)}. Lazy
 {cmd:sql} returns {cmd:r(k)} and {cmd:r(view)}; {cmd:sql ..., clear} returns
@@ -1670,6 +1799,15 @@ transcoding. A lazy view save does not return these transcoding counters.
 {opt xmissing} returns local {cmd:r(xmissing_vars)}, the variables whose
 extended missings were preserved in companion columns (empty when none had
 any); those variables are then absent from {cmd:r(ext_missing)}.
+
+{pstd}{it:Converting an SPSS file.} {cmd:parqit save} {it:file} {cmd:using}
+{it:spssfile} returns scalars {cmd:r(N)} (cases) and {cmd:r(k)} (SPSS
+variables) and locals {cmd:r(filename)}, {cmd:r(source)}, {cmd:r(xmissing_vars)}
+(the variables whose user-missing values occur, stored as {cmd:.a}-{cmd:.z}),
+{cmd:r(encoding)} (the encoding used), {cmd:r(spss_encoding)} (the one the file
+declares) and {cmd:r(spss_compression)} ({cmd:none}, {cmd:bytecode} or
+{cmd:zlib}); scalars {cmd:r(transcoded_cells)} and {cmd:r(transcoded_meta)}
+only when text had to be transcoded.
 
 {pstd}{it:Sources and views.} Lazy {cmd:merge}/{cmd:joinby} return
 {cmd:r(bridge)} only when their using source needed an adapter. {cmd:append}

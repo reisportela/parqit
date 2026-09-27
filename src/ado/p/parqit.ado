@@ -206,6 +206,10 @@ end
 *                      snapshots to a Parquet bridge the engine then scans. Best
 *                      for small inputs (a lookup .dta, an .xlsx) — for a large
 *                      master prefer `use file.dta` + `parqit open _data`.
+*   sav / zsav       : SPSS system files; the plugin's own reader converts them
+*                      into a Parquet bridge out of core, never through a frame
+*                      (SPSS-READ-1). parqit save <file> using <x.sav> writes the
+*                      complete Parquet file directly.
 * The raw path travels through the global PARQIT_RS_IN to survive spaces/quotes.
 * ----------------------------------------------------------------------------
 
@@ -344,8 +348,9 @@ program define _parqit__dlgsource, rclass
     local base = substr(`"`using'"', strrpos(`"`using'"', "/")+1, .)
     local ext ""
     if (strpos(`"`base'"', ".")) local ext = lower(substr(`"`base'"', strrpos(`"`base'"', ".")+1, .))
-    local footer = (`"`using'"' != "" & !inlist("`ext'", "csv", "tsv", "txt", "tab", "dta", "xls", "xlsx"))
-    local legacy = inlist("`ext'", "dta", "xls", "xlsx")
+    local footer = (`"`using'"' != "" & !inlist("`ext'", "csv", "tsv", "txt", "tab", "dta", "xls", "xlsx") ///
+        & !inlist("`ext'", "sav", "zsav"))
+    local legacy = inlist("`ext'", "dta", "xls", "xlsx", "sav", "zsav")
     local usemode 1
     capture local usemode = .`dlg'.main.rb_use.value
     if (!`usemode') {
@@ -485,7 +490,17 @@ program define _parqit_resolve_source, rclass
     }
     else if ("`ext'" == "dta") local kind "dta"
     else if (inlist("`ext'", "xls", "xlsx")) local kind "excel"
-    if ("`kind'" != "") {
+    else if (inlist("`ext'", "sav", "zsav")) local kind "spss"
+    if ("`kind'" == "spss") {
+        * SPSS-READ-1: the plugin reads the SPSS file natively and out of core
+        * (never through Stata's memory) into a Parquet bridge carrying every
+        * SPSS property; the Parquet path then reads that bridge
+        _parqit_spss_to_bridge
+        local raw `"`r(bridge)'"'
+        local bridge `"`raw'"'
+        return local spss_xmissing `"`r(xmissing_vars)'"'
+    }
+    else if ("`kind'" != "") {
         _parqit_import_to_bridge `kind'
         local raw `"`r(bridge)'"'
         local bridge `"`raw'"'
@@ -499,6 +514,76 @@ program define _parqit_resolve_source, rclass
     }
     return local path `"`raw'"'
     return local fmt "`fmt'"
+    return local bridge `"`bridge'"'
+    return local kind "`kind'"
+end
+
+* SPSS-READ-1: one SPSS system file (.sav/.zsav) -> one Parquet file, by the
+* plugin's own reader: the whole file is profiled first (a truncated or corrupt
+* file fails before anything is written), then streamed out of core into the
+* verified Parquet writer. Stata's memory and the open views are untouched.
+* The conversion notes are printed from Mata (no macro expansion of the text).
+program define _parqit_spss_convert, rclass
+    version 16.0
+    syntax, src(string) dest(string) who(string) [replace ENCoding(string) ///
+        COMPression(string) compression_level(integer -1)]
+    * encoding() replaces the code page the SPSS file declares (a wrong or
+    * missing declaration); the plugin decodes these five
+    if (`"`encoding'"' != "") {
+        local _e = lower(strtrim(`"`encoding'"'))
+        if (!inlist("`_e'", "utf-8", "utf8", "windows-1252", "cp1252", "latin1", "iso-8859-1") & ///
+            !inlist("`_e'", "latin9", "iso-8859-15", "macroman", "mac-roman")) {
+            di as err `"`who': encoding() for an SPSS file takes utf-8, windows-1252,"' ///
+                " latin1, latin9 or macroman"
+            exit 198
+        }
+    }
+    _parqit_ensure_plugin
+    tempfile req
+    local _sq_src `"`src'"'
+    local _sq_dest `"`dest'"'
+    local _sq_who `"`who'"'
+    local _sq_replace = ("`replace'" != "")
+    local _sq_encoding `"`encoding'"'
+    local _sq_comp `"`compression'"'
+    local _sq_complevel = `compression_level'
+    mata: _parqit_wr_spss_request("`req'")
+    capture noisily plugin call parqit_plugin, spss_convert `reqhex'
+    if (_rc) exit _rc
+    forvalues i = 1/`parqit_spss_nnotes' {
+        mata: displayas("text"); printf("note: %s\n", _parqit_unhex(st_local("parqit_spss_note`i'")))
+    }
+    mata: st_local("_sq_destabs", _parqit_unhex(st_local("parqit_spss_dest")))
+    mata: st_local("_sq_declared", _parqit_unhex(st_local("parqit_spss_declared")))
+    return local filename `"`_sq_destabs'"'
+    return local source `"`src'"'
+    return scalar N = `parqit_spss_n'
+    return scalar k = `parqit_spss_k'
+    return local xmissing_vars `"`parqit_spss_xmvars'"'
+    return local encoding "`parqit_spss_encoding'"
+    return local spss_encoding `"`_sq_declared'"'
+    return local spss_compression "`parqit_spss_compression'"
+    if (`parqit_spss_tcells' > 0) return scalar transcoded_cells = `parqit_spss_tcells'
+    if (`parqit_spss_tmeta' > 0) return scalar transcoded_meta = `parqit_spss_tmeta'
+end
+
+* SPSS-READ-1: a .sav/.zsav source becomes a package-owned Parquet bridge,
+* exactly like a .dta/Excel source, but without passing through a frame
+program define _parqit_spss_to_bridge, rclass
+    version 16.0
+    local src `"${PARQIT_RS_IN}"'
+    local enc `"${PARQIT_RS_ENC}"'
+    _parqit_bridge_new spss
+    local bridge `"`r(bridge)'"'
+    capture noisily _parqit_spss_convert, src(`"`src'"') dest(`"`bridge'"') ///
+        who("parqit") encoding(`"`enc'"')
+    local rc = _rc
+    if (`rc') {
+        * the conversion error is authoritative; cleanup is best-effort
+        capture _parqit_bridge_discard `"`bridge'"'
+        exit `rc'
+    }
+    return add
     return local bridge `"`bridge'"'
 end
 
@@ -700,9 +785,11 @@ program define _parqit_use, rclass
         exit 198
     }
 
-    * resolve the input: parquet/csv scan in place; dta/xls/xlsx -> Parquet
-    * bridge (the working dataset is left untouched). encoding() is the legacy
-    * code page for non-UTF-8 text in a .dta/Excel bridge (BRIDGE-LOSS-1).
+    * resolve the input: parquet/csv scan in place; dta/xls/xlsx/sav/zsav ->
+    * Parquet bridge (the working dataset is left untouched). encoding() is the
+    * legacy code page for non-UTF-8 text in a .dta/Excel bridge (BRIDGE-LOSS-1)
+    * and the code page of an SPSS file that declares none or a wrong one.
+    local _sq_orig `"`using'"'
     global PARQIT_RS_IN `"`using'"'
     global PARQIT_RS_ENC `"`encoding'"'
     _parqit_resolve_source source
@@ -710,25 +797,30 @@ program define _parqit_use, rclass
     local using `"`r(path)'"'
     local _sq_fmt "`r(fmt)'"
     local _sq_bridge `"`r(bridge)'"'
+    local _sq_kind "`r(kind)'"
+    local _sq_spss_xm `"`r(spss_xmissing)'"'
     _parqit_bridge_losses, ext(`"`r(ext_missing)'"') frac(`"`r(frac_dates)'"') ///
         tvars(`"`r(transcoded_vars)'"') tcells("`r(transcoded_cells)'") ///
         tmeta("`r(transcoded_meta)'") enc(`"`r(encoding)'"')
     if (`"`encoding'"' != "" & `"`_sq_bridge'"' == "") {
-        di as txt "note: encoding() applies to a .dta/Excel source bridged to Parquet; " ///
+        di as txt "note: encoding() applies to a .dta, Excel or SPSS source bridged to Parquet; " ///
             "a Parquet/CSV source is read as UTF-8 (ignored)"
     }
-    * FILENAME-1: a .dta/Excel source is scanned through a package-owned
+    * FILENAME-1: a .dta/Excel/SPSS source is scanned through a package-owned
     * Parquet bridge in the temporary directory, so the path the engine reports
     * is that bridge, not the file the user named — refuse instead of handing
     * back a meaningless path. The bridge is discarded; memory is untouched.
     if ("`filename'" != "" & `"`_sq_bridge'"' != "") {
         capture _parqit_bridge_discard `"`_sq_bridge'"'
         di as err "parqit use: filename() reports the path the engine reads;" ///
-            " a .dta or Excel source is read through a temporary Parquet bridge," ///
+            " a .dta, Excel or SPSS source is read through a temporary Parquet bridge," ///
             " whose path says nothing about your file — write it with" ///
             " {bf:parqit save} first and read the Parquet"
         exit 198
     }
+    * SPSS-READ-1: messages name the SPSS file the user gave, not the bridge
+    local _sq_shown `"`using'"'
+    if ("`_sq_kind'" == "spss") local _sq_shown `"`_sq_orig'"'
     * CSV-OPT-1: csv() changes how delimited text is parsed and typed, so it
     * must never be ignored on a source that is not delimited text.
     if (`"`csv'"' != "" & "`_sq_fmt'" != "csv") {
@@ -762,8 +854,15 @@ program define _parqit_use, rclass
         }
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
-            as res `"`using'"' as txt ": " as res "`parqit_view_k'" ///
+            as res `"`_sq_shown'"' as txt ": " as res "`parqit_view_k'" ///
             as txt " columns; schema probed, no rows loaded — use {bf:parqit collect} or {bf:parqit save})"
+        * SPSS-READ-1: a lazy view reads the user-missing codes as plain `.',
+        * so a Parquet file saved from it would lose them; name the lossless
+        * route (the codes stay in the bridge and in a direct conversion)
+        if ("`_sq_kind'" == "spss" & `"`_sq_spss_xm'"' != "") {
+            di as txt "note: to write this SPSS file to Parquet with its user-missing codes" ///
+                " (.a-.z), convert it directly: " as res `"parqit save {it:newfile}.parquet using `_sq_orig'"'
+        }
         _parqit_return_losses, ext(`"`_bl_ext'"') frac(`"`_bl_frac'"') tvars(`"`_bl_tvars'"') ///
             tcells("`_bl_tcells'") tmeta("`_bl_tmeta'") enc(`"`_bl_enc'"')
         return add
@@ -828,7 +927,7 @@ program define _parqit_use, rclass
     }
 
     di as txt "(" as res "`parqit_k'" as txt " vars, " as res "`parqit_n'" ///
-        as txt `" obs read from `_sq_file')"'
+        as txt `" obs read from `_sq_shown')"'
     _parqit_return_losses, ext(`"`_bl_ext'"') frac(`"`_bl_frac'"') tvars(`"`_bl_tvars'"') ///
         tcells("`_bl_tcells'") tmeta("`_bl_tmeta'") enc(`"`_bl_enc'"')
     return add
@@ -1946,9 +2045,12 @@ program define _parqit_describe, rclass
     if ("`_d_isdir'" == "0" & strpos(`"`_d_base'"', ".") > 0) ///
         local _d_ext = lower(substr(`"`_d_base'"', strrpos(`"`_d_base'"', ".") + 1, .))
     if inlist("`_d_ext'", "csv", "tsv", "txt", "tab", "dta") | ///
-       inlist("`_d_ext'", "xls", "xlsx") {
+       inlist("`_d_ext'", "xls", "xlsx", "sav", "zsav") {
         di as err "parqit describe: reads Parquet footers only (file, glob or Hive directory)"
         di as err `"open `_d_ext' input with {bf:parqit use using `file'} and describe the view instead"'
+        if inlist("`_d_ext'", "sav", "zsav") {
+            di as err `"(or convert it once: {bf:parqit save} {it:newfile}{bf:.parquet using `file'}, and describe that)"'
+        }
         exit 198
     }
     tempfile req resp
@@ -2053,11 +2155,49 @@ end
 
 program define _parqit_save, rclass
     version 16.0
-    syntax anything(name=target id="filename") [, replace Data ///
+    syntax anything(name=target id="filename") [using/] [, replace Data ///
         COMPression(string) compression_level(integer -1) PARTition_by(string) ///
         Chunk(integer -1) ENCoding(string) COPYsource partitions(string) XMISSing]
 
     local dest `target'
+    * SPSS-READ-1: parqit save <file> using <x.sav> converts an SPSS system
+    * file straight to Parquet — the complete file, user-missing codes included
+    * — without touching the dataset in memory or the open views; so it is
+    * settled before either is consulted
+    if (`"`using'"' != "") {
+        local _base = substr(`"`using'"', strrpos(`"`using'"', "/") + 1, .)
+        local _ext ""
+        if (strpos(`"`_base'"', ".")) ///
+            local _ext = lower(substr(`"`_base'"', strrpos(`"`_base'"', ".") + 1, .))
+        if (!inlist("`_ext'", "sav", "zsav")) {
+            di as err "parqit save ... using: converts SPSS system files (.sav, .zsav);" ///
+                " read other files with {bf:parqit use} and save the view"
+            exit 198
+        }
+        foreach o in data copysource xmissing {
+            if ("``o''" != "") {
+                di as err "parqit save ... using: option `o' is not allowed; it describes" ///
+                    " a save of the dataset in memory"
+                exit 198
+            }
+        }
+        if (`"`partition_by'"' != "" | "`partitions'" != "" | `chunk' != -1) {
+            di as err "parqit save ... using: partition_by(), partitions() and chunk() are" ///
+                " not available; convert the file, then open it with {bf:parqit use} and" ///
+                " save the view partitioned"
+            exit 198
+        }
+        _parqit_spss_convert, src(`"`using'"') dest(`"`dest'"') who("parqit save") ///
+            `replace' encoding(`"`encoding'"') compression(`"`compression'"') ///
+            compression_level(`compression_level')
+        local _n = r(N)
+        local _k = r(k)
+        local _fn `"`r(filename)'"'
+        return add
+        di as txt "(" as res "`_n'" as txt " cases and " as res "`_k'" ///
+            as txt `" SPSS variables written to `_fn')"'
+        exit
+    }
     * XMISS-1: xmissing preserves .a-.z in companion columns; it belongs to a
     * save of the dataset in memory (a view carries no extended missings and
     * copysource copies the file as it is) and to a whole-tree write
@@ -3505,6 +3645,21 @@ void _parqit_wr_op_dupdrop_request(string scalar req)
         _parqit_jtext("op", "dupdrop"),
         _parqit_jpair("names", _parqit_jlist(tokens(st_local("_sq_names")))),
         _parqit_jpair("force", st_local("_sq_force") == "1" ? "true" : "false"))))
+}
+
+// SPSS-READ-1: one SPSS system file -> one Parquet file (plugin spss_convert)
+void _parqit_wr_spss_request(string scalar req)
+{
+    _parqit_emit(req, _parqit_jobj((
+        _parqit_jtext("cmd", "spss_convert"),
+        _parqit_jtext("src", st_local("_sq_src")),
+        _parqit_jtext("dest", st_local("_sq_dest")),
+        _parqit_jtext("who", st_local("_sq_who")),
+        _parqit_jtext("tmpdir", st_global("c(tmpdir)")),
+        _parqit_jpair("replace", st_local("_sq_replace") == "1" ? "true" : "false"),
+        _parqit_jtext("compression", strlower(strtrim(st_local("_sq_comp")))),
+        _parqit_jpair("compression_level", st_local("_sq_complevel")),
+        _parqit_jtext("encoding", strlower(strtrim(st_local("_sq_encoding")))))))
 }
 
 void _parqit_wr_view_save_request(string scalar req)

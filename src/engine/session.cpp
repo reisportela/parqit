@@ -2,6 +2,7 @@
 #include "engine/typemap.hpp"
 #include "engine/stats_overflow.hpp"
 #include "engine/statistics.hpp"
+#include "engine/spss_table.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -415,7 +416,8 @@ static bool register_internal_functions(duckdb_connection con, std::string *err)
                            DUCKDB_TYPE_TIMESTAMP,
                            temporal_boundary_fn<duckdb_timestamp_ns, duckdb_timestamp, 1000, 0>, err, true,
                            native_temporal_boundary_fn<duckdb::timestamp_ns_t, duckdb::timestamp_t, 1000, 0>) &&
-           statistics::register_functions(con, err);
+           statistics::register_functions(con, err) &&
+           spss::register_table_function(con, err); /* SPSS-READ-1 */
 }
 
 } // namespace

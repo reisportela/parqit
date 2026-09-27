@@ -102,6 +102,10 @@ include(cmake/PatchDuckDBStreaming.cmake)
 include(cmake/VerifyDuckDBScalarAPI.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
+# DuckDB's bundled zlib subset (namespace duckdb_miniz, compiled into
+# duckdb_static): the SPSS reader inflates .zsav blocks with it — no new
+# dependency.
+set(PARQIT_MINIZ_INCLUDE "${duckdb_SOURCE_DIR}/third_party/miniz")
 
 # ---------------------------------------------------------------------------
 # Engine: DuckDB session, manifest, type map, SQL builder. No Stata API here,
@@ -118,6 +122,9 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/request.cpp
     src/engine/exprtrans.cpp
     src/engine/view.cpp
+    src/engine/spss_reader.cpp
+    src/engine/spss_plan.cpp
+    src/engine/spss_table.cpp
 )
 add_library(parqit_engine STATIC ${PARQIT_ENGINE_SOURCES})
 # The aggregate callbacks run for every row. Keep their optimized builds at
@@ -130,6 +137,7 @@ target_include_directories(parqit_engine PUBLIC
     src
     "${PARQIT_DUCKDB_INCLUDE}"
     "${PARQIT_UTF8PROC_INCLUDE}"
+    "${PARQIT_MINIZ_INCLUDE}"
     "${PARQIT_VENDOR_DIR}/arrow"
     "${PARQIT_VENDOR_DIR}/json"
 )
@@ -164,6 +172,7 @@ endif()
 add_library(parqit_plugin SHARED
     src/plugin/parqit_plugin.cpp
     src/plugin/plugin_io.cpp
+    src/plugin/plugin_spss.cpp
     src/plugin/plugin_view.cpp
     "${PARQIT_VENDOR_DIR}/stata/stplugin.c"
 )
@@ -309,6 +318,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_view.cpp
         tests/unit/test_arrow_copy_bench.cpp
         tests/unit/test_streaming.cpp
+        tests/unit/test_spss_reader.cpp
     )
     target_include_directories(parqit_tests PRIVATE
         src

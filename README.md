@@ -31,6 +31,13 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
+**In development (not yet in a release):** parqit reads SPSS system files
+(`.sav`, `.zsav`) with its own out-of-core reader and writes the corresponding
+Parquet file with the whole SPSS dictionary — labels, user-missing values (as
+`.a`–`.z`), formats, documents and the SPSS-only properties:
+`parqit save survey.parquet using survey.sav`. See
+[SPSS files](#spss-files-sav-zsav).
+
 Version 0.2.4 adds view copies (`parqit use [varlist] using view:<name>, name(<new>)`),
 which let you try verbs on a copy of a plan while the source view stays as it
 was, and sampling designs after `sample2` for `parqit sample`: an `if` frame,
@@ -400,6 +407,7 @@ scratch data; lazy verbs build the plan while the current dataset stays in place
 │
 │    parqit use <file>        a Parquet file, glob or Hive directory,
 │                             or .csv .tsv .txt .tab .dta .xls .xlsx
+│                             or an SPSS .sav .zsav
 │    parqit use view:<name>   a copy of an open view's plan (with name())
 │    parqit open _data        the dataset already in Stata's memory
 │    parqit sql "SELECT ..."  any DuckDB query
@@ -464,7 +472,7 @@ need. Use them when the disk side is a small lookup; use `parqit use` +
 
 | Command | Compiles to | Notes |
 |---|---|---|
-| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge; `int64(refuse|round|string)` says what to do with integers outside the protected +/-2^53 range (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
+| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge), or an SPSS `.sav`/`.zsav` (converted out of core to a Parquet bridge, see [SPSS files](#spss-files-sav-zsav)). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` sets the legacy code page for a non-UTF-8 `.dta`/Excel bridge, or replaces the code page an SPSS file declares; `int64(refuse|round|string)` says what to do with integers outside the protected +/-2^53 range (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
 | `parqit use [varlist] using view:<name>, name(<new>)` | a copy of that view's plan | Copy the plan of an open view into a new view, optionally keeping only `varlist` (without a varlist, `using` may be omitted: `parqit use view:<name>, name(<new>)`); `name()` is required and must differ from the source. The copy reads no rows and leaves the source view unchanged: later verbs on either view do not reach the other, the copy shares the source's temporary bridges, and an unseeded `sample` step keeps its draw. |
 | `parqit open _data [, name() encoding()]` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
 
@@ -472,11 +480,13 @@ need. Use them when the disk side is a small lookup; use `parqit use` +
 file can exceed memory). Stata `.dta` and Excel `.xls`/`.xlsx` are not
 engine-scannable, so parqit imports them into a throwaway frame (your data is
 untouched) and snapshots them to a small Parquet *bridge* — ideal for a small
-lookup, but for a large `.dta` master prefer `use` + `parqit open _data`. The same
+lookup, but for a large `.dta` master prefer `use` + `parqit open _data`. SPSS
+`.sav`/`.zsav` files are converted to such a bridge by parqit's own reader, out
+of core and without a frame (see [SPSS files](#spss-files-sav-zsav)). The same
 extension rule applies to a `using` side of `merge`/`joinby`/`append`, so a
 lazy Parquet master can join a `.dta` lookup and only the result is collected.
 For these two-table using sides, Parquet stays directly on disk; delimited text,
-Stata and Excel are first imported to the package-owned bridge. Each bridge is
+Stata, Excel and SPSS are first imported to the package-owned bridge. Each bridge is
 atomically reserved by the plugin (including when two Stata
 processes share one temporary directory) and is package-owned: an operation
 failure removes it, while a successful lazy operation keeps it until the last
@@ -488,7 +498,7 @@ holding the path each observation was read from — the path *as matched*, so an
 absolute pattern gives absolute paths. It is an ordinary variable: lazy verbs
 filter on it, `collect` and `save` carry it, and a saved file holds it as plain
 Parquet text. It is never confused with a Hive partition key, and a name the
-source already loads is refused rather than quietly renamed. A `.dta`/Excel
+source already loads is refused rather than quietly renamed. A `.dta`/Excel/SPSS
 source refuses it, because the path would be the temporary bridge.
 
 **Delimited text you already know.** Type inference is a guess, and a wrong
@@ -504,6 +514,78 @@ Column subsets in eager or lazy reads accept Stata wildcards, for example
 `parqit use id wage* using panel.parquet, clear`. `*` matches any run and `?`
 matches one Unicode character; the same expansion is used by lazy projections,
 `mergein, keepusing()` and `appendin, keep()`.
+
+### SPSS files (`.sav`, `.zsav`)
+
+parqit reads SPSS system files — `.sav`, uncompressed or bytecode-compressed,
+and ZLIB-compressed `.zsav`, in either byte order — with its own reader
+(written from the published format; no new dependency), out of core: the file
+is decoded straight into Parquet and never passes through a Stata frame. One
+command writes the corresponding Parquet file with the whole SPSS dictionary:
+
+```stata
+parqit save survey.parquet using survey.sav, replace   // compression(), encoding() also accepted
+parqit use using survey.parquet, clear                 // labels, .a-.z codes and SPSS properties restored
+```
+
+The whole file is decoded and checked first — a truncated or corrupt file is
+refused, naming the case or record, before anything is written — and the rows
+then stream through the same staged, verified writer as every `parqit save`; the
+rows written must equal the cases read, and the source must not change meanwhile.
+The dataset in memory and the open views stay as they were. A `.sav`/`.zsav` is
+also accepted wherever parqit reads a file (`parqit use`, lazy or with `clear`;
+the `using` side of `merge`/`joinby`/`append`; `mergein`/`appendin`): it is
+converted the same way into a package-owned temporary Parquet bridge.
+
+| SPSS | Parquet file, and Stata after `parqit use` |
+|---|---|
+| variable names | the SPSS names are the column names; a name Stata cannot hold (over 32 characters, or with `.` `@` `#` `$`) loads under a sanitised name, the SPSS name in `char var[src_name]` |
+| numbers | `DOUBLE`; system-missing is missing |
+| user-missing values | extended missing values `.a`–`.z` (below) |
+| strings | text, the blank padding removed; beyond 2045 bytes a `strL` |
+| dates (`DATE`, `ADATE`, `EDATE`, `JDATE`, `SDATE`, `QYR`, `MOYR`, `WKYR`) | `DATE`, `%td` with the SPSS look (`%tdDD-Mon-CCYY`, `%tdNN/DD/CCYY`, `%tdMon_CCYY`, `%tdq_!Q_CCYY`, …); a date that holds a time of day becomes a `TIMESTAMP` (`%tc`, same look), with a note |
+| `DATETIME`, `YMDHMS` | `TIMESTAMP`, `%tcDD-Mon-CCYY_HH:MM:SS` / `%tcCCYY-NN-DD_HH:MM:SS` |
+| `TIME`, `MTIME` | `TIME` (`%tcHH:MM:SS`) when every value lies within a day; `DTIME` and longer durations as seconds |
+| display formats | `F`→`%w.df`, `COMMA`/`DOLLAR`→`%w.dfc`, `DOT`→`%w,dfc`, `E`→`%w.de`, `N`→`%0w.0f`; the SPSS format itself in `char var[spss_format]` |
+| variable labels | variable labels; Stata keeps 80 characters, a longer label is kept whole in `char var[spss_label]` |
+| value labels | a value label named after the variable with every integer key; what Stata cannot hold (labels of strings, of non-integer values, of dates) whole in `char var[spss_value_labels]` (JSON pairs) |
+| file label, documents | dataset label; notes on `_dta` |
+| measurement level, display width, alignment, role, custom attributes | `char var[spss_measure]`, `[spss_display_width]`, `[spss_alignment]`, `[spss_role]`, `[spss_attributes]` |
+| weight, encoding, product and creation stamp, file attributes, multiple-response and variable sets | `char _dta[spss_weight]`, `[spss_encoding]`, `[spss_product]`, `[spss_creation]`, `[spss_attributes]`, `[spss_mrsets]`, `[spss_varsets]` |
+
+**User-missing values** become extended missing values, so they are missing in
+every computation and keep their identity. The codes are assigned per variable
+in a fixed order: the discrete missing values (ascending), then the labelled
+values inside the missing range (ascending) — both from the SPSS dictionary, so
+files of a survey series with the same definitions get the same codes — then
+any other value observed inside the range (ascending). `char var[spss_missing]`
+holds the SPSS definition (`LO THRU -1, 99`) and `char var[spss_missing_map]`
+the codes (`.a=99 .b=-9 .c=-8`); the SPSS labels of those values are attached to
+their codes too. In Parquet the cell is null — every reader sees a missing value
+— and the code sits in a companion column (the `parqit save, xmissing` layout),
+which `parqit use`, `mergein` and `appendin` restore. More than 26 distinct
+user-missing values in one variable share `.z` from the 26th on, with a note.
+A lazy view reads the codes as plain `.` and says so; to keep them in Parquet,
+convert with `parqit save … using`, not by saving a lazy view. String
+user-missing values stay text (Stata has no missing strings). Compare the
+`spss_missing_map` characteristics before appending files converted one by one:
+a value observed in only some files can get a different code in each.
+
+**Encoding.** Text is decoded from the encoding the file declares: UTF-8,
+windows-1252, latin1, latin9 or macroman; another code page is refused with a
+message, and `encoding()` replaces a missing or wrong declaration. In a UTF-8
+file, text that is not valid UTF-8 is transcoded from windows-1252 (or the
+`encoding()` code page), item by item, with a note.
+
+**Compared with Stata's `import spss`** (which also reads these files):
+user-missing values stay distinct (`.a`–`.z`, not `.`), string user-missing
+values are kept, dates are `%td` days rather than `%tc` milliseconds, a time of
+day counts from 01jan1960, and value labels Stata cannot hold are kept in
+characteristics instead of being dropped. Portable (`.por`) and encrypted SPSS
+files are not read; `parqit describe` reads Parquet footers only (describe the
+converted file, or a view opened over the SPSS file). The tests compare the
+conversion with three other readers: pyreadstat, Stata's `import spss` and R's
+`foreign` (see `tests/verify_suite/v127`–`v130`).
 
 ### Single-table verbs (lazy)
 
@@ -619,10 +701,11 @@ the view without replacing the current dataset.
 |---|---|
 | `parqit collect [, clear int64(refuse|round|string)]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). `int64()` decides what happens to a column whose integers exceed 2^53 (default: refuse); it overrides the value the view was opened with. |
 | `parqit save <dest> [, replace data partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource xmissing]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree); `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match; `xmissing` (a memory save) preserves extended missing values `.a`–`.z` in one `int8` companion column per affected variable (`_parqit_xm_<var>`, 0 = none, 1–26 = `.a`–`.z`, listed under the `parqit.xmissing` footer key) that `parqit use`, `mergein` and `appendin` restore for every numeric storage type; the file stays ordinary Parquet for other readers. |
+| `parqit save <dest> using <file.sav> [, replace compression() compression_level() encoding()]` | Convert an SPSS `.sav`/`.zsav` file to Parquet with its whole dictionary, out of core, leaving the dataset in memory and the open views as they were (see [SPSS files](#spss-files-sav-zsav)); returns `r(N)`, `r(k)`, `r(filename)`, `r(source)`, `r(xmissing_vars)`, `r(encoding)`, `r(spss_encoding)`, `r(spss_compression)`. |
 | `parqit count` | Row count → `r(N)` (only the scalar result is returned). |
 | `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). |
-| `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. |
+| `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. The file form reads Parquet footers only (a `.csv`, `.dta`, Excel or SPSS file is refused with the alternative). |
 
 ### Explore the view (engine-side, current dataset unchanged)
 
@@ -745,6 +828,11 @@ parqit save long_income.parquet, replace
 parqit use using panel.parquet
 parqit pivot (mean) wage (count) n=wage, rows(region) cols(year)
 parqit collect, clear                       // wage2019 n2019 wage2020 n2020 ...
+
+* An SPSS survey to Parquet with its dictionary (labels, .a-.z codes, formats)
+parqit save ess_round10.parquet using ess_round10.sav, replace
+parqit use using ess_round10.parquet, clear
+tabulate trstprl, missing                   // refusals, don't-knows: .a .b ... with labels
 
 * Drop to SQL when a window function is clearest
 parqit use using spells.parquet
@@ -984,6 +1072,16 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   save because Stata's plugin interface exposes text; text `strL`s round-trip,
   and a lazy Parquet-to-Parquet save preserves those bytes without crossing the
   Stata boundary.
+- **SPSS files.** User-missing values are `.a`–`.z` after `parqit use` (the
+  Parquet file keeps them in companion columns) but plain `.` in a lazy view;
+  more than 26 distinct user-missing values in one variable share `.z`; string
+  user-missing values stay text. A value observed in only some files of a series
+  can receive a different code in each, so compare `spss_missing_map` before
+  appending files converted one by one. Portable (`.por`) and encrypted files
+  are refused, as is text in a code page other than UTF-8, windows-1252,
+  latin1, latin9 or macroman unless `encoding()` names one of those. A date
+  variable holding times of day, or a time beyond 24 hours, changes type (with a
+  note), so two files of a series can differ there too.
 
 ## Acknowledgements
 

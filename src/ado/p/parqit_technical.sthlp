@@ -154,6 +154,27 @@ note), an empty header cell becomes {cmd:v}{it:#}, and a file without a header
 keeps the engine's {cmd:column0}, {cmd:column1}, … names.
 
 {pstd}
+{bf:SPSS} system files ({cmd:.sav}, {cmd:.zsav}) are read by parqit's own reader
+and never through a frame. The plugin reads the dictionary — every record of
+the format, in either byte order — and decodes the data once (uncompressed,
+bytecode or ZLIB) to check the whole file and settle what only the data can
+settle: whether a date variable holds whole days, whether a time fits in a
+day, the values observed inside a user-missing range, the widest string. It
+then streams the cases through an internal DuckDB table function into the
+verified Parquet writer, one engine vector at a time, and checks before
+publishing that the rows written equal the cases counted and that the source
+file did not change meanwhile. A malformed file is refused naming the record
+or case and the byte offset; a truncated one is refused before any output
+exists. The Parquet columns carry the SPSS names in dictionary order, followed
+by the {cmd:_parqit_xm_}{it:name} companions of the variables whose
+user-missing values occur; the characteristics are recorded under the Stata
+names parqit's reader gives those columns. {cmd:parqit save} {it:file}
+{cmd:using} {it:x.sav} writes that file; every other command that reads a
+{cmd:.sav}/{cmd:.zsav} writes it as a package-owned bridge and reads it like
+any bridge. The mapping, the user-missing codes and the encoding rules are in
+{help parqit##spss:SPSS files}.
+
+{pstd}
 The delimited-text dialect and column types are inferred from a sample of the
 file. Inference is a guess, and a wrong guess changes values silently: text
 written as {cmd:1e5} becomes the number 100000, a decimal with more digits than
@@ -181,7 +202,7 @@ scan it sits after the files' own columns and before any Hive partition keys,
 but it is not one of them — it takes no {cmd:parqit.*} metadata, is never
 mistaken for a partition key, and carries a note saying what it is. A name the
 source already loads is refused rather than quietly renamed, and a
-{cmd:.dta}/Excel source is refused because what it would report is the
+{cmd:.dta}/Excel/SPSS source is refused because what it would report is the
 temporary bridge.
 
 {pstd}
@@ -224,13 +245,13 @@ small file joins in — only the result is collected:
 {pstd}
 A delimited file is scanned with DuckDB's {cmd:read_csv_auto} (schema and
 delimiter auto-detected); add {opt relaxed} to {cmd:parqit use} to union a glob
-whose files have different schemas. (SAS/SPSS are out of scope — parqit reads
-Parquet, delimited text, Stata and Excel.)
+whose files have different schemas. (SAS files are out of scope — parqit reads
+Parquet, delimited text, Stata, Excel and SPSS.)
 
 {pstd}
 {cmd:parqit describe} {it:source} / {cmd:glimpse} {it:source} is deliberately a
 {bf:Parquet-only} footer inspection (file, glob or Hive directory): it does not
-invoke the CSV, Stata or Excel adapters. With no source argument it instead
+invoke the CSV, Stata, Excel or SPSS adapters. With no source argument it instead
 describes the open view's carried schema and pipeline depth. A mixed-schema
 Parquet glob is refused rather than displaying the first file as if it
 represented the set; open it with {cmd:parqit use ..., relaxed} to inspect the

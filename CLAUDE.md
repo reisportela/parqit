@@ -27,6 +27,7 @@ src/plugin/  C++ Stata Plugin Interface (stplugin.c/.h linked in, extern "C")
    │   parqit_plugin.cpp  entry stata_call + subcommand dispatch (catch-all → loud rc)
    │   plugin_io.cpp      use/describe/save + the SF_* collect (fills Stata cells)
    │   plugin_view.cpp    the lazy-view subcommands (open, op, twotable, reshape, …)
+   │   plugin_spss.cpp    spss_convert: an SPSS .sav/.zsav → one Parquet file (SPSS-READ-1)
    ▼
 src/engine/  no Stata API here — unit-testable without a Stata process
    │   session.cpp   one embedded DuckDB instance/session; temp_directory = spill
@@ -34,6 +35,9 @@ src/engine/  no Stata API here — unit-testable without a Stata process
    │   exprtrans.cpp Stata expression → SQL (the focused, unit-tested translator)
    │   typemap.cpp   Stata type/format ↔ DuckDB/Arrow logical type
    │   sanitize.cpp  identifier sanitiser; request.cpp/hexcodec.cpp  the wire protocol
+   │   spss_reader.cpp / spss_plan.cpp / spss_table.cpp  the native SPSS reader, the
+   │                 conversion plan (types, .a-.z codes, parqit.* metadata) and the
+   │                 parqit_read_sav DuckDB table function (C API) that streams it
    ▼
 embedded DuckDB (FetchContent, SHA256-pinned source tarball, built from source)
    │   reads/writes Parquet directly; out-of-core; pushdown
@@ -89,6 +93,7 @@ When using local Stata directly, keep test state repo-local: prepend the repo ad
 - Verify tests follow the audit's `verify_suite` pattern: one self-contained do-file per invariant that generates its own synthetic data, asserts the exact failure signature, checks the on-disk payload with an **independent oracle** (pyarrow and/or duckdb CLI — never trust parqit-only round-trips), and prints `VERDICT(...): PASS/FAIL`. `tests/integration/t13_tour.do` (the oracle-checked feature tour) is the same idea at feature-tour scale (a native twin in memory as the oracle).
 - C++ unit tests (`tests/unit/`) for: the type map, the Stata-expr→SQL translator, the identifier sanitiser, the request/response protocol, the view compiler, the hex codec.
 - Round-trip property tests: every Stata type with/without missings; 0 rows, 1 row, 1 var, 2500+ vars, multi-row-group, UTF-8/emoji, pathological column names.
+- The SPSS tests (`v127`–`v130`) read the committed fixtures in `tests/fixtures/spss/` (regenerate with `make_spss_fixtures.py`, which needs pandas + pyreadstat) and need pyreadstat + pyarrow importable from Stata's Python (`python query`; the dict output mode needs no pandas); v129 also uses Rscript + `foreign` when present (skipped with a note otherwise).
 - CI (`.github/workflows/build.yml`) must be green on Linux/macOS(x86_64+arm64)/Windows before any release tag; Linux builds against old glibc (AlmaLinux 8) for EL-family HPC clusters. CI builds and runs the C++ tests but **cannot** run the Stata suites — those gate releases on a licensed machine.
 
 ## Correctness invariants (brief §5–§6 — the root-cause discipline)
@@ -106,8 +111,8 @@ When using local Stata directly, keep test state repo-local: prepend the repo ad
 
 ```
 src/ado/p/     parqit.ado (dispatch + Mata wire), parqit.sthlp, parqit.pkg, stata.toc
-src/plugin/    C++: parqit_plugin.cpp (entry+dispatch), plugin_io.cpp (I/O+collect), plugin_view.cpp
-src/engine/    C++ (no Stata API): session, view (verb→plan), exprtrans, typemap, sanitize, request, hexcodec
+src/plugin/    C++: parqit_plugin.cpp (entry+dispatch), plugin_io.cpp (I/O+collect), plugin_view.cpp, plugin_spss.cpp
+src/engine/    C++ (no Stata API): session, view (verb→plan), exprtrans, typemap, sanitize, request, hexcodec, spss_*
 vendor/        stata/stplugin.{c,h}, arrow/abi.h, json/json.hpp, doctest/, VERSIONS.md  (DuckDB NOT here — fetched)
 tests/         unit/ (doctest), verify_suite/ (audit invariants), integration/, roundtrip/, fixtures/
                run_stata.sh (Stata runner), release_lint.sh (version/date + path-leak gate)
