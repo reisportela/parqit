@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.2.5 — the full surface below is implemented and covered by a
+> **Status:** v0.2.6 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,17 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.2.6 adds `parqit spssencode`, which turns a string variable read from
+an SPSS file into a labelled numeric variable with the SPSS labels kept in its
+characteristics (the SPSS codes when they are integers, otherwise 1, 2, … in
+code order; user-missing codes as `.a`–`.z`). `parqit describe <file>` now
+shows each variable's value and variable labels, marks notes and SPSS labels,
+and lists them with its `labels` and `notes` options, all from the footer. In
+the dialogs, **Browse** offers every supported file type (it offered only
+Parquet), and the write dialog converts SPSS files. See
+[SPSS files](#spss-files-sav-zsav). Existing commands and the metadata format
+are unchanged.
 
 Version 0.2.5 reads SPSS system files (`.sav`, and ZLIB-compressed `.zsav`)
 with parqit's own out-of-core reader, and writes the corresponding Parquet file
@@ -218,7 +229,7 @@ running the checks below. `discard` alone does not guarantee a plugin reload.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.2.5`).
+  `download/vX.Y.Z` (for example, `download/v0.2.6`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 

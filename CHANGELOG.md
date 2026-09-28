@@ -6,6 +6,8 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-09-28
+
 ### Added
 - **`parqit spssencode <strvar>, generate(<newvar>) [label() sequential]`**
   (SPSS-ENCODE-1) builds the labelled numeric version of a string variable
