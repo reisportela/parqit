@@ -172,7 +172,11 @@ names parqit's reader gives those columns. {cmd:parqit save} {it:file}
 {cmd:using} {it:x.sav} writes that file; every other command that reads a
 {cmd:.sav}/{cmd:.zsav} writes it as a package-owned bridge and reads it like
 any bridge. The mapping, the user-missing codes and the encoding rules are in
-{help parqit##spss:SPSS files}.
+{help parqit##spss:SPSS files}. A string variable's SPSS value labels, which
+Stata cannot attach to a string, stay in {cmd:char}
+{it:var}{cmd:[spss_value_labels]}; {cmd:parqit spssencode} reads them with a
+strict parser of the JSON that parqit writes, with no Python, and builds the
+labelled numeric version of the variable.
 
 {pstd}
 The delimited-text dialect and column types are inferred from a sample of the
@@ -251,7 +255,11 @@ Parquet, delimited text, Stata, Excel and SPSS.)
 {pstd}
 {cmd:parqit describe} {it:source} / {cmd:glimpse} {it:source} is deliberately a
 {bf:Parquet-only} footer inspection (file, glob or Hive directory): it does not
-invoke the CSV, Stata, Excel or SPSS adapters. With no source argument it instead
+invoke the CSV, Stata, Excel or SPSS adapters. From the parqit metadata in that
+footer it also shows each variable's value label and variable label, marks the
+variables with notes and those whose SPSS labels are kept in characteristics,
+and lists value labels and notes with its {opt labels} and {opt notes} options
+(see {help parqit##explore:parqit describe}). With no source argument it instead
 describes the open view's carried schema and pipeline depth. A mixed-schema
 Parquet glob is refused rather than displaying the first file as if it
 represented the set; open it with {cmd:parqit use ..., relaxed} to inspect the

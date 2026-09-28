@@ -2973,3 +2973,77 @@ entry notes the conservative fallback if the assumption proves wrong.
     legacy code page but holds UTF-8 text is converted from the write dialog or
     the command line.
 
+169. **The labelled numeric version of an SPSS string variable (2026-09-28,
+    SPSS-ENCODE-1).** Stata cannot label a string, so SPSS-READ-1 keeps a string
+    variable's value labels as JSON pairs in `char var[spss_value_labels]`.
+    Users asked for one command instead of a Python recipe:
+    `parqit spssencode strvar, generate(newvar) [label(name) sequential]`. The
+    name mirrors `encode` (string to labelled numeric) and says whose
+    dictionary it applies. (1) **Numbering.** The dictionary decides, not the
+    data: when every code other than a user-missing one is an integer, the
+    integers are distinct (`1` and `01` collide) and each fits a value label
+    (±2,147,483,647), the values are the codes themselves, as `destring` gives.
+    Otherwise the codes are numbered 1, 2, … in code (byte) order, as `encode`
+    does and as SPSS displays them; values the dictionary does not label follow,
+    labelled by their own text. Files that share a dictionary thus share codes,
+    the reasoning of #167's dictionary-first missing codes. `sequential` forces
+    the second numbering. In the first, a value that is neither empty nor an
+    integer code is an error listing up to five such values, never a silent
+    missing. (2) **User-missing codes** (`char var[spss_missing]`, SPSS syntax,
+    discrete strings only) become `.a`, `.b`, … in code order, as for numeric
+    SPSS variables (#167). Their SPSS labels move to the extended missing value,
+    and `char newvar[spss_missing_map]` records the map (`.a="X"`). The string
+    variable is untouched. (3) **Reading the characteristic.** A strict Mata
+    reader of the grammar parqit writes (a list of `["code","label"]` string
+    pairs, UTF-8 text, the escapes `\" \\ \/ \b \f \n \r \t \uXXXX` with
+    surrogate pairs). It refuses a numeric code, a raw control character, `\u0000`
+    and trailing text. A characteristic cut at Stata's 67,783-byte limit is
+    refused with that explanation. No Python is needed. (4) **Order of effects.**
+    The dictionary is parsed and the numbering chosen, the data are mapped into
+    a temporary variable and checked, and only then are the value label (named
+    after `newvar` unless `label()` names another; an existing label is refused)
+    and the variable created. The variable gets the smallest integer type that
+    holds the codes (`double` for codes beyond `long`) and the source variable's
+    label. Sequential numbering uses Stata's own `encode` on a label
+    pre-seeded with the dictionary's codes, so large data are mapped in
+    compiled code. An empty SPSS label cannot be stored (`st_vlmodify` deletes
+    on empty text); it is skipped and counted in a note. (5) **Comparison.**
+    SPSS ignores trailing blanks in string comparisons. The reader already
+    strips them from cells, label keys and missing values, and the command
+    compares those trimmed values as they are. (6) **Dialog.** `release_lint`
+    requires every public subcommand in a dialog. `spssencode` is the fourth
+    choice of the create-or-change dialog (`parqit_gen.dlg`), labelled as
+    working on the data in memory, unlike the lazy gen/egen/replace. Its
+    source picker is a VARNAME control, which Stata fills from the data in
+    memory.
+
+170. **What `parqit describe <file>` says about labels and notes (2026-09-28,
+    DESCRIBE-META-1).** A user converting SPSS files asked whether describe
+    could say that a file holds notes and labels, and list them, particularly
+    the SPSS labels of string variables. The plugin already sends, for
+    describe, the same metadata records `use` applies (variable and value
+    labels, value-label sets, characteristics including notes, the dataset
+    label); the ado ignored them. The change is therefore in the ado alone and
+    works with an existing plugin. (1) **Table.** Each variable's value label and
+    variable label are shown as in Stata's `describe using`. The columns are
+    sized to the content and to `c(linesize)`; the variable label is the column
+    that gives way, cut with `...`. The Parquet type column stays. (2)
+    **Markers follow Stata.** `*` after the storage type marks a variable with
+    notes, `(_dta has notes)` a dataset note. `(spss)` in the value-label column
+    marks a variable without a Stata value label whose SPSS labels are in
+    `char var[spss_value_labels]` (string codes, or values Stata cannot label),
+    with a legend pointing to `parqit spssencode`. Closing lines count variable
+    labels, value-label sets, SPSS-labelled variables and notes; a file
+    without parqit metadata gets no closing lines. (3) **Listing on request.**
+    `labels` lists each value-label set in value order, as `label list` does,
+    then each variable's SPSS labels in code order (numeric when every code is
+    a number), read with #169's strict reader. That reader now also accepts the
+    numeric codes of a numeric variable's labels when describe calls it;
+    spssencode still refuses them. `notes` lists the notes by number, as
+    `notes list` does. Label and note texts are printed with control characters
+    made visible and SMCL braces escaped, never interpreted. (4) **Results.**
+    `r(varlab_i)`, `r(vallab_i)`, `r(n_value_labels)`, `r(n_notes)`,
+    `r(label)` and `r(spss_labels)` are added, and nothing is removed. Text
+    results are returned with `: copy local`, so quotes, backticks and braces in
+    a label arrive intact. The options require a file; the view form refuses
+    them with a message.

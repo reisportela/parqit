@@ -5,7 +5,7 @@
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
 {viewerdialog "parqit keep if/in, sample" "dialog parqit_filter"}{...}
 {viewerdialog "parqit keep/drop/order/sort/rename" "dialog parqit_vars"}{...}
-{viewerdialog "parqit generate" "dialog parqit_gen"}{...}
+{viewerdialog "parqit generate/spssencode" "dialog parqit_gen"}{...}
 {viewerdialog "parqit collapse/pivot/contract/reshape" "dialog parqit_pivot"}{...}
 {viewerdialog "parqit merge/append/joinby" "dialog parqit_combine"}{...}
 {viewerdialog "parqit collect/save" "dialog parqit_write"}{...}
@@ -227,6 +227,9 @@ pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 {p 8 16 2}{cmd:parqit save} {it:filename} {cmd:using} {it:spssfile} [{cmd:,} {opt replace}
 {opt comp:ression(codec)} {opt compression_level(#)} {opt enc:oding(name)}]{space 2}convert an
 SPSS {cmd:.sav}/{cmd:.zsav} file to Parquet ({help parqit##spss:SPSS files}){p_end}
+{p 8 16 2}{cmd:parqit spssencode} {it:strvar}{cmd:,} {opt g:enerate(newvar)} [{opt l:abel(name)}
+{opt seq:uential}]{space 2}labelled numeric version of a string variable read from an
+SPSS file ({help parqit##spss:SPSS files}){p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}
@@ -244,7 +247,7 @@ ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit correlate} {it:varlist}{space 8}(listwise; takes no options){p_end}
 {p 8 16 2}{cmd:parqit pwcorr} {it:varlist} [{cmd:,} {opt obs} {opt sig}]{p_end}
 {p 8 16 2}{cmd:parqit histogram} {it:varname} [{cmd:,} {opt b:ins(#)} {opt nodraw}]{p_end}
-{p 8 16 2}{cmd:parqit describe} [{it:parquet_source}] | {cmd:parqit glimpse} [{it:parquet_source}]{p_end}
+{p 8 16 2}{cmd:parqit describe} [{it:parquet_source}] [{cmd:,} {opt lab:els} {opt not:es}] | {cmd:parqit glimpse} [{it:parquet_source}]{p_end}
 
 {pstd}Escape hatches and introspection:
 
@@ -331,7 +334,8 @@ the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
 {phang2}{bf:User > parqit > Create or change variables...}{p_end}
 {p 12 12 2}({cmd:db parqit_gen}) {cmd:gen} (with a storage type and an
 {cmd:if} qualifier), {cmd:egen} (function and {opt by()}) and
-{cmd:replace}.{p_end}
+{cmd:replace} on the view, and {cmd:spssencode} on the data in memory (the
+labelled numeric version of a string variable read from an SPSS file).{p_end}
 
 {phang2}{bf:User > parqit > Collapse, contract, pivot table, or reshape...}{p_end}
 {p 12 12 2}({cmd:db parqit_pivot}) {cmd:collapse} and {cmd:pivot} share two
@@ -480,7 +484,7 @@ reproducibility.
 engine-side commands, build the pipeline with ordinary verbs, and materialise
 only the result:
 
-{phang2}{cmd:. parqit describe /data/big.parquet}{space 10}({it:rows, columns, types: the footer only}){p_end}
+{phang2}{cmd:. parqit describe /data/big.parquet}{space 10}({it:rows, columns, types, labels: the footer only}){p_end}
 {phang2}{cmd:. parqit use using /data/big.parquet}{space 8}({it:a lazy view; no result rows loaded}){p_end}
 {phang2}{cmd:. parqit summarize wage age}{space 17}({it:engine-side; the dataset in memory is unchanged}){p_end}
 {phang2}{cmd:. parqit keep if year >= 2019 & !missing(wage)}{p_end}
@@ -1055,7 +1059,9 @@ time of day becomes a {cmd:TIMESTAMP} ({cmd:%tc}, same look, with a note){p_end}
 label is kept whole in {cmd:char} {it:var}{cmd:[spss_label]}{p_end}
 {p2col:value labels}a value label named after the variable, with every integer
 key; what Stata cannot hold (labels of strings, of non-integer values, of
-dates) whole in {cmd:char} {it:var}{cmd:[spss_value_labels]} as JSON pairs{p_end}
+dates) whole in {cmd:char} {it:var}{cmd:[spss_value_labels]} as JSON pairs,
+which {cmd:parqit spssencode} turns into a labelled numeric variable (see
+{bf:String codes} below){p_end}
 {p2col:file label, documents}dataset label; notes on {cmd:_dta}{p_end}
 {p2col:measure, width, ...}{cmd:char} {it:var}{cmd:[spss_measure]},
 {cmd:[spss_display_width]}, {cmd:[spss_alignment]}, {cmd:[spss_role]},
@@ -1088,6 +1094,31 @@ definition in {cmd:char} {it:var}{cmd:[spss_missing]}. Before appending files
 converted one by one, compare their {cmd:spss_missing_map}: a value observed in
 only some files can get a different code in each.
 
+{pstd}{bf:String codes.} Stata cannot attach a value label to a string, so a
+string variable keeps its SPSS value labels in {cmd:char}
+{it:var}{cmd:[spss_value_labels]}. With the data in memory,
+{cmd:parqit spssencode} {it:var}{cmd:, generate(}{it:newvar}{cmd:)} creates the
+labelled numeric version. When every SPSS code is a distinct integer, the
+values are the codes themselves, as {cmd:destring} would give; otherwise the
+codes are numbered 1, 2, ... in code order, as {cmd:encode} does, and values
+the dictionary does not label follow, labelled by their own text.
+{opt sequential} asks for that numbering even for integer codes. The
+dictionary, not the data, chooses the numbering, so files that share a
+dictionary share codes. SPSS user-missing codes become {cmd:.a}, {cmd:.b}, ...
+with their labels, recorded in {cmd:char} {it:newvar}{cmd:[spss_missing_map]}.
+The value label is named {it:newvar} unless {opt label()} names another; the
+variable label is copied. The dictionary and the data are checked first:
+integer codes mixed with other values, an existing label or a malformed
+characteristic are refused before anything is created.
+
+{phang2}{cmd:. parqit use using survey.parquet, clear}{p_end}
+{phang2}{cmd:. parqit spssencode region, generate(region_num)}{p_end}
+{phang2}{cmd:. tabulate region_num}{space 30}({it:labelled with the SPSS labels}){p_end}
+
+{pstd}{cmd:parqit describe} {it:file}{cmd:.parquet} marks such variables with
+{cmd:(spss)}, and its {opt labels} option lists their SPSS labels without
+loading the file.
+
 {pstd}{bf:Character encoding.} Text is decoded from the encoding the file
 declares: UTF-8, windows-1252, latin1, latin9 or macroman (a file that declares
 another code page is refused with a message). {opt encoding()} replaces a
@@ -1105,6 +1136,8 @@ dates are {cmd:%td} days rather than {cmd:%tc} milliseconds, a time of day is
 counted from 01jan1960, and value labels Stata cannot hold are kept in
 characteristics instead of being dropped. {cmd:parqit describe} reads Parquet
 footers only; describe the converted file or a view opened over the SPSS file.
+On the converted file it marks the string variables that carry SPSS labels,
+and its {opt labels} option lists them.
 
 
 {marker explore}{...}
@@ -1193,6 +1226,15 @@ The Stata types shown are the honest display of the file's declared/saved
 types {it:without} a data scan; {cmd:collect} additionally sizes integers and
 strings from the observed range, so a foreign file's column can arrive
 narrower than {cmd:describe} showed{p_end}
+{p 8 12 2}{cmd:parqit describe} {it:parquet_source} [{cmd:,} {opt labels} {opt notes}]{space 1}the
+file's footer, without reading column values: rows, columns and row groups, and for each
+variable its Parquet and Stata types, format, value label and variable label, as
+{cmd:describe using} shows a Stata dataset. {cmd:*} marks a variable with notes,
+{cmd:(_dta has notes)} a dataset note, and {cmd:(spss)} a string variable whose SPSS
+value labels are kept in {cmd:char} {it:var}{cmd:[spss_value_labels]} (see
+{cmd:parqit spssencode}); closing lines count the labels and notes. {opt labels} lists
+the value-label sets as {cmd:label list} does, then those SPSS labels; {opt notes}
+lists the notes as {cmd:notes list} does{p_end}
 {p 8 12 2}{cmd:parqit count if} {it:exp}{space 8}filtered count {it:without touching the view's pipeline}
 (any parqit expression except {cmd:_n}/{cmd:_N} — see
 {help parqit##expressions:Expressions} — including {cmd:missing(a,b,c)}){p_end}
@@ -1483,7 +1525,8 @@ already found through the adopath.
 footer metadata, not column values. The other commands below may scan relevant
 data engine-side and stage bounded output, but do not replace the current
 dataset:{p_end}
-{phang2}{cmd:. parqit describe /data/unknown.parquet}{space 4}({it:rows, columns, types, row groups}){p_end}
+{phang2}{cmd:. parqit describe /data/unknown.parquet}{space 4}({it:rows, columns, types, labels, row groups}){p_end}
+{phang2}{cmd:. parqit describe /data/unknown.parquet, labels notes}{space 1}({it:value labels and notes too}){p_end}
 {phang2}{cmd:. parqit use using /data/unknown.parquet}{space 2}({it:lazy view; schema probed, no rows loaded}){p_end}
 {phang2}{cmd:. parqit head 10}{p_end}
 {phang2}{cmd:. parqit codebook}{p_end}
@@ -1817,6 +1860,12 @@ declares) and {cmd:r(spss_compression)} ({cmd:none}, {cmd:bytecode} or
 {cmd:zlib}); scalars {cmd:r(transcoded_cells)} and {cmd:r(transcoded_meta)}
 only when text had to be transcoded.
 
+{pstd}{it:Encoding SPSS string codes.} {cmd:parqit spssencode} returns scalars
+{cmd:r(N_labels)} (SPSS labels carried) and {cmd:r(N_unlabeled)} (distinct
+values without an SPSS label) and locals {cmd:r(mode)} ({cmd:codes} or
+{cmd:sequential}), {cmd:r(label)} and, when user-missing codes exist,
+{cmd:r(missing_map)}.
+
 {pstd}{it:Sources and views.} Lazy {cmd:merge}/{cmd:joinby} return
 {cmd:r(bridge)} only when their using source needed an adapter. {cmd:append}
 returns {cmd:r(n_bridges)} and, for each adapter-created bridge,
@@ -1830,9 +1879,13 @@ current view.
 return scalars {cmd:r(n_rows)}, {cmd:r(n_cols)} (alias
 {cmd:r(n_columns)}), {cmd:r(n_row_groups)}, {cmd:r(n_files)} and
 {cmd:r(has_parqit_meta)}, plus locals {cmd:r(name_}{it:i}{cmd:)},
-{cmd:r(type_}{it:i}{cmd:)} and {cmd:r(stata_type_}{it:i}{cmd:)} for each
-column. The no-argument view form returns {cmd:r(n_cols)} (alias
-{cmd:r(n_columns)}) and {cmd:r(n_steps)}.
+{cmd:r(type_}{it:i}{cmd:)}, {cmd:r(stata_type_}{it:i}{cmd:)},
+{cmd:r(varlab_}{it:i}{cmd:)} (variable label) and {cmd:r(vallab_}{it:i}{cmd:)}
+(value label) for each column; also scalars {cmd:r(n_value_labels)}
+(value-label sets) and {cmd:r(n_notes)}, and locals {cmd:r(label)} (the
+dataset label) and {cmd:r(spss_labels)} (the variables whose SPSS labels are
+kept in characteristics). The no-argument view form returns {cmd:r(n_cols)}
+(alias {cmd:r(n_columns)}) and {cmd:r(n_steps)}.
 
 {pstd}{it:Statistics and previews.} {cmd:count} returns {cmd:r(N)}.
 {cmd:head}/{cmd:list} return {cmd:r(N)}, the number of rows shown.

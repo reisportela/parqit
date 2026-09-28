@@ -7,6 +7,23 @@ semantic versioning once `v0.1.0` is tagged.
 ## [Unreleased]
 
 ### Added
+- **`parqit spssencode <strvar>, generate(<newvar>) [label() sequential]`**
+  (SPSS-ENCODE-1) builds the labelled numeric version of a string variable
+  read from an SPSS file, from the value labels kept in
+  `char var[spss_value_labels]`. The values are the SPSS codes themselves when
+  every code is a distinct integer, and 1, 2, … in code order otherwise.
+  User-missing codes become `.a`–`.z` with their labels. The dictionary and the
+  data are checked before anything is created (ASSUMPTIONS #169). It is also the
+  fourth choice of **User > parqit > Create or change variables...**.
+- **`parqit describe <file>` shows the file's labels and notes** (DESCRIBE-META-1)
+  without reading data. Each variable's value label and variable label appear
+  as in Stata's `describe using`. `*` marks variables with notes,
+  `(_dta has notes)` a dataset note, and `(spss)` a string variable whose SPSS
+  labels are kept in `char var[spss_value_labels]`. Closing lines count them.
+  Options `labels` and `notes` list the value-label sets (with those SPSS
+  labels) and the notes. New results: `r(varlab_i)`, `r(vallab_i)`,
+  `r(n_value_labels)`, `r(n_notes)`, `r(label)` and `r(spss_labels)`
+  (ASSUMPTIONS #170).
 - **The write dialog converts SPSS files.** **User > parqit > Save as Parquet
   or collect into memory...** has a fourth choice that builds `parqit save
   <file> using <file>.sav [, replace compression() compression_level()
@@ -31,6 +48,11 @@ semantic versioning once `v0.1.0` is tagged.
   runs the SPSS conversion shapes the write dialog emits; `dialog_lint.py`
   refuses `.formatfilter` and requires the read and combine pickers to offer
   every extension the source resolver routes.
+- `v131` checks `spssencode` against pyreadstat and Python's `json`
+  (adversarial label texts, both numberings, user-missing codes, one-row and
+  one-label cases, every refusal leaving nothing behind); `v132` checks
+  `describe`'s labels, notes and markers against pyarrow's reading of the
+  footer; `t15` runs the `spssencode` shapes of the create-or-change dialog.
 
 ## [0.2.5] — 2026-09-27
 

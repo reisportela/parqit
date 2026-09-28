@@ -280,6 +280,13 @@ foreach fcn in total mean sd min max count {
 }
 capture noisily parqit replace price = . if price <= 0
 _shape `=_rc' "parqit replace name = exp if exp"
+* the spssencode choice works on the data in memory, here an SPSS fixture
+parqit close _all
+parqit use using `"`repo'/tests/fixtures/spss/survey.sav"', clear
+capture noisily parqit spssencode sex, generate(sex_num)
+_shape `=_rc' "parqit spssencode var, generate()"
+capture noisily parqit spssencode sex, generate(sex_seq) label(sex_lab) sequential
+_shape `=_rc' "parqit spssencode var, generate() label() sequential"
 parqit close _all
 
 * --- Collapse, contract, pivot table, or reshape (db parqit_pivot) ------------

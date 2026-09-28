@@ -17,8 +17,8 @@ program define parqit, rclass
         contract duplicates sample collect count head list show explain    ///
         set merge append joinby reshape pivot sql query summarize tabulate ///
         path view views misstable levelsof ds lookfor codebook distinct    ///
-        tabstat correlate pwcorr histogram mergein appendin menu _dlgvars  ///
-        _dlgcontext _dlgsource
+        tabstat correlate pwcorr histogram mergein appendin menu           ///
+        spssencode _dlgvars _dlgcontext _dlgsource
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -585,6 +585,71 @@ program define _parqit_spss_to_bridge, rclass
     }
     return add
     return local bridge `"`bridge'"'
+end
+
+* SPSS-ENCODE-1: Stata cannot label a string, so a string variable read from an
+* SPSS file keeps its value labels as JSON pairs in char var[spss_value_labels].
+* spssencode makes the labelled numeric version: the SPSS codes themselves when
+* every code is a distinct integer, otherwise 1, 2, ... in code order. The
+* dictionary, not the data, decides, so files that share a dictionary share
+* codes; SPSS user-missing codes become .a-.z, as for numeric SPSS variables.
+* Nothing is created until the dictionary and the data are known to fit.
+program define _parqit_spssencode, rclass
+    version 16.0
+    syntax varname, Generate(name) [Label(name) SEQuential]
+    capture confirm string variable `varlist'
+    if (_rc) {
+        di as err "parqit spssencode: `varlist' is numeric; the SPSS value labels" ///
+            " of a numeric variable are its Stata value label already"
+        exit 109
+    }
+    confirm new variable `generate'
+    if ("`label'" == "") local label `generate'
+    mata: st_local("_sq_lab", strofreal(st_vlexists("`label'")))
+    if (`_sq_lab') {
+        di as err "parqit spssencode: value label `label' already exists;" ///
+            " name another with label()"
+        exit 110
+    }
+    mata: _parqit_spssenc_plan("`varlist'", "`sequential'" != "")
+    tempvar num
+    if ("`_sq_mode'" == "codes") quietly gen double `num' = real(`varlist')
+    else {
+        * encode numbers the dictionary's codes as defined, then the rest
+        mata: _parqit_spssenc_keys("`varlist'", "`label'")
+        capture noisily encode `varlist', generate(`num') label(`label')
+        if (_rc) {
+            local rc = _rc
+            capture label drop `label'
+            exit `rc'
+        }
+    }
+    capture noisily mata: _parqit_spssenc_apply("`varlist'", "`num'", "`label'", ///
+        "`_sq_mode'", "`generate'")
+    if (_rc) {
+        local rc = _rc
+        capture label drop `label'
+        exit `rc'
+    }
+    quietly summarize `num', meanonly
+    local type double
+    if (r(N) == 0 | (r(min) >= -127 & r(max) <= 100)) local type byte
+    else if (r(min) >= -32767 & r(max) <= 32740) local type int
+    else if (r(min) >= -2147483647 & r(max) <= 2147483620) local type long
+    quietly gen `type' `generate' = `num'
+    label values `generate' `label'
+    local vl : variable label `varlist'
+    label variable `generate' `"`vl'"'
+    if (`"`_sq_map'"' != "") char `generate'[spss_missing_map] `"`_sq_map'"'
+    if ("`_sq_mode'" == "codes") ///
+        di as txt "(`generate': the SPSS codes of `varlist', labelled by `label')"
+    else di as txt "(`generate': the SPSS codes of `varlist' numbered 1, 2, ... in" ///
+        " code order, labelled by `label'; `_sq_why')"
+    return local mode "`_sq_mode'"
+    return local label "`label'"
+    return scalar N_labels = `_sq_nlab'
+    return scalar N_unlabeled = `_sq_nextra'
+    if (`"`_sq_map'"' != "") return local missing_map `"`_sq_map'"'
 end
 
 * BRIDGE-LOSS-1: after _parqit_resolve_source, capture the bridge's loss
@@ -2007,10 +2072,15 @@ end
 
 program define _parqit_describe, rclass
     version 16.0
-    syntax [anything(name=target)]
+    syntax [anything(name=target)] [, LABels NOTes]
     _parqit_ensure_plugin
 
     if (`"`target'"' == "") {
+        if ("`labels'`notes'" != "") {
+            di as err "parqit describe: labels and notes list the metadata of a Parquet file;" ///
+                " name the file"
+            exit 198
+        }
         * describe the open view
         tempfile resp
         mata: st_local("whathex", _parqit_hex("describe"))
@@ -2066,8 +2136,7 @@ program define _parqit_describe, rclass
         as txt "   row groups: " as res "`parqit_row_groups'" ///
         as txt "   files: " as res "`parqit_n_files'" ///
         as txt "   parqit metadata: " as res cond("`parqit_has_meta'" == "1", "yes", "no")
-    di as txt ""
-    mata: _parqit_resp_describe("`resp'")
+    mata: _parqit_resp_describe("`resp'", "`labels'" != "", "`notes'" != "")
 
     return scalar n_rows = `parqit_n'
     return scalar n_cols = `parqit_k'
@@ -2075,10 +2144,17 @@ program define _parqit_describe, rclass
     return scalar n_row_groups = `parqit_row_groups'
     return scalar n_files = `parqit_n_files'
     return scalar has_parqit_meta = ("`parqit_has_meta'" == "1")
+    * DESCRIBE-META-1: labels and notes travel as text, copied, never expanded
+    return scalar n_value_labels = `parqit_dnvl'
+    return scalar n_notes = `parqit_dnotes'
+    return local spss_labels `"`parqit_dspss'"'
+    return local label : copy local parqit_dlabel
     forvalues i = 1/`parqit_k' {
         return local name_`i' `"`parqit_dname_`i''"'
         return local type_`i' `"`parqit_dtype_`i''"'
         return local stata_type_`i' `"`parqit_dstype_`i''"'
+        return local varlab_`i' : copy local parqit_dvarlab_`i'
+        return local vallab_`i' : copy local parqit_dvallab_`i'
     }
 end
 
@@ -3662,6 +3738,304 @@ void _parqit_wr_spss_request(string scalar req)
         _parqit_jtext("encoding", strlower(strtrim(st_local("_sq_encoding")))))))
 }
 
+// SPSS-ENCODE-1: reader for the JSON parqit writes into char var[spss_value_labels]
+// of a string variable: [["code","label"],...], UTF-8 text, the escapes
+// \" \\ \/ \b \f \n \r \t \uXXXX. Anything else is refused, loudly.
+void _parqit_js_bad(string scalar var, string scalar what)
+{
+    errprintf("parqit: char %s[spss_value_labels] is not the label list parqit writes (%s)\n",
+        var, what)
+    exit(198)
+}
+
+void _parqit_js_end(string scalar var)
+{
+    errprintf("parqit: char %s[spss_value_labels] ends before its label list does;\n", var)
+    errprintf("Stata keeps at most 67,783 bytes of a characteristic (the file keeps the full text)\n")
+    exit(198)
+}
+
+// a numeric code, as the labels of a numeric SPSS variable carry them
+string scalar _parqit_js_num(string scalar s, real scalar i, string scalar var)
+{
+    real scalar j
+
+    j = i
+    while (i <= strlen(s)) {
+        if (!strpos("-+0123456789.eE", substr(s, i, 1))) break
+        i++
+    }
+    if (i == j) _parqit_js_bad(var, "a code that is neither a string nor a number")
+    return(substr(s, j, i - j))
+}
+
+void _parqit_js_ws(string scalar s, real scalar i)
+{
+    while (anyof((" ", char(9), char(10), char(13)), substr(s, i, 1))) i++
+}
+
+void _parqit_js_tok(string scalar s, real scalar i, string scalar c, string scalar var)
+{
+    _parqit_js_ws(s, i)
+    if (substr(s, i, 1) == "") _parqit_js_end(var)
+    if (substr(s, i, 1) != c) _parqit_js_bad(var, sprintf("%s expected at byte %g", c, i))
+    i++
+}
+
+real scalar _parqit_js_hex4(string scalar s, real scalar i, string scalar var)
+{
+    string scalar h
+
+    h = substr(s, i, 4)
+    if (!regexm(h, "^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$"))
+        _parqit_js_bad(var, "a malformed \u escape")
+    i = i + 4
+    return(frombase(16, strlower(h)))
+}
+
+string scalar _parqit_js_str(string scalar s, real scalar i, string scalar var)
+{
+    string scalar out, c, e
+    real scalar cp, lo
+
+    _parqit_js_tok(s, i, `"""', var)
+    out = ""
+    while (1) {
+        c = substr(s, i, 1)
+        i++
+        if (c == "") _parqit_js_end(var)
+        if (c == `"""') return(out)
+        if (c != "\") {
+            if (ascii(c) < 32) _parqit_js_bad(var, "a control character inside a string")
+            out = out + c
+            continue
+        }
+        e = substr(s, i, 1)
+        i++
+        if (e == `"""' | e == "\" | e == "/") out = out + e
+        else if (e == "b") out = out + char(8)
+        else if (e == "f") out = out + char(12)
+        else if (e == "n") out = out + char(10)
+        else if (e == "r") out = out + char(13)
+        else if (e == "t") out = out + char(9)
+        else if (e == "u") {
+            cp = _parqit_js_hex4(s, i, var)
+            if (cp >= 56320 & cp <= 57343) _parqit_js_bad(var, "an unpaired surrogate")
+            if (cp >= 55296 & cp <= 56319) {
+                if (substr(s, i, 2) != "\u") _parqit_js_bad(var, "an unpaired surrogate")
+                i = i + 2
+                lo = _parqit_js_hex4(s, i, var)
+                if (lo < 56320 | lo > 57343) _parqit_js_bad(var, "an unpaired surrogate")
+                cp = 65536 + (cp - 55296) * 1024 + lo - 56320
+            }
+            if (cp == 0) _parqit_js_bad(var, "a NUL character, which a Stata string cannot hold")
+            out = out + uchar(cp)
+        }
+        else if (e == "") _parqit_js_end(var)
+        else _parqit_js_bad(var, "an unknown escape")
+    }
+}
+
+// numok: a numeric SPSS variable's codes are JSON numbers (describe lists
+// them); a string variable's codes must be strings (spssencode)
+string matrix _parqit_spss_pairs(string scalar s, string scalar var, real scalar numok)
+{
+    real scalar i, more
+    string matrix out
+    string scalar code
+
+    i = 1
+    out = J(0, 2, "")
+    _parqit_js_tok(s, i, "[", var)
+    _parqit_js_ws(s, i)
+    more = substr(s, i, 1) != "]"
+    while (more) {
+        _parqit_js_tok(s, i, "[", var)
+        _parqit_js_ws(s, i)
+        if (substr(s, i, 1) == "") _parqit_js_end(var)
+        if (substr(s, i, 1) == `"""') code = _parqit_js_str(s, i, var)
+        else if (numok) code = _parqit_js_num(s, i, var)
+        else _parqit_js_bad(var, "a code that is not a string, as in the labels of a numeric variable")
+        _parqit_js_tok(s, i, ",", var)
+        out = out \ (code, _parqit_js_str(s, i, var))
+        _parqit_js_tok(s, i, "]", var)
+        _parqit_js_ws(s, i)
+        more = substr(s, i, 1) == ","
+        if (more) i++
+    }
+    _parqit_js_tok(s, i, "]", var)
+    _parqit_js_ws(s, i)
+    if (i <= strlen(s)) _parqit_js_bad(var, "text after the closing bracket")
+    return(out)
+}
+
+// SPSS string missing values as char var[spss_missing] records them: "X", "Y"
+// with embedded quotes doubled; a numeric definition yields none
+string colvector _parqit_spss_strmiss(string scalar s)
+{
+    real scalar i, n
+    string colvector out
+    string scalar v, c
+
+    out = J(0, 1, "")
+    n = strlen(s)
+    i = 1
+    while (i <= n) {
+        c = substr(s, i, 1)
+        i++
+        if (c == " " | c == ",") continue
+        if (c != `"""') return(J(0, 1, ""))
+        v = ""
+        while (i <= n) {
+            c = substr(s, i, 1)
+            i++
+            if (c == `"""') {
+                if (substr(s, i, 1) != `"""') break
+                i++
+            }
+            v = v + c
+        }
+        out = out \ strrtrim(v)
+    }
+    return(out)
+}
+
+real colvector _parqit_spssenc_in(string colvector x, string colvector set)
+{
+    if (!rows(set) | !rows(x)) return(J(rows(x), 1, 0))
+    return(rowsum(x :== set') :> 0)
+}
+
+void _parqit_spssenc_dict(string scalar var, string colvector keys,
+    string colvector texts, string colvector miss)
+{
+    string matrix p
+
+    p = _parqit_spss_pairs(st_global(var + "[spss_value_labels]"), var, 0)
+    keys = strrtrim(p[., 1])
+    texts = p[., 2]
+    miss = uniqrows(_parqit_spss_strmiss(st_global(var + "[spss_missing]")))
+}
+
+// the numbering follows the dictionary: the SPSS codes when every code other
+// than a user-missing one is a distinct integer a value label can hold
+void _parqit_spssenc_plan(string scalar var, real scalar seq)
+{
+    string colvector keys, texts, miss, k
+    real colvector code
+    string scalar why
+
+    if (st_global(var + "[spss_value_labels]") == "") {
+        errprintf("parqit spssencode: %s has no SPSS value labels (char %s[spss_value_labels]);\n",
+            var, var)
+        errprintf("it applies to string variables read from an SPSS file\n")
+        exit(198)
+    }
+    _parqit_spssenc_dict(var, keys, texts, miss)
+    // vec(): a one-row selection comes back as a row, an empty one as 1x0
+    k = vec(select(keys, !_parqit_spssenc_in(keys, miss)))
+    why = seq ? "option sequential" : ""
+    if (why == "" & rows(k)) {
+        if (!all(regexm(strtrim(k), "^-?[0-9]+$"))) why = "not every SPSS code is an integer"
+        else {
+            code = strtoreal(strtrim(k))
+            if (rows(uniqrows(code)) < rows(code)) why = "two SPSS codes are the same integer"
+            else if (max(abs(code)) > 2147483647)
+                why = "an SPSS code is beyond the range of a value label"
+        }
+    }
+    st_local("_sq_mode", why == "" ? "codes" : "sequential")
+    st_local("_sq_why", why)
+}
+
+// sequential numbering: the dictionary's codes first, 1, 2, ... in code order
+void _parqit_spssenc_keys(string scalar var, string scalar lab)
+{
+    string colvector keys, texts, miss, u
+
+    _parqit_spssenc_dict(var, keys, texts, miss)
+    u = uniqrows(vec(select(keys, !_parqit_spssenc_in(keys, miss) :& keys :!= "")))
+    if (rows(u)) st_vlmodify(lab, (1::rows(u)), u)
+}
+
+void _parqit_spssenc_apply(string scalar var, string scalar num, string scalar lab,
+    string scalar mode, string scalar gen)
+{
+    string colvector keys, texts, miss, S, t, u
+    real colvector X, idx, v, code, keep, j
+    real rowvector xm
+    real scalar i, nextra, nempty
+    string scalar map
+
+    _parqit_spssenc_dict(var, keys, texts, miss)
+    st_sview(S, ., var)
+    st_view(X, ., num)
+    xm = (.a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r,
+        .s, .t, .u, .v, .w, .x, .y, .z)
+    // SPSS user-missing codes -> .a, .b, ... in code order (more than 26 share .z)
+    map = ""
+    for (i = 1; i <= rows(miss); i++) {
+        idx = vec(selectindex(S :== miss[i]))
+        if (rows(idx)) X[idx] = J(rows(idx), 1, xm[min((i, 26))])
+        map = map + (i > 1 ? " " : "") + "." + char(96 + min((i, 26))) + "=" +
+            `"""' + subinstr(miss[i], `"""', `""""', .) + `"""'
+    }
+    nempty = 0
+    nextra = 0
+    if (mode == "codes") {
+        idx = vec(selectindex((X :== .) :& (S :!= "")))
+        if (!rows(idx)) idx = vec(selectindex((X :< .) :& (X :!= floor(X))))
+        if (rows(idx)) {
+            u = uniqrows(S[idx])
+            u = `"""' :+ u[|1 \ min((rows(u), 5))|] :+ `"""'
+            errprintf("parqit spssencode: %s holds values that are not integer codes: %s\n",
+                var, invtokens(u', ", "))
+            errprintf("(option sequential numbers the codes 1, 2, ... instead)\n")
+            exit(198)
+        }
+        keep = !_parqit_spssenc_in(keys, miss)
+        nempty = sum(keep :& texts :== "")
+        keep = keep :& texts :!= ""
+        code = strtoreal(strtrim(vec(select(keys, keep))))
+        if (rows(code)) st_vlmodify(lab, code, vec(select(texts, keep)))
+        v = st_data(., num)                  // a copy: vec() refuses a view
+        v = uniqrows(vec(select(v, v :< .)))
+        nextra = rows(uniqrows(v \ strtoreal(strtrim(keys)))) - rows(uniqrows(strtoreal(strtrim(keys))))
+    }
+    else {
+        // encode's labels are the codes themselves: give them the SPSS texts
+        st_vlload(lab, v, t)
+        for (i = 1; i <= rows(v); i++) {
+            if (anyof(miss, t[i])) {
+                st_vlmodify(lab, v[i], "")
+                continue
+            }
+            j = vec(selectindex(keys :== t[i]))
+            if (!rows(j)) nextra++
+            else if (texts[j[1]] == "") nempty++
+            else st_vlmodify(lab, v[i], texts[j[1]])
+        }
+    }
+    for (i = 1; i <= rows(miss); i++) {
+        j = vec(selectindex(keys :== miss[i]))
+        if (rows(j)) {
+            if (texts[j[1]] != "") st_vlmodify(lab, xm[min((i, 26))], texts[j[1]])
+            else nempty++
+        }
+    }
+    displayas("text")
+    if (map != "") printf("note: SPSS user-missing codes of %s are extended missing values in %s: %s (char %s[spss_missing_map])\n",
+        var, gen, map, gen)
+    if (nextra) printf("note: %g value%s of %s %s no SPSS label%s\n", nextra,
+        nextra > 1 ? "s" : "", var, nextra > 1 ? "have" : "has",
+        mode == "codes" ? "" : " (labelled by the value itself)")
+    if (nempty) printf("note: %g SPSS label%s of %s %s empty; Stata cannot store an empty label\n",
+        nempty, nempty > 1 ? "s" : "", var, nempty > 1 ? "are" : "is")
+    st_local("_sq_map", map)
+    st_local("_sq_nlab", strofreal(rows(keys) - nempty))
+    st_local("_sq_nextra", strofreal(nextra))
+}
+
 void _parqit_wr_view_save_request(string scalar req)
 {
     _parqit_emit(req, _parqit_jobj((
@@ -4135,22 +4509,41 @@ void _parqit_resp_decorate(string scalar resp)
     }
 }
 
-void _parqit_resp_describe(string scalar resp)
+// DESCRIBE-META-1: user text in a column of w display columns — control
+// characters made visible, SMCL braces escaped, cut with "..." when longer
+string scalar _parqit_dcol(string scalar s, real scalar w, real scalar pad)
 {
-    real scalar      i, k, _li, _nl
-    real colvector   sel
-    string scalar    line, dt
+    string scalar t
+
+    t = subinstr(_parqit_controls(s), char(9), " ")
+    if (udstrlen(t) > w) t = udsubstr(t, 1, max((w - 3, 0))) + "..."
+    return(_parqit_text(t) + (pad ? max((w - udstrlen(t), 0)) * " " : ""))
+}
+
+string scalar _parqit_plural(real scalar n, string scalar what)
+{
+    return(sprintf("%g %s%s", n, what, n == 1 ? "" : "s"))
+}
+
+void _parqit_resp_describe(string scalar resp, real scalar listlab, real scalar listnotes)
+{
+    real scalar      i, j, k, _li, _nl, nw, tw, sw, fw, vw, lw, nnotes, dnotes, nvl, ls
+    real colvector   sel, o, num, hasnote, spss, isnote
+    string scalar    dlabel, t
     string rowvector f
-    string colvector dnames, dtypes, snames, stypes, sfmts, _lines
+    string matrix    p
+    string colvector dnames, dtypes, snames, stypes, sfmts, svarlab, svallab, _lines,
+                     lkey, lname, ltext, ctgt, cname, cval, dts, vls, sets, tg
 
     /* fread()+split, not fget(): a >32768-byte record (e.g. a long hex source
      * name) would be split by fget's line cap and abort the load — META-1 */
     _lines = _parqit_resp_lines(resp)
     _nl = rows(_lines)
-    dnames = dtypes = snames = stypes = sfmts = J(0, 1, "")
+    dnames = dtypes = snames = stypes = sfmts = svarlab = svallab = J(0, 1, "")
+    lkey = lname = ltext = ctgt = cname = cval = J(0, 1, "")
+    dlabel = ""
     for (_li = 1; _li <= _nl; _li++) {
-        line = _lines[_li]
-        f = _parqit_fields(line, 8)
+        f = _parqit_fields(_lines[_li], 8)
         if (f[1] == "dtype") {
             dnames = dnames \ _parqit_unhex(f[2])
             dtypes = dtypes \ _parqit_unhex(f[3])
@@ -4159,7 +4552,20 @@ void _parqit_resp_describe(string scalar resp)
             snames = snames \ _parqit_unhex(f[3])
             stypes = stypes \ _parqit_unhex(f[5])
             sfmts  = sfmts  \ _parqit_unhex(f[6])
+            svarlab = svarlab \ _parqit_unhex(f[7])
+            svallab = svallab \ _parqit_unhex(f[8])
         }
+        else if (f[1] == "vlab") {
+            lkey  = lkey  \ _parqit_unhex(f[2])
+            lname = lname \ _parqit_unhex(f[3])
+            ltext = ltext \ _parqit_unhex(f[4])
+        }
+        else if (f[1] == "char") {
+            ctgt  = ctgt  \ _parqit_unhex(f[2])
+            cname = cname \ _parqit_unhex(f[3])
+            cval  = cval  \ _parqit_unhex(f[4])
+        }
+        else if (f[1] == "dlabel") dlabel = _parqit_unhex(f[2])
         else if (f[1] == "drop") {
             displayas("error")
             printf("  (column %s not loadable: %s)\n",
@@ -4167,25 +4573,112 @@ void _parqit_resp_describe(string scalar resp)
         }
     }
 
-    displayas("text")
-    printf("  %-32s %-18s %-10s %s\n", "variable", "parquet type", "stata type", "format")
-    printf("  %s\n", 72 * "-")
+    // DESCRIBE-META-1: the file's parqit metadata arrive in the records use
+    // applies (labels, value-label sets, characteristics, notes); say what the
+    // file holds, as Stata's describe does for a dataset
     k = rows(snames)
+    isnote = (rows(cname) ? (regexm(cname, "^note[1-9][0-9]*$") :& (cval :!= "")) : J(0, 1, 0))
+    hasnote = spss = J(k, 1, 0)
+    dts = vls = J(k, 1, "")
     for (i = 1; i <= k; i++) {
+        if (rows(cname)) {
+            hasnote[i] = sum((ctgt :== snames[i]) :& isnote) > 0
+            spss[i] = sum((ctgt :== snames[i]) :& (cname :== "spss_value_labels")) > 0
+        }
         /* DESCRIBE-ALIGN-1 (audit 2026-09-01, F3): the engine type is looked
          * up by the variable's NAME (the dtype records now carry the Stata
          * name, in the var records' manifest order); a positional fallback
          * only when the name is absent. The old positional zip shifted every
          * type after a Hive partition key, which the scan lists last while the
          * manifest keeps it in its original place. */
-        sel = selectindex(dnames :== snames[i])
-        dt = (rows(sel) >= 1 ? dtypes[sel[1]] : (i <= rows(dtypes) ? dtypes[i] : ""))
-        printf("  %-32s %-18s %-10s %s\n", snames[i], dt, stypes[i], sfmts[i])
+        sel = vec(selectindex(dnames :== snames[i]))
+        dts[i] = (rows(sel) >= 1 ? dtypes[sel[1]] : (i <= rows(dtypes) ? dtypes[i] : ""))
+        vls[i] = (svallab[i] != "" ? svallab[i] : (spss[i] ? "(spss)" : ""))
+    }
+    dnotes = rows(cname) ? sum((ctgt :== "_dta") :& isnote) : 0
+    nnotes = sum(isnote)
+    sets = uniqrows(lname)
+    nvl = rows(sets)
+
+    displayas("text")
+    if (dlabel != "") printf("  dataset label: %s\n", _parqit_dcol(dlabel, 200, 0))
+    if (dnotes) printf("  (_dta has notes)\n")
+    printf("\n")
+    ls = c("linesize")
+    nw = min((32, max((8, (k ? max(udstrlen(snames)) : 0)))))
+    tw = min((18, max((12, (k ? max(udstrlen(dts)) : 0)))))
+    sw = max((10, (k ? max(strlen(stypes)) + 1 : 0)))
+    fw = max((6, (k ? max(strlen(sfmts)) : 0)))
+    vw = min((20, max((11, (k ? max(udstrlen(vls)) : 0)))))
+    lw = max((14, ls - (nw + tw + sw + fw + vw + 7)))
+    printf("  %s %s %s %s %s variable label\n", _parqit_dcol("variable", nw, 1),
+        _parqit_dcol("parquet type", tw, 1), _parqit_dcol("stata type", sw, 1),
+        _parqit_dcol("format", fw, 1), _parqit_dcol("value label", vw, 1))
+    printf("  %s\n", (nw + tw + sw + fw + vw + 5 + min((lw, 14))) * "-")
+    for (i = 1; i <= k; i++) {
+        printf("  %s %s %s %s %s %s\n", _parqit_dcol(snames[i], nw, 1),
+            _parqit_dcol(dts[i], tw, 1), _parqit_dcol(stypes[i] + (hasnote[i] ? "*" : ""), sw, 1),
+            _parqit_dcol(sfmts[i], fw, 1), _parqit_dcol(vls[i], vw, 1),
+            _parqit_dcol(svarlab[i], lw, 0))
         st_local("parqit_dname_" + strofreal(i), snames[i])
-        st_local("parqit_dtype_" + strofreal(i), dt)
+        st_local("parqit_dtype_" + strofreal(i), dts[i])
         st_local("parqit_dstype_" + strofreal(i), stypes[i])
+        st_local("parqit_dvarlab_" + strofreal(i), svarlab[i])
+        st_local("parqit_dvallab_" + strofreal(i), svallab[i])
     }
     printf("\n")
+    if (sum(hasnote)) printf("  * indicated variables have notes\n")
+    if (sum(spss :& (svallab :== "")))
+        printf("  (spss) SPSS labels in char var[spss_value_labels]; see parqit spssencode\n")
+    t = ""
+    if (sum(svarlab :!= "")) t = t + ", " + _parqit_plural(sum(svarlab :!= ""), "variable label")
+    if (nvl) t = t + ", " + _parqit_plural(nvl, "value-label set")
+    if (sum(spss)) t = t + ", SPSS labels on " + _parqit_plural(sum(spss), "variable")
+    if (t != "") printf("  labels: %s\n", substr(t, 3, .))
+    if (nnotes) printf("  notes:  %g%s\n", nnotes, dnotes ? sprintf(" (_dta %g)", dnotes) : "")
+    if ((nvl | sum(spss) | nnotes) & !(listlab | listnotes))
+        printf("  (options labels and notes list them)\n")
+
+    if (listlab) {
+        if (!nvl & !sum(spss)) printf("\n  (no value labels)\n")
+        for (j = 1; j <= nvl; j++) {
+            sel = vec(selectindex(lname :== sets[j]))
+            num = strtoreal(lkey[sel])
+            o = order(num, 1)
+            printf("\n  %s:\n", _parqit_dcol(sets[j], 32, 0))
+            for (i = 1; i <= rows(o); i++)
+                printf("  %12s %s\n", lkey[sel[o[i]]], _parqit_dcol(ltext[sel[o[i]]], 32000, 0))
+        }
+        for (i = 1; i <= k; i++) {
+            if (!spss[i]) continue
+            sel = vec(selectindex((ctgt :== snames[i]) :& (cname :== "spss_value_labels")))
+            p = _parqit_spss_pairs(cval[sel[1]], snames[i], 1)
+            // in code order, as label list shows a value label
+            num = strtoreal(p[., 1])
+            o = (hasmissing(num) ? order(p, 1) : order(num, 1))
+            printf("\n  %s (SPSS labels, char %s[spss_value_labels]):\n", snames[i], snames[i])
+            for (j = 1; j <= rows(p); j++)
+                printf("  %12s %s\n", _parqit_dcol(p[o[j], 1], 32000, 0), _parqit_dcol(p[o[j], 2], 32000, 0))
+        }
+    }
+    if (listnotes) {
+        if (!nnotes) printf("\n  (no notes)\n")
+        tg = "_dta" \ snames
+        for (i = 1; i <= rows(tg); i++) {
+            sel = (rows(cname) ? vec(selectindex((ctgt :== tg[i]) :& isnote)) : J(0, 1, .))
+            if (!rows(sel)) continue
+            num = strtoreal(substr(cname[sel], 5, .))
+            o = order(num, 1)
+            printf("\n  %s:\n", tg[i])
+            for (j = 1; j <= rows(o); j++)
+                printf("  %4.0f.  %s\n", num[o[j]], _parqit_dcol(cval[sel[o[j]]], 67784, 0))
+        }
+    }
+    if (listlab | listnotes) printf("\n")
+    st_local("parqit_dlabel", dlabel)
+    st_local("parqit_dnotes", strofreal(nnotes))
+    st_local("parqit_dnvl", strofreal(nvl))
+    st_local("parqit_dspss", sum(spss) ? invtokens(select(snames, spss)') : "")
 }
 
 void _parqit_print_resp(string scalar resp, string scalar kind)

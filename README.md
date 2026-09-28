@@ -147,7 +147,8 @@ reader**. Its identity is the layer above I/O:
   `histogram`, … are computed by the engine as push-down queries over the lazy
   view; only bounded summary output (or a few preview rows) reaches Stata and
   the current dataset stays unchanged. `describe` reads only Parquet footer
-  metadata; the other commands may scan the relevant data engine-side.
+  metadata (types, variable and value labels, notes); the other commands may
+  scan the relevant data engine-side.
 - **Out-of-core by default.** Filter, join, aggregate and reshape files larger
   than memory, using DuckDB's spillable operators and sufficient scratch space.
   Some operator states still need memory. The current Stata dataset is
@@ -353,7 +354,7 @@ Parquet; `data` explicitly selects the dataset in Stata's memory:
 ```stata
 parqit use  mydata.parquet, clear          // read whole file into memory
 parqit save mydata.parquet, replace data   // write the in-memory dataset
-parqit describe mydata.parquet             // schema, types, rows, row groups
+parqit describe mydata.parquet             // schema, types, labels, rows, row groups
 ```
 
 ## First contact with a large file
@@ -369,7 +370,7 @@ you can profile a file that would never fit in RAM before deciding what — if
 anything — to load:
 
 ```stata
-parqit describe /data/deals_*.parquet   // rows, columns, types: footer metadata only, no data scan
+parqit describe /data/deals_*.parquet   // rows, columns, types, labels: footer only, no data scan
 parqit use using /data/deals_*.parquet  // lazy view after a schema/metadata probe
 parqit head 10                          // first rows, nothing else materialised
 parqit codebook                         // per variable: type, obs, missing, distinct, min/max
@@ -550,7 +551,7 @@ converted the same way into a package-owned temporary Parquet bridge.
 | `TIME`, `MTIME` | `TIME` (`%tcHH:MM:SS`) when every value lies within a day; `DTIME` and longer durations as seconds |
 | display formats | `F`→`%w.df`, `COMMA`/`DOLLAR`→`%w.dfc`, `DOT`→`%w,dfc`, `E`→`%w.de`, `N`→`%0w.0f`; the SPSS format itself in `char var[spss_format]` |
 | variable labels | variable labels; Stata keeps 80 characters, a longer label is kept whole in `char var[spss_label]` |
-| value labels | a value label named after the variable with every integer key; what Stata cannot hold (labels of strings, of non-integer values, of dates) whole in `char var[spss_value_labels]` (JSON pairs) |
+| value labels | a value label named after the variable with every integer key; what Stata cannot hold (labels of strings, of non-integer values, of dates) whole in `char var[spss_value_labels]` (JSON pairs), which `parqit spssencode` turns into a labelled numeric variable (see *String codes* below) |
 | file label, documents | dataset label; notes on `_dta` |
 | measurement level, display width, alignment, role, custom attributes | `char var[spss_measure]`, `[spss_display_width]`, `[spss_alignment]`, `[spss_role]`, `[spss_attributes]` |
 | weight, encoding, product and creation stamp, file attributes, multiple-response and variable sets | `char _dta[spss_weight]`, `[spss_encoding]`, `[spss_product]`, `[spss_creation]`, `[spss_attributes]`, `[spss_mrsets]`, `[spss_varsets]` |
@@ -573,6 +574,26 @@ user-missing values stay text (Stata has no missing strings). Compare the
 `spss_missing_map` characteristics before appending files converted one by one:
 a value observed in only some files can get a different code in each.
 
+**String codes.** Stata cannot label a string, so a string variable keeps its
+SPSS value labels in `char var[spss_value_labels]`. With the data in memory,
+`parqit spssencode var, generate(newvar)` creates the labelled numeric version:
+
+```stata
+parqit use using firms.sav, clear         // or the Parquet file converted from it
+parqit spssencode region, generate(region_num)
+tab region_num                            // labelled with the SPSS labels
+```
+
+When every SPSS code is a distinct integer, the values are the codes themselves
+(as `destring` would give). Otherwise, as with letter codes, the codes are
+numbered 1, 2, … in code order (as `encode` does); `sequential` asks for that
+numbering even for integer codes. The dictionary, not the data, chooses the
+numbering, so files that share a dictionary share codes. SPSS user-missing codes
+become `.a`, `.b`, … with their labels (`char newvar[spss_missing_map]`). The
+value label is named after `newvar` unless `label()` names another. Values that
+do not fit the dictionary's numbering, an existing label or a malformed
+characteristic are refused before anything is created.
+
 **Encoding.** Text is decoded from the encoding the file declares: UTF-8,
 windows-1252, latin1, latin9 or macroman; another code page is refused with a
 message, and `encoding()` replaces a missing or wrong declaration. In a UTF-8
@@ -585,7 +606,9 @@ values are kept, dates are `%td` days rather than `%tc` milliseconds, a time of
 day counts from 01jan1960, and value labels Stata cannot hold are kept in
 characteristics instead of being dropped. Portable (`.por`) and encrypted SPSS
 files are not read; `parqit describe` reads Parquet footers only (describe the
-converted file, or a view opened over the SPSS file). The tests compare the
+converted file, or a view opened over the SPSS file). On the converted file it
+marks the string variables that carry SPSS labels, and its `labels` option lists
+them. The tests compare the
 conversion with three other readers: pyreadstat, Stata's `import spss` and R's
 `foreign` (see `tests/verify_suite/v127`–`v130`).
 
@@ -704,10 +727,11 @@ the view without replacing the current dataset.
 | `parqit collect [, clear int64(refuse|round|string)]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). `int64()` decides what happens to a column whose integers exceed 2^53 (default: refuse); it overrides the value the view was opened with. |
 | `parqit save <dest> [, replace data partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource xmissing]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree); `encoding()` names the legacy code page (default `windows-1252`) for text that is not valid UTF-8; `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match; `xmissing` (a memory save) preserves extended missing values `.a`–`.z` in one `int8` companion column per affected variable (`_parqit_xm_<var>`, 0 = none, 1–26 = `.a`–`.z`, listed under the `parqit.xmissing` footer key) that `parqit use`, `mergein` and `appendin` restore for every numeric storage type; the file stays ordinary Parquet for other readers. |
 | `parqit save <dest> using <file.sav> [, replace compression() compression_level() encoding()]` | Convert an SPSS `.sav`/`.zsav` file to Parquet with its whole dictionary, out of core, leaving the dataset in memory and the open views as they were (see [SPSS files](#spss-files-sav-zsav)); returns `r(N)`, `r(k)`, `r(filename)`, `r(source)`, `r(xmissing_vars)`, `r(encoding)`, `r(spss_encoding)`, `r(spss_compression)`. |
+| `parqit spssencode <strvar>, generate(<newvar>) [label(<name>) sequential]` | Labelled numeric version of a string variable read from an SPSS file, from its `char var[spss_value_labels]`: the SPSS codes when they are distinct integers, otherwise 1, 2, … in code order; user-missing codes → `.a`–`.z` (see [SPSS files](#spss-files-sav-zsav)); returns `r(mode)`, `r(label)`, `r(N_labels)`, `r(N_unlabeled)` and `r(missing_map)`. |
 | `parqit count` | Row count → `r(N)` (only the scalar result is returned). |
 | `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
 | `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). |
-| `parqit describe [file]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. The file form reads Parquet footers only (a `.csv`, `.dta`, Excel or SPSS file is refused with the alternative). |
+| `parqit describe [file] [, labels notes]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. The file form reads Parquet footers only (a `.csv`, `.dta`, Excel or SPSS file is refused with the alternative). For each variable it shows the value label and variable label, as Stata's `describe using` does. `*` marks variables with notes, and `(spss)` marks string variables whose SPSS labels are kept in `char var[spss_value_labels]`. `labels` lists the value-label sets and those SPSS labels; `notes` lists the notes. |
 
 ### Explore the view (engine-side, current dataset unchanged)
 
@@ -751,7 +775,8 @@ Labels come from the view, and the current dataset stays unchanged.
 view or into memory); Describe and explore data; Summary statistics, tables,
 and correlations; Keep or drop observations, or draw a sample (with an `if`
 frame, strata, whole clusters and an indicator); Keep, drop,
-order, sort, or rename variables; Create or change variables; Collapse,
+order, sort, or rename variables; Create or change variables (including the
+labelled numeric version of an SPSS string variable); Collapse,
 contract, pivot table, or reshape; Combine datasets (merge, append, joinby);
 Save as Parquet or collect into memory; Views, SQL, and engine settings
 (including copying a view into a new view);

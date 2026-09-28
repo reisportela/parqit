@@ -9,13 +9,15 @@
   Builds parqit gen / egen / replace. Both Create... buttons open Stata's
   expression builder (dates via td(), tm(), year(), mdy(), ...). Untyped numeric
   gen uses double; egen infers its result type. Choose a type to request explicit
-  storage. Lazy: the view's plan changes, not the data in memory.
+  storage. Lazy: the view's plan changes, not the data in memory. The fourth
+  choice, parqit spssencode, works on the data in memory instead: the labelled
+  numeric version of a string variable read from an SPSS file.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 380
+DEFINE _dlght 450
 INCLUDE header
 HELP hlp1, view("help parqit##expressions")
 RESET res1
@@ -44,9 +46,12 @@ BEGIN
 	onclickon(program main_mode)					///
 	label("Create a new variable by group (egen)")
   RADIO rb_repl			@	_ss	@	.,		///
-	last								///
 	onclickon(program main_mode)					///
 	label("Change contents of a variable (replace)")
+  RADIO rb_spss			@	_ss	@	.,		///
+	last								///
+	onclickon(program main_mode)					///
+	label("Labelled numeric version of an SPSS string variable in memory (spssencode)")
 
   TEXT tx_type			_lft	_ls	_vnwd	.,		///
 	label("Variable type:")
@@ -94,9 +99,24 @@ BEGIN
 	option(by)							///
 	label("Group variables")
 
+  TEXT tx_src			_lft	_ls	280	.,		///
+	label("SPSS string variable in memory:")
+  TEXT tx_lab			310	@	280	.,		///
+	label("Value label name (optional; default: the new variable):")
+  VARNAME vn_src		_lft	_ss	280	.,		///
+	error("SPSS string variable")					///
+	label("SPSS string variable")
+  EDIT ed_lab			310	@	160	.,		///
+	max(32)								///
+	option(label)							///
+	label("Value label name")
+  CHECKBOX ck_seq		_lft	_ms	_iwd	.,		///
+	option(sequential)						///
+	label("Number the codes 1, 2, ... even when they are integers (sequential)")
+
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
-  TEXT tx_context _lft 335 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 405 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -136,6 +156,16 @@ END
 
 PROGRAM main_mode
 BEGIN
+	if !main.rb_spss {
+		call main.tx_exp.enable
+		call main.ex_exp.enable
+		call main.tx_src.disable
+		call main.vn_src.disable
+		call main.tx_lab.disable
+		call main.ed_lab.disable
+		call main.ck_seq.disable
+		call main.tx_note.setlabel "Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage."
+	}
 	if main.rb_gen {
 		call main.tx_type.enable
 		call main.cb_type.enable
@@ -168,6 +198,25 @@ BEGIN
 		call main.tx_by.disable
 		call main.cb_by.disable
 		call main.bu_pop.disable
+	}
+	if main.rb_spss {
+		call main.tx_type.disable
+		call main.cb_type.disable
+		call main.tx_fcn.disable
+		call main.cb_fcn.disable
+		call main.tx_exp.disable
+		call main.ex_exp.disable
+		call main.tx_if.disable
+		call main.ex_if.disable
+		call main.tx_by.disable
+		call main.cb_by.disable
+		call main.bu_pop.disable
+		call main.tx_src.enable
+		call main.vn_src.enable
+		call main.tx_lab.enable
+		call main.ed_lab.enable
+		call main.ck_seq.enable
+		call main.tx_note.setlabel "Uses the SPSS codes when they are distinct integers, otherwise 1, 2, ... in code order; user-missing codes become .a-.z."
 	}
 END
 
@@ -227,5 +276,15 @@ BEGIN
 		if main.ex_if {
 			put " if " main.ex_if
 		}
+	}
+	if main.rb_spss {
+		require main.vn_src
+		require main.ed_name
+		put "parqit spssencode " main.vn_src
+		beginoptions
+			put "generate(" main.ed_name ") "
+			optionarg main.ed_lab
+			option main.ck_seq
+		endoptions
 	}
 END
