@@ -242,7 +242,34 @@ def audit_dialog(path: Path) -> list[str]:
     if "put `\"\"\"' main.fi_" in raw or "put `\"\"\"' opt.fi_" in raw:
         errors.append("FILE control is wrapped in raw double quotes; use put /smartquote")
 
+    # .formatfilter is undocumented: it takes ONE format string whose {0}, {1}
+    # are filled by the arguments that follow, so a type list passed as separate
+    # strings kept only its first entry (Browse offered Parquet only).
+    if "formatfilter" in text:
+        errors.append("uses the undocumented .formatfilter; give the FILE control a documented filter()")
+
     return sorted(set(errors))
+
+
+def source_filter_contracts(repo: Path, ado: str) -> list[str]:
+    # The Browse button of each source picker must offer every input type the
+    # resolver routes, plus Parquet (its default) and all files.
+    body = ado.split("program define _parqit_resolve_source", 1)[1].split("\nend", 1)[0]
+    exts = {"parquet", "*"}
+    for group in re.findall(r"inlist\(\"`ext'\",\s*([^)]*)\)", body):
+        exts.update(re.findall(r'"(\w+)"', group))
+    exts.update(re.findall(r"\"`ext'\"\s*==\s*\"(\w+)\"", body))
+    errors = []
+    for name in ("parqit_read", "parqit_combine"):
+        text = uncomment((repo / f"src/ado/p/{name}.dlg").read_text(encoding="utf-8"))
+        controls, _ = controls_by_tab(text.splitlines())
+        control = controls.get("main", {}).get("fi_using")
+        spec = re.search(r'\bfilter\("([^"]*)"\)', control.block) if control else None
+        offered = set(re.findall(r"\*\.(\w+|\*)", spec.group(1))) if spec else set()
+        missing = sorted(exts - offered)
+        if missing:
+            errors.append(f"{name}.dlg: fi_using filter() does not offer " + ", ".join(f"*.{e}" for e in missing))
+    return errors
 
 
 def main() -> int:
@@ -265,6 +292,7 @@ def main() -> int:
 
     ado = (repo / "src/ado/p/parqit.ado").read_text(encoding="utf-8")
     failures.extend(current_option_contracts(repo, ado))
+    failures.extend(source_filter_contracts(repo, ado))
     if re.search(r"if\s*\(\s*`i'\s*>\s*\d+", ado):
         failures.append("parqit.ado: _dlgvars silently caps the populated variable list")
     if "capture .`dlgname'.`listname'.Arrdropall" not in ado:
@@ -276,7 +304,7 @@ def main() -> int:
         for failure in failures:
             print(f"dialog-lint FAIL: {failure}", file=sys.stderr)
         return 1
-    print("dialog-lint OK: 10 dialogs; controls/lists/options/help/quoting/populate contracts")
+    print("dialog-lint OK: 10 dialogs; controls/lists/options/help/quoting/populate/file-filter contracts")
     return 0
 
 

@@ -2943,3 +2943,33 @@ entry notes the conservative fallback if the assumption proves wrong.
     fixtures are written by pyreadstat and committed; ReadStat cannot write a
     non-UTF-8 file, so legacy code pages, big-endian files and the malformations
     are covered by the unit tests only.
+
+168. **Dialog file types and the SPSS choice of the write dialog (2026-09-27,
+    DLG-FILTER-1).** (1) The FILE controls set their Browse file types with the
+    documented `filter()` option (`help dialog programming`). `.formatfilter`,
+    which StataCorp's own dialogs use, is undocumented: it takes one format
+    string whose `{0}`, `{1}`… are filled by the arguments that follow. parqit
+    passed each file type as a separate string, so only the first, Parquet,
+    reached the file chooser, and the read, combine, explore and write pickers
+    offered nothing else (reproduced in GUI Stata under Xvfb before the fix).
+    `tests/dialog_lint.py` now refuses `.formatfilter`. (2) The read and combine
+    pickers open on "Supported data files", which lists every extension that
+    `_parqit_resolve_source` routes, followed by one entry per type and by all
+    files; the lint derives that extension list from the resolver. The type
+    descriptions are short so that the one-line `filter()` literal stays below
+    the longest line in StataCorp's own dialogs (249 characters). (3) Converting
+    an SPSS file is a fourth choice of the write dialog rather than a new dialog.
+    It emits `parqit save … using`, disables every option that route refuses
+    (`data`, `copysource`, `xmissing`, `partition_by()`, `partitions()`,
+    `chunk()`), and has its own code-page selector. That selector's hidden
+    default, `declared`, emits no `encoding()`. The code-page selector for saving
+    memory hides its default `windows-1252`, so reusing it would have made an
+    SPSS file that wrongly declares UTF-8 impossible to override. (4) The read
+    dialog's code-page selector, which serves `.dta`, Excel and SPSS sources, now
+    starts on a hidden `default` that emits no `encoding()`: `.dta` and Excel
+    text is read as windows-1252, an SPSS file in the code page it declares.
+    `windows-1252` becomes an explicit choice. `utf-8` is not offered there,
+    because the `.dta`/Excel bridge refuses it; an SPSS file that declares a
+    legacy code page but holds UTF-8 text is converted from the write dialog or
+    the command line.
+

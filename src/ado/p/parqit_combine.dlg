@@ -30,13 +30,6 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
-	main.fi_using.formatfilter					///
-		"Parquet (*.parquet)|*.parquet|"			///
-		"Delimited text (*.csv *.tsv *.txt *.tab)|*.csv;*.tsv;*.txt;*.tab|" ///
-		"Stata data (*.dta)|*.dta|"				///
-		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
-		"SPSS (*.sav *.zsav)|*.sav;*.zsav|"			///
-		"All files (*.*)|*.*"
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -77,6 +70,7 @@ BEGIN
   FILE fi_using			_lft	_ss	_iwd	.,		///
 	error("Using source")						///
 	defext(parquet)							///
+	filter("Supported data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav|Parquet|*.parquet|Delimited text|*.csv;*.tsv;*.txt;*.tab|Stata data|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|All files|*.*") ///
 	label("Browse...")
 
   TEXT tx_more			_lft	_ls	_iwd	.,		///

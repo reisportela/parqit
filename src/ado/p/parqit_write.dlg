@@ -9,13 +9,15 @@
   The two materialisers: parqit collect executes the current view's pipeline
   once and replaces the data in memory atomically; parqit save executes it
   and writes Parquet directly (or, with data, writes the dataset in memory).
+  The fourth choice converts an SPSS file (.sav, .zsav) to Parquet with
+  parqit save <file> using <spss file>, user-missing codes included.
   As in Stata's own save dialogs, an existing file asks before being replaced.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 475
+DEFINE _dlght 560
 INCLUDE header
 HELP hlp1, view("help parqit##materialisers")
 RESET res1
@@ -27,9 +29,6 @@ BEGIN
 	create DOUBLE pq_populate_error
 	create DOUBLE pq_view_live
 	create STRING pq_view_name
-	main.fi_out.formatfilter					///
-		"Parquet (*.parquet)|*.parquet|"			///
-		"All files (*.*)|*.*"
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -47,11 +46,29 @@ BEGIN
 	label("Write the selected view shown below to Parquet (save)")
   RADIO rb_data _lft _ss _iwd ., onclickon(program main_mode) ///
 	label("Write the dataset in Stata memory to Parquet (save, data)")
+  RADIO rb_spss _lft _ss _iwd ., onclickon(program main_mode) ///
+	label("Convert an SPSS file (.sav, .zsav) to Parquet, user-missing codes included (save ... using)")
   RADIO rb_collect _lft _ss _iwd ., last onclickon(program main_mode) ///
 	label("Load the selected view into Stata memory (collect)")
   CHECKBOX ck_repl		_ilft	_ss	_ibwd	.,		///
 	option(clear)							///
 	label("Replace data in memory even when they have unsaved changes (clear)")
+
+  TEXT tx_spss			_ilft	_ls	400	.,		///
+	label("SPSS file to convert (.sav, .zsav):")
+  TEXT tx_spenc			440	@	140	.,		///
+	label("Code page of its text:")
+  FILE fi_spss			_ilft	_ss	400	.,		///
+	error("SPSS file")						///
+	filter("SPSS (*.sav *.zsav)|*.sav;*.zsav|All files (*.*)|*.*")	///
+	label("Browse...")
+  COMBOBOX cb_spenc		440	@	140	.,		///
+	dropdownlist							///
+	contents(spenc_list)						///
+	default("declared")						///
+	option(encoding)						///
+	tooltip("declared uses the code page the SPSS file records; choose another only when that record is missing or wrong") ///
+	label("Code page")
 
   TEXT tx_out			_ilft	_ls	_ibwd	.,		///
 	label("Filename (a directory when partitioning):")
@@ -59,6 +76,7 @@ BEGIN
 	error("Filename")						///
 	defext(parquet)							///
 	save								///
+	filter("Parquet (*.parquet)|*.parquet|All files (*.*)|*.*")	///
 	label("Save as...")
   CHECKBOX ck_replace		@	_ls	@	.,		///
 	option(replace)							///
@@ -120,9 +138,9 @@ BEGIN
 	default("windows-1252")						///
 	option(encoding)						///
 	label("Code page")
-  TEXT tx_context _lft 405 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 490 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
-  TEXT tx_int64 _ilft 435 300 ., label("Large integers on collect (default = inherit):")
+  TEXT tx_int64 _ilft 520 300 ., label("Large integers on collect (default = inherit):")
   COMBOBOX cb_int64 330 @ 140 ., dropdownlist contents(i64_list) ///
 	default("default") option(int64) label("Integers beyond 2^53") ///
 	tooltip("default inherits the view/session setting; string keeps exact digits, round accepts loss, refuse stops the load")
@@ -130,21 +148,26 @@ END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
-	put dlgname
-	if main.rb_data {
-		put ", data"
+	if main.rb_spss {
+		call main.tx_context.setlabel "Source: the SPSS file named above"
 	}
 	else {
-		put ", target"
+		put "parqit _dlgcontext "
+		put dlgname
+		if main.rb_data {
+			put ", data"
+		}
+		else {
+			put ", target"
+		}
+		stata hidden queue
+		clear
 	}
-	stata hidden queue
-	clear
 END
 
 PROGRAM main_refresh
 BEGIN
-	if main.rb_collect {
+	if main.rb_collect | main.rb_spss {
 		call program main_context
 	}
 	else {
@@ -176,6 +199,16 @@ END
 
 LIST enc_list
 BEGIN
+	windows-1252
+	latin1
+	latin9
+	macroman
+END
+
+LIST spenc_list
+BEGIN
+	declared
+	utf-8
 	windows-1252
 	latin1
 	latin9
@@ -214,11 +247,21 @@ BEGIN
 		call main.cb_pmode.disable
 		call main.tx_enc.disable
 		call main.cb_enc.disable
+		call main.tx_spss.disable
+		call main.fi_spss.disable
+		call main.tx_spenc.disable
+		call main.cb_spenc.disable
+		call main.tx_out.setlabel "Filename (a directory when partitioning):"
 	}
 	if main.rb_save | main.rb_data {
 		call main.ck_repl.disable
 		call main.tx_int64.disable
 		call main.cb_int64.disable
+		call main.tx_spss.disable
+		call main.fi_spss.disable
+		call main.tx_spenc.disable
+		call main.cb_spenc.disable
+		call main.tx_out.setlabel "Filename (a directory when partitioning):"
 		call main.tx_out.enable
 		call main.fi_out.enable
 		call main.ck_replace.enable
@@ -248,6 +291,36 @@ BEGIN
 			call main.ck_xmiss.disable
 		}
 	}
+	if main.rb_spss {
+		call main.ck_repl.disable
+		call main.tx_int64.disable
+		call main.cb_int64.disable
+		call main.tx_spss.enable
+		call main.fi_spss.enable
+		call main.tx_spenc.enable
+		call main.cb_spenc.enable
+		call main.tx_out.setlabel "Parquet file to write:"
+		call main.tx_out.enable
+		call main.fi_out.enable
+		call main.ck_replace.enable
+		call main.ck_copy.setoff
+		call main.ck_copy.disable
+		call main.ck_xmiss.setoff
+		call main.ck_xmiss.disable
+		call main.tx_comp.enable
+		call main.cb_comp.enable
+		call main.tx_level.enable
+		call main.ed_level.enable
+		call main.tx_chunk.disable
+		call main.ed_chunk.disable
+		call main.tx_part.disable
+		call main.bu_pop.disable
+		call main.cb_part.disable
+		call main.tx_pmode.disable
+		call main.cb_pmode.disable
+		call main.tx_enc.disable
+		call main.cb_enc.disable
+	}
 	call program main_context
 END
 
@@ -276,7 +349,7 @@ END
 
 PROGRAM command
 BEGIN
-	if !main.rb_data & !pq_view_live {
+	if !main.rb_data & !main.rb_spss & !pq_view_live {
 		stopbox stop "No view is selected. Open a view and click Refresh, or select the dataset in Stata memory."
 	}
 	if main.rb_collect {
@@ -313,6 +386,25 @@ BEGIN
 			}
 			option main.ck_copy
 			option main.ck_xmiss
+		endoptions
+	}
+	if main.rb_spss {
+		require main.fi_spss
+		require main.fi_out
+		if !main.ck_replace {
+			repfile main.fi_out
+		}
+		put "parqit save "
+		put /smartquote main.fi_out
+		put " using "
+		put /smartquote main.fi_spss
+		beginoptions
+			if main.ck_replace | main.fi_out.repfile {
+				put "replace "
+			}
+			optionarg /hidedefault main.cb_comp
+			optionarg main.ed_level
+			optionarg /hidedefault main.cb_spenc
 		endoptions
 	}
 END

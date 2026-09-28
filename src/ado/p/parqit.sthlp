@@ -290,12 +290,15 @@ memory with {opt clear} — {cmd:open _data}, and {cmd:path}; {bf:Populate}
 lists the variables recorded in the Parquet footer of the source, and
 {bf:Describe} runs {cmd:describe} on it. These two footer-inspection buttons
 are disabled for recognized delimited-text, Stata, Excel and SPSS inputs; those
-sources can still be opened, and variable names can be typed. The
+sources can still be opened, and variable names can be typed. {bf:Browse}
+lists every supported input type together, or one type at a time. The
 {opt int64()}, {opt binary()}, {opt filename()} and {opt csv()} options have
 their own fields (the last a free-text field for the delimited-text reader's
 sub-options, such as {cmd:delim(;) header(off)}). The integer selector's
 {bf:default} choice inherits the session setting; selecting {bf:refuse},
-{bf:round} or {bf:string} emits that explicit option.{p_end}
+{bf:round} or {bf:string} emits that explicit option. Likewise the code-page
+selector's {bf:default} emits no {opt encoding()}: {cmd:.dta} and Excel text is
+read as windows-1252, an SPSS file in the code page it declares.{p_end}
 
 {phang2}{bf:User > parqit > Describe and explore data...}{p_end}
 {p 12 12 2}({cmd:db parqit_explore}) {cmd:describe}/{cmd:glimpse} of the view
@@ -342,11 +345,16 @@ sources) and {cmd:joinby} over files, globs, Hive directories or
 in memory, with the native merge options and an {opt int64()} selector on
 the {bf:Options} tab. That selector applies only to the memory routes. The
 additional-sources field is raw Stata source-list syntax: compound-quote each
-path that contains spaces or commas.{p_end}
+path that contains spaces or commas. {bf:Browse} offers the same file types
+as the read dialog.{p_end}
 
 {phang2}{bf:User > parqit > Save as Parquet or collect into memory...}{p_end}
-{p 12 12 2}({cmd:db parqit_write}) three explicit choices: save the selected
-view to Parquet (the initial choice), save Stata memory with {opt data}, or
+{p 12 12 2}({cmd:db parqit_write}) four explicit choices: save the selected
+view to Parquet (the initial choice), save Stata memory with {opt data},
+convert an SPSS file with {cmd:parqit save} {it:newfile} {cmd:using}
+{it:spssfile} [{opt replace} {opt compression()} {opt compression_level()}
+{opt encoding()}] (see {help parqit##spss:SPSS files}; the code page
+{bf:declared} keeps the one the file records), or
 {cmd:collect} [{opt clear} {opt int64()}]. The integer selector is enabled
 for collect; {bf:default} inherits the view's option or the session setting.
 View save and collect use

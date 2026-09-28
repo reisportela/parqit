@@ -25,13 +25,6 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
-	main.fi_using.formatfilter					///
-		"Parquet (*.parquet)|*.parquet|"			///
-		"Delimited text (*.csv *.tsv *.txt *.tab)|*.csv;*.tsv;*.txt;*.tab|" ///
-		"Stata data (*.dta)|*.dta|"				///
-		"Excel (*.xlsx *.xls)|*.xlsx;*.xls|"			///
-		"SPSS (*.sav *.zsav)|*.sav;*.zsav|"			///
-		"All files (*.*)|*.*"
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -67,6 +60,7 @@ BEGIN
 	onchange(program main_source)					///
 	error("Filename")						///
 	defext(parquet)							///
+	filter("Supported data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav|Parquet|*.parquet|Delimited text|*.csv;*.tsv;*.txt;*.tab|Stata data|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|All files|*.*") ///
 	label("Browse...")
 
   TEXT tx_vars			_lft	_ls	_lw80	.,		///
@@ -99,8 +93,9 @@ BEGIN
   COMBOBOX cb_enc		@	_ss	_vnwd	.,		///
 	dropdownlist							///
 	contents(enc_list)						///
-	default("windows-1252")						///
+	default("default")						///
 	option(encoding)						///
+	tooltip("default: .dta and Excel text as windows-1252, an SPSS file in the code page it declares; a named code page is passed as encoding()") ///
 	label("Code page")
 
   CHECKBOX ck_relaxed		_lft	_ls	_iwd	.,		///
@@ -151,6 +146,7 @@ END
 
 LIST enc_list
 BEGIN
+	default
 	windows-1252
 	latin1
 	latin9

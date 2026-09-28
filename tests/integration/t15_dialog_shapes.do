@@ -38,6 +38,7 @@ local out    `"`stem'_out.parquet"'
 local out2   `"`stem'_out2.parquet"'
 local part   `"`stem'_part"'
 local copy   `"`stem'_copy.parquet"'
+local spssout `"`stem'_spss.parquet"'
 
 sysuse auto, clear
 gen long id = _n
@@ -71,6 +72,10 @@ capture noisily parqit use using `"`autodta'"', encoding(latin1)
 _shape `=_rc' "parqit use using file.dta, encoding()"
 capture noisily parqit use using `"`autodta'"', clear encoding(latin1)
 _shape `=_rc' "parqit use using file.dta, clear encoding()"
+capture noisily parqit use using `"`autodta'"', clear encoding(windows-1252)
+_shape `=_rc' "parqit use using file.dta, clear encoding(windows-1252) (now a named choice)"
+capture noisily parqit use using `"`repo'/tests/fixtures/spss/survey.sav"', clear encoding(windows-1252)
+_shape `=_rc' "parqit use using file.sav, clear encoding(windows-1252)"
 * CSV-OPT-1 dialog field: csv() reaches the ado as one option string
 tempfile autocsv
 quietly export delimited using `"`autocsv'.csv"', replace delimiter(";")
@@ -382,6 +387,12 @@ parqit close _all
 parqit use using `"`auto'"', clear
 capture noisily parqit save `"`copy'"', replace data copysource
 _shape `=_rc' "parqit save file, replace data copysource"
+* the SPSS conversion choice: save ... using, with and without its options
+capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/spss/survey.sav"', ///
+    replace compression(zstd) compression_level(3) encoding(utf-8)
+_shape `=_rc' "parqit save file using spss, replace compression() compression_level() encoding()"
+capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/spss/survey.zsav"', replace
+_shape `=_rc' "parqit save file using zsav, replace"
 
 * --- Views, SQL, and engine settings (db parqit_views) ------------------------
 di as txt _n "db parqit_views"

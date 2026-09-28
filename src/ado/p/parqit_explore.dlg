@@ -26,9 +26,6 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
-	main.fi_file.formatfilter					///
-		"Parquet (*.parquet)|*.parquet|"			///
-		"All files (*.*)|*.*"
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -53,6 +50,7 @@ BEGIN
   FILE fi_file			275	_ss	315	.,		///
 	error("Filename")						///
 	defext(parquet)							///
+	filter("Parquet (*.parquet)|*.parquet|All files (*.*)|*.*")	///
 	label("Browse...")
 
   TEXT tx_vars			275	_ls	230	.,		///

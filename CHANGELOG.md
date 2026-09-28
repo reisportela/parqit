@@ -6,6 +6,32 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Added
+- **The write dialog converts SPSS files.** **User > parqit > Save as Parquet
+  or collect into memory...** has a fourth choice that builds `parqit save
+  <file> using <file>.sav [, replace compression() compression_level()
+  encoding()]`, with its own SPSS file picker and a code-page selector whose
+  default, `declared`, keeps the code page the file records (ASSUMPTIONS #168).
+
+### Fixed
+- **The Browse buttons of the read, combine, explore and write dialogs offered
+  only Parquet files.** The file-type list went to Stata's undocumented
+  `.formatfilter` as separate strings, and only the first survived. The
+  dialogs now use the documented `filter()` of the FILE control: the read and
+  combine pickers list every supported input type together, then Parquet,
+  delimited text, Stata, Excel and SPSS one at a time, then all files.
+- The write dialog's context line no longer overlaps the code-page selector.
+- The read dialog's code-page selector starts on `default`, which emits no
+  `encoding()` (`.dta` and Excel text as windows-1252, an SPSS file in the code
+  page it declares). `windows-1252` is now a choice that is passed on, so an SPSS
+  file that declares the wrong code page can be read from the dialog.
+
+### Tests
+- `v92` covers `.sav`/`.zsav` in any case in the dialog source helper; `t15`
+  runs the SPSS conversion shapes the write dialog emits; `dialog_lint.py`
+  refuses `.formatfilter` and requires the read and combine pickers to offer
+  every extension the source resolver routes.
+
 ## [0.2.5] — 2026-09-27
 
 ### Added

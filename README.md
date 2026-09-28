@@ -770,7 +770,9 @@ complement it and never alter Stata's own menus.
 The context line and **Refresh** identify the view and update variable pickers.
 Numeric calculations offer numeric variables; tabulations also offer strings,
 separate row/column fields and `nolabel`. The write dialog starts with saving
-a view and separates that from saving Stata memory or collecting a view.
+a view and separates that from saving Stata memory, converting an SPSS file
+(`parqit save … using`) or collecting a view. The read and combine dialogs'
+**Browse** lists every supported input type, together or one type at a time.
 View save/collect name the selected view in the emitted command, so closing it
 cannot redirect a save to memory. Each Help button opens the relevant section.
 Integer-precision selectors are available on read, collect, mergein and appendin:
