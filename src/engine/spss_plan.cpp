@@ -111,6 +111,7 @@ struct Profile {
     bool range_more = false;     /* ... and there were more than kept */
     size_t max_bytes = 0;
     long long transcoded = 0;
+    long long undecodable = 0;   /* cells with bytes the encoding does not define */
 };
 
 constexpr size_t kRangeKeep = 64;
@@ -254,7 +255,9 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
                 Profile &p = prof[i];
                 if (v.is_string()) {
                     r.raw_string(v, &raw);
-                    if (decode_text(d, raw.data(), raw.size(), &utf8)) p.transcoded++;
+                    size_t bad = 0;
+                    if (decode_text(d, raw.data(), raw.size(), &utf8, &bad)) p.transcoded++;
+                    if (bad) p.undecodable++;
                     p.max_bytes = std::max(p.max_bytes, utf8.size());
                     continue;
                 }
@@ -307,6 +310,7 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
     /* column indices for the notes, named by their Stata names once known */
     std::vector<size_t> became_ts, became_seconds, time_seconds, str_missing, overflowed;
     std::vector<std::string> long_labels, char_labels;
+    long long undecodable_cells = 0;
     for (size_t i = 0; i < nv; i++) {
         const Variable &v = d.vars[i];
         const Profile &p = prof[i];
@@ -317,6 +321,7 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
         c.transcoded_cells = p.transcoded;
         c.max_bytes = p.max_bytes;
         plan.transcoded_cells += p.transcoded;
+        undecodable_cells += p.undecodable;
         if (v.is_string()) {
             c.kind = OutKind::Varchar;
             c.stata_type = p.max_bytes > static_cast<size_t>(kStataStrMax)
@@ -601,6 +606,13 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
                              "transcoded from " + std::string(legacy_encoding_name(d.legacy)) + ": " +
                              std::to_string(plan.transcoded_cells) + " string cell(s), " +
                              std::to_string(plan.transcoded_meta) + " dictionary text(s)");
+    if (undecodable_cells > 0 || d.undecodable_meta > 0)
+        plan.notes.push_back("text holding bytes that " + std::string(d.utf8 ? "UTF-8" :
+                             legacy_encoding_name(d.legacy)) + " does not define was kept with "
+                             "U+FFFD in their place: " + std::to_string(undecodable_cells) +
+                             " string cell(s), " + std::to_string(d.undecodable_meta) +
+                             " dictionary text(s); if the file's text is in another encoding, "
+                             "give encoding()");
     if (!d.ignored.empty()) {
         std::string what;
         for (size_t k = 0; k < d.ignored.size(); k++) what += (k ? "; " : "") + d.ignored[k];

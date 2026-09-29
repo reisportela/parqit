@@ -31,6 +31,7 @@
 #include "engine/exprtrans.hpp"
 #include "engine/hexcodec.hpp"
 #include "engine/legacy_encoding.hpp"
+#include "engine/text_file.hpp"
 #include "engine/request.hpp"
 #include "engine/sanitize.hpp"
 #include "engine/session.hpp"
@@ -61,10 +62,12 @@ constexpr ST_retcode kRcEngine = 920;
 /* Stata's "no room to add more observations" — the SPI obs index (ST_int)
  * is a 32-bit int, so one dataset can address at most 2^31-1 rows */
 constexpr ST_retcode kRcNoRoomObs = 901;
+/* like Stata's "file not ... format": delimited text parqit cannot read as text */
+constexpr ST_retcode kRcNotText = 610;
 constexpr long long kSpiMaxObs = 2147483647LL;
 
 void cry(const std::string &s) {
-    std::string line = s;
+    std::string line = parqit::with_encoding_hint(s); /* CSV-ENC-1 */
     line.push_back('\n');
     SF_error(const_cast<char *>(line.c_str()));
 }
@@ -702,13 +705,15 @@ bool view_is_live() {
 
 /* =========================================== internal bridge lifecycle ===== */
 
-ST_retcode cmd_bridge_new(const std::vector<std::string> &args) {
-    std::string tmpdir, kind;
-    if (args.size() < 3 || !parqit::hex_decode(args[1], tmpdir) ||
-        !parqit::hex_decode(args[2], kind) || tmpdir.empty() || kind.empty()) {
-        cry("parqit bridge: malformed reservation request");
-        return kRcUsage;
-    }
+namespace {
+
+/* Reserves a process- and operation-unique package-owned bridge: a fresh
+ * directory in tmpdir (*root_out) holding `leaf` — a file, or a pattern over
+ * the files the caller writes there; the whole directory is erased with the
+ * bridge. */
+ST_retcode reserve_bridge(const std::string &tmpdir, const std::string &kind,
+                          const std::string &leaf_file, std::string *path,
+                          std::filesystem::path *root_out = nullptr) {
     for (unsigned char c : kind) {
         if (!(std::isalnum(c) || c == '_')) {
             cry("parqit bridge: invalid bridge kind");
@@ -732,10 +737,10 @@ ST_retcode cmd_bridge_new(const std::vector<std::string> &args) {
         const std::filesystem::path root = parent / std::filesystem::u8path(leaf);
         ec.clear();
         if (std::filesystem::create_directory(root, ec)) {
-            const std::filesystem::path file = root / "bridge.parquet";
-            const std::string path = file.u8string();
-            g_bridges.emplace(path, BridgeState{root, 0, true});
-            save_local("_parqit_bridge", parqit::hex_encode(path));
+            const std::filesystem::path file = root / std::filesystem::u8path(leaf_file);
+            *path = file.u8string();
+            g_bridges.emplace(*path, BridgeState{root, 0, true});
+            if (root_out) *root_out = root;
             return 0;
         }
         if (ec) {
@@ -748,6 +753,339 @@ ST_retcode cmd_bridge_new(const std::vector<std::string> &args) {
     }
     cry("parqit bridge: could not reserve a unique temporary path after 128 attempts");
     return kRcEngine;
+}
+
+} // namespace
+
+ST_retcode cmd_bridge_new(const std::vector<std::string> &args) {
+    std::string tmpdir, kind;
+    if (args.size() < 3 || !parqit::hex_decode(args[1], tmpdir) ||
+        !parqit::hex_decode(args[2], kind) || tmpdir.empty() || kind.empty()) {
+        cry("parqit bridge: malformed reservation request");
+        return kRcUsage;
+    }
+    std::string path;
+    const ST_retcode rc = reserve_bridge(tmpdir, kind, "bridge.parquet", &path);
+    if (rc) return rc;
+    save_local("_parqit_bridge", parqit::hex_encode(path));
+    return 0;
+}
+
+namespace {
+
+/* the files a glob pattern names, in the order the engine lists them */
+bool expand_glob(const std::string &pattern, std::vector<std::string> *files, std::string *err) {
+    Session &s = Session::instance();
+    duckdb_result res;
+    if (!s.query("SELECT file FROM glob(" + parqit::quote_literal(pattern) + ") ORDER BY file", &res,
+                 err))
+        return false;
+    const idx_t n = duckdb_row_count(&res);
+    for (idx_t r = 0; r < n; r++) {
+        char *v = duckdb_value_varchar(&res, 0, r);
+        if (v) {
+            files->push_back(v);
+            duckdb_free(v);
+        }
+    }
+    duckdb_destroy_result(&res);
+    return true;
+}
+
+/* `*` and `?` are the live metacharacters of a path that names no file; `[`
+ * is literal (GLOB-2, plugin_io.cpp source_for) */
+bool has_wildcard(const std::string &s) { return s.find_first_of("*?") != std::string::npos; }
+
+std::string bracket_literal(const std::string &p) {
+    std::string out;
+    for (char c : p) {
+        if (c == '[') out += "[[]";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+std::string upper(std::string s) {
+    for (auto &c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::string thousands(long long n) {
+    std::string d = std::to_string(n < 0 ? -n : n), out;
+    for (size_t i = 0; i < d.size(); i++) {
+        if (i && (d.size() - i) % 3 == 0) out.push_back(',');
+        out.push_back(d[i]);
+    }
+    return n < 0 ? "-" + out : out;
+}
+
+/* notes about the files of a source, several of a kind named by the first few */
+struct NoteList {
+    std::vector<std::string> notes;
+    void per_file(const std::vector<std::string> &lines, const std::string &pattern) {
+        const size_t shown = lines.size() > 5 ? 4 : lines.size();
+        for (size_t i = 0; i < shown; i++) notes.push_back(lines[i]);
+        if (lines.size() > shown)
+            notes.push_back("... and " + thousands(static_cast<long long>(lines.size() - shown)) +
+                            " more file(s) of " + pattern + " likewise");
+    }
+};
+
+} // namespace
+
+/* CSV-ENC-1: how delimited text is read (engine/text_file). A file that is not
+ * UTF-8 — by its byte-order mark, its UTF-16 pattern, the encoding() given or,
+ * for a lookup file (mode "using"), its bytes — is decoded into a
+ * package-owned UTF-8 bridge, reserved only then. The bridge keeps the file
+ * names and every key=value directory of the source path, because the engine
+ * reads those as Hive partition columns: a single file becomes
+ * <root>/<keys>/<name>, a glob of the main source <root>/<keys>/<pattern> over
+ * copies placed as the pattern matched them (files already UTF-8 copied as
+ * they are). A path that names a file is that file, even with `*` or `?` in
+ * its name; otherwise `*` and `?` are live and `[` is literal (GLOB-2). A
+ * missing file or an empty glob is left for the reader to report. The notes
+ * (hex) and the facts travel back as locals. */
+ST_retcode cmd_text_prepare(const std::vector<std::string> &args) {
+    namespace fs = std::filesystem;
+    std::string err;
+    json req;
+    if (!load_req(args, &req, &err)) {
+        cry(err);
+        return kRcUsage;
+    }
+    parqit::TextPlanRequest pr;
+    std::string tmpdir, mode;
+    if (!parqit::req_text(req, "src", &pr.path, &err) ||
+        !parqit::req_text(req, "tmpdir", &tmpdir, &err) ||
+        !parqit::req_text(req, "mode", &mode, &err) ||
+        !parqit::req_text(req, "encoding", &pr.encoding, &err, false)) {
+        cry("parqit: " + err);
+        return kRcUsage;
+    }
+    pr.all = req.value("all", false);
+    /* mode: "source" (a main source, scanned in place), "lookup" (the disk
+     * side of mergein/appendin, scanned in place) or "using" (a lookup
+     * imported into Stata). Undeclared text that is not UTF-8 is decoded from
+     * the session code page in a lookup, and left for the engine to refuse
+     * in a main source. */
+    pr.check_undeclared = mode == "using" || mode == "lookup";
+    pr.session_default = encoding_session_default();
+
+    std::error_code ec;
+    const bool exists = fs::exists(fs::u8path(pr.path), ec);
+    const bool is_file = exists && fs::is_regular_file(fs::u8path(pr.path), ec);
+    /* a lookup imported into Stata is read one file at a time: its reader
+     * reports a pattern */
+    const bool glob = !exists && has_wildcard(pr.path) && mode != "using";
+
+    std::vector<std::string> files;
+    std::vector<fs::path> rels;
+    fs::path base, rest, keys;
+    if (is_file || glob) {
+        /* the path exactly as the reader would get it, never normalized: the
+         * system resolves link/.. physically (a lexical `..` would read other
+         * files), and the engine parses Hive keys from the path it is given */
+        const fs::path given = fs::u8path(pr.path);
+        if (glob) {
+            bool in_rest = false;
+            for (const fs::path &part : given) {
+                if (!in_rest && has_wildcard(part.u8string())) in_rest = true;
+                if (in_rest) rest /= part;
+                else base /= part;
+            }
+            std::vector<std::string> found;
+            if (!expand_glob(bracket_literal(pr.path), &found, &err)) {
+                cry("parqit: " + err);
+                return kRcEngine;
+            }
+            /* where a matched file goes in the copy: its place under the
+             * pattern's fixed prefix (compared lexically: the files are those
+             * the engine's glob found, through the system's resolution) */
+            const fs::path nbase = base.lexically_normal();
+            for (const auto &f : found) {
+                const fs::path rel = fs::u8path(f).lexically_normal().lexically_relative(nbase);
+                if (rel.empty() || rel.begin()->u8string() == "..") {
+                    cry("parqit: " + f + " does not lie under " + base.u8string() +
+                        ", where the pattern " + pr.path + " starts");
+                    return kRcEngine;
+                }
+                files.push_back(f);
+                rels.push_back(rel);
+            }
+            rest = rest.lexically_normal();
+        } else {
+            base = given.parent_path();
+            rest = given.filename();
+            files.push_back(pr.path);
+            rels.push_back(rest);
+        }
+        /* the key=value directories of the fixed part of the path, as the
+         * engine would read them from the path given */
+        for (const fs::path &part : base)
+            if (part.u8string().find('=') != std::string::npos) keys /= part;
+    }
+
+    std::vector<parqit::TextPlan> plans(files.size());
+    bool any = false;
+    for (size_t i = 0; i < files.size(); i++) {
+        parqit::TextPlanRequest one = pr;
+        one.path = files[i];
+        if (!parqit::text_file_plan(one, &plans[i], &err)) {
+            cry("parqit: " + err);
+            return plans[i].usage_error ? kRcUsage : kRcNotText;
+        }
+        any = any || plans[i].decode;
+    }
+
+    std::vector<parqit::TextDecodeStats> stats(files.size());
+    std::string bridge;
+    if (any) {
+        fs::path root;
+        const ST_retcode rc =
+            reserve_bridge(tmpdir, "csv", (keys / rest).u8string(), &bridge, &root);
+        if (rc) return rc;
+        for (size_t i = 0; i < files.size(); i++) {
+            const fs::path dest = root / keys / rels[i];
+            fs::create_directories(dest.parent_path(), ec);
+            bool ok = !ec;
+            if (!ok) err = "cannot create " + dest.parent_path().u8string() + ": " + ec.message();
+            if (ok && plans[i].decode) {
+                ok = parqit::text_file_decode(files[i], dest.u8string(), plans[i].enc, pr.all,
+                                              plans[i].skip, &stats[i], &err);
+            } else if (ok) {
+                fs::copy_file(fs::u8path(files[i]), dest, ec);
+                if (ec) {
+                    ok = false;
+                    err = "cannot copy " + files[i] + ": " + ec.message();
+                }
+            }
+            if (!ok) {
+                std::string ignored;
+                erase_bridge_record(bridge, &ignored);
+                cry("parqit: " + err);
+                return kRcEngine;
+            }
+        }
+    }
+
+    /* what happened, said file by file where it differs between files */
+    const std::string what =
+        glob ? pr.path + " (" + thousands(static_cast<long long>(files.size())) + " files)" : pr.path;
+    auto shown = [&](size_t i) { return glob ? rels[i].generic_u8string() : pr.path; };
+    NoteList notes;
+    std::vector<std::string> over, bom16, pat16, overruled, valid;
+    std::string legacy, encoding;
+    long long leg_lines = 0, leg_kept = 0, leg_revalid = 0, leg_bad = 0, u8_lines = 0, u8_bad = 0,
+              u16_bad = 0, lines = 0, revalid = 0, bad = 0;
+    bool defaulted = false, leg_nul = false;
+    for (size_t i = 0; i < files.size(); i++) {
+        const auto &pl = plans[i];
+        const auto &st = stats[i];
+        if (pl.bom_overrode) {
+            const std::string b = pl.found == "utf-8 bom" ? "UTF-8" : upper(pl.enc.name());
+            over.push_back(shown(i) + " starts with a " + b + " byte-order mark, so it was read as " +
+                           b + ", not " + pl.given);
+        } else if (pl.found == "utf-16le bom" || pl.found == "utf-16be bom") {
+            bom16.push_back(shown(i) + " is " + upper(pl.enc.name()) +
+                            " text (by its byte-order mark); it was decoded to UTF-8");
+        } else if (pl.found.find(" nul") != std::string::npos) {
+            pat16.push_back(shown(i) + " has no byte-order mark but a NUL byte in every other byte, as " +
+                            upper(pl.enc.name()) + " text has; it was decoded from " +
+                            upper(pl.enc.name()));
+        } else if (pl.found.find(" lines") != std::string::npos) {
+            pat16.push_back(shown(i) + " has no byte-order mark, but its line ends are " +
+                            upper(pl.enc.name()) + " line ends and its text is not UTF-8; it was "
+                            "decoded from " + upper(pl.enc.name()));
+        }
+        if (!pl.pattern_overruled.empty())
+            overruled.push_back(shown(i) + " looks like " + upper(pl.pattern_overruled) +
+                                " text without a byte-order mark, but it was read as " + pl.given +
+                                ", as encoding() says; if it is " + upper(pl.pattern_overruled) +
+                                ", give encoding(" + pl.pattern_overruled + ")");
+        if (pl.kept_valid)
+            valid.push_back(shown(i) + " is valid UTF-8 throughout, so it was read as UTF-8, not "
+                            "decoded from " + pl.given + "; if its text is " + pl.given +
+                            ", give encoding(" + pl.given + ", all)");
+        if (!pl.decode) continue;
+        lines += st.lines_decoded;
+        revalid += st.lines_revalid;
+        bad += st.undecodable;
+        if (encoding.empty()) encoding = pl.enc.name();
+        if (pl.enc.is_utf16()) {
+            u16_bad += st.undecodable;
+        } else if (pl.enc.is_utf8()) {
+            u8_lines += st.lines_decoded;
+            u8_bad += st.undecodable;
+        } else {
+            legacy = pl.enc.name();
+            leg_lines += st.lines_decoded;
+            leg_kept += st.lines_kept;
+            leg_revalid += st.lines_revalid;
+            leg_bad += st.undecodable;
+            defaulted = defaulted || pl.defaulted;
+            leg_nul = leg_nul || pl.has_nul;
+        }
+    }
+    if (!legacy.empty()) encoding = legacy;
+    notes.per_file(over, pr.path);
+    notes.per_file(bom16, pr.path);
+    notes.per_file(pat16, pr.path);
+    notes.per_file(overruled, pr.path);
+    notes.per_file(valid, pr.path);
+    if (!legacy.empty() && leg_lines == 0) {
+        /* a single-byte code page read line by line: nothing needed decoding */
+        if (leg_kept > 0)
+            notes.notes.push_back(what + " was read with encoding(" + legacy + "), but its " +
+                                  thousands(leg_kept) + " line(s) with non-ASCII text were valid "
+                                  "UTF-8 already and were kept as they are (encoding(" + legacy +
+                                  ", all) decodes them too)");
+    } else if (!legacy.empty()) {
+        if (defaulted)
+            notes.notes.push_back(what + " declares no encoding and is not UTF-8: " +
+                                  thousands(leg_lines) + " line(s) were decoded from " + legacy +
+                                  ", the default — give encoding() if its text is in another code "
+                                  "page (see help parqit)" +
+                                  (leg_nul ? "; it holds NUL bytes: if it is UTF-16 text, give "
+                                             "encoding(utf-16le) or encoding(utf-16be)"
+                                           : ""));
+        else
+            notes.notes.push_back(what + " is not UTF-8: " + thousands(leg_lines) +
+                                  " line(s) were decoded from " + legacy + " to UTF-8");
+        if (leg_kept > 0)
+            notes.notes.push_back(thousands(leg_kept) + " line(s) of it were valid UTF-8 already and "
+                                  "were kept as they are (encoding(" + legacy +
+                                  ", all) decodes them too)");
+        if (leg_revalid > 0)
+            notes.notes.push_back(thousands(leg_revalid) + " of the decoded lines were valid UTF-8 and "
+                                  "were decoded from " + legacy + " as well: text in a legacy "
+                                  "encoding can be valid UTF-8 by accident");
+        if (leg_bad > 0)
+            notes.notes.push_back(thousands(leg_bad) + " byte sequence(s) in " + what +
+                                  " are not defined in " + legacy + "; each became U+FFFD, the "
+                                  "replacement character — check the encoding");
+    }
+    if (u8_bad > 0)
+        notes.notes.push_back(thousands(u8_lines) + " line(s) of " + what + " held bytes that are not "
+                              "UTF-8; each such sequence (" + thousands(u8_bad) + ") became U+FFFD, "
+                              "the replacement character");
+    if (u16_bad > 0)
+        notes.notes.push_back(thousands(u16_bad) + " broken UTF-16 code unit(s) in " + what +
+                              " (a lone surrogate or an odd final byte) became U+FFFD, the "
+                              "replacement character");
+
+    save_local("_parqit_tf_bridge", parqit::hex_encode(bridge));
+    save_local("_parqit_tf_nnotes", std::to_string(notes.notes.size()));
+    for (size_t i = 0; i < notes.notes.size(); i++)
+        save_local(("_parqit_tf_note" + std::to_string(i + 1)).c_str(),
+                   parqit::hex_encode(notes.notes[i]));
+    save_local("_parqit_tf_encoding", encoding);
+    save_local("_parqit_tf_legacy", legacy);
+    save_local("_parqit_tf_defaulted", defaulted ? "1" : "0");
+    save_local("_parqit_tf_files", std::to_string(files.size()));
+    save_local("_parqit_tf_decoded", std::to_string(lines));
+    save_local("_parqit_tf_revalid", std::to_string(revalid));
+    save_local("_parqit_tf_undecodable", std::to_string(bad));
+    return 0;
 }
 
 ST_retcode cmd_bridge_discard(const std::vector<std::string> &args) {
@@ -1955,8 +2293,14 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
         }
         parqit::LegacyEncoding enc;
         if (!parqit::legacy_encoding_parse(encoding_name, &enc)) {
-            cry("parqit save: encoding() must be windows-1252 (the default), latin1, "
-                "latin9 or macroman; got '" + encoding_name + "'");
+            cry("parqit save: encoding(" + encoding_name + ") is not an encoding parqit decodes; "
+                "it decodes " + std::string(parqit::legacy_encoding_families()) +
+                " (windows-1252 is the default)");
+            return kRcUsage;
+        }
+        if (enc.is_utf16()) {
+            cry("parqit save: encoding(" + encoding_name + ") names a whole-file encoding of "
+                "delimited text; Stata strings are bytes in UTF-8 or a legacy code page");
             return kRcUsage;
         }
     }
@@ -2348,6 +2692,21 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
     std::string err;
     if (what == "statamissing") {
         g_statamissing = (value == "on");
+        return 0;
+    }
+    if (what == "encoding") {
+        /* ENC-3: the session's code page for text that declares none — legacy
+         * bytes in the dataset in memory and in .dta/Excel bridges, an SPSS
+         * file without a declaration, an R file's undeclared strings. An
+         * explicit encoding() on a command still wins. */
+        parqit::LegacyEncoding enc;
+        if (value.empty() || !parqit::legacy_encoding_parse(value, &enc) || enc.is_utf16()) {
+            cry("parqit set encoding: " + value + " is not an encoding parqit decodes; it decodes " +
+                std::string(parqit::legacy_encoding_families()));
+            return kRcUsage;
+        }
+        encoding_session_default() = enc;
+        save_local("_parqit_set_value", parqit::legacy_encoding_name(enc));
         return 0;
     }
     if (what == "int64") {

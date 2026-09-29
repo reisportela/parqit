@@ -613,19 +613,56 @@ TEST_CASE("SPSS-READ-1: text is decoded from the declared code page") {
         if (variant == 2) CHECK(d.transcoded_meta == 2);
         std::remove(path.c_str());
     }
-    /* a code page parqit cannot decode is refused, and encoding() overrides it */
+    /* ENC-3: every language's code pages are decoded, by name or by number;
+     * one parqit does not know is refused, and encoding() overrides it */
+    struct Cp {
+        const char *record20;
+        int code_page;
+        const char *label, *utf8;
+    } cps[] = {
+        {"windows-1251", 0, "\xcf\xf0\xe8\xe2\xe5\xf2", "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"},
+        {nullptr, 1251, "\xcf\xf0\xe8\xe2\xe5\xf2", "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"},
+        {"GBK", 0, "\xd6\xd0\xce\xc4\xc5\xae", "\xe4\xb8\xad\xe6\x96\x87\xe5\xa5\xb3"},
+        {nullptr, 936, "\xd6\xd0\xce\xc4\xc5\xae", "\xe4\xb8\xad\xe6\x96\x87\xe5\xa5\xb3"},
+        {"Shift_JIS", 0, "\x93\xfa\x96\x7b", "\xe6\x97\xa5\xe6\x9c\xac"},
+        {nullptr, 932, "\x93\xfa\x96\x7b", "\xe6\x97\xa5\xe6\x9c\xac"},
+        {nullptr, 949, "\xc7\xd1\xb1\xb9", "\xed\x95\x9c\xea\xb5\xad"},
+        {nullptr, 950, "\xa4\xa4\xa4\xe5", "\xe4\xb8\xad\xe6\x96\x87"},
+        {nullptr, 1253, "\xc1\xe8\xde\xed\xe1", "\xce\x91\xce\xb8\xce\xae\xce\xbd\xce\xb1"},
+        {nullptr, 1256, "\xe3\xd1\xcd\xc8\xc7", "\xd9\x85\xd8\xb1\xd8\xad\xd8\xa8\xd8\xa7"},
+        {nullptr, 874, "\xca\xc7\xd1\xca\xb4\xd5", "\xe0\xb8\xaa\xe0\xb8\xa7\xe0\xb8\xb1\xe0\xb8\xaa\xe0\xb8\x94\xe0\xb8\xb5"},
+        {nullptr, 20866, "\xf0\xd2\xc9\xd7\xc5\xd4", "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"},
+    };
+    for (const auto &cp : cps) {
+        W w;
+        header(w, "$FL2", 0, 0, 1, std::string(cp.label));
+        numeric(w, "X");
+        if (cp.record20) rec7(w, 20, 1, static_cast<int>(std::strlen(cp.record20)), cp.record20);
+        else rec7(w, 3, 4, 8, ints(false, {20, 0, 0, -1, 1, 1, 2, cp.code_page}));
+        end_dict(w);
+        data_plain(w, {{num8(1, false)}});
+        const std::string path = write_file("spss_enc_cp.sav", w.b);
+        const Dictionary d = read_dictionary(path);
+        CHECK_MESSAGE(d.file_label == cp.utf8, (cp.record20 ? cp.record20 : std::to_string(cp.code_page)));
+        CHECK(d.undecodable_meta == 0);
+        std::remove(path.c_str());
+    }
     W w;
     header(w, "$FL2", 0, 0, 1);
     numeric(w, "X");
-    rec7(w, 20, 1, 12, "windows-1251");
+    rec7(w, 20, 1, 11, "ISO-2022-JP");
     end_dict(w);
     data_plain(w, {{num8(1, false)}});
     const std::string path = write_file("spss_enc_bad.sav", w.b);
-    CHECK(contains(error_of(path), "windows-1251"));
+    CHECK(contains(error_of(path), "ISO-2022-JP"));
     ReadOptions opt;
     opt.encoding = "latin1";
     CHECK(read_dictionary(path, opt).encoding_used == "latin1");
     opt.encoding = "koi8-r";
+    CHECK(read_dictionary(path, opt).encoding_used == "koi8-r");
+    opt.encoding = "klingon";
+    CHECK_THROWS_AS(read_dictionary(path, opt), SavError);
+    opt.encoding = "utf-16";
     CHECK_THROWS_AS(read_dictionary(path, opt), SavError);
     std::remove(path.c_str());
 }

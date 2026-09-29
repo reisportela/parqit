@@ -26,7 +26,7 @@ mata: assert(mreldif(st_matrix("C"),st_matrix("r(C)"))==0)
 quietly parqit _dlgcontext no_dialog, report
 assert "`r(view)'"=="autos"
 
-foreach ext in csv CsV TSV txt tab DTA XLS xLsX sav SAV zsav ZSav {
+foreach ext in csv CsV TSV txt tab DTA XLS xLsX sav SAV zsav ZSav rds RDS rda RData rdata {
     quietly parqit _dlgsource no_dialog using "input.`ext'", report
     assert r(footer)==0
 }

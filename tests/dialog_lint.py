@@ -265,7 +265,8 @@ def source_filter_contracts(repo: Path, ado: str) -> list[str]:
         controls, _ = controls_by_tab(text.splitlines())
         control = controls.get("main", {}).get("fi_using")
         spec = re.search(r'\bfilter\("([^"]*)"\)', control.block) if control else None
-        offered = set(re.findall(r"\*\.(\w+|\*)", spec.group(1))) if spec else set()
+        # extensions are routed case-insensitively (x.RData = x.rdata)
+        offered = {e.lower() for e in re.findall(r"\*\.(\w+|\*)", spec.group(1))} if spec else set()
         missing = sorted(exts - offered)
         if missing:
             errors.append(f"{name}.dlg: fi_using filter() does not offer " + ", ".join(f"*.{e}" for e in missing))

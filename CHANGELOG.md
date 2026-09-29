@@ -6,6 +6,116 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-29
+
+### Added
+- **R data files are read natively** (R-READ-1). `parqit save <file>.parquet
+  using <file>.rds` (or `.rda`/`.RData`) converts the data frame an R data file
+  holds, out of core and without R, with parqit's own reader of R's
+  serialization format (XDR, versions 2 and 3; uncompressed, gzip or zstd).
+  Factors become codes with a value label of their levels; `Date`/`IDate`,
+  `POSIXct`, `hms`/`ITime` and `difftime` become dates, UTC date-times, times
+  and numbers with their unit; `integer64` becomes an exact `BIGINT`; haven's
+  labels, variable labels, display formats, tagged NAs and SPSS user-missing
+  values become Stata labels, formats and extended missing values `.a`–`.z`;
+  `comment()` becomes notes, character row names a `rowname` variable, and every
+  other attribute a JSON characteristic. R files are also accepted wherever
+  parqit reads a file (`parqit use`, the two-table verbs, `mergein`/`appendin`).
+  `object(name)` on `parqit use` and `parqit save … using` names the data frame
+  of an `.RData` (or of a list in an `.rds`) that holds several. Columns Stata
+  has no type for are left out with a note naming each (ASSUMPTIONS #171).
+- `parqit spssencode` also reads the haven labels of an R character vector
+  (`char var[r_value_labels]`), and `parqit describe <file>` marks such
+  variables `(r)`, lists their labels with `labels` and returns `r(r_labels)`.
+- The write dialog's fourth choice converts R files too, with a field for the
+  R object; **Browse** in the read and combine dialogs offers `.rds`, `.rda` and
+  `.RData`.
+- **Text in any language and encoding** (ENC-3). `encoding()` now takes any of
+  UTF-8, 49 single-byte code pages (Windows 874 and 1250–1258, ISO-8859,
+  KOI8-R/U, the DOS and Mac code pages), Shift_JIS (932), EUC-JP, GBK (936),
+  GB18030, Big5 (950) and EUC-KR/UHC (949), by name or the usual aliases — for
+  the dataset in memory, `.dta`/Excel bridges, SPSS and R files, and delimited
+  text. The code pages are read as Windows reads them (user-defined characters
+  become the Private Use characters Windows gives them), GB18030 as its 2005
+  edition; the tests compare the mappings with ICU and independent oracles,
+  with explicit vendor differences (`tests/verify_suite/v136`, `v140`).
+  Bytes a code page does not define become U+FFFD
+  and are counted (`r(undecodable)`), never dropped in silence (ASSUMPTIONS #172).
+- `encoding(name, all)` decodes also text that happens to be valid UTF-8. With
+  a multibyte code page, whose text often is (GBK's 女 is UTF-8's Ů), a string
+  variable with any text that is not UTF-8 is decoded whole, and so is the
+  metadata (`r(transcoded_revalid)`, `r(transcoded_revalid_vars)`); a `.dta`
+  of format 117 or older (Stata 13, before Unicode) is read with `all`
+  whenever `encoding()` is given. (`all` is not applied to Excel files, whose
+  text Stata decodes itself; a note says so.)
+- **`parqit set encoding <name>`** sets the code page of legacy text that
+  declares none, for the session (`windows-1252` until set;
+  `r(encoding_default)` says when it applied). When undeclared text was decoded
+  from the default and the locale suggests another code page, a note names it.
+- **Delimited text in other encodings** (CSV-ENC-1): `encoding()` now applies
+  to `.csv`/`.tsv`/`.txt`/`.tab` files and globs of them, which are decoded
+  into a temporary UTF-8 copy that keeps the file names and the Hive
+  `key=value` directories; a UTF-8 or UTF-16 byte-order mark is recognised, and
+  so is UTF-16 without one (by its NUL bytes, or by its line ends in other
+  scripts); lines may end in LF, CRLF or CR; `encoding(utf-8)` reads a file with
+  broken bytes as U+FFFD. An `encoding()` given is followed even where the bytes
+  look like UTF-16 or UTF-32, with a note. Returns `r(transcoded_lines)`,
+  `r(transcoded_revalid_lines)`, `r(undecodable)` and `r(encoding)`.
+- `parqit mergein` and `parqit appendin` take `encoding()`.
+- The encoding fields of the read, write and combine dialogs are editable and
+  list the common code pages of every script; **User > parqit > Manage views,
+  SQL and settings** sets `encoding`.
+
+### Fixed
+- The release audit's R and encoding cases (ASSUMPTIONS #173): generated
+  names for unnamed R list elements cannot hide real object names; compact
+  sequences and row counts are range-checked before integer conversion;
+  inherited temporal formats cannot contradict the converted units; finite
+  date sentinels and times rounding to 24:00 use numeric fallbacks with notes.
+- Already-UTF-8 delimited files stay in place with a named legacy encoding
+  unless `all` is requested, retaining `filename()` and avoiding an unchanged
+  temporary copy. Invalid `csv()` options are refused before making a copy.
+- CP864's byte 0x25 is Arabic percent (U+066A), including in SPSS values and
+  labels and under `encoding(ibm864, all)`; single-byte tables now include
+  their low bytes and the ASCII shortcuts respect each code page.
+- A delimited-text lookup (the using side of `merge`, `joinby`, `append`,
+  `mergein`, `appendin`) is no longer read with Stata's guess of its encoding,
+  which depends on the file and is often wrong without an error — in our tests
+  windows-1251 text was read as Hebrew ISO-8859-8 or as UTF-16 (no
+  observations), GBK and KOI8-U as ISO-8859-2, Korean as windows-1252: parqit
+  checks the file for UTF-8 and otherwise decodes it from `encoding()` or the
+  session code page, with a note.
+- UTF-16 delimited text without a byte-order mark was scanned as one column of
+  garbage without an error; it is now recognised and decoded.
+- Value-label texts, characteristics and data labels longer than Stata allows
+  are cut at a character boundary, never inside a UTF-8 character.
+
+### Changed
+- `copysource` refuses `encoding(name, all)` before writing a destination;
+  omit `copysource` to apply `all` through the normal memory writer.
+- The help documents the R attribute summaries (over 1,000 elements, 20 JSON
+  nesting levels or parser limits; over 60,000 JSON bytes, attribute names).
+- Delimited text that looks like UTF-32 without a byte-order mark (three NUL
+  bytes in every four) is refused (rc 610) unless `encoding()` names an
+  encoding; before it was read as garbage. Other NUL bytes (a fixed-width
+  export's padding) are read as before.
+- A note says, once a session, when the temporary directory's path contains
+  `=`: the engine reads such a directory as a Hive partition column of every
+  bridged file.
+- The engine's refusal of delimited text that is not UTF-8 now names parqit's
+  `encoding()` instead of the engine's own options, which parqit does not pass
+  through.
+- The read of the disk side of `parqit mergein`/`appendin` is shown, so how its
+  text was decoded (and any other conversion) is seen.
+- The transcoding note says "legacy bytes" instead of "legacy 8-bit bytes";
+  `encoding()` on a delimited-text source is no longer ignored (the "ignored"
+  note remains for Parquet sources only).
+- After `parqit use` of a `.dta`, Excel, SPSS or R file with `clear`, the
+  temporary Parquet bridge is no longer recorded as the source a later
+  `parqit save …, copysource` would copy (the bridge is deleted right after the
+  read). `copysource` still refuses there, now saying that the data were not
+  loaded from a Parquet file instead of naming a deleted temporary file.
+
 ## [0.2.6] — 2026-09-28
 
 ### Added

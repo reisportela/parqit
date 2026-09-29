@@ -98,7 +98,7 @@ std::string strip_sql_position(const std::string &err) {
 }
 
 void cry(const std::string &s) {
-    std::string line = s;
+    std::string line = parqit::with_encoding_hint(s); /* CSV-ENC-1 */
     line.push_back('\n');
     SF_error(const_cast<char *>(line.c_str()));
 }
@@ -1046,6 +1046,11 @@ std::vector<std::string> stata_name_basis(const std::vector<std::string> &scan_n
 parqit::Int64Mode &int64_session_default() {
     static parqit::Int64Mode mode = parqit::Int64Mode::Refuse;
     return mode;
+}
+
+parqit::LegacyEncoding &encoding_session_default() {
+    static parqit::LegacyEncoding enc = parqit::LegacyEncoding::Windows1252;
+    return enc;
 }
 
 int &fill_threads_session() {
@@ -4513,9 +4518,27 @@ struct SaveVar {
  * touching the dataset in memory — and counts them for a loud note. */
 struct SaveTranscode {
     parqit::LegacyEncoding enc = parqit::LegacyEncoding::Windows1252;
+    bool defaulted = false;        /* enc is the session default, not encoding() */
+    /* ENC-3: `encoding(name, all)`, or a legacy .dta read with encoding():
+     * every non-ASCII text is in enc, also text that happens to be valid UTF-8 */
+    bool all = false;
+    /* ENC-3: per variable, decode every non-ASCII cell (the column holds
+     * legacy text of a multibyte code page, where short strings are often
+     * valid UTF-8 by accident: GBK 女 is C5 AE, which is UTF-8 Ů) */
+    std::vector<char> whole;
+    bool meta_whole = false;       /* the same for labels, notes, characteristics */
     std::vector<long long> cells;  /* per variable: transcoded string cells */
+    std::vector<long long> revalid; /* ... of which were valid UTF-8 (decoded with their column) */
+    std::vector<long long> undecodable; /* per variable: cells with bytes enc does not define */
     std::vector<size_t> max_bytes; /* per variable: widest UTF-8 cell written */
     long long meta = 0;            /* labels / value-label texts / notes / chars */
+    long long meta_undecodable = 0;
+    void reset_counts() {
+        std::fill(cells.begin(), cells.end(), 0);
+        std::fill(revalid.begin(), revalid.end(), 0);
+        std::fill(undecodable.begin(), undecodable.end(), 0);
+        std::fill(max_bytes.begin(), max_bytes.end(), 0);
+    }
 };
 
 /* A transcoded Latin-1 cell grows (1 byte -> 2+), so the recorded str# width
@@ -4539,17 +4562,27 @@ inline void save_widen_for_transcoding(std::vector<SaveVar> &vars,
 
 inline void save_transcode_locals(const std::vector<SaveVar> &vars,
                                   const SaveTranscode &tr) {
-    std::string names;
-    long long cells = 0;
+    std::string names, revalid_names;
+    long long cells = 0, revalid = 0, undecodable = 0;
     for (size_t i = 0; i < tr.cells.size() && i < vars.size(); i++) {
         if (tr.cells[i] <= 0) continue;
         names += (names.empty() ? "" : " ") + vars[i].name;
         cells += tr.cells[i];
+        if (i < tr.revalid.size() && tr.revalid[i] > 0) {
+            revalid_names += (revalid_names.empty() ? "" : " ") + vars[i].name;
+            revalid += tr.revalid[i];
+        }
+        if (i < tr.undecodable.size()) undecodable += tr.undecodable[i];
     }
     save_local("_parqit_transcoded_vars", names);
     save_local("_parqit_transcoded_cells", std::to_string(cells));
     save_local("_parqit_transcoded_meta", std::to_string(tr.meta));
     save_local("_parqit_encoding", parqit::legacy_encoding_name(tr.enc));
+    /* ENC-3 */
+    save_local("_parqit_encoding_default", tr.defaulted ? "1" : "0");
+    save_local("_parqit_transcoded_revalid", std::to_string(revalid));
+    save_local("_parqit_transcoded_revalid_vars", revalid_names);
+    save_local("_parqit_undecodable", std::to_string(undecodable + tr.meta_undecodable));
 }
 
 bool build_save_kv_metadata(const std::vector<SaveVar> &vars, const json &req,
@@ -4560,10 +4593,15 @@ bool build_save_kv_metadata(const std::vector<SaveVar> &vars, const json &req,
                              * key is not written */
                             const std::map<std::string, std::string> *xmissing = nullptr) {
     /* every user-originated string entering the JSON goes through here: valid
-     * UTF-8 is returned byte-exact, legacy bytes are transcoded and counted */
+     * UTF-8 is returned byte-exact, legacy bytes are transcoded and counted
+     * (ENC-3: under meta_whole every non-ASCII text is decoded) */
     auto fix = [&tr](std::string s) {
-        if (parqit::utf8_or_transcode(&s, tr.enc)) tr.meta++;
-        return s;
+        const bool valid = parqit::utf8_valid(s);
+        if (valid && !(tr.meta_whole && !parqit::text_ascii_unchanged(s.data(), s.size(), tr.enc))) return s;
+        std::string out;
+        if (parqit::legacy_decode(s.data(), s.size(), tr.enc, &out) > 0) tr.meta_undecodable++;
+        tr.meta++;
+        return out;
     };
     json schema;
     schema["version"] = 1;
@@ -4670,17 +4708,95 @@ inline int wkind_width(WKind w) {
  * str# width and counts transcoded cells for the note. */
 inline bool save_cell_utf8(const char **src, size_t *len, std::string *fixed,
                            SaveTranscode &tr, int var) {
+    const size_t v = static_cast<size_t>(var);
     const bool ok =
         parqit::utf8_valid(reinterpret_cast<const unsigned char *>(*src), *len);
-    if (!ok) {
-        *fixed = parqit::legacy_to_utf8(std::string(*src, *len), tr.enc);
+    /* ENC-3: in a column of multibyte legacy text (or under `all`) a cell that
+     * happens to be valid UTF-8 is legacy text too */
+    const bool whole = ok && v < tr.whole.size() && tr.whole[v] &&
+                       !parqit::text_ascii_unchanged(*src, *len, tr.enc);
+    if (!ok || whole) {
+        if (parqit::legacy_decode(*src, *len, tr.enc, fixed) > 0) tr.undecodable[v]++;
         *src = fixed->data();
         *len = fixed->size();
-        tr.cells[static_cast<size_t>(var)]++;
+        tr.cells[v]++;
+        if (whole) tr.revalid[v]++;
     }
-    if (*len > tr.max_bytes[static_cast<size_t>(var)])
-        tr.max_bytes[static_cast<size_t>(var)] = *len;
-    return !ok;
+    if (*len > tr.max_bytes[v]) tr.max_bytes[v] = *len;
+    return !ok || whole;
+}
+
+/* ENC-3: before either writer runs, a multibyte code page (without `all`)
+ * needs to know which string columns hold legacy text at all: one pass over
+ * the string cells, stopping per column at its first cell that is not valid
+ * UTF-8. The metadata follows the dataset: any legacy column, or any label,
+ * note or characteristic that is not valid UTF-8, marks all of it legacy. */
+ST_retcode save_scan_legacy_columns(const std::vector<SaveVar> &vars, const std::vector<bool> &is_str,
+                                    const std::vector<bool> &is_strl, SaveTranscode &tr,
+                                    std::string *err) {
+    const int k = static_cast<int>(vars.size());
+    std::string buf(8192, '\0');
+    int open_cols = 0;
+    for (int i = 0; i < k; i++)
+        if (is_str[static_cast<size_t>(i)] && !tr.whole[static_cast<size_t>(i)]) open_cols++;
+    for (ST_int j = SF_in1(); j <= SF_in2() && open_cols > 0; j++) {
+        if (!SF_ifobs(j)) continue;
+        for (int i = 0; i < k; i++) {
+            if (!is_str[static_cast<size_t>(i)] || tr.whole[static_cast<size_t>(i)]) continue;
+            if (SF_var_is_binary(i + 1, j)) continue; /* the writer refuses it, by name */
+            const ST_int len = SF_sdatalen(i + 1, j);
+            if (len < 0) {
+                *err = "parqit save: could not measure string " + vars[i].name + "[" +
+                       std::to_string(j) + "]";
+                return kRcEngine;
+            }
+            if (static_cast<size_t>(len) + 1 > buf.size()) buf.resize(static_cast<size_t>(len) + 1);
+            if (is_strl[static_cast<size_t>(i)]) {
+                const ST_int capacity = len < kSpiMaxObs ? len + 1 : len;
+                if (SF_strldata(i + 1, j, &buf[0], capacity) != len) {
+                    *err = "parqit save: incomplete strL read for " + vars[i].name + "[" +
+                           std::to_string(j) + "]";
+                    return kRcEngine;
+                }
+            } else if (SF_sdata(i + 1, j, &buf[0]) != 0) {
+                *err = "parqit save: could not read " + vars[i].name + "[" + std::to_string(j) + "]";
+                return kRcEngine;
+            }
+            if (!parqit::utf8_valid(reinterpret_cast<const unsigned char *>(buf.data()),
+                                    static_cast<size_t>(len))) {
+                tr.whole[static_cast<size_t>(i)] = 1;
+                open_cols--;
+            }
+        }
+    }
+    return 0;
+}
+
+/* any label, value-label text, note, characteristic or the dataset label
+ * that is not valid UTF-8 */
+bool save_metadata_has_legacy(const std::vector<SaveVar> &vars, const json &req,
+                              const std::string &dtalabel) {
+    auto bad = [](const std::string &s) { return !parqit::utf8_valid(s); };
+    if (bad(dtalabel)) return true;
+    for (const auto &v : vars)
+        if (bad(v.varlab)) return true;
+    if (req.contains("vallabs") && req["vallabs"].is_array())
+        for (const auto &jl : req["vallabs"])
+            if (jl.contains("entries") && jl["entries"].is_array())
+                for (const auto &e : jl["entries"]) {
+                    std::string txt;
+                    if (e.is_array() && e.size() == 2 && e[1].is_string() &&
+                        parqit::hex_decode(e[1].get<std::string>(), txt) && bad(txt))
+                        return true;
+                }
+    if (req.contains("chars") && req["chars"].is_array())
+        for (const auto &c : req["chars"]) {
+            std::string val;
+            if (c.is_array() && c.size() == 3 && c[2].is_string() &&
+                parqit::hex_decode(c[2].get<std::string>(), val) && bad(val))
+                return true;
+        }
+    return false;
 }
 
 WKind wkind_for(const SaveVar &v) {
@@ -5162,9 +5278,19 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     SaveTranscode tr; /* ENC-2 */
-    if (!parqit::legacy_encoding_parse(encoding_name, &tr.enc)) {
-        cry("parqit save: encoding() must be windows-1252 (the default), latin1, "
-            "latin9 or macroman; got '" + encoding_name + "'");
+    /* ENC-3: no encoding() means the session's code page (parqit set encoding) */
+    tr.defaulted = encoding_name.empty();
+    tr.all = req.value("encoding_all", false);
+    if (tr.defaulted) tr.enc = encoding_session_default();
+    else if (!parqit::legacy_encoding_parse(encoding_name, &tr.enc)) {
+        cry("parqit save: encoding(" + encoding_name + ") is not an encoding parqit decodes; "
+            "it decodes " + std::string(parqit::legacy_encoding_families()) +
+            " (windows-1252 is the default)");
+        return kRcUsage;
+    }
+    if (tr.enc.is_utf16()) {
+        cry("parqit save: encoding(" + encoding_name + ") names a whole-file encoding of "
+            "delimited text; Stata strings are bytes in UTF-8 or a legacy code page");
         return kRcUsage;
     }
     std::string compression;
@@ -5297,6 +5423,33 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
 
     tr.cells.assign(static_cast<size_t>(k), 0);
     tr.max_bytes.assign(static_cast<size_t>(k), 0);
+    tr.revalid.assign(static_cast<size_t>(k), 0);
+    tr.undecodable.assign(static_cast<size_t>(k), 0);
+    tr.whole.assign(static_cast<size_t>(k), 0);
+    {
+        /* ENC-3: which string columns (and whether the metadata) are legacy
+         * text as a whole — under `all`, or for a multibyte code page */
+        std::vector<bool> is_str(static_cast<size_t>(k)), is_strl(static_cast<size_t>(k));
+        for (int i = 0; i < k; i++) {
+            is_str[static_cast<size_t>(i)] = wk[i] == WStr || wk[i] == WStrL;
+            is_strl[static_cast<size_t>(i)] = wk[i] == WStrL;
+        }
+        if (tr.all) {
+            for (int i = 0; i < k; i++)
+                if (is_str[static_cast<size_t>(i)]) tr.whole[static_cast<size_t>(i)] = 1;
+            tr.meta_whole = true;
+        } else if (tr.enc.multibyte()) {
+            std::string serr;
+            const ST_retcode src = save_scan_legacy_columns(vars, is_str, is_strl, tr, &serr);
+            if (src != 0) {
+                cry(serr);
+                return src;
+            }
+            bool any = false;
+            for (char w : tr.whole) any = any || w;
+            tr.meta_whole = any || save_metadata_has_legacy(vars, req, dtalabel);
+        }
+    }
     /* ENC-2: each writer builds the KV metadata after its data pass, so the
      * recorded str# widths follow cells that grew under transcoding and the
      * labels/notes/characteristics themselves are transcoded and counted. */
@@ -5327,8 +5480,7 @@ ST_retcode cmd_save_data(const std::vector<std::string> &args) {
             frac_warned.clear();
             ext_missing.clear();
             xm_pairs.clear();
-            std::fill(tr.cells.begin(), tr.cells.end(), 0);
-            std::fill(tr.max_bytes.begin(), tr.max_bytes.end(), 0);
+            tr.reset_counts();
             err.clear();
         } else if (rc != 0) {
             cry(err);
@@ -5649,6 +5801,11 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
         cry(err);
         return kRcUsage;
     }
+    if (req.value("encoding_all", false)) {
+        cry("parqit save: copysource cannot decode the unchanged payload; "
+            "omit copysource to use encoding(name, all)");
+        return kRcUsage;
+    }
 
     std::string dest, tmpdir, dtalabel, source_file, expect_size, expect_mtime,
         expect_ctime, expect_inode, expect_footer;
@@ -5683,9 +5840,17 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     SaveTranscode tr; /* ENC-2: only the metadata can need it on this path */
-    if (!parqit::legacy_encoding_parse(encoding_name, &tr.enc)) {
-        cry("parqit save: encoding() must be windows-1252 (the default), latin1, "
-            "latin9 or macroman; got '" + encoding_name + "'");
+    tr.defaulted = encoding_name.empty();
+    if (tr.defaulted) tr.enc = encoding_session_default();
+    else if (!parqit::legacy_encoding_parse(encoding_name, &tr.enc)) {
+        cry("parqit save: encoding(" + encoding_name + ") is not an encoding parqit decodes; "
+            "it decodes " + std::string(parqit::legacy_encoding_families()) +
+            " (windows-1252 is the default)");
+        return kRcUsage;
+    }
+    if (tr.enc.is_utf16()) {
+        cry("parqit save: encoding(" + encoding_name + ") names a whole-file encoding of "
+            "delimited text; Stata strings are bytes in UTF-8 or a legacy code page");
         return kRcUsage;
     }
     std::string compression;
@@ -6067,6 +6232,9 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
     }
 
     std::string kv;
+    /* ENC-3: a multibyte code page decodes the metadata as a whole when any
+     * of it is legacy text (the data are copied as they are) */
+    if (tr.enc.multibyte()) tr.meta_whole = save_metadata_has_legacy(vars, req, dtalabel);
     if (!build_save_kv_metadata(vars, req, dtalabel, tr, &kv, &err)) {
         cry(err);
         return kRcUsage;

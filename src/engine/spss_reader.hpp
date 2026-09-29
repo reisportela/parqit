@@ -142,6 +142,8 @@ struct Dictionary {
     std::vector<std::string> ignored;
     std::vector<std::string> warnings;
     long long transcoded_meta = 0;      /* dictionary texts transcoded (ENC-2) */
+    long long undecodable_meta = 0;     /* dictionary texts with bytes the declared
+                                         * encoding does not define (ENC-3) */
     /* where the case data begins; the ZLIB block map for .zsav */
     uint64_t data_offset = 0;
     struct ZBlock {
@@ -156,6 +158,9 @@ struct ReadOptions {
     /* "" = the encoding the file declares; otherwise utf-8 or one of the
      * legacy code pages of engine/legacy_encoding.hpp, replacing it */
     std::string encoding;
+    /* the session's code page (parqit set encoding) for a file that declares
+     * none, and for bytes of a UTF-8 file that are not UTF-8; "" = windows-1252 */
+    std::string default_encoding;
 };
 
 /* Reads and validates the dictionary (and, for .zsav, the block map).
@@ -165,8 +170,15 @@ Dictionary read_dictionary(const std::string &path, const ReadOptions &opt = Rea
 /* Decodes one text item of the file (dictionary or data) to UTF-8 with the
  * dictionary's encoding. Returns true when a UTF-8 file held bytes that are
  * not valid UTF-8, which are then transcoded from the fallback code page
- * (ENC-2); a legacy code page is always decoded, which is not a transcoding. */
-bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *out);
+ * (ENC-2); a legacy code page is always decoded, which is not a transcoding.
+ * *undecodable (optional) receives the count of byte sequences the declared
+ * legacy encoding does not define, each now U+FFFD (ENC-3). */
+bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *out,
+                 size_t *undecodable = nullptr);
+
+/* The encoding of an SPSS Windows code-page number (record 7/3), for the
+ * code pages parqit decodes; false for any other (ENC-3). */
+bool spss_code_page(int code_page, bool *utf8, LegacyEncoding *enc);
 
 /* Sequential reader of the cases. Opens its own handle, so several readers of
  * one file never share a seek position. Throws SavError. */

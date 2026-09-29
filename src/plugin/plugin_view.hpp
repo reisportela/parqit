@@ -31,6 +31,8 @@ ST_retcode cmd_view_list(const std::vector<std::string> &args);
  * created by bridge_new in this plugin session. */
 ST_retcode cmd_bridge_new(const std::vector<std::string> &args);
 ST_retcode cmd_bridge_discard(const std::vector<std::string> &args);
+/* CSV-ENC-1: decode delimited text that is not UTF-8 into a UTF-8 bridge */
+ST_retcode cmd_text_prepare(const std::vector<std::string> &args);
 /* name of the current view ("" when none is live) */
 std::string view_current_name();
 ST_retcode cmd_set(const std::vector<std::string> &args);

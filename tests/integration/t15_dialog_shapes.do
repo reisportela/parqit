@@ -76,11 +76,21 @@ capture noisily parqit use using `"`autodta'"', clear encoding(windows-1252)
 _shape `=_rc' "parqit use using file.dta, clear encoding(windows-1252) (now a named choice)"
 capture noisily parqit use using `"`repo'/tests/fixtures/spss/survey.sav"', clear encoding(windows-1252)
 _shape `=_rc' "parqit use using file.sav, clear encoding(windows-1252)"
+* R-READ-1: an R data file through the same Browse filter
+capture noisily parqit use using `"`repo'/tests/fixtures/r/rownames.rds"', clear encoding(windows-1252)
+_shape `=_rc' "parqit use using file.rds, clear encoding(windows-1252)"
+capture noisily parqit use using `"`repo'/tests/fixtures/r/rownames.rds"', name(rv)
+_shape `=_rc' "parqit use using file.rds, name()"
 * CSV-OPT-1 dialog field: csv() reaches the ado as one option string
 tempfile autocsv
 quietly export delimited using `"`autocsv'.csv"', replace delimiter(";")
 capture noisily parqit use using `"`autocsv'.csv"', clear csv(delim(;) header(on))
 _shape `=_rc' "parqit use using file.csv, clear csv(delim(;) header(on))"
+* CSV-ENC-1 / ENC-3: the editable encoding field — any name, and name, all
+capture noisily parqit use using `"`autocsv'.csv"', clear encoding(windows-1251) csv(delim(;))
+_shape `=_rc' "parqit use using file.csv, clear encoding(windows-1251) csv()"
+capture noisily parqit use using `"`autodta'"', clear encoding(gbk, all)
+_shape `=_rc' "parqit use using file.dta, clear encoding(gbk, all)"
 capture noisily parqit open _data
 _shape `=_rc' "parqit open _data"
 capture noisily parqit open _data, name(mem) encoding(latin1)
@@ -334,6 +344,10 @@ parqit use using `"`auto'"'
 capture noisily parqit merge m:1 foreign using `"`lookup'"', nogenerate
 _shape `=_rc' "parqit merge m:1 keys using file, nogenerate"
 parqit close _all
+parqit use using `"`repo'/tests/fixtures/r/rownames.rds"'
+capture noisily parqit merge 1:1 rowname using `"`repo'/tests/fixtures/r/rownames.rds"', keepusing(wt) nogenerate
+_shape `=_rc' "parqit merge 1:1 keys using file.rds, keepusing() nogenerate"
+parqit close _all
 parqit use using `"`auto'"', name(a)
 capture noisily parqit merge m:m foreign using `"`lookup'"'
 if (_rc == 0) _shape 1 "lazy parqit merge m:m must be refused"
@@ -366,8 +380,13 @@ use `"`autodta'"', clear
 capture noisily parqit mergein m:1 foreign using `"`lookup'"', nogenerate assert(match master) update replace force
 _shape `=_rc' "parqit mergein m:1 keys using file, nogenerate assert() update replace force"
 use `"`autodta'"', clear
+capture noisily parqit mergein m:1 foreign using `"`lookup'"', nogenerate encoding(windows-1250)
+_shape `=_rc' "parqit mergein m:1 keys using file, nogenerate encoding()"
+use `"`autodta'"', clear
 capture noisily parqit appendin using `"`auto'"', keep(make price) force
 _shape `=_rc' "parqit appendin using file, keep() force"
+capture noisily parqit appendin using `"`auto'"', keep(make price) encoding(latin1)
+_shape `=_rc' "parqit appendin using file, keep() encoding()"
 
 * --- Save as Parquet or collect into memory (db parqit_write) -----------------
 di as txt _n "db parqit_write"
@@ -390,6 +409,8 @@ capture noisily parqit save `"`out2'"', replace data
 _shape `=_rc' "parqit save file, replace data (memory while a view is open)"
 capture noisily parqit save `"`out2'"', replace data xmissing
 _shape `=_rc' "parqit save file, replace data xmissing"
+capture noisily parqit save `"`out2'"', replace data encoding(shift_jis, all)
+_shape `=_rc' "parqit save file, replace data encoding(shift_jis, all)"
 parqit close _all
 parqit use using `"`auto'"', clear
 capture noisily parqit save `"`copy'"', replace data copysource
@@ -400,6 +421,12 @@ capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/spss/sur
 _shape `=_rc' "parqit save file using spss, replace compression() compression_level() encoding()"
 capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/spss/survey.zsav"', replace
 _shape `=_rc' "parqit save file using zsav, replace"
+* ... and the R conversion through the same choice, object() when an .RData holds several
+capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/r/workspace.RData"', ///
+    replace compression(zstd) compression_level(3) encoding(utf-8) object(people)
+_shape `=_rc' "parqit save file using RData, replace compression() compression_level() encoding() object()"
+capture noisily parqit save `"`spssout'"' using `"`repo'/tests/fixtures/r/frame.rds"', replace
+_shape `=_rc' "parqit save file using rds, replace"
 
 * --- Views, SQL, and engine settings (db parqit_views) ------------------------
 di as txt _n "db parqit_views"
@@ -450,6 +477,10 @@ capture noisily parqit query "qualify row_number() over (partition by yr order b
 _shape `=_rc' "parqit query fragment"
 capture noisily parqit set statamissing on
 _shape `=_rc' "parqit set statamissing on"
+capture noisily parqit set encoding windows-1251
+_shape `=_rc' "parqit set encoding name"
+capture noisily parqit set encoding windows-1252
+_shape `=_rc' "parqit set encoding windows-1252"
 capture noisily parqit set statamissing off
 _shape `=_rc' "parqit set statamissing off"
 capture noisily parqit set threads 2

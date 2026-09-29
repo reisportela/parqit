@@ -1,7 +1,7 @@
 /*
   parqit use - Open a lazy view or load data into memory
 
-*!  VERSION 0.2.6  28sep2026
+*!  VERSION 0.3.0  29sep2026
 
   User > parqit > Read data (lazy view or into memory)...
   Launch directly with:  db parqit_read      (menu installed by: parqit menu)
@@ -60,7 +60,7 @@ BEGIN
 	onchange(program main_source)					///
 	error("Filename")						///
 	defext(parquet)							///
-	filter("Supported data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav|Parquet|*.parquet|Delimited text|*.csv;*.tsv;*.txt;*.tab|Stata data|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|All files|*.*") ///
+	filter("Data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav;*.rds;*.rda;*.RData|Parquet|*.parquet|Text|*.csv;*.tsv;*.txt;*.tab|Stata|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|R|*.rds;*.rda;*.RData|All files|*.*") ///
 	label("Browse...")
 
   TEXT tx_vars			_lft	_ls	_lw80	.,		///
@@ -89,14 +89,14 @@ BEGIN
 	label("View name")
 
   TEXT tx_enc			_lft2	-20	_cwd1	.,		///
-	label("Code page of legacy text (.dta, Excel or SPSS source):")
+	label("Encoding of text that is not UTF-8:")
   COMBOBOX cb_enc		@	_ss	_vnwd	.,		///
-	dropdownlist							///
+	dropdown							///
 	contents(enc_list)						///
 	default("default")						///
 	option(encoding)						///
-	tooltip("default: .dta and Excel text as windows-1252, an SPSS file in the code page it declares; a named code page is passed as encoding()") ///
-	label("Code page")
+	tooltip("default: delimited text as UTF-8 (UTF-16 by its byte-order mark), .dta text in the session code page (windows-1252 unless parqit set encoding; Stata decodes Excel text itself), an SPSS or R file as it declares; pick or type any encoding parqit reads (add , all for text that is valid UTF-8 by accident)") ///
+	label("Encoding")
 
   CHECKBOX ck_relaxed		_lft	_ls	_iwd	.,		///
 	option(relaxed)							///
@@ -122,7 +122,7 @@ BEGIN
 	label("Binary columns")
 
   TEXT tx_srcvar		_lft	_ls	_iwd	.,		///
-	label("Variable to hold the source file of each observation (optional; not for .dta, Excel or SPSS):")
+	label("Variable to hold the source file of each observation (optional; not for .dta, Excel, SPSS or R):")
   EDIT ed_srcvar		@	_ss	_vnwd	.,		///
 	max(32)								///
 	option(filename)						///
@@ -147,10 +147,34 @@ END
 LIST enc_list
 BEGIN
 	default
+	utf-8
 	windows-1252
 	latin1
 	latin9
 	macroman
+	windows-1250
+	windows-1251
+	windows-1253
+	windows-1254
+	windows-1255
+	windows-1256
+	windows-1257
+	windows-1258
+	windows-874
+	koi8-r
+	koi8-u
+	ibm866
+	iso-8859-2
+	iso-8859-5
+	iso-8859-7
+	shift_jis
+	euc-jp
+	gbk
+	gb18030
+	big5
+	euc-kr
+	utf-16le
+	utf-16be
 END
 
 LIST i64_list

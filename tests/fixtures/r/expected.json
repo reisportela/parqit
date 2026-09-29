@@ -1,0 +1,721 @@
+{
+  "frame.rds": {
+    "object": [""],
+    "nrow": [5],
+    "names": ["i", "d", "s", "l", "f", "o", "dt", "ct", "dtm", "hm", "idate", "i64", "lab", "score", "sex", "stata_fmt"],
+    "rownames": null,
+    "label": ["Fixture data frame"],
+    "comment": ["a note on the data frame"],
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["i"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, null, 3, -2147483647, 2147483647],
+        "comment": ["first note on i", "second note"]
+      },
+      {
+        "name": ["d"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["1.5", null, "NaN", "Inf", "-1.0000000000000001e+300"]
+      },
+      {
+        "name": ["s"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["x", null, "é 中 😀", "", "a\"b"]
+      },
+      {
+        "name": ["l"],
+        "class": [],
+        "typeof": ["logical"],
+        "values": [true, null, false, true, false]
+      },
+      {
+        "name": ["f"],
+        "class": ["factor"],
+        "typeof": ["integer"],
+        "values": [1, 3, null, 1, 2],
+        "levels": ["lo", "mid", "hi"]
+      },
+      {
+        "name": ["o"],
+        "class": ["ordered", "factor"],
+        "typeof": ["integer"],
+        "values": [1, 2, 3, 1, 2],
+        "levels": ["a", "b", "c"]
+      },
+      {
+        "name": ["dt"],
+        "class": ["Date"],
+        "typeof": ["double"],
+        "values": ["18322", null, "-3653", "-141427", "47481"]
+      },
+      {
+        "name": ["ct"],
+        "class": ["POSIXct", "POSIXt"],
+        "typeof": ["double"],
+        "values": ["1583066096.789", null, "-3600", "-315619200", "2147483648"],
+        "tzone": ["Europe/Lisbon"]
+      },
+      {
+        "name": ["dtm"],
+        "class": ["difftime"],
+        "typeof": ["double"],
+        "values": ["1.5", "2", null, "0", "-3"],
+        "units": ["days"]
+      },
+      {
+        "name": ["hm"],
+        "class": ["hms", "difftime"],
+        "typeof": ["double"],
+        "values": ["3661", "0", null, "86399.5", "45"],
+        "units": ["secs"]
+      },
+      {
+        "name": ["idate"],
+        "class": ["IDate", "Date"],
+        "typeof": ["integer"],
+        "values": [18322, null, 0, -3653, 47481]
+      },
+      {
+        "name": ["i64"],
+        "class": ["integer64"],
+        "typeof": ["double"],
+        "values": ["9007199254740993", null, "-5", "0", "123"]
+      },
+      {
+        "name": ["lab"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["1", "98", "NA(a)", "2", "99"],
+        "label": ["Question one"],
+        "labels": {
+          "names": ["Yes", "No", "Refused", "Unknown", "Skipped"],
+          "values": ["1", "2", "98", "99", "NA(a)"]
+        },
+        "na_values": ["98", "99"]
+      },
+      {
+        "name": ["score"],
+        "class": ["haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["0.5", "1", "2.5", null, "1"],
+        "labels": {
+          "names": ["Half", "One"],
+          "values": ["0.5", "1"]
+        }
+      },
+      {
+        "name": ["sex"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "character"],
+        "typeof": ["character"],
+        "values": ["M", "F", "X", null, "F"],
+        "label": ["Sex"],
+        "labels": {
+          "names": ["Male", "Female", "Not stated"],
+          "values": ["M", "F", "X"]
+        },
+        "na_values": ["X"]
+      },
+      {
+        "name": ["stata_fmt"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["10", "20", "30", "40", "50"],
+        "label": ["long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long"],
+        "format.stata": ["%9.2f"]
+      }
+    ]
+  },
+  "frame_v2.rds": {
+    "object": [""],
+    "nrow": [5],
+    "names": ["i", "d", "s", "l", "f", "o", "dt", "ct", "dtm", "hm", "idate", "i64", "lab", "score", "sex", "stata_fmt"],
+    "rownames": null,
+    "label": ["Fixture data frame"],
+    "comment": ["a note on the data frame"],
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["i"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, null, 3, -2147483647, 2147483647],
+        "comment": ["first note on i", "second note"]
+      },
+      {
+        "name": ["d"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["1.5", null, "NaN", "Inf", "-1.0000000000000001e+300"]
+      },
+      {
+        "name": ["s"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["x", null, "é 中 😀", "", "a\"b"]
+      },
+      {
+        "name": ["l"],
+        "class": [],
+        "typeof": ["logical"],
+        "values": [true, null, false, true, false]
+      },
+      {
+        "name": ["f"],
+        "class": ["factor"],
+        "typeof": ["integer"],
+        "values": [1, 3, null, 1, 2],
+        "levels": ["lo", "mid", "hi"]
+      },
+      {
+        "name": ["o"],
+        "class": ["ordered", "factor"],
+        "typeof": ["integer"],
+        "values": [1, 2, 3, 1, 2],
+        "levels": ["a", "b", "c"]
+      },
+      {
+        "name": ["dt"],
+        "class": ["Date"],
+        "typeof": ["double"],
+        "values": ["18322", null, "-3653", "-141427", "47481"]
+      },
+      {
+        "name": ["ct"],
+        "class": ["POSIXct", "POSIXt"],
+        "typeof": ["double"],
+        "values": ["1583066096.789", null, "-3600", "-315619200", "2147483648"],
+        "tzone": ["Europe/Lisbon"]
+      },
+      {
+        "name": ["dtm"],
+        "class": ["difftime"],
+        "typeof": ["double"],
+        "values": ["1.5", "2", null, "0", "-3"],
+        "units": ["days"]
+      },
+      {
+        "name": ["hm"],
+        "class": ["hms", "difftime"],
+        "typeof": ["double"],
+        "values": ["3661", "0", null, "86399.5", "45"],
+        "units": ["secs"]
+      },
+      {
+        "name": ["idate"],
+        "class": ["IDate", "Date"],
+        "typeof": ["integer"],
+        "values": [18322, null, 0, -3653, 47481]
+      },
+      {
+        "name": ["i64"],
+        "class": ["integer64"],
+        "typeof": ["double"],
+        "values": ["9007199254740993", null, "-5", "0", "123"]
+      },
+      {
+        "name": ["lab"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["1", "98", "NA(a)", "2", "99"],
+        "label": ["Question one"],
+        "labels": {
+          "names": ["Yes", "No", "Refused", "Unknown", "Skipped"],
+          "values": ["1", "2", "98", "99", "NA(a)"]
+        },
+        "na_values": ["98", "99"]
+      },
+      {
+        "name": ["score"],
+        "class": ["haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["0.5", "1", "2.5", null, "1"],
+        "labels": {
+          "names": ["Half", "One"],
+          "values": ["0.5", "1"]
+        }
+      },
+      {
+        "name": ["sex"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "character"],
+        "typeof": ["character"],
+        "values": ["M", "F", "X", null, "F"],
+        "label": ["Sex"],
+        "labels": {
+          "names": ["Male", "Female", "Not stated"],
+          "values": ["M", "F", "X"]
+        },
+        "na_values": ["X"]
+      },
+      {
+        "name": ["stata_fmt"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["10", "20", "30", "40", "50"],
+        "label": ["long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long"],
+        "format.stata": ["%9.2f"]
+      }
+    ]
+  },
+  "frame_none.rds": {
+    "object": [""],
+    "nrow": [5],
+    "names": ["i", "d", "s", "l", "f", "o", "dt", "ct", "dtm", "hm", "idate", "i64", "lab", "score", "sex", "stata_fmt"],
+    "rownames": null,
+    "label": ["Fixture data frame"],
+    "comment": ["a note on the data frame"],
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["i"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, null, 3, -2147483647, 2147483647],
+        "comment": ["first note on i", "second note"]
+      },
+      {
+        "name": ["d"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["1.5", null, "NaN", "Inf", "-1.0000000000000001e+300"]
+      },
+      {
+        "name": ["s"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["x", null, "é 中 😀", "", "a\"b"]
+      },
+      {
+        "name": ["l"],
+        "class": [],
+        "typeof": ["logical"],
+        "values": [true, null, false, true, false]
+      },
+      {
+        "name": ["f"],
+        "class": ["factor"],
+        "typeof": ["integer"],
+        "values": [1, 3, null, 1, 2],
+        "levels": ["lo", "mid", "hi"]
+      },
+      {
+        "name": ["o"],
+        "class": ["ordered", "factor"],
+        "typeof": ["integer"],
+        "values": [1, 2, 3, 1, 2],
+        "levels": ["a", "b", "c"]
+      },
+      {
+        "name": ["dt"],
+        "class": ["Date"],
+        "typeof": ["double"],
+        "values": ["18322", null, "-3653", "-141427", "47481"]
+      },
+      {
+        "name": ["ct"],
+        "class": ["POSIXct", "POSIXt"],
+        "typeof": ["double"],
+        "values": ["1583066096.789", null, "-3600", "-315619200", "2147483648"],
+        "tzone": ["Europe/Lisbon"]
+      },
+      {
+        "name": ["dtm"],
+        "class": ["difftime"],
+        "typeof": ["double"],
+        "values": ["1.5", "2", null, "0", "-3"],
+        "units": ["days"]
+      },
+      {
+        "name": ["hm"],
+        "class": ["hms", "difftime"],
+        "typeof": ["double"],
+        "values": ["3661", "0", null, "86399.5", "45"],
+        "units": ["secs"]
+      },
+      {
+        "name": ["idate"],
+        "class": ["IDate", "Date"],
+        "typeof": ["integer"],
+        "values": [18322, null, 0, -3653, 47481]
+      },
+      {
+        "name": ["i64"],
+        "class": ["integer64"],
+        "typeof": ["double"],
+        "values": ["9007199254740993", null, "-5", "0", "123"]
+      },
+      {
+        "name": ["lab"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["1", "98", "NA(a)", "2", "99"],
+        "label": ["Question one"],
+        "labels": {
+          "names": ["Yes", "No", "Refused", "Unknown", "Skipped"],
+          "values": ["1", "2", "98", "99", "NA(a)"]
+        },
+        "na_values": ["98", "99"]
+      },
+      {
+        "name": ["score"],
+        "class": ["haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["0.5", "1", "2.5", null, "1"],
+        "labels": {
+          "names": ["Half", "One"],
+          "values": ["0.5", "1"]
+        }
+      },
+      {
+        "name": ["sex"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "character"],
+        "typeof": ["character"],
+        "values": ["M", "F", "X", null, "F"],
+        "label": ["Sex"],
+        "labels": {
+          "names": ["Male", "Female", "Not stated"],
+          "values": ["M", "F", "X"]
+        },
+        "na_values": ["X"]
+      },
+      {
+        "name": ["stata_fmt"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["10", "20", "30", "40", "50"],
+        "label": ["long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long"],
+        "format.stata": ["%9.2f"]
+      }
+    ]
+  },
+  "workspace.RData:people": {
+    "object": ["people"],
+    "nrow": [3],
+    "names": ["id", "name"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["id"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [101, 102, 103]
+      },
+      {
+        "name": ["name"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["Ana", "Rui", "Eva"]
+      }
+    ]
+  },
+  "workspace.RData:towns": {
+    "object": ["towns"],
+    "nrow": [2],
+    "names": ["town", "pop"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["town"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["Porto", "Braga"]
+      },
+      {
+        "name": ["pop"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["231800", "193300"]
+      }
+    ]
+  },
+  "rownames.rds": {
+    "object": [""],
+    "nrow": [6],
+    "names": ["mpg", "cyl", "wt"],
+    "rownames": ["Mazda RX4", "Mazda RX4 Wag", "Datsun 710", "Hornet 4 Drive", "Hornet Sportabout", "Valiant"],
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["mpg"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["21", "21", "22.800000000000001", "21.399999999999999", "18.699999999999999", "18.100000000000001"]
+      },
+      {
+        "name": ["cyl"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["6", "6", "4", "6", "8", "6"]
+      },
+      {
+        "name": ["wt"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["2.6200000000000001", "2.875", "2.3199999999999998", "3.2149999999999999", "3.4399999999999999", "3.46"]
+      }
+    ]
+  },
+  "edge.rds": {
+    "object": [""],
+    "nrow": [3],
+    "names": ["x", "x", null, "", "X", "lst", "m", "cx", "lt", "seq", "ds", "dr"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["x"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, 2, 3]
+      },
+      {
+        "name": ["x"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [4, 5, 6]
+      },
+      {
+        "name": [null],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [7, 8, 9]
+      },
+      {
+        "name": [""],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [10, 11, 12]
+      },
+      {
+        "name": ["X"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["upper", "case", "name"]
+      },
+      {
+        "name": ["seq"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, 2, 3]
+      },
+      {
+        "name": ["ds"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["10", null, "-3"]
+      },
+      {
+        "name": ["dr"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["1.5", "2", "1e+05"]
+      }
+    ]
+  },
+  "latin1.rds": {
+    "object": [""],
+    "nrow": [3],
+    "names": ["s"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["s"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["café", "plain", "naïve"]
+      }
+    ]
+  },
+  "list.rds:first": {
+    "object": ["first"],
+    "nrow": [2],
+    "names": ["a"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["a"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, 2]
+      }
+    ]
+  },
+  "empty.rds": {
+    "object": [""],
+    "nrow": [0],
+    "names": ["a", "b"],
+    "rownames": null,
+    "label": null,
+    "comment": null,
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["a"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": []
+      },
+      {
+        "name": ["b"],
+        "class": [],
+        "typeof": ["character"],
+        "values": []
+      }
+    ]
+  },
+  "frame_zstd.rds": {
+    "object": [""],
+    "nrow": [5],
+    "names": ["i", "d", "s", "l", "f", "o", "dt", "ct", "dtm", "hm", "idate", "i64", "lab", "score", "sex", "stata_fmt"],
+    "rownames": null,
+    "label": ["Fixture data frame"],
+    "comment": ["a note on the data frame"],
+    "class": ["data.frame"],
+    "columns": [
+      {
+        "name": ["i"],
+        "class": [],
+        "typeof": ["integer"],
+        "values": [1, null, 3, -2147483647, 2147483647],
+        "comment": ["first note on i", "second note"]
+      },
+      {
+        "name": ["d"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["1.5", null, "NaN", "Inf", "-1.0000000000000001e+300"]
+      },
+      {
+        "name": ["s"],
+        "class": [],
+        "typeof": ["character"],
+        "values": ["x", null, "é 中 😀", "", "a\"b"]
+      },
+      {
+        "name": ["l"],
+        "class": [],
+        "typeof": ["logical"],
+        "values": [true, null, false, true, false]
+      },
+      {
+        "name": ["f"],
+        "class": ["factor"],
+        "typeof": ["integer"],
+        "values": [1, 3, null, 1, 2],
+        "levels": ["lo", "mid", "hi"]
+      },
+      {
+        "name": ["o"],
+        "class": ["ordered", "factor"],
+        "typeof": ["integer"],
+        "values": [1, 2, 3, 1, 2],
+        "levels": ["a", "b", "c"]
+      },
+      {
+        "name": ["dt"],
+        "class": ["Date"],
+        "typeof": ["double"],
+        "values": ["18322", null, "-3653", "-141427", "47481"]
+      },
+      {
+        "name": ["ct"],
+        "class": ["POSIXct", "POSIXt"],
+        "typeof": ["double"],
+        "values": ["1583066096.789", null, "-3600", "-315619200", "2147483648"],
+        "tzone": ["Europe/Lisbon"]
+      },
+      {
+        "name": ["dtm"],
+        "class": ["difftime"],
+        "typeof": ["double"],
+        "values": ["1.5", "2", null, "0", "-3"],
+        "units": ["days"]
+      },
+      {
+        "name": ["hm"],
+        "class": ["hms", "difftime"],
+        "typeof": ["double"],
+        "values": ["3661", "0", null, "86399.5", "45"],
+        "units": ["secs"]
+      },
+      {
+        "name": ["idate"],
+        "class": ["IDate", "Date"],
+        "typeof": ["integer"],
+        "values": [18322, null, 0, -3653, 47481]
+      },
+      {
+        "name": ["i64"],
+        "class": ["integer64"],
+        "typeof": ["double"],
+        "values": ["9007199254740993", null, "-5", "0", "123"]
+      },
+      {
+        "name": ["lab"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["1", "98", "NA(a)", "2", "99"],
+        "label": ["Question one"],
+        "labels": {
+          "names": ["Yes", "No", "Refused", "Unknown", "Skipped"],
+          "values": ["1", "2", "98", "99", "NA(a)"]
+        },
+        "na_values": ["98", "99"]
+      },
+      {
+        "name": ["score"],
+        "class": ["haven_labelled", "vctrs_vctr", "double"],
+        "typeof": ["double"],
+        "values": ["0.5", "1", "2.5", null, "1"],
+        "labels": {
+          "names": ["Half", "One"],
+          "values": ["0.5", "1"]
+        }
+      },
+      {
+        "name": ["sex"],
+        "class": ["haven_labelled_spss", "haven_labelled", "vctrs_vctr", "character"],
+        "typeof": ["character"],
+        "values": ["M", "F", "X", null, "F"],
+        "label": ["Sex"],
+        "labels": {
+          "names": ["Male", "Female", "Not stated"],
+          "values": ["M", "F", "X"]
+        },
+        "na_values": ["X"]
+      },
+      {
+        "name": ["stata_fmt"],
+        "class": [],
+        "typeof": ["double"],
+        "values": ["10", "20", "30", "40", "50"],
+        "label": ["long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long"],
+        "format.stata": ["%9.2f"]
+      }
+    ]
+  },
+  "_about": {
+    "r_version": ["4.6.0"],
+    "workspace_objects": ["f", "e", "people", "lst", "towns"]
+  }
+}

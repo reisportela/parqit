@@ -1,7 +1,7 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.2.6  28sep2026
+*!  VERSION 0.3.0  29sep2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)
@@ -51,7 +51,7 @@ BEGIN
   RADIO rb_spss			@	_ss	@	.,		///
 	last								///
 	onclickon(program main_mode)					///
-	label("Labelled numeric version of an SPSS string variable in memory (spssencode)")
+	label("Labelled numeric version of an SPSS- or R-labelled string variable in memory (spssencode)")
 
   TEXT tx_type			_lft	_ls	_vnwd	.,		///
 	label("Variable type:")
@@ -100,12 +100,12 @@ BEGIN
 	label("Group variables")
 
   TEXT tx_src			_lft	_ls	280	.,		///
-	label("SPSS string variable in memory:")
+	label("SPSS- or R-labelled string variable in memory:")
   TEXT tx_lab			310	@	280	.,		///
 	label("Value label name (optional; default: the new variable):")
   VARNAME vn_src		_lft	_ss	280	.,		///
-	error("SPSS string variable")					///
-	label("SPSS string variable")
+	error("Labelled string variable")					///
+	label("Labelled string variable")
   EDIT ed_lab			310	@	160	.,		///
 	max(32)								///
 	option(label)							///

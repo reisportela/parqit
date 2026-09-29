@@ -222,7 +222,9 @@ class Parser {
     }
     std::string dec(const std::string &raw) {
         std::string out;
-        if (decode_text(d_, raw.data(), raw.size(), &out)) d_.transcoded_meta++;
+        size_t bad = 0;
+        if (decode_text(d_, raw.data(), raw.size(), &out, &bad)) d_.transcoded_meta++;
+        if (bad) d_.undecodable_meta++;
         return out;
     }
 
@@ -458,82 +460,85 @@ void Parser::read_extension() {
 
 /* ------------------------------------------------------------- encoding */
 
+/* An encoding name: UTF-8; an ASCII declaration, read as windows-1252 (a
+ * 7/8-bit ASCII label is often a mislabelled Western file); or any legacy
+ * encoding parqit decodes (ENC-3). UTF-16 is not a text encoding of an SPSS
+ * file. */
 bool legacy_by_name(std::string name, bool *utf8, LegacyEncoding *enc) {
-    name = ascii_upper(name);
     std::string k;
-    for (char c : name)
+    for (char c : ascii_upper(name))
         if (c != '-' && c != '_' && c != ' ') k += c;
-    if (k == "UTF8") { *utf8 = true; return true; }
-    *utf8 = false;
-    if (k == "WINDOWS1252" || k == "CP1252" || k == "MSANSI" || k == "USASCII" || k == "ASCII" ||
-        k == "ANSIX3.41968" || k == "ISO646US" || k == "CP20127" || k == "US") {
+    if (k == "USASCII" || k == "ASCII" || k == "ANSIX3.41968" || k == "ISO646US" || k == "CP20127" ||
+        k == "US") {
+        *utf8 = false;
         *enc = LegacyEncoding::Windows1252; /* ASCII is a subset */
         return true;
     }
-    if (k == "ISO88591" || k == "LATIN1" || k == "CP819" || k == "L1" || k == "ISOLATIN1" ||
-        k == "CP28591") {
-        *enc = LegacyEncoding::Latin1;
-        return true;
-    }
-    if (k == "ISO885915" || k == "LATIN9" || k == "LATIN0" || k == "CP28605") {
-        *enc = LegacyEncoding::Latin9;
-        return true;
-    }
-    if (k == "MACINTOSH" || k == "MACROMAN" || k == "XMACROMAN" || k == "CP10000" || k == "MAC") {
-        *enc = LegacyEncoding::MacRoman;
-        return true;
-    }
-    return false;
+    LegacyEncoding e;
+    if (k.empty() || !legacy_encoding_parse(name, &e) || e.is_utf16()) return false;
+    *utf8 = e.is_utf8();
+    if (!*utf8) *enc = e;
+    return true;
 }
 
 void Parser::resolve_encoding() {
     std::string declared = rtrim_blanks(encoding_record_);
+    bool utf8 = true;
+    LegacyEncoding enc = LegacyEncoding::Windows1252;
+    const bool code_page_known = character_code_ >= 0 && spss_code_page(character_code_, &utf8, &enc);
     if (!declared.empty()) {
         d_.declared_encoding = declared;
     } else if (character_code_ >= 0) {
-        static const std::map<int, const char *> known = {
-            {65001, "UTF-8"}, {1252, "windows-1252"}, {28591, "ISO-8859-1"},
-            {28605, "ISO-8859-15"}, {10000, "macintosh"}, {2, "7-bit ASCII"},
-            {3, "8-bit ASCII"}, {20127, "US-ASCII"}, {1, "EBCDIC"}};
         d_.declared_encoding = "code page " + std::to_string(character_code_);
-        auto it = known.find(character_code_);
-        if (it != known.end()) d_.declared_encoding += std::string(" (") + it->second + ")";
+        if (character_code_ == 2 || character_code_ == 3)
+            d_.declared_encoding += character_code_ == 2 ? " (7-bit ASCII)" : " (8-bit ASCII)";
+        else if (character_code_ == 1)
+            d_.declared_encoding += " (EBCDIC)";
+        else if (code_page_known)
+            d_.declared_encoding += std::string(" (") + (utf8 ? "UTF-8" : legacy_encoding_name(enc)) + ")";
     }
-    bool utf8 = true;
-    LegacyEncoding enc = LegacyEncoding::Windows1252;
+    /* ENC-3: the session's code page for undeclared text and for bytes a UTF-8
+     * file holds that are not UTF-8 */
+    bool fallback_utf8 = false;
+    LegacyEncoding fallback = LegacyEncoding::Windows1252;
+    if (!opt_.default_encoding.empty() && !legacy_by_name(opt_.default_encoding, &fallback_utf8, &fallback))
+        throw SavError("the default encoding " + opt_.default_encoding + " is not an encoding parqit "
+                       "decodes");
+    if (fallback_utf8) fallback = LegacyEncoding::Utf8;
+    utf8 = true;
+    enc = fallback;
     if (!opt_.encoding.empty()) {
         if (!legacy_by_name(opt_.encoding, &utf8, &enc))
-            throw SavError("encoding(" + opt_.encoding + ") is not one parqit can decode; use "
-                           "utf-8, windows-1252, latin1, latin9 or macroman");
+            throw SavError("encoding(" + opt_.encoding + ") is not an encoding parqit decodes; it "
+                           "decodes " + std::string(legacy_encoding_families()));
     } else if (!declared.empty()) {
         if (!legacy_by_name(declared, &utf8, &enc))
             throw SavError("SPSS file " + path_ + " declares its text as " + declared +
-                           ", which parqit cannot decode (it reads UTF-8, windows-1252, "
-                           "latin1, latin9 and macroman); if the declaration is wrong give "
-                           "encoding(), otherwise re-save the file from SPSS in Unicode mode");
+                           ", which parqit cannot decode (it decodes " +
+                           std::string(legacy_encoding_families()) + "); if the declaration is "
+                           "wrong give encoding(), otherwise re-save the file from SPSS in Unicode "
+                           "mode");
     } else if (character_code_ >= 0) {
-        switch (character_code_) {
-        case 65001: utf8 = true; break;
-        case 1252: case 2: case 3: case 20127: /* 7/8-bit ASCII: often miscoded 1252 */
-            utf8 = false; enc = LegacyEncoding::Windows1252; break;
-        case 28591: utf8 = false; enc = LegacyEncoding::Latin1; break;
-        case 28605: utf8 = false; enc = LegacyEncoding::Latin9; break;
-        case 10000: utf8 = false; enc = LegacyEncoding::MacRoman; break;
-        case 1:
+        if (character_code_ == 1)
             throw SavError("SPSS file " + path_ + " declares EBCDIC text, which parqit does not read");
-        default:
+        if (character_code_ == 1200 || character_code_ == 1201)
+            throw SavError("SPSS file " + path_ + " declares UTF-16 text (code page " +
+                           std::to_string(character_code_) + "), which an SPSS data file does "
+                           "not hold; give encoding() with the encoding its text really is in");
+        if (!spss_code_page(character_code_, &utf8, &enc))
             throw SavError("SPSS file " + path_ + " declares its text in code page " +
                            std::to_string(character_code_) +
-                           ", which parqit cannot decode (it reads UTF-8, windows-1252, latin1, "
-                           "latin9 and macroman); if the declaration is wrong give encoding(), "
-                           "otherwise re-save the file from SPSS in Unicode mode");
-        }
+                           ", which parqit cannot decode (it decodes " +
+                           std::string(legacy_encoding_families()) + "); if the declaration is "
+                           "wrong give encoding(), otherwise re-save the file from SPSS in Unicode "
+                           "mode");
     } else {
-        /* no declaration at all (very old writers): the Western code page */
-        utf8 = false;
-        enc = LegacyEncoding::Windows1252;
-        warn("the file does not declare its character encoding; text was read as windows-1252 "
-             "(give encoding() if that is wrong)");
+        /* no declaration at all (very old writers): the session's code page */
+        utf8 = fallback_utf8;
+        enc = fallback;
+        warn("the file does not declare its character encoding; text was read as " +
+             std::string(fallback_utf8 ? "UTF-8" : legacy_encoding_name(fallback)) +
+             " (give encoding() if that is wrong)");
     }
     d_.utf8 = utf8;
     d_.legacy = enc;
@@ -1253,11 +1258,11 @@ bool MissingSpec::matches(double v) const {
     return false;
 }
 
-bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *out) {
+bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *out,
+                 size_t *undecodable) {
     const unsigned char *p = reinterpret_cast<const unsigned char *>(raw);
-    bool ascii = true;
-    for (size_t i = 0; i < n && ascii; i++) ascii = p[i] < 0x80;
-    if (ascii) {
+    if (undecodable) *undecodable = 0;
+    if (text_ascii_unchanged(raw, n, d.utf8 ? LegacyEncoding::Utf8 : d.legacy)) {
         out->assign(raw, n);
         return false;
     }
@@ -1266,11 +1271,49 @@ bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *ou
             out->assign(raw, n);
             return false;
         }
-        *out = legacy_to_utf8(std::string(raw, n), d.legacy);
+        const size_t bad = legacy_decode(raw, n, d.legacy, out);
+        if (undecodable) *undecodable = bad;
         return true;
     }
-    *out = legacy_to_utf8(std::string(raw, n), d.legacy);
+    const size_t bad = legacy_decode(raw, n, d.legacy, out);
+    if (undecodable) *undecodable = bad;
     return false;
+}
+
+bool spss_code_page(int code_page, bool *utf8, LegacyEncoding *enc) {
+    /* Windows code-page numbers as SPSS records them (record 7/3) */
+    static const std::map<int, const char *> names = {
+        {874, "windows-874"},   {932, "windows-932"},    {936, "windows-936"},
+        {949, "windows-949"},   {950, "windows-950"},    {1250, "windows-1250"},
+        {1251, "windows-1251"}, {1252, "windows-1252"},  {1253, "windows-1253"},
+        {1254, "windows-1254"}, {1255, "windows-1255"},  {1256, "windows-1256"},
+        {1257, "windows-1257"}, {1258, "windows-1258"},  {2, "windows-1252"},
+        {3, "windows-1252"},    {20127, "windows-1252"}, {20866, "koi8-r"},
+        {21866, "koi8-u"},      {28591, "latin1"},       {28592, "iso-8859-2"},
+        {28593, "iso-8859-3"},  {28594, "iso-8859-4"},   {28595, "iso-8859-5"},
+        {28596, "iso-8859-6"},  {28597, "iso-8859-7"},   {28598, "iso-8859-8"},
+        {38598, "iso-8859-8"},  {28599, "iso-8859-9"},   {28603, "iso-8859-13"},
+        {28605, "latin9"},      {20932, "euc-jp"},       {51932, "euc-jp"},
+        {51936, "windows-936"}, {51949, "windows-949"},  {54936, "gb18030"},
+        {10000, "macroman"},    {10006, "mac-greek"},    {10007, "mac-cyrillic"},
+        {10029, "mac-centraleurope"}, {10079, "mac-iceland"}, {10081, "mac-turkish"},
+        {437, "ibm437"},        {737, "ibm737"},         {775, "ibm775"},
+        {850, "ibm850"},        {852, "ibm852"},         {855, "ibm855"},
+        {857, "ibm857"},        {858, "ibm858"},         {860, "ibm860"},
+        {861, "ibm861"},        {862, "ibm862"},         {863, "ibm863"},
+        {864, "ibm864"},        {865, "ibm865"},         {866, "ibm866"},
+        {869, "ibm869"}};
+    if (code_page == 65001) {
+        *utf8 = true;
+        return true;
+    }
+    const auto it = names.find(code_page);
+    if (it == names.end()) return false;
+    LegacyEncoding e;
+    if (!legacy_encoding_parse(it->second, &e)) return false;
+    *utf8 = false;
+    *enc = e;
+    return true;
 }
 
 Dictionary read_dictionary(const std::string &path, const ReadOptions &opt) {

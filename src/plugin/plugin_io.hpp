@@ -14,6 +14,7 @@
 
 #include "engine/request.hpp"
 #include "engine/session.hpp"
+#include "engine/legacy_encoding.hpp"
 #include "engine/typemap.hpp"
 
 namespace parqit_plugin {
@@ -196,6 +197,11 @@ struct PlanContext {
  * function-local static: no static-init order to reason about, and both
  * translation units (cmd_set lives with the views) see the same value. */
 parqit::Int64Mode &int64_session_default();
+
+/* ENC-3: the session's code page for text that declares none (`parqit set
+ * encoding <name>`), consulted by every command that carries no encoding();
+ * windows-1252 until the user changes it. Same idiom as above. */
+parqit::LegacyEncoding &encoding_session_default();
 
 /* FILL-THREADS-SET-1: the session's fill-worker count (`parqit set
  * fill_threads auto|#`): -1 = not set (PARQIT_FILL_THREADS, then the automatic

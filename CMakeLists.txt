@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.2.6 LANGUAGES C CXX)
+project(parqit VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,6 +106,9 @@ set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 # duckdb_static): the SPSS reader inflates .zsav blocks with it — no new
 # dependency.
 set(PARQIT_MINIZ_INCLUDE "${duckdb_SOURCE_DIR}/third_party/miniz")
+# ... and its bundled zstd (namespace duckdb_zstd, also inside duckdb_static):
+# the R reader inflates zstd-compressed .rds/.RData files with it.
+set(PARQIT_ZSTD_INCLUDE "${duckdb_SOURCE_DIR}/third_party/zstd/include")
 
 # ---------------------------------------------------------------------------
 # Engine: DuckDB session, manifest, type map, SQL builder. No Stata API here,
@@ -114,6 +117,8 @@ set(PARQIT_MINIZ_INCLUDE "${duckdb_SOURCE_DIR}/third_party/miniz")
 set(PARQIT_ENGINE_SOURCES
     src/engine/hexcodec.cpp
     src/engine/legacy_encoding.cpp
+    src/engine/encoding_tables.cpp
+    src/engine/text_file.cpp
     src/engine/parquet_footer.cpp
     src/engine/session.cpp
     src/engine/statistics.cpp
@@ -125,6 +130,9 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/spss_reader.cpp
     src/engine/spss_plan.cpp
     src/engine/spss_table.cpp
+    src/engine/rdata_reader.cpp
+    src/engine/rdata_plan.cpp
+    src/engine/rdata_table.cpp
 )
 add_library(parqit_engine STATIC ${PARQIT_ENGINE_SOURCES})
 # The aggregate callbacks run for every row. Keep their optimized builds at
@@ -138,6 +146,7 @@ target_include_directories(parqit_engine PUBLIC
     "${PARQIT_DUCKDB_INCLUDE}"
     "${PARQIT_UTF8PROC_INCLUDE}"
     "${PARQIT_MINIZ_INCLUDE}"
+    "${PARQIT_ZSTD_INCLUDE}"
     "${PARQIT_VENDOR_DIR}/arrow"
     "${PARQIT_VENDOR_DIR}/json"
 )
@@ -173,6 +182,7 @@ add_library(parqit_plugin SHARED
     src/plugin/parqit_plugin.cpp
     src/plugin/plugin_io.cpp
     src/plugin/plugin_spss.cpp
+    src/plugin/plugin_rdata.cpp
     src/plugin/plugin_view.cpp
     "${PARQIT_VENDOR_DIR}/stata/stplugin.c"
 )
@@ -307,6 +317,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_main.cpp
         tests/unit/test_hexcodec.cpp
         tests/unit/test_legacy_encoding.cpp
+        tests/unit/test_text_file.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
         tests/unit/test_parallelism.cpp
@@ -319,6 +330,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_arrow_copy_bench.cpp
         tests/unit/test_streaming.cpp
         tests/unit/test_spss_reader.cpp
+        tests/unit/test_rdata_reader.cpp
     )
     target_include_directories(parqit_tests PRIVATE
         src

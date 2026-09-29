@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.6 28sep2026}{...}
+{* *! version 0.3.0 29sep2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Stata metadata in Parquet" "parqit_technical##metadata"}{...}
@@ -137,11 +137,15 @@ your working dataset is left untouched — and snapshots them to a temporary Par
 along. parqit picks the path by the final file extension, case-insensitively.
 On the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, Parquet stays
 on disk, while delimited text, {cmd:.dta} and Excel are first imported to a
-package-owned Parquet bridge; this keeps the engine's two-table input contract
+package-owned Parquet bridge (SPSS and R files are converted to one, as
+described below); this keeps the engine's two-table input contract
 uniform and is intended for a comparatively small using side.
 The delimited using-side adapter uses Stata's {cmd:import delimited}, whose
 type inference can differ from {cmd:read_csv_auto} on the main side (for
-example, date text versus a parsed date). Excel uses the first worksheet and
+example, date text versus a parsed date). It reads the file as UTF-8 — after
+parqit has decoded it when it is not (CSV-ENC-1), never with the encoding
+{cmd:import delimited} would guess, which for Cyrillic, Chinese or Japanese
+text is wrong without a word (observed: no observations, or mojibake). Excel uses the first worksheet and
 its first row as variable names; there are no sheet/range/header options.
 To retain the main-source CSV inference for a join, open that CSV as its own
 named view and refer to {cmd:view:}{it:name}.
@@ -179,6 +183,30 @@ strict parser of the JSON that parqit writes, with no Python, and builds the
 labelled numeric version of the variable.
 
 {pstd}
+{bf:R data files} ({cmd:.rds}, {cmd:.rda}, {cmd:.RData}) are read by parqit's own
+reader of R's serialization format (R's {cmd:src/main/serialize.c}, versions 2
+and 3, XDR), with no R. A gzip- or zstd-compressed file is first inflated into
+a temporary file (each gzip member's CRC-32 and length checked), removed with
+the conversion. A first pass parses the whole structure: attributes are loaded,
+while every vector that may be a data frame column is only located — its
+length and the offset of its first element — so the data are read later,
+column by column, each column with its own cursor and buffer. Objects that are
+not data are passed over without being evaluated or recursed into: a function
+(byte-compiled or not), an environment that refers to itself, an external
+pointer. R's references are followed through the file's own reference table,
+and a malformed or truncated file is refused naming the byte offset. A profile
+pass then reads every column once, to settle what only the data can settle —
+a date holding a fraction of a day, a time beyond a day, the values inside a
+user-missing range, the tagged missing values present, the widest string —
+and an internal DuckDB table function streams the rows into the verified
+Parquet writer, which checks the rows written and that the source file did
+not change. ALTREP vectors R writes compactly are expanded as R would: integer
+and real sequences, sorted/no-NA wrappers and deferred {cmd:as.character()} of
+integers. Column names that repeat, or differ only by case, are written exactly
+(footer rename, as for {cmd:parqit save}), after an empty or repeated name is
+made unique. The mapping and the codes are in {help parqit##rdata:R data files}.
+
+{pstd}
 The delimited-text dialect and column types are inferred from a sample of the
 file. Inference is a guess, and a wrong guess changes values silently: text
 written as {cmd:1e5} becomes the number 100000, a decimal with more digits than
@@ -206,22 +234,35 @@ scan it sits after the files' own columns and before any Hive partition keys,
 but it is not one of them — it takes no {cmd:parqit.*} metadata, is never
 mistaken for a partition key, and carries a note saying what it is. A name the
 source already loads is refused rather than quietly renamed, and a
-{cmd:.dta}/Excel/SPSS source is refused because what it would report is the
-temporary bridge.
+{cmd:.dta}/Excel/SPSS/R source, or delimited text decoded from another
+encoding, is refused because what it would report is the temporary bridge.
 
 {pstd}
 Because a bridge {it:is} a {cmd:parqit save} of the imported frame, the
 write-side conversions apply to it and are now reported: extended missings
 {cmd:.a}-{cmd:.z} collapse to {cmd:.}, fractional date/period counts round, and
-legacy 8-bit text is transcoded from {cmd:windows-1252} (see
-{it:String encoding} under Materialisers). The command that created the bridge prints those losses through a
+legacy text is transcoded from the session code page ({cmd:windows-1252}
+unless {cmd:parqit set encoding}; see {it:String encoding} under
+Materialisers). The command that created the bridge prints those losses through a
 {cmd:note:} naming the bridged file and returns them in
 {cmd:r(ext_missing)}/{cmd:r(frac_dates)}/{cmd:r(transcoded_vars)}/
-{cmd:r(transcoded_cells)}/{cmd:r(transcoded_meta)}/{cmd:r(encoding)} —
+{cmd:r(transcoded_cells)}/{cmd:r(transcoded_meta)}/{cmd:r(transcoded_revalid)}/
+{cmd:r(undecodable)}/{cmd:r(encoding_default)}/{cmd:r(encoding)} —
 {cmd:parqit use} (lazy and eager), {cmd:merge}/{cmd:joinby}/{cmd:append} and
 {cmd:open _data} alike. Choose another code page for a {cmd:.dta}/Excel bridge
-with {opt encoding(name)} on any of those commands (a Latin-9 or MacRoman
-{cmd:.dta}); a CSV main source is scanned as UTF-8 and is not transcoded.
+with {opt encoding(name)} on any of those commands (any encoding parqit reads:
+a Cyrillic, Greek, Chinese or Japanese {cmd:.dta} as much as a Latin-9 one).
+With a named text encoding, checking UTF-8 may scan the entire file before
+opening a view; a wholly UTF-8 file stays in place unless {cmd:all} is requested.
+Delimited text that is not UTF-8 — by its byte-order mark, the patterns of
+UTF-16 or {opt encoding()} — is decoded first into a package-owned UTF-8 copy,
+under the file's own name and the {it:key}{cmd:=}{it:value} directories of its
+path, that the engine scans (or {cmd:import delimited} reads, on the using
+side) instead; see {help parqit##encoding:Text encodings}. Every bridge lives in
+the temporary directory ({cmd:c(tmpdir)}); if its path contains {cmd:=}, the
+engine reads such a directory as a Hive partition column of the bridged data,
+and parqit says so once a session — point TMPDIR (STATATMP on Windows) at a
+directory without {cmd:=}.
 
 {pstd}
 {bf:When does the bridge make sense?} For a {it:small} side — a lookup
@@ -250,14 +291,14 @@ small file joins in — only the result is collected:
 A delimited file is scanned with DuckDB's {cmd:read_csv_auto} (schema and
 delimiter auto-detected); add {opt relaxed} to {cmd:parqit use} to union a glob
 whose files have different schemas. (SAS files are out of scope — parqit reads
-Parquet, delimited text, Stata, Excel and SPSS.)
+Parquet, delimited text, Stata, Excel, SPSS and R data files.)
 
 {pstd}
 {cmd:parqit describe} {it:source} / {cmd:glimpse} {it:source} is deliberately a
 {bf:Parquet-only} footer inspection (file, glob or Hive directory): it does not
-invoke the CSV, Stata, Excel or SPSS adapters. From the parqit metadata in that
+invoke the CSV, Stata, Excel, SPSS or R adapters. From the parqit metadata in that
 footer it also shows each variable's value label and variable label, marks the
-variables with notes and those whose SPSS labels are kept in characteristics,
+variables with notes and those whose SPSS or R labels are kept in characteristics,
 and lists value labels and notes with its {opt labels} and {opt notes} options
 (see {help parqit##explore:parqit describe}). With no source argument it instead
 describes the open view's carried schema and pipeline depth. A mixed-schema
@@ -426,18 +467,25 @@ dataset to that source so {opt copysource} can verify provenance; it is harmless
 travels with a saved {cmd:.dta}, is never written into a parqit Parquet file, and
 may be removed with {cmd:char _dta[_parqit_fast_source_nonce]}.
 
-{pstd}{opt encoding(name)} names the legacy 8-bit code page used to transcode
-text that is not valid UTF-8 (see {it:String encoding} below):
-{cmd:windows-1252} (the default; aliases {cmd:cp1252}, {cmd:cp-1252},
-{cmd:windows1252}), {cmd:latin1} ({cmd:iso-8859-1}, {cmd:iso8859-1},
-{cmd:latin-1}), {cmd:latin9} ({cmd:iso-8859-15}, {cmd:iso8859-15}) or
-{cmd:macroman} ({cmd:mac-roman}, {cmd:macintosh}). {cmd:r(encoding)} reports the
-canonical name ({cmd:windows-1252}, {cmd:latin1}, {cmd:latin9},
-{cmd:macroman}) whatever spelling was typed. Any other name is refused before
-anything is written — on {bf:both} the memory-save and the lazy view-save
-paths. It has an effect only for a save of the dataset in memory; a lazy
-Parquet-to-Parquet save carries UTF-8 already, so a valid name is accepted with
-no effect there.
+{pstd}{opt encoding(name)} names the code page used to transcode text that is
+not valid UTF-8 (see {it:String encoding} below): any of the encodings listed
+under {help parqit##encoding:Text encodings} — UTF-8, 49 single-byte code
+pages (Windows 874 and 1250-1258, ISO-8859, KOI8, DOS, Mac), Shift_JIS (932),
+GBK (936), UHC (949), Big5 (950), EUC-JP and GB18030 — by its name or a usual
+alias, case-insensitively and ignoring {cmd:-}, {cmd:_}, {cmd:.} and blanks.
+Without it the session code page applies ({cmd:windows-1252}, or the one
+{cmd:parqit set encoding} named). {opt encoding(name, all)} decodes every
+text from {it:name}, also text that happens to be valid UTF-8. ASCII bytes are
+unchanged only when that encoding gives them their ASCII meaning; CP864's
+0x25 becomes Arabic {cmd:٪}. {opt copysource} refuses {cmd:all} before writing:
+omit {opt copysource} to decode text through the normal memory writer.
+{cmd:r(encoding)} reports the canonical name ({cmd:windows-1252}, {cmd:latin1},
+{cmd:latin9}, {cmd:macroman}, {cmd:windows-1251}, {cmd:windows-936}, ...)
+whatever spelling was typed. Any other name is refused before anything is
+written — on {bf:both} the memory-save and the lazy view-save paths — with the
+list of the families parqit reads; UTF-16 applies to delimited text only. It has
+an effect only for a save of the dataset in memory; a lazy Parquet-to-Parquet
+save carries UTF-8 already, so a valid name is accepted with no effect there.
 
 {pstd}
 Writers for the same destination are serialized by
@@ -460,31 +508,103 @@ partitioned tree, and do not concurrently write overlapping destinations.
 
 {pstd}
 {it:String encoding.} Parquet/Arrow strings must be valid UTF-8. Text that is
-already valid UTF-8 (ASCII, accented text, emoji, {cmd:strL}) is written
+already valid UTF-8 (text in any script, emoji, {cmd:strL}) is written
 byte-exact. A string cell, variable or data label, value-label text, note or
-characteristic that carries raw Latin-1/Windows-1252/MacRoman bytes (common in
+characteristic that carries the raw bytes of a legacy code page (common in
 administrative data saved by Stata 13 and earlier, or loaded into a Unicode
 Stata without {helpb unicode:unicode translate}) is
 {bf:transcoded to UTF-8 on the way out}, item by item — what
 {cmd:unicode translate} would do, with no
 translate step on your side and without touching the dataset in memory. The
-source code page defaults to {cmd:windows-1252} (identical to Latin-1 for the
-accented letters, and covering the euro sign and typographic quotes in
-0x80-0x9F); {opt encoding()} selects {cmd:latin1}, {cmd:latin9} or
-{cmd:macroman}. A {cmd:str#} whose transcoded values are longer is recorded
+source code page is {opt encoding()}, or else the session's:
+{cmd:windows-1252} (identical to Latin-1 for the accented letters, and covering
+the euro sign and typographic quotes in 0x80-0x9F) unless
+{cmd:parqit set encoding} named another. A byte an 8-bit code page leaves
+undefined becomes, as in the WHATWG decoders, the C1 control of the same value
+(0x80-0x9F) or U+FFFD; an invalid multibyte sequence becomes U+FFFD (a trailing
+ASCII byte is kept); each text with a U+FFFD is counted in
+{cmd:r(undecodable)} and said. A {cmd:str#} whose transcoded values are longer is recorded
 wider, exactly as {cmd:unicode translate} widens it, and past 2,045 bytes the
 recorded type becomes {cmd:strL} (the {cmd:parqit.*} metadata is built after the
 data pass, so the recorded type always matches the written values). Every save
 that transcodes anything prints a {cmd:note:} with counts and returns
-{cmd:r(transcoded_cells)}, {cmd:r(transcoded_meta)}, {cmd:r(transcoded_vars)}
-and {cmd:r(encoding)}. One limitation, shared with {cmd:unicode translate}: a
-legacy string that happens to be well-formed UTF-8 cannot be told apart and is
-kept as is. On read, parqit never transcodes: a foreign Parquet file whose
+{cmd:r(transcoded_cells)}, {cmd:r(transcoded_meta)}, {cmd:r(transcoded_vars)},
+{cmd:r(transcoded_revalid)}, {cmd:r(undecodable)}, {cmd:r(encoding_default)}
+and {cmd:r(encoding)}. The limitation shared with {cmd:unicode translate} — a
+legacy string that happens to be well-formed UTF-8 cannot be told apart — is
+narrowed three ways (ENC-3): with a multibyte code page, whose text is often
+valid UTF-8 by accident, a string variable with any cell that is not UTF-8 is
+decoded as a whole, and so is all the metadata once any column or item is
+legacy (a pre-scan finds them, stopping per variable at its first such cell);
+{opt encoding(name, all)} decodes all text, including a code page's non-ASCII
+meaning for a byte below 128 (CP864's 0x25); and a
+{cmd:.dta} of format 117 or older ({cmd:dtaversion}), which predates Unicode,
+is read with {cmd:all} whenever {opt encoding()} is given. Otherwise a single
+legacy string that is well-formed UTF-8 is kept as is. A Parquet file is never
+transcoded on read (delimited text, {cmd:.dta}, Excel, SPSS and R files are
+decoded on their way in; see {help parqit##encoding:Text encodings}): a foreign Parquet file whose
 string payload is not valid UTF-8 is refused by the engine with a loud error
 naming the column — rewrite it as UTF-8 at the source. A binary {cmd:strL} containing an embedded NUL cannot be represented
 through the Stata plugin's text interface, so a direct memory-to-Parquet save
 refuses the offending cell before publishing any output. A lazy
 Parquet-to-Parquet save does not cross that interface and preserves the bytes.
+
+{pstd}
+{it:Encoding tables.} The code-page tables are generated
+({cmd:tools/gen_encoding_tables.py}) from the standard mapping files as Python's
+codecs carry them, corrected where Windows reads its own code pages
+differently: the end-user-defined areas of 932, 936, 949 and 950 map to the
+Private Use Area as Windows maps them, 950's C6A1-C8FE is such an area (not the
+ETEN extensions), 936's reserved cells keep the Private Use code points
+Windows gives them where GB18030 later assigned real characters, EUC-JP's JIS
+X 0208 is read through the 932 table by pointer (as WHATWG builds it: the NEC
+and IBM extensions, and Microsoft's mappings of the few characters vendors
+disagree on), and GB18030 follows its 2005 edition (as ICU and glibc do). No
+multibyte sequence decodes to an ASCII character, so decoding cannot create a
+delimiter, a quote or a line break. The verify suite compares every byte
+sequence of every code page — about 195,000 — with ICU ({cmd:ustrfrom()}); the
+few that differ are listed there with the reason (IBM's extensions in ICU,
+vendor tables of the DOS code pages 864 and 869).
+
+{pstd}
+{it:Delimited text} (CSV-ENC-1). The engine's CSV reader reads UTF-8 only, and
+reads UTF-16 without a byte-order mark as one column of garbage without an
+error, so parqit reads the first 64 KiB of each file first: a UTF-8, UTF-16 or
+UTF-32 byte-order mark; UTF-16 without one — NUL bytes in at least a tenth of
+the byte pairs with at least 95% at one parity, or (fewer NUL bytes: text in
+other scripts) a sample that is not UTF-8 whose line feeds are UTF-16 line
+feeds at even offsets, at most one in ten at the other parity, and which read
+as UTF-16 is text (no unpaired surrogate, no control character but tab, LF and
+CR: random bytes fail at once); UTF-32 without
+one — the two high bytes of every four NUL (95%), the low one not (5%), refused
+unless {opt encoding()} names an encoding. Any other NUL bytes (the padding of
+fixed-width exports) are left to the reader, as before. An {opt encoding()}
+given is followed over these patterns, with a note; a byte-order mark is not a
+pattern but the file's own declaration, and overrides {opt encoding()}. A file
+that is not UTF-8 is decoded, streaming, in 4 MiB blocks cut after a CR or LF
+(bytes no supported encoding uses inside a character; UTF-16 blocks keep a split
+surrogate pair together); a line longer than 64 MiB is cut into pieces that
+depend on the text alone — anywhere in a single-byte code page, at a character
+boundary in UTF-8, after a byte below 0x30 in a multibyte code page, and
+refused when a multibyte one has none. The copy goes to a package-owned
+directory, erased with the view or once imported, under the file's own name
+and the {it:key}{cmd:=}{it:value} directories of its path (the engine reads
+them as Hive partition columns); a glob whose files need it becomes the same
+tree of copies, read through the same pattern (files that need no decoding are
+copied as they are; with a single-byte code page every file is read line by
+line, its lines that are valid UTF-8 kept). The path is used as given, never
+normalized: the system resolves {it:link}{cmd:/..} physically, and the engine
+reads Hive keys from the path it is given. A path that names a file is that
+file, even with {cmd:*} or {cmd:?} in it; otherwise {cmd:*} and {cmd:?} are live
+and {cmd:[} is literal (GLOB-2). A missing file or an empty glob is left for the reader to report, as
+before. With a single-byte code page each line is decoded unless it is valid
+UTF-8; with a multibyte one the file is first checked for UTF-8, stopping at the
+first line that is not, and then decoded whole. The notes are written by the
+plugin, file by file where files differ. The engine's own CSV encodings
+(latin-1, UTF-16) are not used: they reject half of windows-1252, and its
+extension hook copies multibyte text wrongly (DuckDB 1.5.3, {cmd:csv_encoder}).
+The engine's refusal of text that is not UTF-8 names parqit's {opt encoding()}
+in place of the engine's own advice.
 
 
 {marker perf}{...}
@@ -913,9 +1033,31 @@ differs only by case from a file column is refused (see {it:Column names} under
 {cmd:use ..., clear} and {cmd:collect} refuse more than 2,147,483,647 rows with
 error 901; filter, aggregate or {cmd:save} the lazy result instead.{p_end}
 {pstd}{cmd:•} Main-source Parquet and delimited text are engine-scanned, but
-{cmd:.dta}/{cmd:.xls}/{cmd:.xlsx} require a full temporary Parquet bridge.
-Delimited text on a two-table {cmd:using} side is bridged too.
-{cmd:describe} with a source argument is Parquet-only.{p_end}
+{cmd:.dta}/{cmd:.xls}/{cmd:.xlsx} require a full temporary Parquet bridge, and
+SPSS and R files are converted, out of core, into one (a compressed R file is
+first decompressed into {cmd:c(tmpdir)}). Delimited text on a two-table
+{cmd:using} side is bridged too, and delimited text that is not UTF-8 is first
+decoded into a temporary UTF-8 copy, which needs room in {cmd:c(tmpdir)} (UTF-8
+can take more bytes than the code page did). {cmd:describe} with a source
+argument is Parquet-only.{p_end}
+{pstd}{cmd:•} Bridges belong to the Stata session that created them and are
+removed when the last view that uses them is closed or replaced (an eager read
+removes its bridge at once); a session that ends with views open, or crashes,
+leaves its {cmd:_parqit_bridge_}{it:kind}{cmd:_}{it:pid}{cmd:_}... directories
+in {cmd:c(tmpdir)}. Close views with {cmd:parqit close _all} before exit; such
+a directory can be deleted once no Stata session uses it (its name carries the
+id of the process that made it). If the path of {cmd:c(tmpdir)} contains
+{cmd:=}, the engine reads the bridge directory as a Hive partition column;
+parqit says so once a session.{p_end}
+{pstd}{cmd:•} Encoding limits: ISO-2022-JP and other stateful encodings,
+EUC-TW, Big5-HKSCS, EBCDIC and UTF-32 are refused with a message. GB18030 is
+read as its 2005 edition (as ICU and glibc read it), without the 2022
+edition's changes, and {cmd:big5} is Windows' code page 950, whose area C6A1-C8FE is read as Private
+Use characters, so the ETEN extensions of a Unix Big5 file (circled digits,
+kana) come out as those. No legacy code page is guessed from the text: only
+byte-order marks and the patterns of UTF-16 and UTF-32 are recognised, and
+otherwise {opt encoding()} or the session code page applies (see
+{help parqit##encoding:Text encodings}).{p_end}
 {pstd}{cmd:•} Without {opt xmissing}, extended missings {cmd:.a}-{cmd:.z}
 become plain missing in Parquet, with a write-time note. With it, eager reads
 restore the codes; lazy views still fold them and announce that loss.

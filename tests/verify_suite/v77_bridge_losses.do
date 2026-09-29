@@ -131,7 +131,9 @@ log using v77c.log, text replace name(v77c)
 parqit use using `"`bigc'.parquet"', clear
 log close v77c
 local got : char _dta[bignote]
-assert strlen(`"`got'"') == 67783
+* ENC-3: cut at a character boundary — 33,891 é are 67,782 bytes (a cut at
+* 67,783 would leave half an é, text that is not UTF-8)
+assert strlen(`"`got'"') == 67782 & ustrinvalidcnt(`"`got'"') == 0
 python:
 from sfi import Macro
 import pyarrow.parquet as pq, json

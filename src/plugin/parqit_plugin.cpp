@@ -19,8 +19,10 @@
 #include <vector>
 
 #include "engine/hexcodec.hpp"
+#include "engine/legacy_encoding.hpp"
 #include "engine/session.hpp"
 #include "plugin/plugin_io.hpp"
+#include "plugin/plugin_rdata.hpp"
 #include "plugin/plugin_spss.hpp"
 #include "plugin/plugin_view.hpp"
 
@@ -39,7 +41,7 @@ constexpr ST_retcode kRcEngine = 920;  /* engine (DuckDB) failure */
 
 [[maybe_unused]] void say(const std::string &s) { SF_display(const_cast<char *>(s.c_str())); }
 void cry(const std::string &s) {
-    std::string line = s;
+    std::string line = parqit::with_encoding_hint(s); /* CSV-ENC-1 */
     line.push_back('\n');
     SF_error(const_cast<char *>(line.c_str()));
 }
@@ -205,7 +207,9 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "view_list") return parqit_plugin::cmd_view_list(args);
     if (cmd == "bridge_new") return parqit_plugin::cmd_bridge_new(args);
     if (cmd == "bridge_discard") return parqit_plugin::cmd_bridge_discard(args);
+    if (cmd == "text_prepare") return parqit_plugin::cmd_text_prepare(args);
     if (cmd == "spss_convert") return parqit_plugin::cmd_spss_convert(args);
+    if (cmd == "rdata_convert") return parqit_plugin::cmd_rdata_convert(args);
     if (cmd == "view_alive") {
         save_local("_parqit_view_alive", parqit_plugin::view_is_live() ? "1" : "0");
         save_local("_parqit_view_current",

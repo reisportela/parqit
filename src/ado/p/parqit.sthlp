@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.2.6 28sep2026}{...}
+{* *! version 0.3.0 29sep2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -25,6 +25,7 @@
 {viewerjumpto "Verbs" "parqit##verbs"}{...}
 {viewerjumpto "Sampling designs" "parqit##sampledesign"}{...}
 {viewerjumpto "Materialisers" "parqit##materialisers"}{...}
+{viewerjumpto "Text encodings" "parqit##encoding"}{...}
 {viewerjumpto "Exploring a view" "parqit##explore"}{...}
 {viewerjumpto "Expressions" "parqit##expressions"}{...}
 {viewerjumpto "Settings, raw SQL and diagnostics" "parqit##options"}{...}
@@ -53,11 +54,12 @@ into memory:
 {p 8 16 2}
 {cmd:parqit use} [{it:varlist-patterns}] {cmd:using} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)}
 {opt relax:ed} {opt enc:oding(name)} {opt int64(refuse|round|string)} {opt binary(text|hex)}
-{opt file:name(newvar)} {opt csv(read_options)}]
+{opt file:name(newvar)} {opt csv(read_options)} {opt obj:ect(name)}]
 
 {p 8 16 2}
 {cmd:parqit use} {it:filename} [{cmd:,} {opt clear} {opt n:ame(viewname)} {opt relax:ed} {opt enc:oding(name)}
-{opt int64(refuse|round|string)} {opt binary(text|hex)} {opt file:name(newvar)} {opt csv(read_options)}]
+{opt int64(refuse|round|string)} {opt binary(text|hex)} {opt file:name(newvar)} {opt csv(read_options)}
+{opt obj:ect(name)}]
 
 {p 8 16 2}
 {cmd:parqit use} [{it:varlist-patterns}] {cmd:using view:}{it:viewname}{cmd:,} {opt n:ame(newview)}
@@ -77,8 +79,9 @@ instead of reading a file; see {help parqit##copy:Copying a view}.
 (wildcards are {cmd:*} and {cmd:?}; a {cmd:[} is a literal character, and a
 filename that exists is always read as itself, never as a pattern),
 a Hive-partitioned directory, a delimited-text file ({cmd:.csv}, {cmd:.tsv},
-{cmd:.txt} or {cmd:.tab}), a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file, or an
-SPSS system file ({cmd:.sav} or {cmd:.zsav}; see {help parqit##spss:SPSS files}) — see
+{cmd:.txt} or {cmd:.tab}), a Stata {cmd:.dta} / Excel {cmd:.xls}/{cmd:.xlsx} file, an
+SPSS system file ({cmd:.sav} or {cmd:.zsav}; see {help parqit##spss:SPSS files}), or an
+R data file ({cmd:.rds}, {cmd:.rda} or {cmd:.RData}; see {help parqit##rdata:R data files}) — see
 {help parqit_technical##formats:Input formats}. Without {opt clear} a lazy view opens over
 the file(s), replaces any existing view with the same name and becomes current;
 the current in-memory dataset is unchanged. With {opt clear} the whole result is
@@ -87,10 +90,20 @@ is then invalid.
 {opt relaxed} reads a glob whose files have {it:different} schemas by union of
 column names (columns absent from a file arrive missing); without it a schema
 mismatch across the matched files is a loud error. {opt encoding(name)} names
-the legacy 8-bit code page for a {cmd:.dta}/Excel source that must be bridged to
-Parquet (see {help parqit_technical##formats:Input formats}), and for an SPSS file the
-code page that replaces the one the file declares; it is ignored, with a note,
-for a Parquet/CSV source (read as UTF-8).
+the encoding of text that is not UTF-8, in any language: of delimited text
+(read as UTF-8 without it; a UTF-16 byte-order mark is recognised), of a
+{cmd:.dta}/Excel source that must be bridged to Parquet (by default the
+session code page, windows-1252 unless {cmd:parqit set encoding} named
+another), for an SPSS file the code page that replaces the one the file
+declares, and for an R data file the encoding of the strings R did not mark.
+Any encoding parqit reads may be named: UTF-8, the Windows, ISO-8859, KOI8,
+DOS and Mac code pages, Shift_JIS, EUC-JP, GBK, GB18030, Big5, EUC-KR and
+UTF-16 (see {help parqit##encoding:Text encodings}); {opt encoding(name, all)}
+decodes from {it:name} also text that happens to be valid UTF-8. It is
+ignored, with a note, for a Parquet source (UTF-8 by definition).
+{opt object(name)} names the data frame to read from an R data file that holds
+several: an {cmd:.RData} saved with several objects, or an {cmd:.rds} holding a
+named list (see {help parqit##rdata:R data files}); it is an error on any other source.
 
 {pstd}{opt int64(refuse|round|string)} says what to do with a column whose
 integers go beyond 2^53, outside the consecutively exact integer range of a
@@ -133,8 +146,10 @@ and a saved file holds it as plain text. It is added even when a
 {it:varlist} selects only some columns; naming it in the {it:varlist} places it
 where you put it. The name must not be one the source already loads (including
 a Hive partition key) — that refuses, naming the clash — and a {cmd:.dta},
-Excel or SPSS source refuses too, because such a source is read through a temporary
-Parquet bridge whose path says nothing about your file.
+Excel, SPSS or R source refuses too, because such a source is read through a temporary
+Parquet bridge whose path says nothing about your file. Delimited text that needs
+decoding also refuses; a file already valid UTF-8 stays in place with a named
+legacy encoding unless {cmd:all} is requested, and supports {opt filename()}.
 
 {pstd}{opt csv(read_options)} hands the reader the dialect and the types of a
 delimited-text source instead of letting it infer them; it is an error on any
@@ -190,9 +205,9 @@ under the engine's {cmd:column0}, {cmd:column1}, ... names.
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source} [{cmd:,} {opt enc:oding(name)}]{p_end}
 
 {p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file}
-[{cmd:,} {it:merge_options} {opt int64(refuse|round|string)}]{p_end}
+[{cmd:,} {it:merge_options} {opt int64(refuse|round|string)} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit appendin using} {it:file}
-[{cmd:,} {opt keep(varlist)} {opt force} {opt int64(refuse|round|string)}]{space 3}({opt keep()}
+[{cmd:,} {opt keep(varlist)} {opt force} {opt int64(refuse|round|string)} {opt enc:oding(name)}]{space 3}({opt keep()}
 names variables {it:of the file}, as in native {helpb append}){p_end}
 
 {pstd}{cmd:mergein}/{cmd:appendin} join the data {it:already in Stata's memory}
@@ -211,7 +226,7 @@ only the options shown in its own syntax line; any other native
 {cmd:merge} option is rejected.
 
 {pstd}where each {it:source} is any supported disk input (Parquet file, glob or
-Hive directory; delimited text; Stata; Excel; or SPSS) or
+Hive directory; delimited text; Stata; Excel; SPSS; or R) or
 {cmd:view:}{it:viewname} — another open view whose plan is embedded without
 materialising either view. Non-Parquet file sources follow the adapter rules
 in {help parqit_technical##formats:Input formats}.
@@ -224,12 +239,13 @@ pipeline; only {cmd:collect}/{cmd:save} materialise its full result):
 {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)}
 {opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}
 {opt xmiss:ing}]{p_end}
-{p 8 16 2}{cmd:parqit save} {it:filename} {cmd:using} {it:spssfile} [{cmd:,} {opt replace}
-{opt comp:ression(codec)} {opt compression_level(#)} {opt enc:oding(name)}]{space 2}convert an
-SPSS {cmd:.sav}/{cmd:.zsav} file to Parquet ({help parqit##spss:SPSS files}){p_end}
+{p 8 16 2}{cmd:parqit save} {it:filename} {cmd:using} {it:spssfile}|{it:Rfile} [{cmd:,} {opt replace}
+{opt comp:ression(codec)} {opt compression_level(#)} {opt enc:oding(name)} {opt obj:ect(name)}]{space 2}convert an
+SPSS {cmd:.sav}/{cmd:.zsav} file or an R {cmd:.rds}/{cmd:.rda}/{cmd:.RData} file to Parquet
+({help parqit##spss:SPSS files}, {help parqit##rdata:R data files}){p_end}
 {p 8 16 2}{cmd:parqit spssencode} {it:strvar}{cmd:,} {opt g:enerate(newvar)} [{opt l:abel(name)}
 {opt seq:uential}]{space 2}labelled numeric version of a string variable read from an
-SPSS file ({help parqit##spss:SPSS files}){p_end}
+SPSS file, or from an R file with haven labels ({help parqit##spss:SPSS files}){p_end}
 {p 8 16 2}{cmd:parqit head} [{it:#}]{p_end}
 {p 8 16 2}{cmd:parqit summarize} [{it:varlist}] [{cmd:,} {opt d:etail}]{p_end}
 {p 8 16 2}{cmd:parqit tabulate} {it:varname} [{it:varname2}] [{cmd:,} {opt m:issing} {opt row} {opt col}
@@ -257,7 +273,7 @@ ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit view} [{it:viewname}[{cmd::} {it:parqit_command}]] | {cmd:parqit views}{p_end}
 {p 8 16 2}{cmd:parqit open _data} [{cmd:,} {opt n:ame(viewname)} {opt enc:oding(name)}]
 | {cmd:parqit close} [{it:viewname}|{cmd:_all}] | {cmd:parqit path} {it:filename}{p_end}
-{p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:int64}|{cmd:fill_threads}|{cmd:stream_buffer_mb}|{cmd:threads}|
+{p 8 16 2}{cmd:parqit set} {cmd:statamissing}|{cmd:int64}|{cmd:encoding}|{cmd:fill_threads}|{cmd:stream_buffer_mb}|{cmd:threads}|
 {cmd:memory_limit}|{cmd:tempdir} {it:value}{p_end}
 {p 8 16 2}{cmd:parqit version}{space 4}(plugin + engine versions){p_end}
 {p 8 16 2}{cmd:parqit selftest}{space 3}(end-to-end engine and codec check, useful on new installs/HPC nodes){p_end}
@@ -292,16 +308,20 @@ launched directly with {cmd:db} {it:name}.
 memory with {opt clear} — {cmd:open _data}, and {cmd:path}; {bf:Populate}
 lists the variables recorded in the Parquet footer of the source, and
 {bf:Describe} runs {cmd:describe} on it. These two footer-inspection buttons
-are disabled for recognized delimited-text, Stata, Excel and SPSS inputs; those
+are disabled for recognized delimited-text, Stata, Excel, SPSS and R inputs; those
 sources can still be opened, and variable names can be typed. {bf:Browse}
 lists every supported input type together, or one type at a time. The
 {opt int64()}, {opt binary()}, {opt filename()} and {opt csv()} options have
 their own fields (the last a free-text field for the delimited-text reader's
 sub-options, such as {cmd:delim(;) header(off)}). The integer selector's
 {bf:default} choice inherits the session setting; selecting {bf:refuse},
-{bf:round} or {bf:string} emits that explicit option. Likewise the code-page
-selector's {bf:default} emits no {opt encoding()}: {cmd:.dta} and Excel text is
-read as windows-1252, an SPSS file in the code page it declares.{p_end}
+{bf:round} or {bf:string} emits that explicit option. Likewise the encoding
+selector's {bf:default} emits no {opt encoding()}: delimited text is read as
+UTF-8 (UTF-16 by its byte-order mark or its pattern), {cmd:.dta} text in the session
+code page (windows-1252 unless {cmd:parqit set encoding}), an SPSS file in the
+code page it declares, and an R file in the encoding R recorded. The field lists
+the common code pages of every script and takes any other name typed in,
+{it:name}{cmd:, all} included.{p_end}
 
 {phang2}{bf:User > parqit > Describe and explore data...}{p_end}
 {p 12 12 2}({cmd:db parqit_explore}) {cmd:describe}/{cmd:glimpse} of the view
@@ -335,7 +355,8 @@ the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
 {p 12 12 2}({cmd:db parqit_gen}) {cmd:gen} (with a storage type and an
 {cmd:if} qualifier), {cmd:egen} (function and {opt by()}) and
 {cmd:replace} on the view, and {cmd:spssencode} on the data in memory (the
-labelled numeric version of a string variable read from an SPSS file).{p_end}
+labelled numeric version of a string variable read from an SPSS file, or from
+an R file with haven labels).{p_end}
 
 {phang2}{bf:User > parqit > Collapse, contract, pivot table, or reshape...}{p_end}
 {p 12 12 2}({cmd:db parqit_pivot}) {cmd:collapse} and {cmd:pivot} share two
@@ -346,8 +367,10 @@ statistic rows plus free additional specifications; {cmd:contract};
 {p 12 12 2}({cmd:db parqit_combine}) lazy {cmd:merge}, {cmd:append} (several
 sources) and {cmd:joinby} over files, globs, Hive directories or
 {cmd:view:}{it:name}; native {cmd:mergein}/{cmd:appendin} for data already
-in memory, with the native merge options and an {opt int64()} selector on
-the {bf:Options} tab. That selector applies only to the memory routes. The
+in memory, with the native merge options, an {opt int64()} selector and an
+{opt encoding()} field on the {bf:Options} tab. The integer selector applies
+only to the memory routes; the encoding field, which names the encoding of the
+using file's text that is not UTF-8, applies to every route. The
 additional-sources field is raw Stata source-list syntax: compound-quote each
 path that contains spaces or commas. {bf:Browse} offers the same file types
 as the read dialog.{p_end}
@@ -355,10 +378,12 @@ as the read dialog.{p_end}
 {phang2}{bf:User > parqit > Save as Parquet or collect into memory...}{p_end}
 {p 12 12 2}({cmd:db parqit_write}) four explicit choices: save the selected
 view to Parquet (the initial choice), save Stata memory with {opt data},
-convert an SPSS file with {cmd:parqit save} {it:newfile} {cmd:using}
-{it:spssfile} [{opt replace} {opt compression()} {opt compression_level()}
-{opt encoding()}] (see {help parqit##spss:SPSS files}; the code page
-{bf:declared} keeps the one the file records), or
+convert an SPSS or R file with {cmd:parqit save} {it:newfile} {cmd:using}
+{it:file} [{opt replace} {opt compression()} {opt compression_level()}
+{opt encoding()} {opt object()}] (see {help parqit##spss:SPSS files} and
+{help parqit##rdata:R data files}; the code page {bf:declared} keeps the one the
+file records, and {bf:R object} names the data frame of an {cmd:.RData} that
+holds several), or
 {cmd:collect} [{opt clear} {opt int64()}]. The integer selector is enabled
 for collect; {bf:default} inherits the view's option or the session setting.
 View save and collect use
@@ -377,8 +402,8 @@ when {opt data} is selected.{p_end}
 once ({cmd:views}, {cmd:show}, {cmd:explain}, {cmd:describe}, {cmd:ds},
 {cmd:version}, {cmd:selftest}); the actions {cmd:view}, {cmd:close},
 {cmd:view} {it:name}{cmd::} {it:command}, a copy of a view ({cmd:use} ...
-{cmd:using view:}{it:name}), {cmd:sql}, {cmd:query} and all seven
-{cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:threads},
+{cmd:using view:}{it:name}), {cmd:sql}, {cmd:query} and all eight
+{cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:encoding}, {cmd:threads},
 {cmd:fill_threads}, {cmd:stream_buffer_mb}, {cmd:memory_limit}, {cmd:tempdir}.{p_end}
 
 {phang2}{bf:User > parqit > Version}, {bf:Self-test}, {bf:Help on parqit}, {bf:Technical reference}{p_end}
@@ -459,6 +484,21 @@ values (as {cmd:.a}-{cmd:.z}), formats, documents and the SPSS-only properties.
 corresponding Parquet file; see {help parqit##spss:SPSS files}.
 
 {pstd}
+R data files ({cmd:.rds}, {cmd:.rda}, {cmd:.RData}) are read the same way, by
+parqit's own reader of R's serialization, without R: the data frame with its
+factors, dates, date-times, haven labels and missing-value codes, and every
+attribute; see {help parqit##rdata:R data files}.
+
+{pstd}
+Text in any language and encoding is read: {opt encoding()} names the code page
+of text that is not UTF-8 — Cyrillic, Greek, Turkish, Hebrew, Arabic, Baltic,
+Vietnamese, Thai, Chinese, Japanese and Korean as much as Western European — for
+the dataset in memory, {cmd:.dta} and Excel files, SPSS and R files and
+delimited text (UTF-16 included), and {cmd:parqit set encoding} sets the session
+default. The text is decoded to UTF-8 and a {cmd:note:} says what was decoded;
+see {help parqit##encoding:Text encodings}.
+
+{pstd}
 StataNow (Stata 19.5) ships a native {cmd:import parquet} that reads a Parquet
 file into memory ({bf:File > Import > Parquet data}). {cmd:parqit} is
 complementary to it, not a replacement: its contribution is the lazy verb
@@ -507,6 +547,12 @@ keeps a tenth of the households of each region, with all their members
 view, copy its plan first: {cmd:parqit use view:default, name(try)}
 ({help parqit##copy:Copying a view}).
 
+{pstd}Other files open the same way, by their extension: delimited text,
+{cmd:.dta}, Excel, SPSS ({cmd:parqit use using survey.sav}) and R
+({cmd:parqit use using people.rds}). Text in another code page is decoded with
+{opt encoding()}: {cmd:parqit use using prices.csv, encoding(windows-1251)}
+({help parqit##encoding:Text encodings}).
+
 {pstd}Three rules of thumb: put {cmd:keep}/{cmd:keep if} early so the engine
 reads less; never expect a lazy verb to change the data in memory (only
 {cmd:collect} does, and only with a complete result); and read
@@ -533,6 +579,7 @@ current Stata dataset stays unchanged until an explicit collection.
    {c |}{space 4}{cmd:parqit use} {it:file}{space 11}a Parquet file, glob or Hive directory,
    {c |}{space 30}or {cmd:.csv} {cmd:.tsv} {cmd:.txt} {cmd:.tab} {cmd:.dta} {cmd:.xls} {cmd:.xlsx}
    {c |}{space 30}or an SPSS {cmd:.sav} {cmd:.zsav}
+   {c |}{space 30}or an R {cmd:.rds} {cmd:.rda} {cmd:.RData}
    {c |}{space 4}{cmd:parqit use view:}{it:name}{space 6}a copy of an open view's plan, with {opt name()}
    {c |}{space 4}{cmd:parqit open _data}{space 9}the dataset already in Stata's memory
    {c |}{space 4}{cmd:parqit sql} {cmd:"}{it:SELECT ...}{cmd:"}{space 3}any DuckDB query
@@ -1116,15 +1163,20 @@ characteristic are refused before anything is created.
 {phang2}{cmd:. tabulate region_num}{space 30}({it:labelled with the SPSS labels}){p_end}
 
 {pstd}{cmd:parqit describe} {it:file}{cmd:.parquet} marks such variables with
-{cmd:(spss)}, and its {opt labels} option lists their SPSS labels without
-loading the file.
+{cmd:(spss)} ({cmd:(r)} for the labels of an R file), and its {opt labels}
+option lists them without loading the file.
 
 {pstd}{bf:Character encoding.} Text is decoded from the encoding the file
-declares: UTF-8, windows-1252, latin1, latin9 or macroman (a file that declares
-another code page is refused with a message). {opt encoding()} replaces a
-missing or wrong declaration. In a UTF-8 file, text that is not valid UTF-8 is
-transcoded from windows-1252 (or the {opt encoding()} code page), item by item,
-and a note counts it.
+declares, by name (record 7, subtype 20) or code page number: UTF-8 or any code
+page parqit reads (see {help parqit##encoding:Text encodings}) — Windows 874 and
+1250-1258, ISO-8859, KOI8, DOS and Mac, Shift_JIS, GBK, UHC, Big5, EUC-JP,
+GB18030; a file that declares EBCDIC, UTF-16 or a code page parqit does not read
+is refused with a message. A file without a declaration is decoded in the
+session code page (windows-1252 unless {cmd:parqit set encoding}), with a note.
+{opt encoding()} replaces a missing or wrong declaration. In a UTF-8 file, text
+that is not valid UTF-8 is transcoded from the session code page (or the
+{opt encoding()} one), item by item, and a note counts it; bytes the code page
+does not define become U+FFFD, counted.
 
 {pstd}{bf:Not read.} SPSS portable files ({cmd:.por}), encrypted
 (password-protected) files, and EBCDIC or non-IEEE files are refused with a
@@ -1139,6 +1191,254 @@ footers only; describe the converted file or a view opened over the SPSS file.
 On the converted file it marks the string variables that carry SPSS labels,
 and its {opt labels} option lists them.
 
+
+{marker rdata}{...}
+{title:R data files}
+
+{pstd}parqit reads R data files — {cmd:.rds} (written by {cmd:saveRDS()}) and
+{cmd:.rda}/{cmd:.RData} (written by {cmd:save()}) — with its own reader of R's
+serialization format, out of core and without R: the data frame is decoded
+straight into Parquet and never passes through a Stata frame. To write the
+corresponding Parquet file, with every R property kept:
+
+{phang2}{cmd:. parqit save households.parquet using households.rds, replace}{p_end}
+{phang2}{cmd:. parqit save people.parquet using workspace.RData, replace object(people)}{p_end}
+
+{pstd}As for an SPSS file, the whole file is parsed and every column read first,
+so a truncated or corrupt file is refused before anything is written, and the
+dataset in memory and the open views are untouched. {cmd:parqit save}
+{it:file} {cmd:using} {it:Rfile} takes {opt replace}, {opt compression()},
+{opt compression_level()}, {opt encoding()} and {opt object()}. An R data file is
+also accepted wherever parqit reads a file — {cmd:parqit use} (lazy or with
+{opt clear}), the {cmd:using} side of {cmd:merge}/{cmd:joinby}/{cmd:append}, and
+{cmd:mergein}/{cmd:appendin} — through a temporary Parquet bridge.
+
+{pstd}{bf:Which data frame.} An {cmd:.rds} holds one object: a data frame, or a
+list whose data frames can be read by name. An {cmd:.RData} holds named objects;
+functions (byte-compiled or not), environments and other objects are passed
+over, never run. When the file holds exactly one data frame, that one is read,
+with a note naming it when there are other objects; when it holds several,
+{opt object(name)} names one (names are case-sensitive), and without it the
+command stops, listing them. {opt object()} is an option of {cmd:parqit use} and
+{cmd:parqit save ... using}; for the other commands, convert the file first.
+Unnamed list elements use {cmd:[[1]]}, {cmd:[[2]]}, ...; a suffix is added when
+that spelling is already a real name. Real names retain their own elements.
+
+{pstd}{bf:Formats.} R's binary (XDR) serialization, versions 2 and 3, is read
+uncompressed or compressed with gzip (R's default) or zstd. Files compressed
+with bzip2 or xz, and files saved in R's ASCII format ({cmd:ascii = TRUE}), are
+refused with a message: re-save them in R with {cmd:saveRDS(x, file)} or
+{cmd:save(x, file = ...)}. (The data sets of R packages are often compressed
+with xz or bzip2, because CRAN keeps whichever compresses best.) A compressed file is first decompressed into a
+temporary file in {cmd:c(tmpdir)}, so that much free space is needed there.
+
+{pstd}{bf:What is kept, and where.}
+
+{p2colset 5 30 32 2}{...}
+{p2col:{it:R}}{it:Parquet file, and Stata after} {cmd:parqit use}{p_end}
+{p2line}
+{p2col:column names}the R names; a name Stata cannot hold loads under a sanitised
+name (the Parquet name in {cmd:char} {it:var}{cmd:[src_name]}); an empty or
+{cmd:NA} name becomes {cmd:V}{it:#} (its position) and a repeated name gets
+{cmd:_1}, {cmd:_2}, ... (the R name in {cmd:char} {it:var}{cmd:[r_name]}){p_end}
+{p2col:logical}{cmd:BOOLEAN}, loaded as a {cmd:byte} 0/1{p_end}
+{p2col:integer}{cmd:INTEGER}; {cmd:NA} is missing{p_end}
+{p2col:double}{cmd:DOUBLE}; {cmd:NA} is missing; {cmd:NaN} and {cmd:Inf} stay in
+the Parquet file and load as {cmd:.}, with a note{p_end}
+{p2col:integer64 (bit64)}{cmd:BIGINT}, exact; values beyond 2^53 load only with
+{opt int64()}, as for any Parquet file{p_end}
+{p2col:character}UTF-8 text; {cmd:NA_character_} is a null in the Parquet file,
+which Stata loads as {cmd:""}; beyond 2045 bytes a {cmd:strL}{p_end}
+{p2col:factor, ordered}the integer codes, with a value label of the levels; with
+more than 65,536 levels, or a level longer than 32,000 bytes, the text (with a
+note){p_end}
+{p2col:Date, IDate}{cmd:DATE} ({cmd:%td}); a date holding a fraction of a day
+becomes a {cmd:TIMESTAMP} ({cmd:%tc}), with a note{p_end}
+{p2col:POSIXct}{cmd:TIMESTAMP} ({cmd:%tc}), the UTC clock time of the instant R
+stores; the time zone R displayed it in, in {cmd:char} {it:var}{cmd:[r_tzone]},
+with a note{p_end}
+{p2col:hms, ITime}{cmd:TIME} ({cmd:%tcHH:MM:SS}) when every value remains within
+a day after microsecond rounding, otherwise seconds{p_end}
+{p2col:difftime}its number, the unit in {cmd:char} {it:var}{cmd:[r_units]}{p_end}
+{p2col:label (haven)}the variable label; Stata keeps 80 characters, a longer
+label is kept whole in {cmd:char} {it:var}{cmd:[r_label]}{p_end}
+{p2col:labels (haven)}a value label with every integer key; what Stata cannot
+hold (labels of text, of non-integer values) whole in {cmd:char}
+{it:var}{cmd:[r_value_labels]} as JSON pairs, which {cmd:parqit spssencode}
+turns into a labelled numeric variable{p_end}
+{p2col:format.stata (haven)}a display format compatible with the converted units;
+an incompatible format is kept in {cmd:r_attributes}, with a note{p_end}
+{p2col:comment()}notes, on the variable or on {cmd:_dta}{p_end}
+{p2col:the data frame's label}the dataset label{p_end}
+{p2col:character row names}a first variable, {cmd:rowname}; integer row names
+are not kept (a note says so when they are not 1 to N){p_end}
+{p2col:other attributes}{cmd:char} {it:var}{cmd:[r_class]} and
+{it:var}{cmd:[r_attributes]} (JSON); {cmd:char _dta[r_class]},
+{cmd:[r_attributes]}, {cmd:[r_object]}, {cmd:[r_written_by]},
+{cmd:[r_encoding]}{p_end}
+{p2line}
+{p2colreset}{...}
+
+{pstd}A fractional {cmd:Date} uses {cmd:%tc} even if its original
+{cmd:format.stata} was {cmd:%td}. Finite dates that coincide with the engine's
+infinity sentinels are kept as numbers of days since 1970, with a note.
+Times that round to 24:00 are kept as seconds.
+
+{pstd}Other attributes exceeding 1,000 elements, 20 levels of JSON nesting,
+or the parser's size/depth limits are summarized. A JSON characteristic over
+60,000 bytes is reduced to the attribute names, with a note. These summaries
+do not retain the full attribute values.
+
+{pstd}{bf:Missing-value codes.} haven's tagged missing values
+({cmd:tagged_na("a")}, as haven reads the {cmd:.a}-{cmd:.z} of a Stata or SAS
+file) become the extended missing values of the same letter. SPSS
+user-missing values carried by haven ({cmd:na_values}, {cmd:na_range}) become
+extended missing values as for an SPSS file (see {help parqit##spss:SPSS files}),
+taking the letters the tagged values of that variable do not use;
+{cmd:char} {it:var}{cmd:[r_missing]} holds the definition and
+{it:var}{cmd:[r_missing_map]} the codes. Their labels are attached to their
+codes. In the Parquet file the cell is null and its code sits in a companion
+column, which {cmd:parqit use}, {cmd:mergein} and {cmd:appendin} restore; a lazy
+view reads them as {cmd:.} and says so.
+
+{pstd}{bf:Not carried.} Columns Stata has no type for — lists, nested data
+frames, matrices, complex numbers, raw bytes, {cmd:POSIXlt} (convert it with
+{cmd:as.POSIXct()} in R) and S4 objects — are left out, each named in a note, as
+is a column that only its own package can expand (an ALTREP class of a package).
+A character column that R still holds as the numbers of an {cmd:as.character()}
+it has not carried out — R writes them as text only when they are used, with the
+formatting of the computer that reads them — is stored as those numbers, with a
+note and {cmd:char} {it:var}{cmd:[r_deferred]}; to keep R's text, run
+{cmd:x <- paste0(x)} on the column in R before saving. The distinction between
+{cmd:NA_character_} and {cmd:""} survives in the Parquet file only.
+
+{pstd}{bf:Character encoding.} Each string is decoded by the encoding R marked
+on it (UTF-8, latin1, bytes), and an unmarked one by the encoding R recorded
+for its session (a version-3 file records it — any code page parqit reads, see
+{help parqit##encoding:Text encodings}; UTF-8 is assumed for a version-2 file).
+{opt encoding()} replaces the recorded one. A string that is not valid in its
+encoding is read in the session code page (windows-1252 unless
+{cmd:parqit set encoding}) or the {opt encoding()} one, and a note counts it.
+
+{pstd}{cmd:parqit describe} reads Parquet footers only; describe the converted
+file, where {cmd:(r)} marks the variables whose labels are in {cmd:char}
+{it:var}{cmd:[r_value_labels]}.
+
+{marker encoding}{...}
+{title:Text encodings}
+
+{pstd}Parquet text is UTF-8, as is text in Stata 14 and later, and names,
+values, labels, notes and characteristics in any script travel unchanged (no
+normalisation: {cmd:é} and {cmd:e} followed by a combining accent stay
+different). Text in another encoding, in any language, is decoded to UTF-8 on
+its way in — never refused, never guessed in silence: a {cmd:note:} says what
+was decoded, from what, and how much.
+
+{pstd}{bf:The encodings.} {opt encoding()} and {cmd:parqit set encoding} take
+any of these (case, {cmd:-}, {cmd:_}, {cmd:.} and blanks do not matter, and the
+usual aliases work: {cmd:cp1251}, {cmd:Shift_JIS}, {cmd:sjis}, {cmd:GB2312},
+{cmd:EUC-KR}, {cmd:UHC}, {cmd:Big5}, {cmd:latin2}, {cmd:ISO-8859-5}, ...):
+
+{p2colset 9 32 34 2}{...}
+{p2col:UTF-8}{cmd:utf-8}{p_end}
+{p2col:Western European}{cmd:windows-1252} (the default), {cmd:latin1},
+{cmd:latin9}, {cmd:macroman}, {cmd:ibm850}, {cmd:ibm437}, {cmd:ibm858},
+{cmd:ibm860}, {cmd:ibm861}, {cmd:ibm863}, {cmd:ibm865}, {cmd:mac-iceland},
+{cmd:iso-8859-3}, {cmd:iso-8859-10}, {cmd:iso-8859-14}{p_end}
+{p2col:Central European}{cmd:windows-1250}, {cmd:iso-8859-2},
+{cmd:iso-8859-16}, {cmd:ibm852}, {cmd:mac-centraleurope}{p_end}
+{p2col:Cyrillic}{cmd:windows-1251}, {cmd:koi8-r}, {cmd:koi8-u},
+{cmd:iso-8859-5}, {cmd:ibm866}, {cmd:ibm855}, {cmd:mac-cyrillic}{p_end}
+{p2col:Greek}{cmd:windows-1253}, {cmd:iso-8859-7}, {cmd:ibm737},
+{cmd:ibm869}, {cmd:mac-greek}{p_end}
+{p2col:Turkish}{cmd:windows-1254}, {cmd:iso-8859-9}, {cmd:ibm857},
+{cmd:mac-turkish}{p_end}
+{p2col:Hebrew}{cmd:windows-1255}, {cmd:iso-8859-8}, {cmd:ibm862}{p_end}
+{p2col:Arabic}{cmd:windows-1256}, {cmd:iso-8859-6}, {cmd:ibm864}{p_end}
+{p2col:Baltic}{cmd:windows-1257}, {cmd:iso-8859-4}, {cmd:iso-8859-13},
+{cmd:ibm775}{p_end}
+{p2col:Vietnamese}{cmd:windows-1258}{p_end}
+{p2col:Thai}{cmd:windows-874}, {cmd:iso-8859-11} ({cmd:tis-620}){p_end}
+{p2col:Japanese}{cmd:shift_jis} (Windows code page 932), {cmd:euc-jp}{p_end}
+{p2col:Chinese}{cmd:gbk} (936, {cmd:gb2312}), {cmd:gb18030},
+{cmd:big5} (950: Windows' Big5, whose ETEN area C6A1-C8FE is read as Private
+Use characters; not Big5-HKSCS){p_end}
+{p2col:Korean}{cmd:euc-kr} (949, UHC){p_end}
+{p2col:UTF-16}{cmd:utf-16le}, {cmd:utf-16be}, {cmd:utf-16} (delimited text only){p_end}
+{p2colreset}{...}
+
+{pstd}{cmd:r(encoding)} reports the canonical name ({cmd:windows-932},
+{cmd:windows-936}, {cmd:windows-949} and {cmd:windows-950} for the four
+Windows double-byte code pages). The code pages are read as Windows reads them
+— the characters users defined in Shift_JIS, GBK, UHC and Big5 become the
+Unicode Private Use characters Windows gives them — and GB18030 as its 2005
+edition. The tests compare mappings with ICU and independent oracles, with
+explicit vendor differences: CP864's byte 0x25 is Arabic {cmd:٪}; some ICU
+variants give ASCII {cmd:%}. ISO-8859-16 and Mac Icelandic, absent from Stata's
+ICU, are pinned by unit tests against published tables. A byte sequence that a
+code page does not define becomes U+FFFD (the replacement character), counted
+in {cmd:r(undecodable)} and said in a note.
+
+{pstd}{bf:The dataset in memory, .dta and Excel files.} Text that is valid
+UTF-8 is kept; any other text is decoded from the code page item by item — a
+cell, a label, a note — as {helpb unicode:unicode translate} would, without
+changing the data in memory. The code page is {opt encoding()}, or else the
+session's ({cmd:windows-1252} unless {cmd:parqit set encoding} named another).
+Text in a multibyte code page (Shift_JIS, EUC-JP, GBK, GB18030, Big5, EUC-KR)
+is often valid UTF-8 by accident (GBK's {cmd:女} is also UTF-8's {cmd:Ů}), so
+with such a code page a string variable with any text that is not UTF-8 is
+decoded as a whole, and so are all labels, notes and characteristics once any
+text is legacy; a note counts the cells that were valid UTF-8
+({cmd:r(transcoded_revalid)}). {opt encoding(name, all)} decodes every text
+that needs decoding, including CP864's byte 0x25 (Arabic {cmd:٪}), whose meaning
+differs from ASCII. {opt copysource} refuses {opt encoding(name, all)}: omit
+{opt copysource} to decode text through the normal memory writer.
+A {cmd:.dta} file of format 117 or older (Stata 13 and
+earlier, which predate Unicode) is read as {opt encoding(name, all)} whenever
+{opt encoding()} names its code page. Stata decodes an Excel file's text
+itself, so {opt encoding(name, all)} is not applied to it (a note says so).
+
+{pstd}{bf:Delimited text.} A {cmd:.csv}, {cmd:.tsv}, {cmd:.txt} or
+{cmd:.tab} file is read as UTF-8. Its byte-order mark is recognised (UTF-8 or
+UTF-16; a mark, which the file itself declares, overrides a contradicting
+{opt encoding()}, with a note), and so is UTF-16 without one — by the NUL byte
+in every other byte of its ASCII text, or by its line ends when its text is in
+another script. UTF-32 is refused; the NUL bytes of a fixed-width export's
+padding are read as before (Stata cuts a cell at a NUL, with a note). An
+{opt encoding()} given is followed even when the bytes look like UTF-16 or
+UTF-32, and a note says what they looked like. A file valid UTF-8 throughout
+stays in place with a named legacy encoding unless {cmd:all} is requested;
+{opt filename()} continues to report its original path. Checking a named
+encoding may scan the whole file before opening the view. Files needing decoding
+are read through a temporary UTF-8 copy — line by line with
+a single-byte code page (a line already valid UTF-8 is kept), all of it with a
+multibyte one; decoded lines that were valid UTF-8 are counted.
+Lines may end in LF, CRLF or CR alone. {opt encoding(utf-8)} reads a
+UTF-8 file whose broken bytes then become U+FFFD. A glob ({cmd:data/*.csv},
+{cmd:data/**/*.csv}) is decoded file by file, each by its own mark, and the copy
+keeps the file names and the {it:key}{cmd:=}{it:value} directories that the
+engine reads as Hive partition columns. Without {opt encoding()}, text that is
+not UTF-8 in a file scanned in place ({cmd:parqit use}) is refused, and the
+message names {opt encoding()}; the using file of {cmd:merge}, {cmd:joinby},
+{cmd:append}, {cmd:mergein} or {cmd:appendin} is decoded from the session code
+page, with a note — never from Stata's own guess of its encoding, which is
+wrong for most scripts.
+
+{pstd}{bf:SPSS and R files} declare their encoding; see
+{help parqit##spss:SPSS files} and {help parqit##rdata:R data files}.
+{bf:Parquet} text is UTF-8 by definition and is never transcoded.
+
+{pstd}{bf:The default and the locale.} The default code page is
+{cmd:windows-1252} wherever parqit runs, so a do-file gives the same result on
+every computer; {cmd:parqit set encoding} {it:name} changes it for the session.
+When text that declares no encoding was decoded from the default and the
+locale ({cmd:c(locale_functions)}) suggests another code page, a note names it —
+in a Russian locale, {cmd:encoding(windows-1251)}, or once per session
+{cmd:parqit set encoding windows-1251}.
+
+{pstd}{bf:Stata's limits.} A value-label text longer than Stata's 32,000 bytes,
+a characteristic longer than 67,783 bytes and a variable or data label longer
+than 80 characters are cut at a character boundary, never inside one.
 
 {marker explore}{...}
 {title:Exploring a view (current dataset unchanged)}
@@ -1427,10 +1727,13 @@ details, ties in sort keys, extended missings and double-precision evaluation
 {marker options}{...}
 {title:Settings, raw SQL and diagnostics}
 
-{pstd}{bf:Engine settings.} {cmd:parqit set} takes one of seven names and a value:
+{pstd}{bf:Engine settings.} {cmd:parqit set} takes one of eight names and a value:
 
 {p 8 12 2}{cmd:parqit set statamissing on}|{cmd:off}{space 4}expression missing-value mode{p_end}
 {p 8 12 2}{cmd:parqit set int64} {it:mode}{space 12}refuse|round|string for integers beyond 2^53{p_end}
+{p 8 12 2}{cmd:parqit set encoding} {it:name}{space 9}the code page of legacy text that declares none, for the
+session (windows-1252 until set; an {opt encoding()} option still wins; see
+{help parqit##encoding:Text encodings}){p_end}
 {p 8 12 2}{cmd:parqit set fill_threads} {cmd:auto}|{it:#}{space 3}workers that fill Stata's memory on
 {cmd:use}/{cmd:collect} ({cmd:auto} = environment override, otherwise one per available CPU
 on reads with at least 50,000 rows or 2 million cells;
@@ -1570,6 +1873,19 @@ the file ({help parqit##spss:SPSS files}):{p_end}
 {phang2}{cmd:. parqit use using ess_round10.parquet, clear}{p_end}
 {phang2}{cmd:. tabulate trstprl, missing}{space 10}({it:refusals and don't-knows are .a, .b, … with their labels}){p_end}
 {phang2}{cmd:. char list trstprl[]}{space 16}({it:the SPSS definition, codes, format and measurement level}){p_end}
+
+{pstd}{bf:An R data frame without R.} Factors, dates, haven labels and
+missing-value codes travel the same way ({help parqit##rdata:R data files}):{p_end}
+{phang2}{cmd:. parqit save households.parquet using households.rds, replace}{p_end}
+{phang2}{cmd:. parqit use using workspace.RData, clear object(people)}{space 2}({it:one data frame of an .RData}){p_end}
+
+{pstd}{bf:Text in other code pages} — Cyrillic CSV files decoded as they are
+read, a Chinese {cmd:.dta} from Stata 13, and a session default
+({help parqit##encoding:Text encodings}):{p_end}
+{phang2}{cmd:. parqit use using prices_ru_*.csv, encoding(windows-1251)}{space 2}({it:a note counts the decoded lines}){p_end}
+{phang2}{cmd:. parqit collect, clear}{p_end}
+{phang2}{cmd:. parqit use using survey_zh.dta, clear encoding(gbk)}{p_end}
+{phang2}{cmd:. parqit set encoding windows-1251}{space 4}({it:undeclared text, for the rest of the session}){p_end}
 
 {pstd}{bf:Out-of-core panel build} — filter, derive, aggregate on disk; only
 the firm-year result enters Stata:{p_end}
@@ -1796,8 +2112,9 @@ exists.{p_end}
 on invalid UTF-8) and {opt binary(hex)} as uppercase hex digits. Give the
 option to {cmd:parqit use}, which is where a view's columns are decided.{p_end}
 {pstd}{cmd:•} Stata {cmd:.dta} and Excel inputs are bridged through memory;
-SPSS files are converted out of core into a bridge; Parquet and delimited text
-are scanned out of core. {cmd:describe} with a file argument is
+SPSS and R files are converted out of core into a bridge; Parquet and delimited
+text are scanned out of core, delimited text that is not UTF-8 after it has been
+decoded into a temporary copy. {cmd:describe} with a file argument is
 Parquet-only.{p_end}
 {pstd}{cmd:•} SPSS user-missing values are {cmd:.a}-{cmd:.z} after
 {cmd:parqit use} but plain {cmd:.} in a lazy view (convert with
@@ -1805,6 +2122,20 @@ Parquet-only.{p_end}
 variable share {cmd:.z}; string user-missing values stay text. Portable
 ({cmd:.por}) and encrypted SPSS files are not read; see
 {help parqit##spss:SPSS files}.{p_end}
+{pstd}{cmd:•} R files compressed with bzip2 or xz, and files in R's ASCII
+format, are refused with a message (re-save them with R's default); lists,
+nested data frames, matrices, complex, raw, {cmd:POSIXlt} and S4 columns are
+left out, each named in a note; a compressed file needs its uncompressed size
+free in {cmd:c(tmpdir)}. See {help parqit##rdata:R data files}.{p_end}
+{pstd}{cmd:•} ISO-2022-JP and other stateful encodings, EUC-TW, Big5-HKSCS,
+EBCDIC and UTF-32 are refused with a message; GB18030 is read as its 2005
+edition, without the 2022 edition's changes, and {cmd:big5} is Windows' code
+page 950. A legacy code
+page is never guessed from the text: only byte-order marks and the patterns of
+UTF-16 and UTF-32 are recognised, and otherwise {opt encoding()} or the session
+code page applies. Legacy text that happens to be valid UTF-8 cannot be told
+apart item by item ({opt encoding(name, all)} decodes it too); see
+{help parqit##encoding:Text encodings}.{p_end}
 {pstd}{cmd:•} Names that differ only by case are kept exact, but a lazy name
 the engine could not tell apart from a live one is refused (a generated
 {cmd:x1} beside {cmd:X1}, some {opt relaxed} unions, a Hive key clashing with a
@@ -1830,7 +2161,12 @@ source through a temporary snapshot ({cmd:use} lazy or eager,
 {cmd:merge}/{cmd:joinby}/{cmd:append}, {cmd:open _data}) additionally returns
 the snapshot's losses — {cmd:r(ext_missing)}, {cmd:r(frac_dates)},
 {cmd:r(transcoded_vars)}, {cmd:r(transcoded_cells)}, {cmd:r(transcoded_meta)},
-{cmd:r(encoding)} — only when the corresponding loss occurred. This bridge
+{cmd:r(transcoded_revalid)}, {cmd:r(transcoded_revalid_vars)},
+{cmd:r(undecodable)}, {cmd:r(encoding_default)}, {cmd:r(encoding)} — only when
+the corresponding loss occurred; delimited text decoded to UTF-8 on the way in
+returns {cmd:r(transcoded_lines)}, {cmd:r(transcoded_revalid_lines)} (decoded
+lines that were valid UTF-8), {cmd:r(undecodable)} and {cmd:r(encoding)}
+(see {help parqit##encoding:Text encodings}). This bridge
 reporting differs from the zero-valued counters returned by a direct memory save.
 
 {pstd}{it:Writing.} {cmd:parqit save} always returns scalars {cmd:r(N)} and
@@ -1840,9 +2176,13 @@ whose fractional date/period counts were rounded, and are stored
 {it:only when such a loss occurred}: with nothing lost they are not set at all, so they are
 absent from {helpb return list} and both references expand to nothing. A view
 save also returns {cmd:r(view)}; a memory save does not. A memory save also
-returns scalars {cmd:r(transcoded_cells)} and {cmd:r(transcoded_meta)} and
-locals {cmd:r(transcoded_vars)} and {cmd:r(encoding)} (see
-{it:String encoding}); the counts are zero, {cmd:r(transcoded_vars)} is empty,
+returns scalars {cmd:r(transcoded_cells)}, {cmd:r(transcoded_meta)},
+{cmd:r(transcoded_revalid)} (cells that were valid UTF-8 and were decoded
+with their column, or under {cmd:all}), {cmd:r(undecodable)} (texts with bytes
+the code page does not define, now U+FFFD) and {cmd:r(encoding_default)} (1
+when no {opt encoding()} was given) and locals {cmd:r(transcoded_vars)},
+{cmd:r(transcoded_revalid_vars)} and {cmd:r(encoding)} (see
+{help parqit##encoding:Text encodings}); the counts are zero, the lists are empty,
 and {cmd:r(encoding)} still names the selected code page when nothing needed
 transcoding. A lazy view save does not return these transcoding counters.
 {cmd:parqit save} {it:…}{cmd:, data copysource} additionally returns local
@@ -1859,6 +2199,18 @@ variables) and locals {cmd:r(filename)}, {cmd:r(source)}, {cmd:r(xmissing_vars)}
 declares) and {cmd:r(spss_compression)} ({cmd:none}, {cmd:bytecode} or
 {cmd:zlib}); scalars {cmd:r(transcoded_cells)} and {cmd:r(transcoded_meta)}
 only when text had to be transcoded.
+
+{pstd}{it:Converting an R data file.} {cmd:parqit save} {it:file} {cmd:using}
+{it:Rfile} returns scalars {cmd:r(N)} (rows), {cmd:r(k)} (columns written) and
+{cmd:r(k_dropped)} (columns Stata has no type for) and locals
+{cmd:r(filename)}, {cmd:r(source)}, {cmd:r(xmissing_vars)} (the variables whose
+tagged or user-missing values occur, stored as {cmd:.a}-{cmd:.z}),
+{cmd:r(r_object)} (the object read, when the file holds several),
+{cmd:r(r_format)} ({cmd:rds} or {cmd:RData}), {cmd:r(r_version)} (the R that
+wrote it), {cmd:r(r_encoding)} and {cmd:r(r_compression)} ({cmd:none},
+{cmd:gzip} or {cmd:zstd}); scalars {cmd:r(transcoded_cells)} and
+{cmd:r(transcoded_meta)} only when text had to be read in the session code page.
+{cmd:parqit use} of an R file returns {cmd:r(r_object)} as well.
 
 {pstd}{it:Encoding SPSS string codes.} {cmd:parqit spssencode} returns scalars
 {cmd:r(N_labels)} (SPSS labels carried) and {cmd:r(N_unlabeled)} (distinct
@@ -1883,8 +2235,8 @@ return scalars {cmd:r(n_rows)}, {cmd:r(n_cols)} (alias
 {cmd:r(varlab_}{it:i}{cmd:)} (variable label) and {cmd:r(vallab_}{it:i}{cmd:)}
 (value label) for each column; also scalars {cmd:r(n_value_labels)}
 (value-label sets) and {cmd:r(n_notes)}, and locals {cmd:r(label)} (the
-dataset label) and {cmd:r(spss_labels)} (the variables whose SPSS labels are
-kept in characteristics). The no-argument view form returns {cmd:r(n_cols)}
+dataset label), {cmd:r(spss_labels)} and {cmd:r(r_labels)} (the variables whose
+SPSS or R labels are kept in characteristics). The no-argument view form returns {cmd:r(n_cols)}
 (alias {cmd:r(n_columns)}) and {cmd:r(n_steps)}.
 
 {pstd}{it:Statistics and previews.} {cmd:count} returns {cmd:r(N)}.

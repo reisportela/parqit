@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "engine/hexcodec.hpp"
+#include "engine/legacy_encoding.hpp"
 #include "engine/request.hpp"
 #include "engine/session.hpp"
 #include "engine/spss_plan.hpp"
@@ -36,7 +37,7 @@ constexpr ST_retcode kRcNotSpss = 610; /* like Stata's "file not ... format" */
 constexpr ST_retcode kRcEngine = 920;
 
 void cry(const std::string &s) {
-    std::string line = s;
+    std::string line = parqit::with_encoding_hint(s); /* CSV-ENC-1 */
     line.push_back('\n');
     SF_error(const_cast<char *>(line.c_str()));
 }
@@ -86,6 +87,16 @@ ST_retcode cmd_spss_convert(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     if (who.empty()) who = "parqit";
+    /* ENC-3: a name parqit does not decode is a usage error, refused before
+     * the file is opened */
+    if (!encoding.empty()) {
+        parqit::LegacyEncoding enc;
+        if (!parqit::legacy_encoding_parse(encoding, &enc) || enc.is_utf16()) {
+            cry(who + ": encoding(" + encoding + ") is not an encoding parqit decodes; it decodes " +
+                std::string(parqit::legacy_encoding_families()));
+            return kRcUsage;
+        }
+    }
     const bool replace = req.value("replace", false);
     const long long level = req.value("compression_level", -1LL);
 
@@ -110,6 +121,7 @@ ST_retcode cmd_spss_convert(const std::vector<std::string> &args) {
 
     parqit::spss::ReadOptions opt;
     opt.encoding = encoding;
+    opt.default_encoding = parqit::legacy_encoding_name(encoding_session_default()); /* ENC-3 */
     std::shared_ptr<const parqit::spss::Plan> plan;
     try {
         plan = std::make_shared<const parqit::spss::Plan>(parqit::spss::make_plan(src, opt));

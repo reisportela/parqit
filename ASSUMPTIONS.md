@@ -2904,7 +2904,8 @@ entry notes the conservative fallback if the assumption proves wrong.
     page is refused with the remedy (`encoding()` or re-saving in Unicode mode).
     `encoding()` replaces the declaration. Invalid UTF-8 in a UTF-8 file is
     transcoded item by item from the fallback code page (ENC-2) and counted in a
-    note. Trailing blanks and NULs are removed (SPSS pads with blanks; some writers
+    note. (Extended by #172: every code page in parqit's registry is read, and
+    the fallback is the session code page.) Trailing blanks and NULs are removed (SPSS pads with blanks; some writers
     with NULs); inner blanks and NULs are kept.
     (8) **Loud on data, tolerant on presentation.** A truncated file, a bytecode
     that contradicts the variable type (254 for a number, 255 or a compressed
@@ -3047,3 +3048,363 @@ entry notes the conservative fallback if the assumption proves wrong.
     results are returned with `: copy local`, so quotes, backticks and braces in
     a label arrive intact. The options require a file; the view form refuses
     them with a message.
+
+171. **Reading R data files natively (2026-09-28, R-READ-1).** The maintainer
+    asked for parqit to read R's own data files and extract their metadata. As
+    with SPSS (#167), this extends the input surface the brief fixed (Parquet
+    and delimited text, with `.dta`/Excel bridges); SAS stays out. (1)
+    **Source of truth.** R's `src/main/serialize.c`, `altclasses.c`,
+    `include/Defn.h` and `Rinternals.h` at the R 4.6.0 release (`wch/r-source`,
+    tag `R-4-6-0`, commit `71d21fd4e419c28bbb2a5fe160683ca6030a0536`), and
+    haven's `src/tagged_na.c` for tagged missing values (R's `NA_real_` with the
+    tag letter in the low byte of the high word). No R code is linked or copied;
+    the reader is parqit's own C++ (`src/engine/rdata_reader.cpp`). (2)
+    **Formats.** `.rds` is one serialized object; `.rda`/`.RData` is the magic
+    `RDX2`/`RDX3` then a pairlist of named objects. The XDR form, versions 2 and
+    3, is read, uncompressed or compressed with gzip (every member, each CRC-32
+    and length checked, with DuckDB's bundled miniz) or zstd (DuckDB's bundled
+    zstd); the file type is decided by content, not by extension. bzip2 and xz
+    (no decoder bundled), R's ASCII forms (`A\n`, `RDA2/3`) and the native
+    binary form (`B\n`, `RDB2/3`) are refused with the re-save recipe
+    (`saveRDS(x, file)` / `save(x, file = ...)`), as are format version 1 and
+    class/generic references, which R itself no longer reads. A compressed file
+    is inflated once into a temporary file in `c(tmpdir)`, removed with the
+    conversion, so the columns can be read by offset. (3) **Parsing without
+    evaluating.** One pass walks the whole stream: attributes are loaded (with
+    size and depth caps; a larger value is described, not kept), while every
+    vector that can be a data frame column is only located (length and offset).
+    Everything else — closures, byte code (with its own reference table),
+    environments (registered before their contents, so self-references work),
+    promises, external pointers, weak references, namespaces — is skipped by an
+    explicit-stack walker, never by recursion, so a `save.image()` workspace of
+    any depth parses (a 200,000-deep call is a unit test). Byte-compiled
+    functions are therefore passed over rather than refused. R's reference table
+    is kept (symbols by name) so a later reference resolves. A truncated or
+    malformed stream (length past the end, a reference to an unknown object, an
+    unknown type) is refused with the byte offset; a unit test cuts the stream
+    at every byte and flips every byte. (4) **ALTREP.** Version-3 files carry
+    some vectors in R's compact forms: `compact_intseq`/`compact_realseq` (the
+    sequence is generated, R's own element formulas), `wrap_*` (the wrapped
+    vector, with the wrapper's attributes), and `deferred_string` of integers
+    (decimal text, `NA` kept). A `deferred_string` of doubles — a character
+    column from `as.character(x)` that R had not yet expanded — is carried as
+    those doubles, with a note and `char var[r_deferred]`: R formats them only
+    when they are used, with the reading session's digits, `scipen` and
+    `OutDec` and platform-dependent long-double arithmetic, so the file holds
+    no text to copy and imitating R's formatting could invent a different one.
+    Any other ALTREP class (a package's own) is left out with a note. (5)
+    **Which object.** An `.rds` data frame is read; an `.rds` list is searched
+    one level down for data frames; an `.RData`'s objects are its top-level
+    names. The only data frame is read (a note names it when other objects
+    exist); several need `object(name)` (exact, case-sensitive), and the refusal
+    lists them. `object()` is an option of `parqit use` and `parqit save …
+    using` only; the other readers need a single data frame (convert first). A
+    data frame is a list with class `data.frame` (tibbles and data.tables
+    included); its rows come from the compact `row.names` (`c(NA, -n)`) or the
+    length of explicit row names. (6) **Types** (`src/engine/rdata_plan.cpp`).
+    logical → BOOLEAN; integer → INTEGER; double → DOUBLE with `NA` → NULL while
+    `NaN` and `±Inf` stay in the file (Stata loads them as `.`, with its usual
+    note); `integer64` (bit64's int64 in a double's bits) → exact BIGINT,
+    `INT64_MIN` = NA; character → VARCHAR; factor → INTEGER codes plus a value
+    label of the levels, or the level text when a level set does not fit one
+    Stata value label (more than 65,536 levels, or a level over 32,000 bytes);
+    `Date`/`IDate` → DATE, or TIMESTAMP when a value holds a fraction of a day,
+    or days as numbers when neither holds; `POSIXct` → TIMESTAMP of the stored
+    UTC instant (the display zone in `char var[r_tzone]`, a note when it is not
+    UTC; µs from whole seconds plus the rounded fraction), or seconds when out
+    of range; `hms`/`ITime` → TIME when every value lies within a day, else
+    seconds; `difftime` → its number with `char var[r_units]`; non-finite dates
+    become missing with a note. The profile pass reads every column once to
+    decide these and the recorded Stata type (integer ranges, string widths),
+    and the scan re-checks each conversion (a value that no longer fits means
+    the file changed: loud error). Lists, nested data frames, matrices, complex,
+    raw, `POSIXlt` and S4 columns, and a column whose length differs from the
+    rows, are left out, each named in a note. (7) **Labels and missing codes.**
+    haven's `label` is the variable label (whole in `char var[r_label]` beyond
+    80 characters); `labels` gives a native value label for integer keys of a
+    numeric column (tagged-NA keys as `.a`–`.z` entries), and whenever part of
+    the set cannot be native (text keys, non-integer keys, over 65,536 entries,
+    a text over 32,000 bytes) the whole set goes to `char var[r_value_labels]`
+    as JSON pairs in the same grammar as `spss_value_labels`, which
+    `parqit spssencode` now also reads (with `r_missing`'s `na_values:` list, the
+    quote-doubling rule of SPSS) and `parqit describe` marks `(r)`. Tagged NAs
+    become the extended missing value of their letter (a tag outside a–z is a
+    plain missing value, with a note). haven's SPSS user-missing values
+    (`na_values`, `na_range`) of a numeric column become codes by #167's
+    dictionary-first order, but on the letters the column's tagged NAs (in the
+    data or among its label keys) do not use: a value and a tag never share a
+    code. Both travel in the #148 companion layout (`parqit.xmissing`).
+    String user-missing values stay text with `char var[r_missing]`. (8)
+    **Names.** A column's Parquet name is its R name; an empty or `NA` name
+    becomes `V<position>`, a repeated name `<name>_<k>` (the R name in
+    `char var[r_name]`); names that differ only by case are written exactly
+    through NAME-CASE-1's footer rename. Stata names come from the reader's
+    sanitiser, as for any Parquet file. (9) **Everything else.**
+    `format.stata` is the display format; `comment()` becomes notes (variable
+    or `_dta`); the data frame's `label` the dataset label; character row names
+    a first variable `rowname` (integer row names are dropped, with a note when
+    they are not 1..N); the class of each column and of the data frame
+    `char r_class`; every other attribute `char r_attributes` as JSON (vectors
+    over 1,000 elements summarised, a dump over 60,000 bytes reduced to the
+    attribute names with a note); `_dta` gets `r_object`, `r_written_by` and
+    `r_encoding`. (10) **Text.** A string is decoded by its own encoding mark
+    (UTF-8, latin1, bytes, ASCII); an unmarked one by the native encoding the
+    version-3 header records (any encoding parqit reads, #172; another one is
+    refused unless the text is valid UTF-8), assumed UTF-8 in a version-2 file.
+    `encoding()` replaces the recorded one. Text invalid in its encoding is read
+    in the session code page (windows-1252 unless `parqit set encoding`, #172)
+    and counted in a note (ENC-2's policy). (11)
+    **Documented losses.** `NA_character_` and `""` differ in the Parquet file
+    only (Stata has no missing string); `NaN`/`±Inf` load as `.`; integer row
+    names and the attributes of attribute values beyond the JSON caps are not
+    kept. (12) **Bridges and copysource.** An R file read by any command other
+    than `parqit save … using` goes through a package-owned bridge like SPSS.
+    `parqit use …, clear` no longer records any bridge (`.dta`, Excel, SPSS, R)
+    as the source `copysource` would copy — it is deleted right after the read —
+    so copysource refuses with the generic message instead of naming the
+    deleted file. (13) **Tests.** `tests/unit/test_rdata_reader.cpp` writes R
+    streams byte by byte (every structure above, every refusal); the fixtures in
+    `tests/fixtures/r` are written by R itself with base R and jsonlite
+    (`make_r_fixtures.R`, haven/tibble/data.table/hms/bit64 classes built from
+    their attributes), with R's own reading of the same objects in
+    `expected.json` as the oracle; v133 checks the Parquet files (pyarrow), v134
+    the data in Stata memory and every command route, v135 a live R (random
+    data in every form R writes, and 3,000,000 rows) when Rscript is installed.
+172. **Text in any encoding, and encoding problems (2026-09-28, ENC-3,
+    CSV-ENC-1).** The maintainer asked that parqit be resilient to many
+    encodings and to encoding problems, and not be specific to Portuguese.
+    Before: the save path decoded four Western code pages (ENC-2, #94); SPSS and R files were read in five declared encodings; delimited
+    text was UTF-8 only when scanned in place and went through Stata's
+    `import delimited` guess on the using side; the dialogs listed Western
+    code pages only. (1) **The registry** (`src/engine/legacy_encoding`,
+    `TextEncoding`): UTF-8; 49 single-byte code pages (Windows 874 and
+    1250–1258, ISO-8859-1 to -16 but 12, KOI8-R/U, 16 DOS and 6 Mac code pages);
+    the Windows double-byte code pages 932, 936, 949 and 950; EUC-JP; GB18030;
+    UTF-16LE/BE/BOM for delimited text. Names are compared case-insensitively
+    without `-`, `_`, `.` and blanks, with the usual aliases; the canonical
+    names of ENC-2 (`windows-1252`, `latin1`, `latin9`, `macroman`) are
+    unchanged in `r(encoding)`. The tables are generated
+    (`tools/gen_encoding_tables.py`, committed output
+    `src/engine/encoding_tables.{hpp,cpp}`) from Python 3.12.9's codecs,
+    corrected where Windows reads its code pages differently and ICU agrees:
+    the EUDC areas of 936, 949 and 950 map to the Private Use Area linearly
+    (932's already did); 950's C6A1–C8FE is such an area, not Python's ETEN
+    extensions (249 mappings replaced); 936's pairs that Python leaves
+    undefined take GB18030's Private Use code points, and the 81 reserved
+    cells GB18030 later gave real characters (0xA2E3 = €, 0xFE50 = ⺁, …) keep
+    the code points of Windows' byte-order numbering U+E766–U+E864, each run
+    filling exactly the gap between its neighbours (checked by the generator);
+    EUC-JP's JIS X 0208 goes through the 932 table by WHATWG's pointer (NEC
+    row 13, NEC-selected IBM extensions, and U+FF5E/U+2225/U+FF0D/U+FFE0–2
+    for the characters vendors disagree on, consistent with Shift_JIS); JIS X
+    0212 0x2237 is U+FF5E (ICU, glibc; Python's U+007E would make an ASCII
+    byte out of a three-byte sequence); GB18030 follows its 2005 edition
+    (0xA8BC = U+1E3F, 0x8135F437 = U+E7C7; Python keeps 2000's swap). The
+    generator asserts that no multibyte sequence decodes to ASCII, so decoding
+    never creates a delimiter, quote or line break. Undefined single bytes
+    follow WHATWG (the C1 control for 0x80–0x9F, U+FFFD elsewhere); an invalid
+    multibyte sequence is U+FFFD and a trailing ASCII byte is read again;
+    UTF-8 is validated with maximal-subpart replacement; UTF-16 pairs
+    surrogates. Every U+FFFD is counted and said (`r(undecodable)`). (2) **The
+    oracle.** `v136` sends 195,279 byte sequences (every upper byte of 47
+    single-byte code pages, every lead/trail pair of 932/936/949/950 and
+    GB18030, EUC-JP's two- and three-byte sequences, all 39,420 four-byte BMP
+    sequences of GB18030 and a sample of the supplementary planes) through
+    `parqit save …, data encoding(name, all)`, reads them back with pyarrow and
+    compares with Stata's ICU (`ustrfrom`). The 375 differences left are
+    listed with their reason: ICU's IBM tables map bytes Microsoft leaves
+    undefined (windows-874 DB–DE/FC–FF, windows-1253 AA, ibm852 AA the other
+    way), 0xE6 is U+00B5 in Microsoft's CP437.TXT family and U+03BC in ICU
+    (437, 860–863, 865), vendor tables of 864 and 869 differ, Microsoft's 932
+    reads the single bytes 0x7F/0x80/0xA0, and ICU's EUC-JP is IBM's
+    (8EE0–8EE2, JIS X 0212 row 83). ISO-8859-16 and Mac Icelandic have no ICU
+    converter in Stata: unit tests pin bytes from the published tables. glibc
+    `iconv` agrees on GB18030's 2005 swap, on 0x2237 and on 932's EUDC (its
+    936/949/950 leave EUDC undefined, as Python does). (3) **The save rule.**
+    Single-byte code pages: per item, as ENC-2 (valid UTF-8 kept). Multibyte
+    code pages: a pre-scan finds the string columns with any cell that is not
+    UTF-8 (stopping per column at the first) and those columns are decoded
+    whole — their valid-UTF-8 cells counted in `r(transcoded_revalid)` and
+    `r(transcoded_revalid_vars)` —, and all the metadata is decoded when any
+    column or metadata item is legacy. `encoding(name, all)` (parsed in the
+    ado; `encoding_all` in the request) decodes every non-ASCII text. A `.dta`
+    of format 117 or older (`dtaversion`, available since Stata 13) is bridged
+    with `all` whenever `encoding()` is given: those formats predate Unicode.
+    An Excel file's text is decoded by Stata's `import excel` (UTF-8 in the
+    frame), so `all` is not applied to it — it would decode that UTF-8 again —
+    and a note says so.
+    (4) **The default.** `parqit set encoding name` sets the session's code
+    page for undeclared legacy text (held in the plugin like `int64`; refuses
+    UTF-16), used by the save path, `.dta`/Excel bridges, SPSS files without a
+    declaration, R strings without a mark and undeclared lookup files; an
+    `encoding()` option still wins; `r(encoding_default)` says which applied.
+    The default stays `windows-1252` on every computer — a locale-derived
+    default was considered and rejected so that one do-file gives the same
+    bytes everywhere; the maintainer may ratify the alternative. Instead, when
+    undeclared text was decoded from the default and `c(locale_functions)`
+    maps to another Windows code page, a note names it (ru/uk/be/bg/sr/mk/kk/
+    ky/tg/mn/tt/ba and any Cyrl script → 1251; pl/cs/sk/hu/sl/hr/ro/sq/tk,
+    sr/bs Latin → 1250; el → 1253; tr/az/uz → 1254; he/yi → 1255;
+    ar/fa/ur/ps/ug/sd → 1256; lt/lv/et → 1257; vi → 1258; th → 874; ja → 932;
+    ko → 949; zh → 936, or 950 for Hant/TW/HK/MO). (5) **Delimited text**
+    (`src/engine/text_file`, plugin `text_prepare`). DuckDB's CSV reader reads
+    UTF-8; its latin-1 option rejects 0x80–0x9F, its UTF-16 option needs the
+    file to say so, a UTF-16 or UTF-32 file without a byte-order mark is read
+    as one garbage column without an error (observed), and its encoder
+    extension hook copies the bytes carried to the next buffer from the
+    buffer's start (`csv_encoder.cpp:104-111` in 1.5.3) — wrong for multibyte
+    text. So parqit reads the first 64 KiB of each file: a UTF-8/UTF-16/UTF-32
+    byte-order mark; UTF-16 without one when NUL bytes fill at least a tenth of
+    the byte pairs with at least 95% at one parity, or — fewer NUL bytes, text
+    in other scripts — when the sample is not UTF-8, at least two line feeds
+    are UTF-16 line feeds at even offsets (at most one in ten at the odd ones,
+    none of the other byte order's) and the sample read as UTF-16 is text (no
+    unpaired surrogate, no control but tab/LF/CR, no U+FFFE/FFFF — random
+    bytes, 6% of which the line-feed test alone took for UTF-16 in the re-audit
+    (F15), fail at once); UTF-32 without one when the two high bytes
+    of every four are NUL (≥ 95%) and the low one is not (≤ 5%), refused (rc
+    610) unless `encoding()` names an encoding. Any other NUL bytes (the
+    padding of fixed-width exports) are left to the reader as before; an
+    earlier draft refused them, with no way out, which the release audit
+    caught (F2). An `encoding()` given is followed over these patterns, with a
+    note naming what the bytes looked like; a byte-order mark, the file's own
+    declaration, overrides `encoding()` with a note. A file that is not UTF-8
+    is decoded, streaming in 4 MiB blocks cut after a CR or LF (bytes no
+    supported encoding uses inside a character; UTF-16 keeps a split surrogate
+    pair for the next block); a line longer than 64 MiB is cut into pieces that
+    depend on the text alone (anywhere for a single-byte code page, at a
+    character boundary for UTF-8, after a byte below 0x30 for a multibyte one —
+    refused when there is none), so memory stays bounded for CR-only or
+    binary files (F6). The copy goes to a package-owned bridge directory,
+    reserved only then and erased with the view or after the import, under the
+    file's own name and the `key=value` directories of its path — DuckDB reads
+    those as Hive partition columns, also for a single file, and an earlier
+    draft that flattened a glob into numbered files lost them in silence (F1);
+    a glob of the main source (or of the disk side of mergein/appendin) becomes
+    the same tree, read through the same pattern (files that need no decoding
+    copied as they are; with a single-byte code page every file is read line
+    by line, its UTF-8 lines kept — F24). The path is used exactly as given,
+    never normalized: the system resolves `link/..` physically, and a lexical
+    normalization read other files in the re-audit (F18); the Hive keys come
+    from the path as given, as the engine parses them. A path that names a file is that
+    file even with `*`/`?` in it; otherwise `*`/`?` are live and `[` is
+    literal (GLOB-2, as the reader); a missing file or an empty glob is left
+    for the reader to report as before. Single-byte code pages decode line by
+    line (a line valid UTF-8 kept), multibyte ones whole once a first pass
+    found a line that is not UTF-8 (a file valid UTF-8 throughout is read as it
+    is, with a note naming `encoding(name, all)`; the decoded lines that were
+    valid UTF-8 are counted, `r(transcoded_revalid_lines)`, F5),
+    `encoding(utf-8)` with U+FFFD for broken bytes. The plugin writes the notes,
+    file by file where the files of a glob differ (F4), and the ado prints them
+    through Mata. Undeclared text that is not UTF-8 in a file scanned in place
+    is refused by the engine; `with_encoding_hint` replaces the engine's advice
+    (its own `encoding=` and `ignore_errors` options, which parqit does not
+    pass through) with parqit's `encoding()`, in every plugin `cry`. The using
+    side of `merge`/`joinby`/`append` is scanned for UTF-8 and, if it is not,
+    decoded from the session code page with a note; `import delimited` then
+    always reads UTF-8 (`encoding("utf-8")`) and the frame is saved without
+    `encoding()`, so nothing is decoded twice. This replaces Stata's own
+    guess, which depends on the file and is often wrong without an error:
+    with StataNow 19.5 the same kinds of files were read, depending on size and
+    content, as UTF-16LE (no observations), Hebrew ISO-8859-8, Central European
+    ISO-8859-2 or windows-1252; Shift_JIS was sometimes guessed right (the
+    release audit's re-observation, F10) — a behaviour change on the using
+    side, in CHANGELOG. (6) **mergein/appendin** gain `encoding()`, and
+    the read of the disk side is no longer quiet, so its decoding notes (and
+    the bridge losses) are seen. Their disk side is read by `parqit use` with
+    the internal option `lookup`: scanned in place like a main source, but its
+    undeclared text decoded from the session code page like any lookup's (an
+    earlier draft left it to the engine to refuse, contrary to this entry; the
+    release audit's F3). (7) **SPSS and R** declare through the
+    registry: SPSS code page numbers 874, 932, 936, 949, 950, 1250–1258, 2/3/
+    20127 (ASCII), 20866, 21866, 28591–28599, 28603, 28605, 38598, 20932/51932,
+    51936, 51949, 54936, 10000/6/7/29/79/81, the DOS pages and 65001, and
+    record-20 names; EBCDIC and 1200/1201 are refused with a message, as is an
+    unknown page (listing the families); an undeclared file uses the session
+    code page with a note. R's recorded native encoding goes through the same
+    names. (8) **Stata's limits.** Value-label text over 32,000 bytes and a
+    characteristic over 67,783 bytes are cut at a UTF-8 character boundary
+    (`_parqit_ubytes`), a data label over 80 characters with `usubstr`, never
+    inside a character. (9) **Dialogs.** The encoding fields are editable
+    (`dropdown`) and list the common code pages of every script (and `default`
+    for the session's); `mergein`/`appendin` emit `encoding()`; the views
+    dialog sets `encoding`; the source helper enables the field for delimited
+    text. (10) **Tests.** Unit: `test_legacy_encoding` (aliases, 18 language
+    samples, the Windows/ICU-aligned values above, totality, counting) and
+    `test_text_file` (the sniff, every chunk size 1–17 and 4 MiB, a surrogate
+    pair across blocks, the plan's decisions, the engine-message rewrite).
+    Stata: `v136` (ICU), `v137` (22 encodings from Unicode ground truth, eager
+    and lazy, a 9 MB file across blocks, a pair cut by the first 4 MiB block,
+    refusals, the using side with and without `encoding()`, `parqit set
+    encoding`, the locale hint), `v138` (a GBK dataset in values, labels,
+    notes, characteristics and data label: the column rule, `all`, the format
+    117 rule, `parqit save` checked by pyarrow, Russian/Japanese/Greek, the
+    locale map compiled from the shipped Mata source, the cuts), `v139` (UTF-8
+    in 13 scripts with emoji, combining and bidirectional marks, U+FEFF,
+    U+2028 and a long strL, no normalisation, and filter/strlen/ustrlen/sort/
+    collapse/merge on such text against native Stata), `t15` shapes.
+    Stata's `ustrunescape()` re-encodes characters that are already UTF-8
+    (`ustrunescape("é")` is C3 83 C2 A9); the tests build such characters with
+    `uchar()`. (11) **Not done.** GB18030-2022's changes (ICU and glibc here
+    follow 2005), stateful encodings (ISO-2022-JP), EUC-TW, Big5-HKSCS, EBCDIC
+    and UTF-32 are refused with a message (`big5` is Windows' 950, whose ETEN
+    area is read as Private Use characters — a Unix Big5-ETEN file's circled
+    digits and kana come out as those, F11); there is no statistical guessing of
+    a legacy code page — only byte-order marks and the patterns of UTF-16
+    (NUL bytes, line ends) and UTF-32 are recognised — by design.
+    (12) **Release audit** (Claude Fable 5.1, 2026-09-28,
+    `docs/audits/AUDITORIA_FABLE_RELEASE_R_ENCODINGS_2026-09-28.md`, repros
+    in `audit_repro/fable_release_audit_20260928/`): GO with conditions. Its
+    findings F1–F7 are fixed as above and pinned by `v137` and
+    `test_text_file.cpp`; F8 (R package data in xz/bzip2) is documented in the
+    help; F9 (a false comment about notes under `quietly`) is gone with the
+    code; F10 and F11 are corrected here and in the help; F12 (`$` or a
+    backtick in a path) and F13 (bridges left in TMPDIR by a Stata that exits
+    with a view open) predate this work.
+    (13) **Re-audit** (Claude Fable 5.1, 2026-09-28,
+    `docs/audits/AUDITORIA_FABLE_REAUDITORIA_RELEASE_0_3_0_2026-09-28.md`,
+    repros in `audit_repro/fable_release_reaudit_20260928/`): F1–F7 confirmed
+    fixed; GO with conditions. New findings, all addressed: F14 (a glob as the
+    disk side of mergein/appendin ignored `encoding()`: the internal lookup
+    mode now reaches the plugin as itself, where globs are expanded and
+    undeclared text decoded), F18 (above), F15 (above), F16 (the help lists
+    `r(transcoded_revalid_lines)`), F17 (`lookup` is no longer a `parqit use`
+    option but the internal global `PARQIT_USE_LOOKUP`, consumed on entry), F19
+    (a temporary directory whose path contains `=` gives every bridge a Hive
+    column: a note says so once a session — preexisting for the Parquet
+    bridges), F20/F24 (help and this entry), F21 (a line wedged between `if`
+    and `else if` in `_parqit_resolve_source`, moved), F22 (a UTF-8 file read
+    with a single-byte code page no longer says it "is not UTF-8"), F23 (a
+    UTF-16 byte order given against the pattern is followed with a note).
+
+173. **Closing the R/encoding release audit (2026-09-29).** The Codex audit
+    of the v0.3.0 candidate found nine reproducible defects. (1) Generated
+    `[[i]]` names of unnamed R list elements must be unique against every
+    real name; suffixes preserve access to both. Real duplicate names retain
+    R's first-match rule. (2) Compact sequence lengths must be integral and
+    in `[0, R_XLEN_T_MAX]` (2^52, R's installed `Rinternals.h`); integer
+    sequences also require integral first values and endpoints within the
+    nonmissing int32 range. Compact row counts are checked before casting.
+    Malformed states raise `RError` before output publication. (3) A temporal
+    `format.stata` must agree with the converted units; an incompatible one
+    stays in `r_attributes` with a note. DuckDB's infinite DATE sentinels
+    cannot represent finite R dates, so both integer and double Date inputs
+    use the numeric-days fallback there. TIME must remain below 24 hours
+    after microsecond rounding; otherwise the column stays in seconds.
+    (4) A wholly UTF-8 delimited source stays in place under a named legacy
+    encoding without `all`, preserving `filename()`. CSV options are parsed
+    before any source bridge is reserved. (5) `copysource` cannot fulfill
+    `encoding(name, all)` on an unchanged payload: the combination is refused
+    with rc 198 before writing, with the normal memory writer as the remedy.
+    (6) CP864's low byte 0x25 maps to U+066A, as CP864.TXT, Python, glibc
+    iconv and pyreadstat specify. The single-byte tables cover all 256 bytes;
+    ASCII shortcuts are conditional on the encoding's actual mapping.
+    Stata's ICU variant maps 0x25 to U+0025, a difference explicitly tested
+    rather than silently allowed. Valid UTF-8 still follows the existing
+    keep policy unless `all` or a declared legacy file requires decoding.
+    (7) Existing R attribute caps are now explicit in README/help; their
+    summary representation is unchanged. Unit tests cover the parser and
+    conversion boundaries; v140 checks R-written files, unchanged memory and
+    destinations after errors, CSV provenance/cleanup, both memory writers,
+    and CP864 against pyarrow/Python/pyreadstat. v136 now also tests low bytes
+    1-127 (NUL remains a C++ test because Stata strings cannot carry it).

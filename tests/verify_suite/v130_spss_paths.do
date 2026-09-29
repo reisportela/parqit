@@ -177,10 +177,14 @@ foreach o in data copysource xmissing "partition_by(id)" "partitions(append)" "c
         local ++fails
     }
 }
-capture noisily parqit save `"`stem'_6.parquet"' using `"`sav'"', encoding(koi8-r)
+* ENC-3: an encoding parqit does not read (a stateful one) is refused; KOI8-R,
+* refused before ENC-3, is now one of those it reads
+capture noisily parqit save `"`stem'_6.parquet"' using `"`sav'"', encoding(iso-2022-jp)
 if (_rc != 198) local ++fails
 capture noisily parqit save `"`stem'_6.parquet"' using `"`sav'"', encoding(latin1) replace
 if (_rc) local ++fails                          /* a valid override is accepted */
+capture noisily parqit save `"`stem'_6.parquet"' using `"`sav'"', encoding(koi8-r) replace
+if (_rc) local ++fails
 log using `"`lg'"', text replace name(v130)
 capture noisily parqit describe `"`sav'"'
 local rc = _rc
