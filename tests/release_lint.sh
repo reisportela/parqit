@@ -231,10 +231,19 @@ public_cmds=$(awk '
 
 for cmd in $public_cmds; do
     case "$cmd" in _dlgvars|_dlgcontext|_dlgsource) continue ;; esac
-    awk -v needle="{cmd:parqit $cmd" '
+    # CMD-ABBREV-1: a syntax line may spell the verb with Stata's abbreviation
+    # markup, {cmd:parqit} {cmdab:su:mmarize}; any split of the name counts
+    needles="{cmd:parqit $cmd"
+    k=1
+    while [ "$k" -lt "${#cmd}" ]; do
+        needles="$needles|{cmd:parqit} {cmdab:${cmd:0:k}:${cmd:k}}"
+        k=$((k + 1))
+    done
+    awk -v needles="$needles" '
+        BEGIN { n = split(needles, needle, "|") }
         /\{marker syntax\}/       { inside=1 }
         /\{marker description\}/  { inside=0 }
-        inside && index($0, needle) { found=1 }
+        inside { for (i = 1; i <= n; i++) if (index($0, needle[i])) found=1 }
         END { exit(found ? 0 : 1) }
     ' "$REPO/src/ado/p/parqit.sthlp" || \
         err "public subcommand '$cmd' is absent from the help syntax section"

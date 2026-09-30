@@ -2,7 +2,7 @@
   parqit merge - Combine the view with a file or another view, or join the
   data in memory with a file
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Combine datasets (merge, append, joinby)...
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
@@ -96,7 +96,7 @@ BEGIN
 	label("Key variables")
 
   TEXT tx_keepus		_lft	_ls	_iwd	.,		///
-	label("Variables to keep from the using source (by default all are kept): keepusing() for merge and mergein, keep() for appendin:")
+	label("Variables to keep from the using source (all by default): keepusing() for merge/mergein, keep() for append/appendin:")
   COMBOBOX cb_keepus		@	_ss	@	.,		///
 	append								///
 	dropdown							///
@@ -297,6 +297,8 @@ BEGIN
 	if main.rb_append {
 		call main.tx_more.enable
 		call main.ed_more.enable
+		call main.tx_keepus.enable
+		call main.cb_keepus.enable
 		call main.tx_gen.enable
 		call main.ed_gen.enable
 		call main.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
@@ -334,6 +336,9 @@ BEGIN
 		call opt.cb_int64.enable
 		call main.tx_keepus.enable
 		call main.cb_keepus.enable
+		call main.tx_gen.enable
+		call main.ed_gen.enable
+		call main.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
 		call opt.ck_aforce.enable
 	}
 	call program main_context
@@ -425,6 +430,9 @@ BEGIN
 		}
 		beginoptions
 			optionarg main.ed_gen
+			if main.cb_keepus {
+				put "keep(" main.cb_keepus ") "
+			}
 			optionarg /hidedefault opt.cb_enc
 		endoptions
 	}
@@ -472,6 +480,7 @@ BEGIN
 			if main.cb_keepus {
 				put "keep(" main.cb_keepus ") "
 			}
+			optionarg main.ed_gen
 			option opt.ck_aforce
 			optionarg /hidedefault opt.cb_int64
 			optionarg /hidedefault opt.cb_enc

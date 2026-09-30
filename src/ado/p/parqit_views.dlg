@@ -1,7 +1,7 @@
 /*
   parqit view - Manage views, run DuckDB SQL, and set engine options
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Views, SQL, and engine settings...
   Launch directly with:  db parqit_views      (menu installed by: parqit menu)
@@ -20,7 +20,7 @@ VERSION 16.0
 INCLUDE _std_wide
 DEFINE _dlght 370
 INCLUDE header
-HELP hlp1, view("help parqit##options")
+HELP hlp1, view("help parqit##settings")
 RESET res1
 
 SCRIPT PREINIT

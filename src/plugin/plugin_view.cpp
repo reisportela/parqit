@@ -113,7 +113,22 @@ std::string text_cell(duckdb_result &res, idx_t col, idx_t row = 0,
 std::map<std::string, View> g_views;
 std::string g_current = "default";
 bool g_statamissing = false;
+/* STATAMISS-WARN-1: the user chose a missing-value mode with parqit set
+ * statamissing on|off; until then a comparison that can differ from native
+ * Stata is announced */
+bool g_statamissing_chosen = false;
 long long g_collect_counter = 0;
+
+parqit::ExprSchema expr_schema_of(const View &v) {
+    parqit::ExprSchema s;
+    for (const auto &c : v.cols()) {
+        s.kinds[c.name] = c.kind;
+        s.numeric_types[c.name] = c.physical_type;
+        if (c.is_float()) s.float_columns.insert(c.name);
+        if (c.normalized) s.normalized.insert(c.name);
+    }
+    return s;
+}
 
 /* Persistent adapter/open-data bridges are reserved by the plugin, then move
  * through two explicit states: pending (the ado is still importing/writing)
@@ -239,6 +254,34 @@ bool validate_pending_claim(const std::vector<std::string> &files,
 View &g_view_ref() {
     return g_views[g_current];
 }
+
+/* STATAMISS-WARN-1: the comparisons of an expression over the current view
+ * whose missing-value outcome can differ from native Stata's — none once the
+ * user has chosen a mode */
+std::vector<std::string> missing_rule_cmps(const std::string &expr, bool filter,
+                                           const std::string &guard = "") {
+    if (expr.empty() || g_statamissing || g_statamissing_chosen) return {};
+    return parqit::missing_rule_differences(expr, expr_schema_of(g_view_ref()), filter, guard);
+}
+
+/* Left hex-encoded in the global PARQIT_MISSWARN (a macro name without a
+ * leading _ is a global): the parqit dispatcher shows it after the command,
+ * in red and silenced by quietly like any Stata output, which SF_error is not */
+void warn_missing_rules(const std::vector<std::string> &cmps) {
+    if (cmps.empty()) return;
+    std::string list;
+    for (size_t i = 0; i < cmps.size() && i < 4; i++)
+        list += (i ? ", " : "") + cmps[i];
+    if (cmps.size() > 4) list += ", ...";
+    save_local("PARQIT_MISSWARN",
+               parqit::hex_encode(
+                   "warning: " + list + ": when a compared value is missing, native Stata "
+                   "treats it as larger than any number, while parqit follows SQL by default "
+                   "(the comparison is unknown), so this result can differ from native Stata. "
+                   "Type parqit set statamissing on to follow Stata, or parqit set statamissing "
+                   "off to keep the SQL rule; either choice silences this warning."));
+}
+
 bool close_current_view(std::string *err = nullptr) {
     g_views.erase(g_current);
     return drop_owned(g_current, err);
@@ -1411,11 +1454,54 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
                         "view (the companion columns are hidden); parqit use <file>, "
                         "clear restores them");
     }
+    /* ORDER-CARRIER-1: a Parquet scan gives each row's physical position
+     * through DuckDB's virtual columns file_index and file_row_number (a single
+     * file needs only the second: its file_index is always 0). Carried hidden
+     * through the row-preserving verbs, they break the ties of a declared sort
+     * in the source's order, the same at every evaluation. A real column of
+     * the same name hides the virtual one, and such a source keeps the plain
+     * behaviour, with a note. The hidden names have spaces, which no Stata
+     * variable name can have, so no later gen or rename can collide with them. */
+    std::vector<std::string> order_cols;
+    if (src.scan_sql.rfind("read_parquet(", 0) == 0) {
+        auto lower = [](std::string x) {
+            for (auto &ch : x)
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+            return x;
+        };
+        std::string clash_name;
+        for (const auto &n : src_names)
+            if (clash_name.empty() && (lower(n) == "file_row_number" ||
+                                       (!src.single_file && lower(n) == "file_index")))
+                clash_name = n;
+        if (!clash_name.empty())
+            warns.push_back("column \"" + clash_name + "\" hides the engine's physical row "
+                            "positions, so rows that tie on a sort come in an engine-defined "
+                            "order that need not be the file's; sort on a unique key when the "
+                            "order within ties matters");
+        else {
+            std::set<std::string> taken;
+            for (const auto &c : cols) taken.insert(lower(c.name));
+            auto pick = [&](std::string name) {
+                while (taken.count(lower(name))) name += "_";
+                taken.insert(lower(name));
+                return quote_ident(name);
+            };
+            if (!src.single_file) {
+                const std::string f = pick("__parqit order file");
+                sel += ", file_index AS " + f;
+                order_cols.push_back(f);
+            }
+            const std::string r = pick("__parqit order row");
+            sel += ", file_row_number AS " + r;
+            order_cols.push_back(r);
+        }
+    }
     View candidate;
     candidate.open("SELECT " + sel + " FROM " + src.scan_sql, cols,
                    meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object(),
                    vchars,
-                   meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc);
+                   meta_ctx.meta.present ? meta_ctx.meta.dtalabel : "", desc, order_cols);
     if (meta_ctx.meta.present && !meta_ctx.meta.sortedby.empty()) {
         std::vector<std::string> restored;
         for (const auto &key : meta_ctx.meta.sortedby) {
@@ -1648,6 +1734,14 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
      * bind probe must both succeed before the current view is replaced; this
      * gives all operations the same strong rollback boundary as gen/replace. */
     View candidate = g_view_ref();
+    /* STATAMISS-WARN-1: comparisons whose missing outcome can differ from
+     * native Stata, announced once the verb has succeeded */
+    std::vector<std::string> miss_cmps;
+    auto add_miss = [&](std::vector<std::string> more) {
+        for (auto &m : more)
+            if (std::find(miss_cmps.begin(), miss_cmps.end(), m) == miss_cmps.end())
+                miss_cmps.push_back(std::move(m));
+    };
     if (op == "keep_vars") e = candidate.keep_vars(req_list_or_empty(req, "names"));
     else if (op == "drop_vars") e = candidate.drop_vars(req_list_or_empty(req, "names"));
     else if (op == "keep_if" || op == "drop_if") {
@@ -1657,6 +1751,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         e = candidate.filter(ex, op == "drop_if", g_statamissing);
+        add_miss(missing_rule_cmps(ex, true));
     } else if (op == "gen") {
         std::string name, type, ex, ifex;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -1667,6 +1762,8 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         e = candidate.gen(name, type, ex, ifex, g_statamissing);
+        add_miss(missing_rule_cmps(ex, false, ifex));
+        add_miss(missing_rule_cmps(ifex, true));
     } else if (op == "replace") {
         std::string name, ex, ifex;
         if (!parqit::req_text(req, "name", &name, &err) ||
@@ -1675,6 +1772,8 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
+        add_miss(missing_rule_cmps(ex, false, ifex));
+        add_miss(missing_rule_cmps(ifex, true));
         std::string old_meta;
         for (const auto &c : g_view_ref().cols())
             if (c.name == name) {
@@ -1757,6 +1856,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             if (e.empty())
                 e = candidate.sample_design(amount, count, seed, ifx, by, cluster, rule, gen,
                                             g_statamissing);
+            add_miss(missing_rule_cmps(ifx, true));
         }
     } else if (op == "egen") {
         std::string name, fcn, ex, ty;
@@ -1793,6 +1893,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         }
         e = candidate.egen(name, fcn, ex, req_list_or_empty(req, "by"),
                            g_statamissing, ty, arg_type);
+        add_miss(missing_rule_cmps(ex, false));
     } else {
         cry("parqit: unknown view operation '" + op + "'");
         return kRcUsage;
@@ -1803,6 +1904,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     if (!sample_note.empty()) cry("note: " + sample_note);
+    warn_missing_rules(miss_cmps);
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }
@@ -1989,6 +2091,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         sql = "SELECT * FROM (" + sql + ") WHERE " + tr.sql;
+        warn_missing_rules(missing_rule_cmps(pfilter, true)); /* STATAMISS-WARN-1 */
     }
     std::vector<std::string> pvars;
     if (!parqit::req_text_list(req, "vars", &pvars, &err, false)) {
@@ -2692,6 +2795,7 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
     std::string err;
     if (what == "statamissing") {
         g_statamissing = (value == "on");
+        g_statamissing_chosen = true; /* STATAMISS-WARN-1 */
         return 0;
     }
     if (what == "encoding") {
@@ -3197,7 +3301,9 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
 
     if (op == "append") {
         std::string gen;
-        if (!parqit::req_text(req, "gen", &gen, &err, false)) {
+        std::vector<std::string> keep;
+        if (!parqit::req_text(req, "gen", &gen, &err, false) ||
+            !parqit::req_text_list(req, "keep", &keep, &err, false)) {
             cry(err);
             return kRcUsage;
         }
@@ -3210,6 +3316,49 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                 return rc;
             }
             sources.push_back(std::move(u));
+        }
+        /* APPEND-KEEP-1: keep() names the variables taken from the using
+         * sources (the master keeps all of its own), with wildcards, as native
+         * append. Each name must be in every using source — native stops with
+         * r(111) at the first source without it, after appending the earlier
+         * ones; parqit checks them all before changing the view. Only the value
+         * labels attached to a kept variable come along. */
+        if (!keep.empty()) {
+            auto kept = [&](const std::string &name) {
+                for (const auto &k : keep)
+                    if (k.find_first_of("*?") != std::string::npos ? parqit::glob_match(k, name)
+                                                                   : k == name)
+                        return true;
+                return false;
+            };
+            for (size_t si = 0; si < sources.size(); si++)
+                for (const auto &k : keep) {
+                    const bool wild = k.find_first_of("*?") != std::string::npos;
+                    bool hit = false;
+                    for (const auto &c : sources[si].cols)
+                        hit = hit || (wild ? parqit::glob_match(k, c.name) : k == c.name);
+                    if (!hit) {
+                        cry("parqit append: variable " + k + " not found in using source " +
+                            std::to_string(si + 1) + "; keep() names variables of every using "
+                            "source, as in native append");
+                        return kRcVarNotFound;
+                    }
+                }
+            for (auto &u : sources) {
+                std::vector<ViewCol> cols;
+                std::set<std::string> labels;
+                for (const auto &c : u.cols)
+                    if (kept(c.name)) {
+                        cols.push_back(c);
+                        if (!c.vallab.empty()) labels.insert(c.vallab);
+                    }
+                u.cols = std::move(cols);
+                json vl = json::object();
+                if (u.vallabs.is_object())
+                    for (auto it = u.vallabs.begin(); it != u.vallabs.end(); ++it)
+                        if (labels.count(it.key())) vl[it.key()] = it.value();
+                u.vallabs = std::move(vl);
+            }
         }
         std::string e = candidate.append_with(std::move(sources), gen, &warns);
         if (!e.empty()) {
@@ -3705,6 +3854,28 @@ ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
     return 0;
 }
 
+/* SQL-KEYWORD-1: DuckDB stops with a bare "syntax error at or near" when a
+ * reserved word is used as a name — auto.dta's foreign is the classic case.
+ * Name the word and the quoting it needs; any other error is left as it is. */
+std::string sql_keyword_hint(Session &s, const std::string &err) {
+    const std::string key = "syntax error at or near \"";
+    const size_t p = err.find(key);
+    if (p == std::string::npos) return "";
+    const size_t b = p + key.size(), e = err.find('"', b);
+    if (e == std::string::npos || e == b) return "";
+    const std::string word = err.substr(b, e - b);
+    for (unsigned char ch : word)
+        if (!(std::isalnum(ch) || ch == '_')) return "";
+    std::string category, qerr;
+    if (!s.query_scalar("SELECT keyword_category FROM duckdb_keywords() WHERE keyword_name "
+                        "= lower(" + quote_literal(word) + ")",
+                        &category, &qerr) ||
+        category != "reserved")
+        return "";
+    return "\n" + word + " is a reserved word in SQL: if it is meant as a column name, write "
+           "it in double quotes, \"" + word + "\" (text values take single quotes)";
+}
+
 ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
     std::string err;
     json req;
@@ -3726,7 +3897,7 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
     /* probe the query, then boundary-cast its result like any source */
     duckdb_result res;
     if (!s.query("SELECT * FROM (" + sql + ") LIMIT 0", &res, &err)) {
-        cry("parqit sql: " + err);
+        cry("parqit sql: " + err + sql_keyword_hint(s, err));
         return kRcEngine;
     }
     idx_t ncol = duckdb_column_count(&res);
@@ -3876,7 +4047,7 @@ ST_retcode cmd_view_query(const std::vector<std::string> &args) {
     duckdb_result res;
     if (!s.query("SELECT * FROM (" + candidate.compile(false) + ") LIMIT 0", &res,
                  &verr)) {
-        cry("parqit query: the fragment does not compile: " + verr);
+        cry("parqit query: the fragment does not compile: " + verr + sql_keyword_hint(s, verr));
         return kRcUsage;
     }
     refresh_numeric_types(candidate, res);
@@ -3956,7 +4127,34 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             }
         }
     }
-    const std::string base = "(" + g_view_ref().compile(false) + ")";
+    std::string base = "(" + g_view_ref().compile(false) + ")";
+    /* duplicates list numbers Obs over every row before the if applies, as
+     * native does (its Obs is the row's _n in the whole dataset) */
+    std::string if_sql;
+    /* TAB-IF-1 / STATS-IF-1: an if condition restricts the rows the statistic
+     * reads, as the if of the native commands does; the view is not changed */
+    std::string ifexpr;
+    if (!parqit::req_text(req, "ifexpr", &ifexpr, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    if (!ifexpr.empty()) {
+        const std::string who = "parqit " + (what == "tab2" ? std::string("tabulate") : what);
+        parqit::ExprResult tr =
+            parqit::translate_filter(ifexpr, expr_schema_of(g_view_ref()), g_statamissing);
+        if (!tr.ok) {
+            cry(who + ": " + tr.error);
+            return kRcUsage;
+        }
+        if (tr.uses_rowctx) {
+            cry(who + ": _n/_N are not supported in the if condition; apply parqit keep "
+                "if first, or collect and tabulate natively");
+            return kRcUsage;
+        }
+        if_sql = tr.sql;
+        base = "(SELECT * FROM " + base + " WHERE " + tr.sql + ")";
+        warn_missing_rules(missing_rule_cmps(ifexpr, true)); /* STATAMISS-WARN-1 */
+    }
     parqit::ResponseWriter w;
     if (!w.open(respfile, &err)) {
         cry(err);
@@ -3994,7 +4192,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
     save_local("__sq_by", display_by);
     if (what != "countif" && what != "levelsof") {
         for (const auto &c : g_view_ref().cols()) {
-            if (what != "duplist" && !vars.empty() && c.name != display_by &&
+            if (!vars.empty() && c.name != display_by &&
                 std::find(vars.begin(), vars.end(), c.name) == vars.end()) continue;
             w.rec("smeta", {std::string(1, c.kind)},
                   {c.name, c.exposed(), c.varlab, c.fmt, c.meta_type});
@@ -4479,6 +4677,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcEngine;
         }
         save_local("_parqit_n", n);
+        warn_missing_rules(missing_rule_cmps(expr, true)); /* STATAMISS-WARN-1 */
     } else if (what == "codebook") {
         std::vector<std::pair<std::string, char>> targets;
         for (const auto &c : g_view_ref().cols()) {
@@ -4532,6 +4731,13 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         std::vector<std::string> targets = vars;
         if (targets.empty())
             for (const auto &c : g_view_ref().cols()) targets.push_back(c.name);
+        /* DISTINCT-OBS-1: as the community-contributed distinct (Cox &
+         * Longton, SSC), Obs is the number of observations used — the
+         * nonmissing ones — and missing values are not a distinct value; with
+         * missing, every observation counts and missing is one more value.
+         * joint counts the distinct tuples of the complete observations (all
+         * of them with missing). */
+        const bool withmiss = req.value("missing", false);
         std::string sel = "count(*)";
         for (const auto &t : targets) {
             bool found = false;
@@ -4540,7 +4746,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit distinct: variable " + t + " not found in the view");
                 return kRcVarNotFound;
             }
-            sel += ", count(DISTINCT " + norm_view_key(t) + ")";
+            const std::string k = norm_view_key(t);
+            sel += ", count(DISTINCT " + k + ")";
+            sel += withmiss ? ", count(*) - count(" + k + ")" : ", count(" + k + ")";
         }
         bool joint = req.value("joint", false) && targets.size() > 1;
         if (joint) {
@@ -4550,42 +4758,55 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 tup += (i ? ", " : "") + k;
                 complete += (i ? " AND " : "") + k + " IS NOT NULL";
             }
-            sel += ", count(DISTINCT (" + tup + ")) FILTER (WHERE " + complete +
-                   ")";
+            /* a row value keeps its NULL fields, and DISTINCT treats two NULL
+             * fields as equal, so with missing each missing pattern is a value */
+            if (withmiss) sel += ", count(DISTINCT (" + tup + ")), count(*)";
+            else
+                sel += ", count(DISTINCT (" + tup + ")) FILTER (WHERE " + complete +
+                       "), count(*) FILTER (WHERE " + complete + ")";
         }
         duckdb_result res;
         if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
             cry("parqit distinct: " + err);
             return kRcEngine;
         }
-        long long total = duckdb_value_int64(&res, 0, 0);
-        for (size_t t = 0; t < targets.size(); t++)
-            w.rec("dst",
-                  {std::to_string(duckdb_value_int64(&res, t + 1, 0)),
-                   std::to_string(total)},
-                  {targets[t]});
-        if (joint)
-            w.rec("dstj",
-                  {std::to_string(duckdb_value_int64(&res, targets.size() + 1, 0)),
-                   std::to_string(total)},
-                  {});
-        duckdb_destroy_result(&res);
-        save_local("_parqit_n", std::to_string(total));
-    } else if (what == "dupreport" || what == "duplist") {
-        if (vars.empty()) {
-            cry("parqit duplicates: a key varlist is required");
-            return kRcUsage;
+        const long long total = duckdb_value_int64(&res, 0, 0);
+        long long last_n = total;
+        for (size_t t = 0; t < targets.size(); t++) {
+            long long d = duckdb_value_int64(&res, 1 + 2 * t, 0);
+            const long long second = duckdb_value_int64(&res, 2 + 2 * t, 0);
+            long long n = second;
+            if (withmiss) { /* second = the missing count */
+                n = total;
+                if (second > 0) d += 1;
+            }
+            last_n = n;
+            w.rec("dst", {std::to_string(d), std::to_string(n)}, {targets[t]});
         }
-        std::string keys, order_keys;
-        for (size_t i = 0; i < vars.size(); i++) {
+        if (joint) {
+            const idx_t j = 1 + 2 * targets.size();
+            last_n = duckdb_value_int64(&res, j + 1, 0);
+            w.rec("dstj",
+                  {std::to_string(duckdb_value_int64(&res, j, 0)), std::to_string(last_n)},
+                  {});
+        }
+        duckdb_destroy_result(&res);
+        w.rec("dstn", {std::to_string(total), withmiss ? "1" : "0"}, {});
+        save_local("_parqit_n", std::to_string(last_n));
+    } else if (what == "dupreport" || what == "duplist") {
+        /* DUP-ALL-1: no varlist means every variable, as in native duplicates */
+        std::vector<std::string> keyvars = vars;
+        if (keyvars.empty())
+            for (const auto &c : g_view_ref().cols()) keyvars.push_back(c.name);
+        std::string keys;
+        for (size_t i = 0; i < keyvars.size(); i++) {
             bool found = false;
-            for (const auto &c : g_view_ref().cols()) found = found || c.name == vars[i];
+            for (const auto &c : g_view_ref().cols()) found = found || c.name == keyvars[i];
             if (!found) {
-                cry("parqit duplicates: variable " + vars[i] + " not found in the view");
+                cry("parqit duplicates: variable " + keyvars[i] + " not found in the view");
                 return kRcVarNotFound;
             }
-            keys += (i ? ", " : "") + norm_view_key(vars[i]);
-            order_keys += (i ? ", " : "") + quote_ident(vars[i]);
+            keys += (i ? ", " : "") + norm_view_key(keyvars[i]);
         }
         if (what == "dupreport") {
             duckdb_result res;
@@ -4604,39 +4825,82 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                       {});
             duckdb_destroy_result(&res);
         } else {
+            /* DUP-LIST-1: the observations of every duplicated group, as native
+             * duplicates list shows them — Group (numbered in the order of the
+             * key values, "" first for a string and missing last for a number),
+             * Obs (the row's _n in the view's current order) and the key
+             * variables — up to limit() rows, with the totals */
             long long limit = req.value("limit", 20LL);
-            std::string sel;
-            const auto &cols = g_view_ref().cols();
-            for (size_t i = 0; i < cols.size(); i++) {
-                const std::string casted = "CAST(" + quote_ident(cols[i].name) +
-                                           " AS VARCHAR)";
-                sel += (i ? ", " : "") + std::string("encode(") +
-                       (cols[i].kind == 's' ? "coalesce(" + casted + ", '')"
-                                            : casted) + ")";
+            std::set<std::string> taken;
+            for (const auto &c : g_view_ref().cols()) taken.insert(c.name);
+            auto helper = [&](const std::string &hint) {
+                std::string n = "__parqit_dl_" + hint;
+                while (taken.count(n)) n += "_";
+                taken.insert(n);
+                return quote_ident(n);
+            };
+            const std::string obs = helper("obs"), cnt = helper("cnt"), grp = helper("grp"),
+                              tot = helper("tot"), ngr = helper("ngr");
+            std::string rank, cells;
+            for (size_t i = 0; i < keyvars.size(); i++) {
+                const std::string k = norm_view_key(keyvars[i]);
+                bool str = false;
+                for (const auto &c : g_view_ref().cols())
+                    if (c.name == keyvars[i]) str = (c.kind == 's');
+                rank += (i ? ", " : "") +
+                        (str ? "coalesce(" + k + ", '') ASC" : k + " ASC NULLS LAST");
+                const std::string casted = "CAST(" + quote_ident(keyvars[i]) + " AS VARCHAR)";
+                cells += ", encode(" + (str ? "coalesce(" + casted + ", '')" : casted) + ")";
             }
+            const std::string sql =
+                "WITH d0 AS (" + g_view_ref().compile_numbered(obs) +
+                "), dz AS (SELECT * FROM d0" +
+                (if_sql.empty() ? std::string() : " WHERE " + if_sql) +
+                "), d1 AS (SELECT *, count(*) OVER (PARTITION BY " + keys + ") AS " + cnt +
+                " FROM dz), d2 AS (SELECT *, dense_rank() OVER (ORDER BY " + rank + ") AS " +
+                grp + " FROM d1 WHERE " + cnt + " > 1), d3 AS (SELECT *, count(*) OVER () AS " +
+                tot + ", max(" + grp + ") OVER () AS " + ngr + " FROM d2) SELECT " + grp +
+                ", " + obs + ", " + tot + ", " + ngr + cells + " FROM d3 ORDER BY " + grp +
+                ", " + obs + " LIMIT " + std::to_string(limit);
             duckdb_result res;
-            if (!s.query("SELECT " + sel + " FROM " + base +
-                             " QUALIFY count(*) OVER (PARTITION BY " + keys +
-                             ") > 1 ORDER BY " + order_keys + " LIMIT " +
-                             std::to_string(limit),
-                         &res, &err)) {
+            if (!s.query(sql, &res, &err)) {
                 cry("parqit duplicates list: " + err);
                 return kRcEngine;
             }
-            /* Encode each cell independently: every byte, including a unit
-             * separator inside a string, belongs to that cell alone. */
-            std::vector<std::string> hdr;
-            for (const auto &col : cols) hdr.push_back(col.name);
-            w.rec("duph2", {std::to_string(hdr.size())}, hdr);
-            idx_t n = duckdb_row_count(&res);
-            for (idx_t i = 0; i < n; i++) {
-                std::vector<std::string> row;
-                for (idx_t c = 0; c < duckdb_column_count(&res); c++) {
-                    row.push_back(text_cell(res, c, i));
+            w.rec("dlh", {std::to_string(keyvars.size())}, keyvars);
+            /* the value labels of the keys, so the list shows them like native */
+            const json &vl = g_view_ref().vallabs();
+            auto js = [](const json &x) { return x.is_string() ? x.get<std::string>() : x.dump(); };
+            for (const auto &kv : keyvars)
+                for (const auto &c : g_view_ref().cols()) {
+                    if (c.name != kv || c.vallab.empty() || !vl.is_object() ||
+                        !vl.contains(c.vallab))
+                        continue;
+                    const json &def = vl[c.vallab];
+                    if (!def.is_object() || !def.contains("entries") || !def["entries"].is_array())
+                        continue;
+                    for (const auto &e : def["entries"])
+                        if (e.is_array() && e.size() == 2)
+                            w.rec("dlv", {}, {kv, c.vallab, js(e[0]), js(e[1])});
                 }
-                w.rec("dupl2", {}, row);
+            const idx_t n = duckdb_row_count(&res);
+            long long total = 0, ngroups = 0;
+            for (idx_t i = 0; i < n; i++) {
+                if (i == 0) {
+                    total = duckdb_value_int64(&res, 2, 0);
+                    ngroups = duckdb_value_int64(&res, 3, 0);
+                }
+                /* each cell is encoded on its own: every byte belongs to it */
+                std::vector<std::string> row;
+                for (idx_t c = 4; c < duckdb_column_count(&res); c++)
+                    row.push_back(text_cell(res, c, i));
+                w.rec("dlr",
+                      {std::to_string(duckdb_value_int64(&res, 0, i)),
+                       std::to_string(duckdb_value_int64(&res, 1, i))},
+                      row);
             }
             duckdb_destroy_result(&res);
+            w.rec("dlt", {std::to_string(total), std::to_string(n), std::to_string(ngroups)}, {});
         }
     } else if (what == "misspatterns") {
         std::vector<std::pair<std::string, char>> targets;
@@ -4828,7 +5092,15 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
     } else if (what == "corr") {
         bool pairwise = req.value("pairwise", false);
         std::vector<std::string> targets, display_targets;
-        for (const auto &v : vars) {
+        /* CORR-ALL-1: no varlist means every numeric variable; a string one is
+         * named and skipped, as native correlate and pwcorr do */
+        std::vector<std::string> wanted = vars;
+        if (wanted.empty())
+            for (const auto &c : g_view_ref().cols()) {
+                if (c.kind == 'n') wanted.push_back(c.name);
+                else w.rec("corrign", {}, {c.exposed()});
+            }
+        for (const auto &v : wanted) {
             bool found = false, isnum = false;
             std::string display;
             for (const auto &c : g_view_ref().cols())

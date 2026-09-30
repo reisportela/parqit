@@ -47,25 +47,36 @@ gen byte k = 1
 gen strL s = "a"+char(31)+"b"
 gen long tail = 77
 label variable s "{hline 8}"
+* DUP-LIST-1: duplicates list shows the key variables as native does, so s is
+* a key here and each table must equal native duplicates list's
 parqit open _data
 log using `"`out'/controls.log"', text name(v91c)
-parqit duplicates list k
+parqit duplicates list k s
 parqit lookfor hline
 parqit describe
 log close v91c
+log using `"`out'/controls_native.log"', text name(v91cn)
+duplicates list k s
+log close v91cn
 parqit close _all
 replace s = "{hline 8}"
 parqit open _data
 log using `"`out'/braces.log"', text name(v91b)
-parqit duplicates list k
+parqit duplicates list k s
 log close v91b
+log using `"`out'/braces_native.log"', text name(v91bn)
+duplicates list k s
+log close v91bn
 parqit close _all
 replace s = 40000*"a"
 parqit open _data
 log using `"`out'/long.log"', text name(v91long)
-parqit duplicates list k
+parqit duplicates list k s
 parqit codebook s
 log close v91long
+log using `"`out'/long_native.log"', text name(v91ln)
+duplicates list k s
+log close v91ln
 quietly parqit tabstat tail, by(s) save
 mata: assert(strlen(st_global("r(name1)")) == 40000)
 assert r(Stat1)[1,1] == 77
@@ -79,9 +90,12 @@ p=Path(Macro.getLocal('out'))
 controls=(p/'controls.log').read_text()
 braces=(p/'braces.log').read_text()
 long=(p/'long.log').read_text()
-assert 'a\\x1fb' in controls and '{hline 8}' in controls
+def table(text): return [x for x in text.splitlines() if x.startswith('  +') or x.startswith('  |')]
+for tag in ('controls', 'braces', 'long'):
+    lazy = table((p/(tag+'.log')).read_text())
+    assert lazy and lazy == table((p/(tag+'_native.log')).read_text()), tag
+assert '{hline 8}' in controls
 assert braces.count('{hline 8}') >= 2
-assert long.count('77') >= 2
 assert '["'+23*'a'+'~","'+23*'a'+'~"]' in long
 end
 

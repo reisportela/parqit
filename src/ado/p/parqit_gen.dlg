@@ -1,7 +1,7 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)

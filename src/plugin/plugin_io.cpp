@@ -449,12 +449,13 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
                   bool csv, const std::string &filename_column,
                   const CsvOptions &csv_opts) {
     std::string list;
-    bool any_dir = false;
+    bool any_dir = false, one_file = !csv && files.size() == 1;
     for (size_t i = 0; i < files.size(); i++) {
         std::string f = files[i];
         std::error_code ec;
         if (!csv && std::filesystem::is_directory(f, ec)) {
             any_dir = true;
+            one_file = false;
             /* the directory name itself may contain glob metacharacters */
             f = glob_escape(f);
             if (!f.empty() && f.back() != '/' && f.back() != '\\') f += "/";
@@ -466,6 +467,7 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
         } else {
             /* pattern: `*`/`?` stay live, `[` is literal (GLOB-2) */
             f = glob_escape_brackets(f);
+            one_file = false;
         }
         if (i) list += ", ";
         list += quote_literal(f);
@@ -473,6 +475,7 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
     Source s;
     s.hive = any_dir;
     s.relaxed = relaxed;
+    s.single_file = one_file;
     const std::string paths = "[" + list + "]";
     std::string opts;
     if (any_dir) opts += ", hive_partitioning = true";
@@ -2512,6 +2515,141 @@ std::string describe_column_diff(const std::vector<std::pair<std::string, std::s
            std::to_string(b.size());
 }
 
+/* PART-META-DIFF-1: what differs between the tree's parqit.* metadata and the
+ * result's, named by variable and attribute — "cae: storage type str5 in the
+ * tree, str8 in the result" — so the user knows what to change. The first
+ * four differences, then how many more; the bare key names if nothing more
+ * precise can be said. */
+std::string describe_meta_diff(const std::map<std::string, std::string> &tree,
+                               const std::map<std::string, std::string> &result) {
+    auto parse = [](const std::map<std::string, std::string> &m, const std::string &key) {
+        auto it = m.find(key);
+        if (it == m.end()) return json();
+        json j = json::parse(it->second, nullptr, false);
+        return j.is_discarded() ? json() : j;
+    };
+    auto text = [](const json &o, const char *key) {
+        return o.is_object() && o.contains(key) && o[key].is_string() ? o[key].get<std::string>()
+                                                                     : std::string();
+    };
+    auto shown = [](const std::string &s) { return s.empty() ? std::string("none") : "\"" + s + "\""; };
+    std::vector<std::string> out;
+    auto both = [&](const std::string &what, const std::string &t, const std::string &r) {
+        out.push_back(what + " " + t + " in the tree, " + r + " in the result");
+    };
+
+    const json ts = parse(tree, "parqit.schema"), rs = parse(result, "parqit.schema");
+    std::vector<json> tv, rv;
+    for (const json *s : {&ts, &rs})
+        if (s->is_object() && s->contains("vars") && (*s)["vars"].is_array())
+            for (const auto &v : (*s)["vars"])
+                if (v.is_object()) (s == &ts ? tv : rv).push_back(v);
+    std::map<std::string, json> rmap;
+    for (const auto &v : rv) rmap[text(v, "name")] = v;
+    std::set<std::string> tnames;
+    for (const auto &v : tv) {
+        const std::string name = text(v, "name");
+        tnames.insert(name);
+        auto it = rmap.find(name);
+        if (it == rmap.end()) {
+            out.push_back(name + ": in the tree, not in the result");
+            continue;
+        }
+        const json &w = it->second;
+        if (text(v, "type") != text(w, "type"))
+            both(name + ": storage type", text(v, "type"), text(w, "type"));
+        if (text(v, "fmt") != text(w, "fmt"))
+            both(name + ": format", text(v, "fmt"), text(w, "fmt"));
+        if (text(v, "varlab") != text(w, "varlab"))
+            both(name + ": variable label", shown(text(v, "varlab")), shown(text(w, "varlab")));
+        if (text(v, "vallab") != text(w, "vallab"))
+            both(name + ": value label", shown(text(v, "vallab")), shown(text(w, "vallab")));
+    }
+    for (const auto &v : rv)
+        if (!tnames.count(text(v, "name")))
+            out.push_back(text(v, "name") + ": in the result, not in the tree");
+    auto sorted_by = [&](const json &s) {
+        std::string keys;
+        if (s.is_object() && s.contains("sortedby") && s["sortedby"].is_array())
+            for (const auto &k : s["sortedby"])
+                if (k.is_string()) keys += (keys.empty() ? "" : " ") + k.get<std::string>();
+        return keys;
+    };
+    if (sorted_by(ts) != sorted_by(rs))
+        both("sort order (sortedby)", shown(sorted_by(ts)), shown(sorted_by(rs)));
+
+    const json tl = parse(tree, "parqit.vallabs"), rl = parse(result, "parqit.vallabs");
+    std::set<std::string> labels;
+    for (const json *l : {&tl, &rl})
+        if (l->is_object())
+            for (auto it = l->begin(); it != l->end(); ++it) labels.insert(it.key());
+    for (const auto &name : labels) {
+        const bool in_t = tl.is_object() && tl.contains(name);
+        const bool in_r = rl.is_object() && rl.contains(name);
+        if (in_t && in_r && tl[name] == rl[name]) continue;
+        out.push_back("value label " + name +
+                      (in_t && in_r ? ": different values or texts"
+                                    : in_t ? ": in the tree, not in the result"
+                                           : ": in the result, not in the tree"));
+    }
+
+    const json tc = parse(tree, "parqit.chars"), rc = parse(result, "parqit.chars");
+    std::set<std::string> chars;
+    auto flat = [](const json &c, std::map<std::string, std::string> *m) {
+        if (!c.is_object()) return;
+        for (auto t = c.begin(); t != c.end(); ++t)
+            if (t.value().is_object())
+                for (auto n = t.value().begin(); n != t.value().end(); ++n)
+                    (*m)[t.key() + "[" + n.key() + "]"] = n.value().is_string()
+                                                              ? n.value().get<std::string>()
+                                                              : n.value().dump();
+    };
+    std::map<std::string, std::string> tcm, rcm;
+    flat(tc, &tcm);
+    flat(rc, &rcm);
+    for (const auto &kv : tcm) chars.insert(kv.first);
+    for (const auto &kv : rcm) chars.insert(kv.first);
+    for (const auto &name : chars) {
+        auto t = tcm.find(name), r = rcm.find(name);
+        if (t != tcm.end() && r != rcm.end() && t->second == r->second) continue;
+        out.push_back("characteristic " + name + " (notes are characteristics)" +
+                      (t == tcm.end() ? ": only in the result"
+                                      : r == rcm.end() ? ": only in the tree" : ": different text"));
+    }
+
+    const json td = parse(tree, "parqit.dtalabel"), rd = parse(result, "parqit.dtalabel");
+    const std::string tds = td.is_string() ? td.get<std::string>() : std::string();
+    const std::string rds = rd.is_string() ? rd.get<std::string>() : std::string();
+    if (tds != rds) both("data label", shown(tds), shown(rds));
+
+    /* any other parqit.* key (a future one, or parqit.xmissing) */
+    for (const auto *m : {&tree, &result})
+        for (const auto &kv : *m) {
+            const std::string &k = kv.first;
+            if (k == "parqit.schema" || k == "parqit.vallabs" || k == "parqit.chars" ||
+                k == "parqit.dtalabel")
+                continue;
+            auto other = (m == &tree ? result : tree).find(k);
+            if (other != (m == &tree ? result : tree).end() && other->second == kv.second) continue;
+            const std::string item = k + " differs";
+            if (std::find(out.begin(), out.end(), item) == out.end()) out.push_back(item);
+        }
+
+    if (out.empty()) { /* nothing more precise: the keys, as before */
+        std::string keys;
+        for (const auto &kv : tree)
+            if (!result.count(kv.first) || result.at(kv.first) != kv.second)
+                keys += (keys.empty() ? "" : ", ") + kv.first;
+        for (const auto &kv : result)
+            if (!tree.count(kv.first)) keys += (keys.empty() ? "" : ", ") + kv.first;
+        return keys;
+    }
+    std::string s;
+    for (size_t i = 0; i < out.size() && i < 4; i++) s += (i ? "; " : "") + out[i];
+    if (out.size() > 4) s += "; and " + std::to_string(out.size() - 4) + " more";
+    return s;
+}
+
 void collect_leaf_dirs(const std::filesystem::path &root, const std::filesystem::path &rel,
                        size_t depth, size_t nkeys, std::vector<std::filesystem::path> *out) {
     namespace fs = std::filesystem;
@@ -2547,7 +2685,8 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
                               const std::filesystem::path &staged,
                               OutputTransaction &tx, size_t nkeys,
                               const std::string &mode, long long *n_replaced,
-                              long long *n_added, std::string *err) {
+                              long long *n_added, long long *n_extended,
+                              std::string *err) {
     namespace fs = std::filesystem;
     struct LeafMove {
         fs::path target, aside;
@@ -2615,7 +2754,7 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
                 moves.push_back(m);
                 break;
             }
-            ++*n_added;
+            ++*n_extended; /* PART-NOTE-1: an existing partition got a file */
         }
         moves.push_back(m);
     }
@@ -3038,33 +3177,33 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                         return kRcEngine;
                     }
                     if (staged_meta != tree_meta) {
-                        std::string keys;
-                        for (const auto &kv : tree_meta)
-                            if (!staged_meta.count(kv.first) || staged_meta[kv.first] != kv.second)
-                                keys += (keys.empty() ? "" : ", ") + kv.first;
-                        for (const auto &kv : staged_meta)
-                            if (!tree_meta.count(kv.first))
-                                keys += (keys.empty() ? "" : ", ") + kv.first;
                         cleanup_tmp();
                         *err = "partitions(): the result's Stata metadata differs from "
-                               "the existing tree's (" + keys +
+                               "the existing tree's (" + describe_meta_diff(tree_meta, staged_meta) +
                                "); a tree whose files disagree loses its labels and "
-                               "formats on read. Rewrite it with replace, or write "
-                               "elsewhere";
+                               "formats on read. Make the result match the tree "
+                               "(parqit describe <tree> shows its types and labels), "
+                               "rewrite the tree with replace, or write elsewhere";
                         return kRcUsage;
                     }
                 }
             }
-            long long n_replaced = 0, n_added = 0;
+            long long n_replaced = 0, n_added = 0, n_extended = 0;
             ST_retcode prc = publish_partitions(fs::path(dest), fs::path(tmpdest), tx,
                                                 partition_by.size(), partition_mode,
-                                                &n_replaced, &n_added, err);
+                                                &n_replaced, &n_added, &n_extended, err);
             cleanup_tmp();
             if (prc != 0) return prc;
+            /* PART-NOTE-1: a file appended to an existing partition extends it;
+             * only a partition the tree did not have is "added" */
             if (note)
                 *note += "(" + std::to_string(n_replaced) + " partition" +
                          (n_replaced == 1 ? "" : "s") + " replaced, " +
-                         std::to_string(n_added) + " added under " + dest + ")\n";
+                         std::to_string(n_added) + " added" +
+                         (n_extended > 0 ? ", " + std::to_string(n_extended) +
+                                               " extended with a new file"
+                                         : std::string()) +
+                         " under " + dest + ")\n";
             return 0;
         }
         /* honour replace, but rename the old tree ASIDE rather than deleting it

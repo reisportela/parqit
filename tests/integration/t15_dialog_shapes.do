@@ -81,6 +81,8 @@ capture noisily parqit use using `"`repo'/tests/fixtures/r/rownames.rds"', clear
 _shape `=_rc' "parqit use using file.rds, clear encoding(windows-1252)"
 capture noisily parqit use using `"`repo'/tests/fixtures/r/rownames.rds"', name(rv)
 _shape `=_rc' "parqit use using file.rds, name()"
+capture noisily parqit use using `"`repo'/tests/fixtures/r/workspace.RData"', name(rw) object(people)
+_shape `=_rc' "parqit use using file.RData, name() object()"
 * CSV-OPT-1 dialog field: csv() reaches the ado as one option string
 tempfile autocsv
 quietly export delimited using `"`autocsv'.csv"', replace delimiter(";")
@@ -143,6 +145,8 @@ capture noisily parqit describe
 _shape `=_rc' "parqit describe"
 capture noisily parqit describe `"`auto'"'
 _shape `=_rc' "parqit describe file"
+capture noisily parqit describe `"`auto'"', labels notes
+_shape `=_rc' "parqit describe file, labels notes"
 capture noisily parqit glimpse
 _shape `=_rc' "parqit glimpse"
 capture noisily parqit glimpse `"`auto'"'
@@ -187,6 +191,26 @@ capture noisily parqit duplicates report foreign, limit(20)
 _shape `=_rc' "parqit duplicates report keys, limit()"
 capture noisily parqit duplicates list foreign, limit(20)
 _shape `=_rc' "parqit duplicates list keys, limit()"
+capture noisily parqit distinct foreign rep78, joint missing
+_shape `=_rc' "parqit distinct varlist, joint missing"
+capture noisily parqit duplicates report
+_shape `=_rc' "parqit duplicates report (all variables)"
+capture noisily parqit duplicates list, limit(20)
+_shape `=_rc' "parqit duplicates list, limit() (all variables)"
+capture noisily parqit codebook rep78 if price > 5000
+_shape `=_rc' "parqit codebook varlist if exp"
+capture noisily parqit misstable rep78 if price > 5000
+_shape `=_rc' "parqit misstable varlist if exp"
+capture noisily parqit misstable patterns rep78 mpg if price > 5000
+_shape `=_rc' "parqit misstable patterns varlist if exp"
+capture noisily parqit levelsof rep78 if price > 5000, limit(100)
+_shape `=_rc' "parqit levelsof var if exp, limit()"
+capture noisily parqit distinct foreign rep78 if price > 5000, joint missing
+_shape `=_rc' "parqit distinct varlist if exp, joint missing"
+capture noisily parqit duplicates report foreign if price > 5000, limit(20)
+_shape `=_rc' "parqit duplicates report keys if exp, limit()"
+capture noisily parqit duplicates list foreign if price > 5000, limit(20)
+_shape `=_rc' "parqit duplicates list keys if exp, limit()"
 
 * --- Summary statistics, tables, and correlations (db parqit_stats) -----------
 di as txt _n "db parqit_stats"
@@ -202,6 +226,10 @@ capture noisily parqit tabulate foreign, nolabel
 _shape `=_rc' "parqit tabulate var, nolabel"
 capture noisily parqit tabulate foreign rep78, nolabel row col
 _shape `=_rc' "parqit tabulate var1 var2, nolabel row col"
+capture noisily parqit tabulate foreign if price > 5000
+_shape `=_rc' "parqit tabulate var if exp"
+capture noisily parqit tabulate foreign rep78 if price > 5000 & !missing(rep78), missing row col
+_shape `=_rc' "parqit tabulate var1 var2 if exp, missing row col"
 capture noisily parqit tabstat price mpg
 _shape `=_rc' "parqit tabstat varlist (no statistics(): default mean)"
 capture noisily parqit tabstat price mpg, statistics(n mean sd min max median sum var p90 range) by(foreign)
@@ -212,6 +240,20 @@ capture noisily parqit correlate price mpg weight
 _shape `=_rc' "parqit correlate varlist"
 capture noisily parqit pwcorr price mpg weight, obs sig
 _shape `=_rc' "parqit pwcorr varlist, obs sig"
+capture noisily parqit correlate
+_shape `=_rc' "parqit correlate (all numeric variables)"
+capture noisily parqit pwcorr, obs sig
+_shape `=_rc' "parqit pwcorr, obs sig (all numeric variables)"
+capture noisily parqit summarize price mpg if price > 5000, detail
+_shape `=_rc' "parqit summarize varlist if exp, detail"
+capture noisily parqit tabstat price mpg if price > 5000, statistics(mean sd) by(foreign) save
+_shape `=_rc' "parqit tabstat varlist if exp, statistics() by() save"
+capture noisily parqit correlate price mpg if price > 5000
+_shape `=_rc' "parqit correlate varlist if exp"
+capture noisily parqit pwcorr price mpg if price > 5000, obs sig
+_shape `=_rc' "parqit pwcorr varlist if exp, obs sig"
+capture noisily parqit histogram price if price > 5000, bins(10) nodraw
+_shape `=_rc' "parqit histogram var if exp, bins() nodraw"
 capture noisily parqit histogram price, bins(10) nodraw
 _shape `=_rc' "parqit histogram var, bins() nodraw"
 capture noisily parqit tabulate foreign rep78 yr
@@ -368,6 +410,8 @@ parqit close _all
 parqit use using `"`auto'"'
 capture noisily parqit append using `"`auto'"' `"`auto'"', generate(src) encoding(latin1)
 _shape `=_rc' "parqit append using file file, generate() encoding()"
+capture noisily parqit append using `"`auto'"', generate(src2) keep(make price)
+_shape `=_rc' "parqit append using file, generate() keep()"
 parqit close _all
 parqit use using `"`auto'"'
 capture noisily parqit joinby foreign using `"`lookup'"', encoding(latin1)
@@ -385,6 +429,8 @@ _shape `=_rc' "parqit mergein m:1 keys using file, nogenerate encoding()"
 use `"`autodta'"', clear
 capture noisily parqit appendin using `"`auto'"', keep(make price) force
 _shape `=_rc' "parqit appendin using file, keep() force"
+capture noisily parqit appendin using `"`auto'"', keep(make price) generate(src3) force
+_shape `=_rc' "parqit appendin using file, keep() generate() force"
 capture noisily parqit appendin using `"`auto'"', keep(make price) encoding(latin1)
 _shape `=_rc' "parqit appendin using file, keep() encoding()"
 

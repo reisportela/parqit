@@ -25,6 +25,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace parqit {
 
@@ -66,5 +67,23 @@ ExprResult translate_expression(const std::string &expr, const ExprSchema &schem
  * counts as true). String results are an error. */
 ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
                             bool statamissing);
+
+/* STATAMISS-WARN-1: the comparisons of `expr` whose result under the default
+ * SQL missing-value rules can differ from native Stata's when a compared value
+ * is missing (Stata orders missing above every number; SQL leaves such a
+ * comparison unknown). `filter` is true for a condition (keep/drop if,
+ * count/list if, an if qualifier) and false for an assigned value. A
+ * condition differs only where Stata would make the comparison true (false
+ * under an odd number of !); a value differs wherever an operand can be
+ * missing. Idioms that settle the missing rows in both modes are recognised:
+ * x < ., x != . or !missing(x) in the same & chain, missing(x), x == . or
+ * x >= . in the same | chain, and — for a value — those nonmissing tests in
+ * the top-level & chain of its if qualifier `guard`. Returns the comparisons as
+ * written, in order and without duplicates; empty when none can differ or the
+ * expression does not parse (its translation reports that). Static analysis:
+ * no data is read, and the translation itself is never affected. */
+std::vector<std::string> missing_rule_differences(const std::string &expr,
+                                                  const ExprSchema &schema, bool filter,
+                                                  const std::string &guard = "");
 
 } // namespace parqit

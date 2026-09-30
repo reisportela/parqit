@@ -1312,3 +1312,61 @@ TEST_CASE("sample designs draw whole clusters, keep rows outside the frame, flag
     CHECK(run_scalar("SELECT CAST(id AS VARCHAR) FROM (" + big.compile(false) + ")") ==
           "9007199254740992");
 }
+
+TEST_CASE("ORDER-CARRIER-1: ties in a declared sort follow the carried physical order") {
+    /* the scan returns the rows shuffled; the hidden column holds each row's
+     * physical position, as the plugin carries a Parquet file_row_number */
+    const std::string pos = quote_ident("__parqit order row");
+    const auto open_ties = [&](View *v) {
+        std::vector<ViewCol> cols(3);
+        cols[0].name = "k";
+        cols[1].name = "j";
+        cols[2].name = "id";
+        for (auto &c : cols) c.kind = 'n';
+        v->open("SELECT k, j, id, id AS " + pos + " FROM (VALUES (1, 0, 4), (0, 2, 3), "
+                "(1, 1, 2), (0, 1, 1), (NULL, 0, 6), (1, 2, 5)) t(k, j, id)",
+                cols, nlohmann::json::object(), nlohmann::json::object(), "", "ties", {pos});
+    };
+    const auto ids = [](const View &v) {
+        return run_scalar("SELECT string_agg(id::VARCHAR, ',' ORDER BY n) FROM (" +
+                          v.compile(false) + ")");
+    };
+
+    /* _n numbers a tie in physical order, the missing key last */
+    View v;
+    open_ties(&v);
+    REQUIRE(v.sort({"k"}, {false}).empty());
+    REQUIRE(v.gen("n", "", "_n", "", false).empty());
+    CHECK(ids(v) == "1,3,2,4,5,6");
+    /* the result exposes the view's columns only */
+    duckdb_result res;
+    std::string err;
+    REQUIRE_MESSAGE(Session::instance().query(v.compile(true), &res, &err), err);
+    CHECK(duckdb_column_count(&res) == 4);
+    duckdb_destroy_result(&res);
+
+    /* keep in slices that same order */
+    View s;
+    open_ties(&s);
+    REQUIRE(s.sort({"k"}, {false}).empty());
+    REQUIRE(s.keep_in(2, 4).empty());
+    REQUIRE(s.gen("n", "", "_n", "", false).empty());
+    CHECK(ids(s) == "3,2,4");
+
+    /* a dropped key keeps deciding the ties it decided (sort k j, drop j:
+     * native Stata keeps the k-j order, not the file order, within k) */
+    View d;
+    open_ties(&d);
+    REQUIRE(d.sort({"k", "j"}, {false, false}).empty());
+    REQUIRE(d.drop_vars({"j"}).empty());
+    REQUIRE(d.sort_keys().size() == 1);
+    REQUIRE(d.gen("n", "", "_n", "", false).empty());
+    CHECK(ids(d) == "1,3,4,2,5,6");
+
+    /* a stage that changes the rows ends the carrier; the view still works */
+    View c;
+    open_ties(&c);
+    REQUIRE(c.sort({"k"}, {false}).empty());
+    REQUIRE(c.contract({"k"}, "").empty());
+    CHECK(run_count(c) == 3);
+}

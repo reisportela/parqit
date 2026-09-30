@@ -655,3 +655,69 @@ TEST_CASE("mod uses the correctly rounded remainder of its binary64 inputs") {
     CHECK(std::strtod(eval_at("mod(f, 0.1)", 2).c_str(), nullptr) ==
           std::strtod(eval_at("mod(0.30000001192092896, 0.1)", 2).c_str(), nullptr)); /* float operand in double */
 }
+
+/* STATAMISS-WARN-1: the static analysis behind the missing-value warning */
+static std::vector<std::string> diffs(const std::string &e, bool filter = true,
+                                      const std::string &guard = "") {
+    return missing_rule_differences(e, test_schema(), filter, guard);
+}
+using Texts = std::vector<std::string>;
+
+TEST_CASE("STATAMISS-WARN-1: comparisons whose missing outcome differs from Stata") {
+    /* a condition differs only where Stata makes the comparison true */
+    CHECK(diffs("x > 5") == Texts{"x > 5"});
+    CHECK(diffs("x >= 5") == Texts{"x >= 5"});
+    CHECK(diffs("x != 3") == Texts{"x != 3"});
+    CHECK(diffs("x < 5").empty());
+    CHECK(diffs("x <= 5").empty());
+    CHECK(diffs("x == 5").empty());
+    CHECK(diffs("5 < x") == Texts{"5 < x"});
+    CHECK(diffs("5 > x").empty());
+    CHECK(diffs("x == y") == Texts{"x == y"}); /* . == . is true in Stata */
+    /* under an odd number of ! it differs where Stata makes it false */
+    CHECK(diffs("!(x < 5)") == Texts{"x < 5"});
+    CHECK(diffs("!(x > 5)").empty());
+    /* literal-missing tests and strings are identical in both modes */
+    CHECK(diffs("x == .").empty());
+    CHECK(diffs("x < .").empty());
+    CHECK(diffs("s == \"a\"").empty());
+    CHECK(diffs("s > \"a\"").empty());
+    /* idioms that settle the missing rows in both modes */
+    CHECK(diffs("x > 5 & x < .").empty());
+    CHECK(diffs("x > 5 & !missing(x)").empty());
+    CHECK(diffs("(x > 5) & (x != .)").empty());
+    CHECK(diffs("missing(x) | x > 5").empty());
+    CHECK(diffs("x == . | x > 5").empty());
+    CHECK(diffs("d > td(01jan2020) & d < .").empty());
+    CHECK(diffs("x > 5 & y < .") == Texts{"x > 5"});
+    CHECK(diffs("(x > 5 | y > 3) & x < .") == Texts{"y > 3"});
+    CHECK(diffs("x < . | x > 5") == Texts{"x > 5"});      /* | does not guard */
+    CHECK(diffs("missing(x) & x > 5") == Texts{"x > 5"}); /* & does not settle */
+    /* an assigned value differs wherever an operand can be missing */
+    CHECK(diffs("x < 5", false) == Texts{"x < 5"});
+    CHECK(diffs("x > 5 & x < .", false).empty());
+    CHECK(diffs("x > 5", false, "x < .").empty()); /* gen v = x > 5 if x < . */
+    CHECK(diffs("x > 5", false, "!missing(x) & y > 0").empty());
+    CHECK(diffs("x > 5", false, "x < . | y > 0") == Texts{"x > 5"});
+    CHECK(diffs("cond(x > 5, 1, 0)", false) == Texts{"x > 5"});
+    /* inside a function argument a comparison is a value, even in a condition */
+    CHECK(diffs("cond(x < 5, 1, 0)") == Texts{"x < 5"});
+    /* in order, without duplicates; a parse error reports nothing */
+    CHECK(diffs("x > 5 | x > 5 | y >= 1") == Texts{"x > 5", "y >= 1"});
+    CHECK(diffs("x > (").empty());
+}
+
+TEST_CASE("STATAMISS-WARN-1: the verdict agrees with both modes on real rows") {
+    /* the fixture has a missing x (row 3) and a missing y (row 4) */
+    for (const char *e : {"x < 5", "x <= 2", "x == 2", "!(x > 2)", "x > 1 & x < .",
+                          "missing(x) | x > 2", "x > 1 & !missing(x)", "x == . | x >= 4"}) {
+        CAPTURE(e);
+        REQUIRE(diffs(e).empty());
+        CHECK(count_where(e) == count_where(e, true));
+    }
+    for (const char *e : {"x > 2", "x != 2", "!(x < 3)", "y >= 20"}) {
+        CAPTURE(e);
+        REQUIRE(!diffs(e).empty());
+        CHECK(count_where(e) != count_where(e, true));
+    }
+}

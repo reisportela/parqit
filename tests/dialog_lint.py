@@ -19,7 +19,7 @@ HELP_ANCHORS = {
     'parqit_read': 'lazy', 'parqit_explore': 'explore', 'parqit_stats': 'explore',
     'parqit_filter': 'verbs', 'parqit_vars': 'verbs', 'parqit_gen': 'expressions',
     'parqit_pivot': 'verbs', 'parqit_combine': 'verbs',
-    'parqit_write': 'materialisers', 'parqit_views': 'options',
+    'parqit_write': 'materialisers', 'parqit_views': 'settings',
 }
 
 

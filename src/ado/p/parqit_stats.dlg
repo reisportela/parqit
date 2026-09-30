@@ -1,7 +1,7 @@
 /*
   parqit summarize - Summary statistics, tables, correlations, and histograms
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Summary statistics, tables, and correlations...
   Launch directly with:  db parqit_stats      (menu installed by: parqit menu)
@@ -14,7 +14,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 410
+DEFINE _dlght 470
 INCLUDE header
 HELP hlp1, view("help parqit##explore")
 RESET res1
@@ -126,8 +126,7 @@ BEGIN
 	append								///
 	dropdown							///
 	contents(numeric_list)						///
-	error("Variables")						///
-	label("Variables")
+	label("Variables (leave empty for all numeric variables)")
   CHECKBOX ck_pw		300	@	90	.,		///
 	onclickon(program main_mode)					///
 	onclickoff(program main_mode)					///
@@ -158,7 +157,12 @@ BEGIN
   CHECKBOX ck_nodraw		360	@	230	.,		///
 	option(nodraw)							///
 	label("Do not draw the histogram")
-  TEXT tx_context _lft 365 470 ., label("Current view: refresh to check")
+
+  TEXT tx_if			_lft	_ls	_iwd	.,		///
+	label("Only the rows where (if expression, optional; applies to the statistic chosen above):")
+  EXP ex_if			@	_ss	@	.,		///
+	label("Create...")
+  TEXT tx_context _lft 425 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -288,6 +292,9 @@ BEGIN
 		if main.cb_sumvars {
 			put " " main.cb_sumvars
 		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			option main.ck_detail
 		endoptions
@@ -301,6 +308,9 @@ BEGIN
 		if main.cb_tab2 {
 			put " " main.cb_tab2
 		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			option main.ck_tmiss
 			option main.ck_nolabel
@@ -313,6 +323,9 @@ BEGIN
 	if main.rb_ts {
 		require main.cb_tsvars
 		put "parqit tabstat " main.cb_tsvars
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			if main.ck_s_n | main.ck_s_mean | main.ck_s_sd |	///
 			   main.ck_s_min | main.ck_s_max | main.ck_s_med |	///
@@ -352,9 +365,11 @@ BEGIN
 		endoptions
 	}
 	if main.rb_corr {
-		require main.cb_corr
 		if main.ck_pw {
 			put "parqit pwcorr " main.cb_corr
+			if main.ex_if {
+				put " if " main.ex_if
+			}
 			beginoptions
 				option main.ck_obs
 				option main.ck_sig
@@ -362,11 +377,17 @@ BEGIN
 		}
 		else {
 			put "parqit correlate " main.cb_corr
+			if main.ex_if {
+				put " if " main.ex_if
+			}
 		}
 	}
 	if main.rb_hist {
 		require main.cb_hvar
 		put "parqit histogram " main.cb_hvar
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			optionarg main.ed_bins
 			option main.ck_nodraw

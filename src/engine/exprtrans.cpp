@@ -350,6 +350,9 @@ struct Val {
      * columns (see relational()). */
     bool lit = false;
     double litv = 0.0;
+    /* STATAMISS-WARN-1: the bare numeric columns a missing()/mi() call tests,
+     * so an enclosing ! can be recognised as a nonmissing guard */
+    std::vector<std::string> miss_of;
 };
 
 /* FLOAT-LIT-1: a numeric literal that a FLOAT column can hold exactly
@@ -382,6 +385,31 @@ struct Parser {
     /* ROWCTX-1: set when _n/_N is consumed, so the caller can tell whether the
      * emitted SQL still needs the view compiler's row-context substitution. */
     bool used_rowctx = false;
+
+    /* STATAMISS-WARN-1: analysis state, filled only when `collect` is set (by
+     * missing_rule_differences); a translating Parser never reads it, so the
+     * SQL it emits is unaffected. Chains: every & (|) chain gets an id; an |
+     * of a single disjunct hands its records to the enclosing chains, so
+     * parentheses do not hide a guard. */
+    struct MissCmp {
+        std::string text;              /* the comparison as written */
+        std::vector<std::string> cols; /* operands that can be missing and are bare columns */
+        bool anon = false;             /* an operand that can be missing and is not a bare column */
+        bool odd = false;              /* under an odd number of ! */
+        std::vector<int> and_anc, or_anc; /* the chains that enclose it, outermost first */
+    };
+    struct MissGuard {
+        std::string col;
+        bool notnull = false; /* x < ., x != ., !missing(x); else missing(x), x == ., x >= . */
+        int and_id = 0, or_id = 0;
+    };
+    bool collect = false, value_ctx = false, top_or_single = true;
+    int neg = 0, fn = 0, and_id = 0, or_id = 0, ids = 0, or_depth = 0, last_and = 0;
+    int top_and = 0, top_or = 0;
+    std::vector<int> and_stack, or_stack;
+    std::set<int> single_and; /* & chains of one term: a whole | disjunct */
+    std::vector<MissCmp> miss_cmps;
+    std::vector<MissGuard> miss_guards;
 
     Parser(const std::string &s, const ExprSchema &sch, bool sm)
         : lex(s), schema(sch), stmiss(sm), src(s) {
@@ -417,6 +445,7 @@ struct Parser {
         v->col.clear();
         v->float32 = false;
         v->lit = false;
+        v->miss_of.clear();
     }
     std::string as_bool(const Val &v) {
         if (v.kind == 'b') return v.sql;
@@ -538,6 +567,84 @@ struct Parser {
                         right + ")))");
         default:
             return fail("internal: bad relational");
+        }
+    }
+
+    /* STATAMISS-WARN-1: a value that cannot be missing — a numeric literal or
+     * a date literal such as td(1jan2020), which translates to a bare integer */
+    static bool constant(const Val &v) {
+        if (v.lit) return true;
+        if (v.kind != 'n' || v.sql.empty()) return false;
+        size_t i = v.sql[0] == '-' ? 1 : 0;
+        if (i == v.sql.size()) return false;
+        for (; i < v.sql.size(); i++)
+            if (!std::isdigit(static_cast<unsigned char>(v.sql[i]))) return false;
+        return true;
+    }
+
+    void note_guard(const std::string &col, bool notnull) {
+        MissGuard g;
+        g.col = col;
+        g.notnull = notnull;
+        g.and_id = and_id;
+        g.or_id = or_id;
+        miss_guards.push_back(g);
+    }
+
+    /* STATAMISS-WARN-1: record a comparison whose missing-value outcome can
+     * differ from native Stata's (see missing_rule_differences), or the guard
+     * a literal-missing test sets. `start` is where its left operand began. */
+    void note_comparison(const Val &l, Tok op, const Val &r, size_t start) {
+        if (l.kind == 's' || r.kind == 's') return; /* a string is never missing here */
+        const bool lmiss = (l.sql == "NULL"), rmiss = (r.sql == "NULL");
+        const bool odd = (neg % 2) != 0;
+        if (lmiss || rmiss) {
+            /* x < ., x == . ...: IS NULL tests, identical in both modes */
+            if (lmiss && rmiss) return;
+            const Val &x = rmiss ? l : r;
+            if (x.col.empty() || odd || fn > 0) return;
+            Tok o = op;
+            if (lmiss) /* put the column on the left */
+                o = (op == Tok::Lt ? Tok::Gt : op == Tok::Gt ? Tok::Lt
+                     : op == Tok::Le ? Tok::Ge : op == Tok::Ge ? Tok::Le : op);
+            if (o == Tok::Lt || o == Tok::Ne) note_guard(x.col, true);
+            else if (o == Tok::Eq || o == Tok::Ge) note_guard(x.col, false);
+            return;
+        }
+        const bool nl = !constant(l), nr = !constant(r);
+        if (!nl && !nr) return;
+        bool differs = true;
+        if (!value_ctx && fn == 0) {
+            /* a condition differs only where Stata makes the comparison true
+             * (false under an odd number of !): SQL leaves it unknown, which a
+             * filter treats like false */
+            bool can_true = false, can_false = false;
+            switch (op) {
+            case Tok::Gt: case Tok::Ge: can_true = nl; can_false = nr; break;
+            case Tok::Lt: case Tok::Le: can_true = nr; can_false = nl; break;
+            case Tok::Ne: can_true = nl || nr; can_false = nl && nr; break;
+            default:      can_true = nl && nr; can_false = nl || nr; break; /* == */
+            }
+            differs = odd ? can_false : can_true;
+        }
+        if (!differs) return;
+        MissCmp c;
+        size_t end = std::min(cur.pos, src.size());
+        while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t')) end--;
+        c.text = src.substr(start, end - start);
+        if (nl) { if (l.col.empty()) c.anon = true; else c.cols.push_back(l.col); }
+        if (nr) { if (r.col.empty()) c.anon = true; else c.cols.push_back(r.col); }
+        c.odd = odd;
+        c.and_anc = and_stack;
+        c.or_anc = or_stack;
+        miss_cmps.push_back(c);
+    }
+
+    /* move the guards made since g0 from chain `from` to chain `to` */
+    void retag(size_t g0, bool is_and, int from, int to) {
+        for (size_t i = g0; i < miss_guards.size(); i++) {
+            int &id = is_and ? miss_guards[i].and_id : miss_guards[i].or_id;
+            if (id == from) id = to;
         }
     }
 
@@ -664,7 +771,13 @@ struct Parser {
         if (cur.t == Tok::Not) {
             advance();
             Val v;
-            if (!unary(&v)) return false;
+            ++neg;
+            const bool ok = unary(&v);
+            --neg;
+            if (!ok) return false;
+            /* STATAMISS-WARN-1: !missing(x) says x is nonmissing */
+            if (collect && neg % 2 == 0 && fn == 0)
+                for (const auto &c : v.miss_of) note_guard(c, true);
             std::string b = as_bool(v);
             if (b.empty()) return fail("cannot apply ! to a string");
             /* Stata: !x is 1/0; a missing x counts as true (as_bool), so
@@ -785,6 +898,7 @@ struct Parser {
     }
 
     bool rel(Val *out) {
+        const size_t start = cur.pos; /* STATAMISS-WARN-1: quote the comparison */
         if (!arith(out)) return false;
         /* EXPR-4: relational operators chain LEFT-associatively in Stata, so
          * `1 < wage < 3000` parses as `(1 < wage) < 3000` — a 0/1 result, never
@@ -798,14 +912,21 @@ struct Parser {
             if (!arith(&r)) return false;
             Val res;
             if (!relational(*out, op, r, &res)) return false;
+            if (collect) note_comparison(*out, op, r, start);
             *out = res;
         }
         return true;
     }
 
     bool and_expr(Val *out) {
+        const int parent = and_id;
+        and_id = ++ids;
+        const int mine = and_id;
+        and_stack.push_back(mine);
+        bool single = true;
         if (!rel(out)) return false;
         while (cur.t == Tok::And) {
+            single = false;
             advance();
             Val r;
             if (!rel(&r)) return false;
@@ -815,12 +936,29 @@ struct Parser {
             out->kind = 'b';
             computed(out);
         }
+        if (single) single_and.insert(mine);
+        last_and = mine;
+        and_stack.pop_back();
+        and_id = parent;
         return true;
     }
 
     bool or_expr(Val *out) {
+        const int parent_or = or_id, parent_and = and_id;
+        const size_t g0 = miss_guards.size();
+        or_id = ++ids;
+        const int mine = or_id;
+        or_stack.push_back(mine);
+        ++or_depth;
+        bool single = true;
         if (!and_expr(out)) return false;
+        const int first_and = last_and;
+        if (or_depth == 1) {
+            top_and = first_and;
+            top_or = mine;
+        }
         while (cur.t == Tok::Or) {
+            single = false;
             advance();
             Val r;
             if (!and_expr(&r)) return false;
@@ -830,6 +968,17 @@ struct Parser {
             out->kind = 'b';
             computed(out);
         }
+        if (single && or_depth > 1) {
+            /* one parenthesised disjunct belongs to the enclosing chains:
+             * (a & b) & c is a & b & c, so parentheses do not hide a guard */
+            retag(g0, true, first_and, parent_and);
+            retag(g0, false, mine, parent_or);
+        } else if (!single && or_depth == 1) {
+            top_or_single = false;
+        }
+        or_stack.pop_back();
+        --or_depth;
+        or_id = parent_or;
         return true;
     }
 };
@@ -905,6 +1054,7 @@ bool Parser::call(const std::string &fname, Val *out) {
     /* ---- regular functions: parse comma-separated arguments ---- */
     std::vector<Val> args;
     if (cur.t != Tok::RParen) {
+        ++fn; /* STATAMISS-WARN-1: a comparison inside an argument is a value */
         while (true) {
             Val a;
             if (!or_expr(&a)) return false;
@@ -915,6 +1065,7 @@ bool Parser::call(const std::string &fname, Val *out) {
             }
             break;
         }
+        --fn;
     }
     if (!expect(Tok::RParen, ") after function arguments")) return false;
 
@@ -968,6 +1119,13 @@ bool Parser::call(const std::string &fname, Val *out) {
         }
         out->sql = sql + ")";
         out->kind = 'b';
+        /* STATAMISS-WARN-1: missing(x) settles the rows where x is missing in
+         * both modes; an enclosing ! turns it into a nonmissing guard */
+        for (const auto &a : args)
+            if (a.kind == 'n' && !a.col.empty() && a.sql == quote_ident(a.col)) {
+                out->miss_of.push_back(a.col);
+                if (collect && neg % 2 == 0 && fn == 0) note_guard(a.col, false);
+            }
         return true;
     }
     if (fname == "abs") {
@@ -1444,6 +1602,52 @@ ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
                 ? v.sql
                 : "((" + v.sql + ") IS NULL OR (" + v.sql + ") <> 0)";
     return r;
+}
+
+std::vector<std::string> missing_rule_differences(const std::string &expr,
+                                                  const ExprSchema &schema, bool filter,
+                                                  const std::string &guard) {
+    std::vector<std::string> out;
+    /* columns the if qualifier keeps nonmissing wherever the value is assigned */
+    std::set<std::string> guarded;
+    if (!guard.empty()) {
+        Parser g(guard, schema, false);
+        g.collect = true;
+        Val gv;
+        if (g.or_expr(&gv) && g.error.empty() && g.cur.t == Tok::End && g.top_or_single)
+            for (const auto &m : g.miss_guards)
+                if (m.notnull && m.and_id == g.top_and && m.or_id == g.top_or)
+                    guarded.insert(m.col);
+    }
+    Parser p(expr, schema, false);
+    p.collect = true;
+    p.value_ctx = !filter;
+    Val v;
+    if (!p.or_expr(&v) || !p.error.empty() || p.cur.t != Tok::End) return out;
+    for (const auto &c : p.miss_cmps) {
+        bool settled = !c.anon;
+        for (const auto &col : c.cols) {
+            bool hit = guarded.count(col) != 0;
+            /* x < . in an & chain that encloses the comparison, or missing(x)
+             * as a whole disjunct of an enclosing | chain (another disjunct
+             * than the comparison's), decides the rows where x is missing
+             * identically in both modes */
+            auto in = [](const std::vector<int> &v, int id) {
+                return std::find(v.begin(), v.end(), id) != v.end();
+            };
+            if (!c.odd)
+                for (const auto &m : p.miss_guards)
+                    if (m.col == col &&
+                        (m.notnull ? in(c.and_anc, m.and_id)
+                                   : in(c.or_anc, m.or_id) && !in(c.and_anc, m.and_id) &&
+                                         p.single_and.count(m.and_id) != 0))
+                        hit = true;
+            settled = settled && hit;
+        }
+        if (settled) continue;
+        if (std::find(out.begin(), out.end(), c.text) == out.end()) out.push_back(c.text);
+    }
+    return out;
 }
 
 } // namespace parqit

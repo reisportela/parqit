@@ -1,7 +1,7 @@
 /*
   parqit use - Open a lazy view or load data into memory
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Read data (lazy view or into memory)...
   Launch directly with:  db parqit_read      (menu installed by: parqit menu)
@@ -15,7 +15,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 545
+DEFINE _dlght 590
 INCLUDE header
 HELP hlp1, view("help parqit##lazy")
 RESET res1
@@ -134,9 +134,15 @@ BEGIN
 	option(csv)							///
 	label("csv() options")
 
+  TEXT tx_object		_lft	_ls	_iwd	.,		///
+	label("Data frame to read from an R file that holds several, object() (.rds, .rda, .RData):")
+  EDIT ed_object		@	_ss	_vnwd	.,		///
+	option(object)							///
+	label("R data frame")
+
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("A lazy view probes the schema and loads no result rows; materialise it later with parqit collect or parqit save.")
-  TEXT tx_context _lft 500 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 545 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
 
@@ -213,6 +219,8 @@ BEGIN
 		call main.cb_binary.enable
 		call main.tx_csv.enable
 		call main.ed_csv.enable
+		call main.tx_object.enable
+		call main.ed_object.enable
 		if main.ck_clear {
 			call main.tx_name.disable
 			call main.ed_name.disable
@@ -244,6 +252,8 @@ BEGIN
 		call main.cb_binary.disable
 		call main.tx_csv.disable
 		call main.ed_csv.disable
+		call main.tx_object.disable
+		call main.ed_object.disable
 	}
 	if main.rb_path {
 		call main.tx_using.enable
@@ -266,6 +276,8 @@ BEGIN
 		call main.cb_binary.disable
 		call main.tx_csv.disable
 		call main.ed_csv.disable
+		call main.tx_object.disable
+		call main.ed_object.disable
 	}
 END
 
@@ -336,6 +348,7 @@ BEGIN
 			optionarg /hidedefault main.cb_int64
 			optionarg /hidedefault main.cb_binary
 			optionarg main.ed_csv
+			optionarg main.ed_object
 		endoptions
 	}
 	if main.rb_open {

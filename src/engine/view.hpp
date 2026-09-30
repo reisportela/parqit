@@ -86,9 +86,13 @@ class View {
     void close();
 
     /* opens over a prepared source SELECT (boundary casts already applied) */
+    /* order_cols: ORDER-CARRIER-1 — quoted names of hidden columns of the scan
+     * that give each row's physical position in the source (file, row within
+     * file); empty when the source cannot provide them */
     void open(const std::string &scan_select, std::vector<ViewCol> cols,
               nlohmann::json vallabs, nlohmann::json chars, std::string dtalabel,
-              const std::string &source_desc);
+              const std::string &source_desc,
+              std::vector<std::string> order_cols = {});
 
     const std::vector<ViewCol> &cols() const { return cols_; }
     void set_numeric_types(const std::vector<std::string> &types);
@@ -266,6 +270,12 @@ class View {
      * statistics (tabstat's rank windows) use it too. */
     std::string fresh_helper(const std::string &hint,
                              const std::set<std::string> &taken = {});
+    /* DUP-LIST-1: the window that numbers rows as _n does over compile() —
+     * the declared sort, or the engine's row order when none is declared */
+    std::string row_number_over() const;
+    /* DUP-LIST-1: the whole pipeline with one more column, `obs`, numbering
+     * the rows as _n does (the physical carrier stays in scope for it) */
+    std::string compile_numbered(const std::string &obs) const;
 
   private:
     int col_index(const std::string &name) const;
@@ -278,13 +288,20 @@ class View {
                          const std::set<std::string> &ignore = {}) const;
     /* FROM-source for a keep/drop projection stage: when the projection is
      * about to remove a sort-key column, bakes the full current ORDER BY into
-     * the source subquery (the physical order survives via DuckDB's default
-     * preserve_insertion_order) and truncates sort_ to the longest prefix of
-     * keys whose columns all survive — mirroring native Stata, where dropping
-     * a sortedby variable keeps the rows' physical order and truncates (or
-     * clears) sortedby. Otherwise just the previous stage name. */
+     * the source subquery (the physical order survives in one hidden row
+     * number while the order carrier is live, ORDER-CARRIER-1, and otherwise
+     * via DuckDB's default preserve_insertion_order) and truncates sort_ to
+     * the longest prefix of keys whose columns all survive — mirroring
+     * native Stata, where dropping a sortedby variable keeps the rows'
+     * physical order and truncates (or clears) sortedby. Otherwise just the
+     * previous stage name. */
     std::string projection_source(const std::vector<ViewCol> &survivors);
+    std::string bake_order(const std::string &prev); /* ORDER-CARRIER-1 */
+    std::string ctes(size_t nstages) const; /* WITH clause of the scan and stages */
     std::string select_list() const; /* quoted current columns, in order */
+    /* ORDER-CARRIER-1: select_list() plus the hidden order columns while the
+     * current stage carries them — the list a row-preserving verb selects */
+    std::string stage_list() const;
     std::string order_by_sql() const;
     /* wrap `prev` in a subquery exposing ONLY the row-context windows *sql
      * references: row_number() for _n (a streaming window) and count(*) OVER ()
@@ -292,7 +309,10 @@ class View {
      * Emitting the blocking count only when _N is actually used keeps the common
      * _n-only idiom streaming instead of buffering the whole input (PERF-1). */
     std::string rowctx_wrap(std::string *sql, const std::string &prev);
-    void push_stage(const std::string &select_body, const std::string &desc);
+    /* keeps_order: the stage selects stage_list(), so the physical order
+     * columns reach the next stage; any other stage drops them */
+    void push_stage(const std::string &select_body, const std::string &desc,
+                    bool keeps_order = false);
 
     bool live_ = false;
     std::string scan_;
@@ -305,6 +325,14 @@ class View {
     std::vector<std::string> descs_;
     std::vector<ViewCol> cols_;
     std::vector<std::string> sort_;   /* quoted "name" or "name DESC" */
+    /* ORDER-CARRIER-1: hidden columns holding each row's physical position in
+     * a Parquet source (file index, row within file), carried through the
+     * row-preserving stages; a declared sort breaks its ties by them, so the
+     * order within a tie is the source's, as in native Stata, and the same at
+     * every evaluation (_n, keep in, list in, collect). order_live_ says the
+     * current last stage still exposes them. */
+    std::vector<std::string> order_cols_;
+    bool order_live_ = false;
     std::vector<PendingRange> ranges_;
     nlohmann::json vallabs_;
     nlohmann::json chars_;

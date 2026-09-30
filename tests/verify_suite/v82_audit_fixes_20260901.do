@@ -219,18 +219,25 @@ set obs 3
 gen str10 s = "a" + char(9) + "b"
 gen long k = 1
 parqit save `"`dir'/dup.parquet"', replace data
+* DUP-LIST-1: duplicates list shows the key variables as native does, so the
+* TAB-holding string is a key here; its table must equal native's
 log using `"`dir'/v82d.log"', replace name(v82d) text
 parqit use using `"`dir'/dup.parquet"'
-parqit duplicates list k
+parqit duplicates list s k
 parqit close _all
 log close v82d
+log using `"`dir'/v82n.log"', replace name(v82n) text
+duplicates list s k
+log close v82n
 python:
 from sfi import Macro
-import os, re
-txt = open(os.path.join(Macro.getLocal("dir"), "v82d.log"), encoding="utf-8", errors="replace").read()
-# the TAB stays inside the first cell ("a<TAB>b", which the text log may show
-# as spaces), padded, then the k cell "1" — never a third cell
-Macro.setLocal("dup_ok", "1" if re.search(r"^\s+a\s+b\s+1\s*$", txt, re.M) else "0")
+import os
+def table(name):
+    txt = open(os.path.join(Macro.getLocal("dir"), name), encoding="utf-8", errors="replace").read()
+    return [x for x in txt.splitlines() if x.startswith("  +") or x.startswith("  |")]
+lazy, native = table("v82d.log"), table("v82n.log")
+# the TAB stays inside its cell: the same rows, cell for cell, as native
+Macro.setLocal("dup_ok", "1" if lazy and lazy == native else "0")
 end
 assert "`dup_ok'" == "1"
 

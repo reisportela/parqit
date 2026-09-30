@@ -6,6 +6,175 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-30
+
+Second round of BPLIM user feedback (2026-09-29) and a reorganised help;
+pinned by `tests/verify_suite/v141_rute_round2.do`, `v142_tied_sort_order.do`,
+`v143_stata_abbreviations.do`, `v144_tabulate_layout.do` and unit tests;
+ASSUMPTIONS #174 to #177.
+
+### Added
+- **Stata's abbreviations** (CMD-ABBREV-1). Subcommands take the short forms
+  native Stata accepts for the same commands: `parqit su` is `parqit
+  summarize`, and likewise `ta` (`tabulate`), `d` (`describe`), `g` (`gen`),
+  `l` (`list`), `cou` (`count`), `u` (`use`), `sa` (`save`), `ren` (`rename`),
+  `so` (`sort`), `mer` (`merge`), `ap` (`append`), `cor` (`correlate`) and `se`
+  (`set`), each with every longer prefix, plus `hist` for `histogram` — a
+  synonym only, so `histo` is refused, as in Stata. The set is what Stata's
+  `which` resolves for every prefix of these commands. `duplicates r|l` and
+  `misstable sum|pat` follow native's subcommand rules. Where parqit's options
+  were stricter than Stata's they now take Stata's forms: `tabulate …, r co`
+  (`row` from `r`, `column` from `co`; `col` still works), `pwcorr …, o`,
+  `tabstat …, stats()` (a synonym, refused together with `statistics()` as
+  native) and `mergein …, nolabels`. The commands Stata spells out, and
+  parqit's own verbs, are typed in full. The help's syntax lines underline the
+  short forms, Stata style.
+- **A warning, in red, where missing values can change a result**
+  (STATAMISS-WARN-1). Under the default SQL rule a comparison with a missing
+  value is unknown, while native Stata treats missing as larger than any
+  number: `parqit keep if x > 5` drops a missing `x` that native keeps. Until a
+  mode is chosen, `keep if`, `drop if`, `gen`, `replace`, `egen`, `sample if`,
+  `count if`, `list if` and `tabulate if` now name each comparison whose result
+  can differ (in a condition, only where Stata would make it true; in an
+  assigned value, wherever an operand can be missing). The idioms that settle
+  the missing rows stay silent (`x > 5 & x < .`, `& !missing(x)`,
+  `missing(x) | …`, `gen … if !missing(x)`). A static check: no data is read,
+  and the translated SQL is unchanged. It is shown after the command's output
+  and, like any output, is silenced by `quietly` and `capture`; `parqit set
+  statamissing on` or `off` silences it for the session.
+- `[if exp]` on every statistics command (TAB-IF-1, STATS-IF-1): `summarize`,
+  `tabulate`, `tabstat`, `distinct`, `duplicates report|list`, `correlate`,
+  `pwcorr`, `codebook`, `misstable`, `levelsof` and `histogram` read only the
+  rows that satisfy `exp`, as the native commands do; the view is unchanged,
+  and `duplicates list` still numbers Obs over the whole view, as native.
+- `parqit append …, keep(varlist)` (APPEND-KEEP-1): the variables taken from
+  the using sources, with wildcards, as native `append`. A name missing from any
+  using source is refused with r(111) before the view changes (native appends
+  the earlier sources first).
+- `parqit appendin …, generate(newvar)` (APPENDIN-GEN-1), forwarded to native
+  `append` (0 = master, 1 = the file, labelled). The combine dialog offers
+  `keep()` for `append` and `generate()` for `appendin`.
+- `parqit distinct …, missing`: missing counts as one more value, and every
+  observation is used.
+- `parqit sql` and `parqit query` name a reserved SQL word the engine stopped at
+  and show its quoting (`"foreign"`) (SQL-KEYWORD-1).
+
+### Changed
+- `parqit misstable`: a first word of three letters or more that begins
+  `summarize` or `patterns` (`sum`, `pat`, …) is now the subcommand, as in
+  native `misstable`, so a variable named like that goes after the subcommand
+  (`parqit misstable summarize sum`); before, only the full words were.
+- `parqit distinct`: **Obs** now counts the observations used — the nonmissing
+  ones, and for `joint` those with no missing value among the variables — as the
+  community-contributed `distinct` (Cox and Longton, SSC) reports them; it was
+  the total row count. The distinct counts are unchanged; `r(N)` follows **Obs**
+  of the last line. A note says when missing values were left out.
+- `parqit duplicates list` shows what native `duplicates list` shows: the
+  native `list` of Group (numbered in the order of the key values), Obs (the
+  row's `_n` in the view's current order) and the key variables with their
+  formats and value labels, instead of every column (DUP-LIST-1). It says
+  `(0 observations are duplicates)` when there are none, and how many rows
+  `limit()` left out.
+- `parqit duplicates report|list`, `parqit correlate` and `parqit pwcorr` take
+  an optional varlist: without one, every variable (every numeric variable for
+  the correlations, naming each string one skipped), as native (DUP-ALL-1,
+  CORR-ALL-1).
+- `parqit append …, generate()` labels its marker as native `append` does:
+  value label `_append` (0 "Master", k "Appended dataset k"; `__append1` and so
+  on when the name is taken) and variable label "Dataset source", as
+  `appendin` already did (APPEND-GEN-LABEL-1).
+- `parqit save …, partitions()`: a metadata refusal names what differs,
+  variable by variable (`cae: storage type str5 in the tree, str8 in the
+  result`), instead of only the footer key (PART-META-DIFF-1); the note tells a
+  partition extended by `append` from one added (PART-NOTE-1).
+- Dialogs: the statistics dialog has one `if` expression field for every
+  statistic and runs `correlate`/`pwcorr` on every numeric variable when the
+  field is left empty; the exploration dialog offers `distinct, missing`, runs
+  `duplicates report|list` without variables, and its `if` field serves every
+  operation that takes one.
+- Dialogs, checked against the command surface: the read dialog names the data
+  frame to read from an R file that holds several (`object()`, available when
+  an `.rds`, `.rda` or `.RData` file is loaded into memory), and the
+  exploration dialog's description of a Parquet file offers `labels` and
+  `notes` (options of `describe` since 0.2.6 that no dialog offered). The
+  session dialog's Help button opens the settings section.
+
+### Fixed
+- **`parqit tabulate` prints native tabulate's table** (TAB-LAYOUT-1). A
+  variable label longer than the stub widened the table and was cut with `~`
+  (auto's `tabulate rep78` printed `Repair record 1978` on one line); it now
+  wraps word by word, as native does (`Repair` / `record 1978`), for the row
+  and the column variable, and never widens the stub. The stub is sized by the
+  values (and by a `str#` variable's storage width) as native: 11 to 39
+  columns one-way, 10 to 21 two-way; value labels are cut at the width, string
+  values abbreviated with `..` (the `~` marker no longer appears in
+  `tabulate`; other commands keep it), numbers shown in their format at width
+  9 (`1.23e+09`, never cut), dates and times in their format when it fits 9
+  columns and otherwise in their class's default (`%tdCCYY-NN-DD` as
+  `01jan2020`, `%tc` as `01jan20..`), and column values show 9 characters. A
+  two-way table wider than the line splits into native panels (one column
+  fewer at the boundary than before, and without the `Columns 1-5 of 15`
+  line). Before, 24 of the first 29 layouts that `v144_tabulate_layout`
+  compares with native differed; it pins 50.
+- **Ties in a declared sort follow the files' row order** (ORDER-CARRIER-1).
+  A Parquet file saved from Stata while sorted on a non-unique key (auto's
+  `foreign`) reopens with that sort declared, and within a tie the lazy plan
+  returned rows in an engine-defined order that could change between
+  evaluations: `parqit gen n = _n` then `collect` gave `n != _n` (5 of auto's 74
+  rows), `parqit keep in 50/54` took ids 33, 40, 52, 53, 54 where native takes
+  50–54, and `duplicates list` numbered Obs unlike native. A view over Parquet
+  files now carries each row's position in its source (the file, then the row
+  within the file) through the verbs that keep rows, and a declared sort breaks
+  its ties by it: `_n`, `keep in`, `list in`, `collect`, `save` and Obs agree
+  with each other and with native Stata's order after `use`. A new `parqit
+  sort` breaks ties in file order (native `sort …, stable` on the data as
+  loaded); a dropped or replaced sort variable keeps the order it gave. The same
+  order decides, within a tie, which row `collapse (first)/(last)`, `duplicates
+  drop varlist` and `sample` take, and the order in which `append` keeps the
+  master's rows — engine-defined before, the files' order now. After a
+  verb that builds new rows (`merge`, `append`, `joinby`, `collapse`,
+  `contract`, `reshape`, `pivot`, `query`, the `sample` designs, `duplicates
+  drop` without a varlist), in views over CSV files or `parqit sql`, and for a
+  source with a column named `file_row_number` (or `file_index`, over several
+  files — with a note), ties keep the engine's order, as before. Cost: one
+  hidden 64-bit column (two over several files) and as many extra sort keys
+  when a sort is declared; indicatively, on 20 million rows of three columns,
+  `save` of a sorted view took about 3% longer and `gen n = _n` then `save`
+  about 20% longer (shared host, five interleaved runs).
+- `parqit pwcorr, obs sig` with no varlist stopped with "varlist not allowed";
+  the options are now split at the first top-level comma.
+
+### Documentation
+- **`help parqit` is a user's guide, laid out as Stata's own help files**
+  (HELP-REORG-1). Users found it dense, repetitive and technical. It now opens
+  with a pointer to `help parqit_technical` and an "At a glance" section: what
+  parqit is for and a diagram of its four moves (open a view, shape it, look at
+  it, get the result). Then come Syntax (grouped by task, with tables of the
+  `use` and `save` options), Menu, Description, Quick start, Options (by
+  subcommand), one short section per topic (views, lazy verbs, sampling
+  designs, getting the result, exploring a view, other file formats and text
+  encodings, expressions and missing values, settings), Examples, Limitations
+  and Stored results. Every command and option is still documented there; the
+  detail moved, verbatim, to `help parqit_technical`, which gains the sections
+  Syntax conventions, Views, Reading data, SPSS files, R data files, Text
+  encodings, Sampling designs, Exploration commands, Menus and dialogs and
+  Stored results, and its Limitations list gains the SPSS and R items. The
+  guide is half its former length (1,144 lines, from 2,351). Nothing was
+  dropped: a paragraph-by-paragraph check finds every paragraph of the former
+  files, verbatim, in one of the two, apart from the parts written anew for
+  the guide (the description, the map, the quick-start comments, the menu list
+  and the short list of limitations), whose substance both keep.
+- `help parqit`: when to use `joinby` and when `mergein m:m`, with a 2 x 3
+  example; what `distinct`'s `joint` counts; SQL quoting and the reserved words
+  that are plausible variable names; the missing-value warning.
+- Both help files now fit a standard 80-column Viewer: the last line of the
+  view-at-a-glance map (88 columns) is split, the `parqit set` syntax names
+  its settings in a sentence instead of one 66-character `a|b|c` run, the
+  `net get` example keeps its long URL within the margin, and the bridge's
+  `r()` results are listed with commas. The Viewer lays a help file out at
+  the width it has when it draws it and does not re-wrap on resize (Stata's
+  own help files alike): after resizing, Refresh or reopen the help.
+
 ## [0.3.0] — 2026-09-29
 
 ### Added

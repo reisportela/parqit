@@ -1,7 +1,7 @@
 /*
   parqit describe - Describe and explore a view or a Parquet file
 
-*!  VERSION 0.3.0  29sep2026
+*!  VERSION 0.3.1  30sep2026
 
   User > parqit > Describe and explore data...
   Launch directly with:  db parqit_explore      (menu installed by: parqit menu)
@@ -16,7 +16,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 400
+DEFINE _dlght 430
 INCLUDE header
 HELP hlp1, view("help parqit##explore")
 RESET res1
@@ -94,13 +94,22 @@ BEGIN
 	numonly								///
 	label("to")
 
-  CHECKBOX ck_joint		275	_ls	315	.,		///
+  CHECKBOX ck_joint		275	_ls	160	.,		///
 	option(joint)							///
-	label("Also count the distinct joint values (joint)")
+	label("Joint values (joint)")
+  CHECKBOX ck_dmiss		440	@	150	.,		///
+	option(missing)							///
+	label("Count missing (missing)")
+  CHECKBOX ck_dlab		275	_ls	160	.,		///
+	option(labels)							///
+	label("Value labels (labels)")
+  CHECKBOX ck_dnotes		440	@	150	.,		///
+	option(notes)							///
+	label("Notes (notes)")
 
   TEXT tx_note			275	_ls	315	.,		///
 	label("Engine-side query; the data in memory are unchanged.")
-  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 385 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -183,6 +192,9 @@ BEGIN
 	main.tx_to.disable
 	main.ed_to.disable
 	main.ck_joint.disable
+	main.ck_dmiss.disable
+	main.ck_dlab.disable
+	main.ck_dnotes.disable
 	main.tx_vars.setlabel "Variables (leave empty for all):"
 	main.tx_file.setlabel "Parquet file, glob, or Hive directory:"
 END
@@ -204,6 +216,8 @@ BEGIN
 	script all_off
 	main.tx_file.enable
 	main.fi_file.enable
+	main.ck_dlab.enable
+	main.ck_dnotes.enable
 END
 
 SCRIPT op_glimpse
@@ -225,6 +239,8 @@ SCRIPT op_vars
 BEGIN
 	script all_off
 	script vars_on
+	main.tx_if.enable
+	main.ex_if.enable
 END
 
 SCRIPT op_patterns
@@ -232,6 +248,8 @@ BEGIN
 	script all_off
 	script vars_on
 	main.tx_vars.setlabel "Variables (maximum 14; empty selects all):"
+	main.tx_if.enable
+	main.ex_if.enable
 END
 
 SCRIPT op_head
@@ -267,6 +285,8 @@ BEGIN
 	main.tx_vars.setlabel "Variable:"
 	main.tx_limit.enable
 	main.ed_limit.enable
+	main.tx_if.enable
+	main.ex_if.enable
 END
 
 SCRIPT op_distinct
@@ -274,15 +294,20 @@ BEGIN
 	script all_off
 	script vars_on
 	main.ck_joint.enable
+	main.ck_dmiss.enable
+	main.tx_if.enable
+	main.ex_if.enable
 END
 
 SCRIPT op_keys
 BEGIN
 	script all_off
 	script vars_on
-	main.tx_vars.setlabel "Key variables:"
+	main.tx_vars.setlabel "Key variables (leave empty for all):"
 	main.tx_limit.enable
 	main.ed_limit.enable
+	main.tx_if.enable
+	main.ex_if.enable
 END
 
 PROGRAM main_populate
@@ -317,6 +342,10 @@ BEGIN
 		require main.fi_file
 		put "parqit describe "
 		put /smartquote main.fi_file
+		beginoptions
+			option main.ck_dlab
+			option main.ck_dnotes
+		endoptions
 	}
 	if main.lb_op.equals("glimpse") {
 		put "parqit glimpse"
@@ -336,6 +365,9 @@ BEGIN
 		put "parqit codebook"
 		if main.cb_vars {
 			put " " main.cb_vars
+		}
+		if main.ex_if {
+			put " if " main.ex_if
 		}
 	}
 	if main.lb_op.equals("head") {
@@ -367,16 +399,25 @@ BEGIN
 		if main.cb_vars {
 			put " " main.cb_vars
 		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 	}
 	if main.lb_op.equals("misspatterns") {
 		put "parqit misstable patterns"
 		if main.cb_vars {
 			put " " main.cb_vars
 		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 	}
 	if main.lb_op.equals("levelsof") {
 		require main.cb_vars
 		put "parqit levelsof " main.cb_vars
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			optionarg main.ed_limit
 		endoptions
@@ -386,20 +427,34 @@ BEGIN
 		if main.cb_vars {
 			put " " main.cb_vars
 		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			option main.ck_joint
+			option main.ck_dmiss
 		endoptions
 	}
 	if main.lb_op.equals("dupreport") {
-		require main.cb_vars
-		put "parqit duplicates report " main.cb_vars
+		put "parqit duplicates report"
+		if main.cb_vars {
+			put " " main.cb_vars
+		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			optionarg main.ed_limit
 		endoptions
 	}
 	if main.lb_op.equals("duplist") {
-		require main.cb_vars
-		put "parqit duplicates list " main.cb_vars
+		put "parqit duplicates list"
+		if main.cb_vars {
+			put " " main.cb_vars
+		}
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			optionarg main.ed_limit
 		endoptions

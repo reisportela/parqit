@@ -41,6 +41,9 @@ struct Source {
      * keys, so every leaf alignment counts the scan without it and no Hive or
      * name-clash check may see it. */
     std::string filename_column;
+    /* ORDER-CARRIER-1: exactly one existing Parquet file (no directory, no
+     * pattern), whose file_index is always 0 */
+    bool single_file = false;
     /* CSV-OPT-1: the user's forced CSV dialect, so the CSV-HEADER-1
      * raw-header probe reads the file exactly as the scan does */
     struct CsvDialect {

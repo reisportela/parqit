@@ -95,19 +95,23 @@ std::string View::coerce_numeric_column(const std::string &name,
         else
             sel += ref;
     }
+    if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
+        for (const auto &c : order_cols_) sel += ", " + c;
     cols_[static_cast<size_t>(idx)].meta_type = type;
     cols_[static_cast<size_t>(idx)].physical_type = type == "float" ? "FLOAT" : "DOUBLE";
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
-               "commit " + name + " as " + type + " storage");
+               "commit " + name + " as " + type + " storage", true);
     return "";
 }
 
 void View::open(const std::string &scan_select, std::vector<ViewCol> cols,
                 json vallabs, json chars, std::string dtalabel,
-                const std::string &source_desc) {
+                const std::string &source_desc, std::vector<std::string> order_cols) {
     close();
     live_ = true;
     scan_ = scan_select;
+    order_cols_ = std::move(order_cols); /* ORDER-CARRIER-1 */
+    order_live_ = !order_cols_.empty();
     cols_ = std::move(cols);
     vallabs_ = std::move(vallabs);
     chars_ = std::move(chars);
@@ -190,6 +194,13 @@ std::string View::select_list() const {
     return out;
 }
 
+std::string View::stage_list() const {
+    std::string out = select_list();
+    if (order_live_)
+        for (const auto &c : order_cols_) out += ", " + c;
+    return out;
+}
+
 std::string View::order_by_sql() const {
     if (sort_.empty()) return "";
     std::string o = " ORDER BY ";
@@ -200,6 +211,11 @@ std::string View::order_by_sql() const {
          * every direction" regardless of DuckDB's default null order */
         o += sort_[i] + " NULLS LAST";
     }
+    /* ORDER-CARRIER-1: a tie in the declared keys keeps the source's physical
+     * order — native Stata's order within a tie after use — and the same one
+     * at every evaluation, so _n, keep in, list in and collect agree */
+    if (order_live_)
+        for (const auto &c : order_cols_) o += ", " + c;
     return o;
 }
 
@@ -220,9 +236,16 @@ std::vector<std::string> View::sortedby_names() const {
     return out;
 }
 
-void View::push_stage(const std::string &select_body, const std::string &desc) {
+void View::push_stage(const std::string &select_body, const std::string &desc,
+                      bool keeps_order) {
     stages_.push_back(select_body);
     descs_.push_back(desc);
+    /* ORDER-CARRIER-1: the order columns survive only a stage that declares
+     * it keeps them AND selects them; any other stage ends the carrier, and
+     * the view falls back to ordering by its declared keys alone */
+    if (!keeps_order) order_live_ = false;
+    for (const auto &c : order_cols_)
+        if (select_body.find(c) == std::string::npos) order_live_ = false;
 }
 
 /* refer to the previous pipeline step */
@@ -230,18 +253,31 @@ static std::string prev_name(size_t k) {
     return k == 0 ? "__parqit_s0" : ("__parqit_s" + std::to_string(k));
 }
 
-std::string View::compile_prefix(size_t nstages) const {
+std::string View::ctes(size_t nstages) const {
     std::string sql = "WITH __parqit_s0 AS (" + scan_ + ")";
     for (size_t k = 0; k < nstages; k++)
         sql += ", __parqit_s" + std::to_string(k + 1) + " AS (" + stages_[k] + ")";
-    sql += " SELECT * FROM " + prev_name(nstages);
     return sql;
 }
 
+std::string View::compile_prefix(size_t nstages) const {
+    return ctes(nstages) + " SELECT * FROM " + prev_name(nstages);
+}
+
 std::string View::compile(bool with_order) const {
-    std::string sql = compile_prefix(stages_.size());
+    /* ORDER-CARRIER-1: the result exposes the view's columns only; the hidden
+     * order columns, while the last stage still has them, may still order it */
+    const std::string last = prev_name(stages_.size());
+    std::string sql = order_cols_.empty() ? compile_prefix(stages_.size())
+                                          : ctes(stages_.size()) + " SELECT " +
+                                                select_list() + " FROM " + last;
     if (with_order) sql += order_by_sql();
     return sql;
+}
+
+std::string View::compile_numbered(const std::string &obs) const {
+    return ctes(stages_.size()) + " SELECT " + select_list() + ", row_number() " +
+           row_number_over() + " AS " + obs + " FROM " + prev_name(stages_.size());
 }
 
 std::string View::show() const {
@@ -251,7 +287,8 @@ std::string View::show() const {
         out += ",\n-- " + descs_[k] + "\n__parqit_s" + std::to_string(k + 1) +
                " AS (\n  " + stages_[k] + "\n)";
     }
-    out += "\nSELECT * FROM " + prev_name(stages_.size());
+    out += "\nSELECT " + (order_cols_.empty() ? std::string("*") : select_list()) +
+           " FROM " + prev_name(stages_.size());
     out += order_by_sql();
     return out;
 }
@@ -353,6 +390,11 @@ static void substitute(std::string *sql, const std::string &from,
     }
 }
 
+std::string View::row_number_over() const {
+    const std::string ord = order_by_sql();
+    return ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
+}
+
 std::string View::rowctx_wrap(std::string *sql, const std::string &prev) {
     bool needs_row = sql->find("__PARQIT_ROW__") != std::string::npos;
     bool needs_n = sql->find("__PARQIT_NROWS__") != std::string::npos;
@@ -403,9 +445,32 @@ std::string View::projection_source(const std::vector<ViewCol> &survivors) {
         }
     }
     if (keep == sort_.size()) return prev; /* every key survives: nothing to do */
-    std::string src = "(SELECT * FROM " + prev + order_by_sql() + ")";
+    std::string src = bake_order(prev);
     sort_.resize(keep);
     return src;
+}
+
+/* ORDER-CARRIER-1: bake the current order into the input of a stage that is
+ * about to shorten or clear the declared sort (SEM-006, the projection above).
+ * Without order columns the subquery's order is carried by DuckDB's
+ * insertion-order preservation, as before. With them, they are replaced by one
+ * column that numbers the rows in the full current order, so the dropped keys
+ * keep deciding ties afterwards — the physical order native Stata keeps. */
+std::string View::bake_order(const std::string &prev) {
+    if (!order_live_) return "(SELECT * FROM " + prev + order_by_sql() + ")";
+    const std::string ord = order_by_sql();
+    /* a space in the name, which no Stata variable name can have, so no later
+     * gen or rename can collide with the hidden column; it still dodges the
+     * live columns, since a Parquet source may use any name */
+    std::string name = "__parqit order " + std::to_string(++helper_counter_);
+    while (std::any_of(cols_.begin(), cols_.end(), [&](const ViewCol &c) {
+        return c.name == name || ci_clash(c.name, name);
+    }))
+        name += "_";
+    const std::string rn = quote_ident(name);
+    order_cols_ = {rn};
+    return "(SELECT *, row_number() OVER (" + ord.substr(1) + ") AS " + rn + " FROM " +
+           prev + ord + ")";
 }
 
 std::string View::keep_vars(const std::vector<std::string> &patterns) {
@@ -416,8 +481,8 @@ std::string View::keep_vars(const std::vector<std::string> &patterns) {
     for (const auto &want : keep) ncols.push_back(cols_[col_index(want)]);
     const std::string src = projection_source(ncols); /* may bake a dropped sort */
     cols_ = std::move(ncols);
-    push_stage("SELECT " + select_list() + " FROM " + src,
-               "keep " + std::to_string(cols_.size()) + " variables");
+    push_stage("SELECT " + stage_list() + " FROM " + src,
+               "keep " + std::to_string(cols_.size()) + " variables", true);
     return "";
 }
 
@@ -433,8 +498,8 @@ std::string View::drop_vars(const std::vector<std::string> &patterns) {
         if (!dropset.count(c.name)) ncols.push_back(c);
     const std::string src = projection_source(ncols); /* may bake a dropped sort */
     cols_ = std::move(ncols);
-    push_stage("SELECT " + select_list() + " FROM " + src,
-               "drop " + std::to_string(dropset.size()) + " variables");
+    push_stage("SELECT " + stage_list() + " FROM " + src,
+               "drop " + std::to_string(dropset.size()) + " variables", true);
     return "";
 }
 
@@ -449,11 +514,11 @@ std::string View::filter(const std::string &stata_expr, bool drop,
     const std::string prev = prev_name(stages_.size());
     if (uses_rowctx(cond)) {
         std::string src = rowctx_wrap(&cond, prev);
-        push_stage("SELECT " + select_list() + " FROM " + src + " WHERE " + cond,
-                   (drop ? "drop if " : "keep if ") + stata_expr);
+        push_stage("SELECT " + stage_list() + " FROM " + src + " WHERE " + cond,
+                   (drop ? "drop if " : "keep if ") + stata_expr, true);
     } else {
-        push_stage("SELECT " + select_list() + " FROM " + prev + " WHERE " + cond,
-                   (drop ? "drop if " : "keep if ") + stata_expr);
+        push_stage("SELECT " + stage_list() + " FROM " + prev + " WHERE " + cond,
+                   (drop ? "drop if " : "keep if ") + stata_expr, true);
     }
     return "";
 }
@@ -505,10 +570,10 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     std::string body;
     if (uses_rowctx(value)) {
         std::string src = rowctx_wrap(&value, prev);
-        body = "SELECT " + select_list() + ", " + value + " AS " + quote_ident(name) +
+        body = "SELECT " + stage_list() + ", " + value + " AS " + quote_ident(name) +
                " FROM " + src;
     } else {
-        body = "SELECT " + select_list() + ", " + value + " AS " + quote_ident(name) +
+        body = "SELECT " + stage_list() + ", " + value + " AS " + quote_ident(name) +
                " FROM " + prev;
     }
     ViewCol nc;
@@ -518,7 +583,7 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     nc.normalized = nc.kind == 'n'; /* coerce_storage already normalizes numeric results */
     cols_.push_back(nc);
     push_stage(body, "gen " + name + " = " + expr +
-                         (if_expr.empty() ? "" : " if " + if_expr));
+                         (if_expr.empty() ? "" : " if " + if_expr), true);
     return "";
 }
 
@@ -565,7 +630,7 @@ std::string View::replace(const std::string &name, const std::string &expr,
         }
     }
     if (changed_sort < sort_.size()) {
-        source = "(SELECT * FROM " + source + order_by_sql() + ")";
+        source = bake_order(source);
         sort_.resize(changed_sort);
     }
 
@@ -577,6 +642,8 @@ std::string View::replace(const std::string &name, const std::string &expr,
         else
             sel += quote_ident(cols_[i].name);
     }
+    if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
+        for (const auto &c : order_cols_) sel += ", " + c;
     /* replacing changes content, and a wider value may no longer fit the
      * saved narrow type. MISS-1: the new expression may also introduce an IEEE
      * special (e.g. replace f = f*f), so drop its normalized flag. */
@@ -591,7 +658,7 @@ std::string View::replace(const std::string &name, const std::string &expr,
         cols_[idx].meta_type.clear();
     push_stage("SELECT " + sel + " FROM " + source,
                "replace " + name + " = " + expr +
-                   (if_expr.empty() ? "" : " if " + if_expr));
+                   (if_expr.empty() ? "" : " if " + if_expr), true);
     return "";
 }
 
@@ -624,8 +691,10 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
         if (k == quote_ident(oldn)) k = quote_ident(newn);
         if (k == quote_ident(oldn) + " DESC") k = quote_ident(newn) + " DESC";
     }
+    if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
+        for (const auto &c : order_cols_) sel += ", " + c;
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
-               "rename " + oldn + " " + newn);
+               "rename " + oldn + " " + newn, true);
     return "";
 }
 
@@ -711,8 +780,10 @@ std::string View::rename_many(const std::vector<std::string> &old_names,
     cols_ = std::move(ncols);
     chars_ = std::move(nchars);
     sort_ = std::move(nsort);
+    if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
+        for (const auto &c : order_cols_) sel += ", " + c;
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
-               "rename group (" + std::to_string(old_names.size()) + " variables)");
+               "rename group (" + std::to_string(old_names.size()) + " variables)", true);
     return "";
 }
 
@@ -726,8 +797,8 @@ std::string View::reorder(const std::vector<std::string> &front) {
     for (const auto &c : cols_)
         if (!moved.count(c.name)) ncols.push_back(c);
     cols_ = std::move(ncols);
-    push_stage("SELECT " + select_list() + " FROM " + prev_name(stages_.size()),
-               "order (column reorder)");
+    push_stage("SELECT " + stage_list() + " FROM " + prev_name(stages_.size()),
+               "order (column reorder)", true);
     return "";
 }
 
@@ -1117,10 +1188,10 @@ std::string View::duplicates_drop(const std::vector<std::string> &by, bool force
         part += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
     }
     std::string rn = fresh_helper("rn");
-    push_stage("SELECT " + select_list() + " FROM (SELECT *, row_number() OVER "
+    push_stage("SELECT " + stage_list() + " FROM (SELECT *, row_number() OVER "
                "(PARTITION BY " + part + order_by_sql() + ") AS " + quote_ident(rn) +
                " FROM " + prev + ") WHERE " + quote_ident(rn) + " = 1",
-               "duplicates drop (by varlist, keeping the first in sort order)");
+               "duplicates drop (by varlist, keeping the first in sort order)", true);
     return "";
 }
 
@@ -1132,10 +1203,10 @@ std::string View::keep_in(long long f, long long l) {
                "ranges are not supported on a lazy view)";
     const std::string prev = prev_name(stages_.size());
     std::string inner = "SELECT * FROM " + prev + order_by_sql();
-    push_stage("SELECT " + select_list() + " FROM (" + inner + " LIMIT " +
+    push_stage("SELECT " + stage_list() + " FROM (" + inner + " LIMIT " +
                    std::to_string(l - f + 1) + " OFFSET " + std::to_string(f - 1) +
                    ")",
-               "keep in " + std::to_string(f) + "/" + std::to_string(l));
+               "keep in " + std::to_string(f) + "/" + std::to_string(l), true);
     PendingRange pr;
     pr.stage = stages_.size() - 1; /* validate against the count BEFORE this */
     pr.f = f;
@@ -1159,11 +1230,11 @@ std::string View::drop_in(long long f, long long l) {
     const std::string rn = fresh_helper("rn");
     const std::string ord = order_by_sql();
     const std::string over = ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
-    push_stage("SELECT " + select_list() + " FROM (SELECT *, row_number() " + over +
+    push_stage("SELECT " + stage_list() + " FROM (SELECT *, row_number() " + over +
                    " AS " + quote_ident(rn) + " FROM " + prev + ") WHERE " +
                    quote_ident(rn) + " < " + std::to_string(f) + " OR " +
                    quote_ident(rn) + " > " + std::to_string(l),
-               "drop in " + std::to_string(f) + "/" + std::to_string(l));
+               "drop in " + std::to_string(f) + "/" + std::to_string(l), true);
     PendingRange pr;
     pr.stage = stages_.size() - 1; /* validate against the count BEFORE this */
     pr.f = f;
@@ -1196,18 +1267,18 @@ std::string View::sample(double amount, bool is_count, long long seed) {
         const std::string over = order.empty() ? "" : order.substr(1);
         // Capture once; round the global count once. Block percentage reservoirs
         // floor their per-block counts and can reach an invalid zero-size state.
-        push_stage("WITH " + data + " AS MATERIALIZED (SELECT " + select_list() +
+        push_stage("WITH " + data + " AS MATERIALIZED (SELECT " + stage_list() +
             ", row_number() OVER (" + over + ") AS " + row + " FROM " + prev +
-            ") SELECT " + select_list() + " FROM " + data +
+            ") SELECT " + stage_list() + " FROM " + data +
             " ORDER BY hash(hash(" + row + ", " + std::to_string(seed) + ")), " + row +
             " LIMIT (SELECT __parqit_sample_count(CAST(count(*) AS UBIGINT), CAST(" +
-            quote_literal(dtoa(amount)) + " AS DOUBLE)) FROM " + data + ")", "sample");
+            quote_literal(dtoa(amount)) + " AS DOUBLE)) FROM " + data + ")", "sample", true);
         return "";
     }
     clause += " REPEATABLE (" + std::to_string(seed) + ")";
-    push_stage("SELECT " + select_list() + " FROM " + prev + " USING SAMPLE " +
+    push_stage("SELECT " + stage_list() + " FROM " + prev + " USING SAMPLE " +
                    clause,
-               "sample");
+               "sample", true);
     return "";
 }
 
@@ -1269,10 +1340,10 @@ std::string View::egen(const std::string &name, const std::string &fcn,
     }
     const bool finite_double = fcn == "total" || fcn == "mean" || fcn == "sd";
     std::string stored = type_req == "double" && finite_double ? agg : coerce_storage(agg, type_req, 'n');
-    push_stage("SELECT " + select_list() + ", " + stored + " AS " +
+    push_stage("SELECT " + stage_list() + ", " + stored + " AS " +
                    quote_ident(name) + " FROM " + prev_name(stages_.size()),
                "egen " + name + " = " + fcn + "(...)" +
-                   (by.empty() ? "" : ", by(...)"));
+                   (by.empty() ? "" : ", by(...)"), true);
     ViewCol nc;
     nc.name = name;
     nc.kind = 'n';
@@ -2078,8 +2149,24 @@ std::string View::append_with(std::vector<UsingSide> sources,
         ViewCol gc;
         gc.name = gen_name;
         gc.kind = 'n';
-        gc.varlab = "Source of the observation (0 = master)";
+        /* APPEND-GEN-LABEL-1: as native append — "Dataset source", labelled
+         * _append (0 "Master", k "Appended dataset k"), or a fresh __append#
+         * when that label name is taken, with a display format wide enough
+         * for the longest label */
+        gc.varlab = "Dataset source";
         gc.meta_type = "byte";
+        std::string lab = "_append";
+        for (int k = 1; vallabs_.is_object() && vallabs_.contains(lab); k++)
+            lab = "__append" + std::to_string(k);
+        nlohmann::json entries = nlohmann::json::array();
+        entries.push_back(nlohmann::json::array({"0", "Master"}));
+        for (size_t s = 0; s < sources.size(); s++)
+            entries.push_back(nlohmann::json::array(
+                {std::to_string(s + 1), "Appended dataset " + std::to_string(s + 1)}));
+        if (!vallabs_.is_object()) vallabs_ = nlohmann::json::object();
+        vallabs_[lab] = {{"entries", entries}};
+        gc.vallab = lab;
+        gc.fmt = "%" + std::to_string(17 + std::to_string(sources.size()).size()) + ".0g";
         ncols.push_back(gc);
     }
     /* normalise the column order deterministically */

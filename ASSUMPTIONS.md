@@ -3408,3 +3408,237 @@ entry notes the conservative fallback if the assumption proves wrong.
     destinations after errors, CSV provenance/cleanup, both memory writers,
     and CP864 against pyarrow/Python/pyreadstat. v136 now also tests low bytes
     1-127 (NUL remains a C++ test because Stata strings cannot carry it).
+
+174. **Second round of BPLIM user feedback (2026-09-29).** Rute Costa's list,
+    answered item by item in `examples/Examples_Parqit_Rute_V01.do`; the
+    changes are pinned by v141, v142 and the exprtrans and view unit tests.
+    (1) `appendin, generate()` is forwarded to native `append` (APPENDIN-GEN-1).
+    (2) Lazy `append, keep()` filters each using source's manifest with the
+    wildcard rule of `keepusing()`; only value labels attached to a kept
+    column come along, as native. Native `append` checks `keep()` source by
+    source and stops with r(111) after appending the earlier ones; parqit checks
+    every source first and refuses with r(111) before the view changes
+    (validate-then-mutate) (APPEND-KEEP-1).
+    (3) The help explains `merge m:m` against `joinby` in user terms.
+    (4) `distinct` keeps its name: it is Stata vocabulary — the
+    community-contributed `distinct` (Cox and Longton, Stata Journal 8(4),
+    2008; SSC), whose `joint` option parqit already mirrors — not SQL's;
+    `unique` (SSC) reports other things. No alias was added.
+    (5) `distinct`'s Obs column changes meaning to the SSC command's *total*:
+    the observations used (nonmissing; complete tuples for `joint`), not every
+    row; `missing` counts every row and missing as one more value, and `r(N)`
+    is the last line's Obs (DISTINCT-OBS-1). The distinct counts themselves are
+    unchanged. Decided 2026-09-29: the command bears the SSC command's name, so
+    it reports what that command reports; the change is announced under
+    "Changed" in the CHANGELOG, and a note says when missing values were left
+    out.
+    (6) The missing-value warning (STATAMISS-WARN-1). The
+    default stays SQL (brief §5); the warning is a static analysis in
+    `exprtrans` (`missing_rule_differences`), run by a separate Parser after
+    a successful translation, so the SQL cannot change. A condition flags a
+    comparison only where Stata would make it true for a missing operand (false
+    under an odd number of `!`); an assigned value (gen/replace/egen, or a
+    comparison inside a function argument) flags any comparison with an operand
+    that can be missing. Literal-missing tests and string comparisons never
+    flag. Settling idioms suppress it: a nonmissing guard (`x < .`, `x != .`,
+    `!missing(x)`) in an enclosing `&` chain; `missing(x)`, `x == .` or
+    `x >= .` as a whole disjunct of an enclosing `|` chain (another disjunct);
+    for a value, a nonmissing guard in the top-level `&` chain of its `if`
+    qualifier. It reads no data, so it can name a column with no missing
+    values; it may also stay conservative (warn) on rarer settling forms.
+    Silence rule (decided 2026-09-29): it fires only while the user has not
+    run `parqit set statamissing on|off` in the session — either choice
+    silences it, and is the documented way to; no per-command switch. The
+    plugin does not print it: it leaves the text, hex-encoded, in the global
+    `PARQIT_MISSWARN`, and the `parqit` dispatcher prints it after the command
+    with `display as error` (red), so `quietly` and `capture` silence it like
+    any other output — SF_error, the plugin's usual warning channel, reaches
+    the screen even under `quietly`. The dispatcher clears the global before
+    every command, so no command shows another's warning.
+    (7) `tabulate [if]`: the ado splits the condition with `_parqit_split_if`
+    because `syntax [if]` looks the variables up in the dataset in memory; the
+    plugin's `view_stats` accepts a generic `ifexpr` that wraps its base
+    relation. Every statistics command now sends it (STATS-IF-1): one Mata
+    helper, `_parqit_stats_split`, splits `<varlist> [if exp] [, options]` for
+    all of them. `duplicates list` numbers Obs over the unfiltered view and then
+    applies the condition, because native's Obs is the row's `_n` in the whole
+    dataset. The stats dialog has one `if` field shared by every statistic; the
+    explore dialog's `if` field serves every operation that takes one.
+    (8) `duplicates report|list`, `correlate` and `pwcorr` without a varlist
+    use every variable (numeric only for the correlations; each string one is
+    named as skipped, as native) (DUP-ALL-1, CORR-ALL-1).
+    (9) `duplicates list` reproduces native `duplicates list`: Group is
+    `dense_rank()` over the key values after keeping groups of more than one
+    (numbers ascending with missing last, strings with "" first), Obs is
+    `row_number()` over the view's order — `_n`, native's even within a tie of
+    the declared sort since (15) — and the rows are shown
+    by native `list …, subvarname noobs` in a scratch frame, with the keys'
+    formats and value labels; Group is omitted when there is one group. The
+    `limit()` safeguard (default 20) stays, with a note of the total
+    (DUP-LIST-1).
+    (10) `head` stays (non-regression rule; `head #` is `list in 1/#`).
+    (11) A DuckDB `syntax error at or near "X"` where X is a *reserved* keyword
+    (`duckdb_keywords()`) gains one line naming the double-quote quoting; the
+    user's SQL is never rewritten (SQL-KEYWORD-1).
+    (12) Lazy `append, generate()` labels its marker as native `append` does —
+    `_append` (0 "Master", k "Appended dataset k"), a fresh `__append#` when
+    the name is taken (native's rule, checked), variable label "Dataset
+    source", a display format as wide as the longest label — so it no longer
+    differs from `appendin`'s (APPEND-GEN-LABEL-1).
+    (13) From testing item 1: a `partitions()` metadata refusal names each
+    difference by variable and attribute (storage type, format, variable or
+    value label, sort order, value-label sets, characteristics and notes, data
+    label), at most four and a count of the rest, falling back to the footer
+    keys (PART-META-DIFF-1); the note separates partitions extended by
+    `append` from partitions added (PART-NOTE-1).
+    (14) `pwcorr` with options and no varlist split its options with
+    `gettoken … parse(",")`, which returns the comma itself; it now uses
+    `_parqit_split_opts` like `tabulate`. The combine, stats and explore
+    dialogs emit the new shapes, which `t15_dialog_shapes` runs; they were
+    checked by dialog-lint and t15, and then opened in GUI Stata (Xvfb).
+    (15) Ties in a declared sort follow the physical row order
+    (ORDER-CARRIER-1). Found while answering (11): auto, saved sorted by
+    `foreign`, reopens with that sort declared, and a plan ordered only by the
+    declared keys numbered, sliced and returned the members of a tie in an
+    engine-defined order, not necessarily the same at each evaluation — `gen n
+    = _n` then `collect` gave `n != _n` in 5 of 74 rows, `keep in 50/54` took
+    ids 33, 40, 52, 53, 54 (native: 50–54). Of the two fixes put to the
+    maintainer — carry the physical row order, or break every tie by all the
+    columns (a wider sort, and not native's order) — the first was chosen. A
+    Parquet scan also selects DuckDB's virtual `file_row_number` and, over
+    several files, `file_index` (a single file's is always 0, so it is left
+    out), under hidden names with spaces, which no Stata name can take; the
+    row-preserving stages (keep/drop of variables, `if` and `in`, gen,
+    replace, egen, rename, order, sample, duplicates drop with a varlist, the
+    numeric coercion) carry them, `sort`/`gsort` keep them, and
+    `order_by_sql()` appends them after the declared keys, so every `_n`
+    window, slice, preview, collect, save and Obs sees one total order: the
+    files' order within a tie, native's after `use`. A new `sort` therefore
+    breaks ties by file order — native `sort …, stable` on the data as loaded,
+    not on the view's previous order (native `sort` without `stable` promises
+    no order within a tie). When a projection or a replace ends a sort key
+    (SEM-006), the full current order is baked into one hidden row number that
+    replaces the carriers, so the dropped keys keep deciding the ties they
+    decided. Every other use of the order sees the same tiebreak, so within a
+    tie of the declared sort the row `collapse (first)/(last)` and
+    `duplicates drop varlist` keep, the rows a seeded `sample` or sample design
+    numbers, and the order of the master's rows that `append` bakes follow the
+    files too — engine-defined before, not a promised order, so no previous
+    guarantee changes. Any other stage ends the carrier (merge, append, joinby,
+    collapse, contract, reshape, pivot, the sample designs, query, no-varlist
+    duplicates drop), and the view falls back to its declared keys alone, as
+    before; CSV views and `parqit sql` never have one. A real column named
+    `file_row_number` (or `file_index`, over several files) hides the virtual
+    one: such a source keeps the old behaviour, with a note at `parqit use`,
+    and its values are untouched. Without a declared sort nothing changes and
+    nothing is sorted: unused, the hidden columns are pruned by DuckDB.
+    Cost, measured indicatively (20 million rows × 3 columns, five interleaved
+    runs of the same binary with the carrier on and off, shared host under
+    load): `save` of a sorted view +3%, `gen n = _n` then `save` +20% — a
+    correctness cost, kept.
+
+175. **Stata's abbreviations of commands, subcommands and options
+    (CMD-ABBREV-1, 2026-09-29).** The maintainer asked that parqit take the
+    short forms Stata core takes (`parqit su` for `summarize`); `help parqit`
+    had said since 0.1.35 that native abbreviations were not implied, a
+    documentation statement, not a brief decision. The oracle is Stata itself:
+    `which` on every prefix of every Stata command parqit mirrors (StataNow
+    19.5 here; these are long-stable core forms, unchanged since well before
+    parqit's `version 16.0` baseline). Accepted, each with every longer
+    prefix: use from `u`, save `sa`, describe `d` (Stata's `d`…`describ`
+    wrappers), generate `g` (to parqit's `gen`), rename `ren`, sort `so`,
+    count `cou`, list `l`, merge `mer`, append `ap`, summarize `su`, tabulate
+    `ta`, correlate `cor`, set `se`; histogram only as `hist`, because Stata
+    ships `hist.ado` and no other short form (`histo` is refused). `sa` is
+    save, so `sam` (a prefix of sample, which Stata spells out) is refused, as
+    native; v143 pins both. No short
+    form, as in Stata: keep, drop, egen, replace, order, gsort, collapse,
+    contract, duplicates, sample, joinby, reshape, misstable, levelsof, ds,
+    lookfor, codebook, tabstat, pwcorr. Left out on purpose although `which`
+    resolves them: `q`…`quer` (Stata's `query` reports settings, parqit's
+    appends SQL to the plan), `join` (ftools' SSC command, not core), `h`
+    (help), `levels` (a legacy command, not an abbreviation of levelsof),
+    `mi` (multiple imputation). parqit's own verbs take no abbreviations. The
+    rule lives in one Mata function, `_parqit_cmd_name`, applied by the
+    dispatcher before the verb lookup; a word it does not know comes back
+    unchanged, so every exact verb (ds, drop, tabstat, sample, selftest,
+    appendin, mergein, ...) reaches its own program (v143 checks it).
+    Subcommands copy the native ados literally: `duplicates` takes `report`
+    and `list` from one letter and `drop` in full (duplicates.ado); `misstable`
+    takes `summarize` and `patterns` from three letters (misstable.ado). parqit
+    also accepts a bare varlist after `misstable`, so a first word such as
+    `sum` or `pat` that named a variable now names the subcommand, as native —
+    a behaviour change for that edge, in the CHANGELOG and the help. Options:
+    the `syntax` capitals give Stata's minimum wherever parqit was stricter,
+    checked by running native: tabulate `Row` (native takes `r`, although its
+    help prints `row`) and `COlumn` (`co`; the old `col` still works), pwcorr
+    `Obs` (`o`), tabstat's `STATS()` synonym (refused with `statistics()`, as
+    tabstat.ado does), mergein's `noLabels` (merge.ado's spelling: `nolabel`
+    and `nolabels`). Options where parqit was already as or more permissive
+    stay (histogram `Bins`, sample `Count`, spssencode `Generate`), and no
+    unsupported native option was added. The help underlines the short forms
+    with `{cmdab:}`/`{opt}` markup, and `release_lint` accepts a verb spelled
+    that way in the syntax section.
+
+176. **tabulate's layout is native tabulate's (TAB-LAYOUT-1, 2026-09-29).**
+    Native `tabulate` is built in, so its layout was read off its output in
+    StataNow 19.5 over the cases `v144_tabulate_layout` pins, and parqit's
+    printers (`_parqit_print_tabulate`, `_parqit_print_tab2`) follow it. The
+    stub is sized by the values alone — their display width, or a `str#`
+    variable's storage width — within 11 to 39 columns one-way and 10 to 21
+    two-way, whatever the line size. A variable's label never widens it: the
+    label wraps greedily by words into lines of at most the stub's width in
+    bytes (native counts bytes, so `residência` breaks sooner than its
+    characters suggest), a word longer than a line is cut at the last whole
+    character that fits and its remainder starts the next line, the lines are
+    right-aligned and end on the header line. Two-way, the column label wraps
+    the same way to the columns' width (11 per column, less one), each line
+    centred by characters, ending on the line above the column values; the
+    header is as tall as the longer of the two. Values wider than their field:
+    a value label or a number is cut at the width, a string value keeps
+    width-2 characters and `..`; column values show at most 9 characters. A
+    two-way table holds floor((linesize - stub - 14) / 11) columns per panel,
+    each panel repeating the header, with no `Columns x-y of c` line (parqit's
+    old `- 13` put one column too many at the boundary). A number without a
+    value label shows in its variable's format at width 9 (`%12.0g` as
+    `%9.0g`, `%10.2f` as `%9.2f`, `%15.0fc` as `%9.0fc`), so Stata's own
+    formatting turns a wide value to e-notation or drops its commas —
+    1234567891 shows as `1.23e+09`, as native, checked value for value against
+    Mata's `strofreal()` — and a number is never cut, since a cut would show a
+    different number. A date or time (whose format takes no width) shows in
+    its own format when that fits 9 columns (`%tcHH:MM` as `13:45`), else in
+    its class's default (`%tdCCYY-NN-DD` as `01jan2020`, `%tmMonth_CCYY` as
+    `2020m1`), else abbreviated to 7 characters and `..` (`%tc` as
+    `01jan20..`), in rows as in columns. The `~` marker of `_parqit_clip`
+    stays in the other printers; tabulate no longer uses it. Before the
+    change, 24 of the first 29 compared layouts differed, among them auto's
+    plain `tabulate rep78`; `v144` pins 50.
+177. **`help parqit` is a user's guide; the contracts live in
+    `help parqit_technical` (HELP-REORG-1, 2026-09-30).** Researchers found
+    the help dense, repetitive and technical, so it was split by one criterion:
+    `help parqit` says what parqit is for, how each command and option is
+    typed and what it does, the behaviour a user must know to get the right
+    result (views are live plans, the missing-value rule, the order of ties),
+    worked examples, a short list of limitations and a table of stored
+    results; `help parqit_technical` holds the contracts behind them — sources
+    and adapters, SPSS, R and encoding details, metadata, verb and
+    materialiser contracts, the numerical contract of the statistics, the
+    expression dialect, types, settings, the dialogs field by field, every
+    stored result and the complete list of limitations. The guide follows the
+    layout of Stata's own help files (Title, Syntax, Menu, Description,
+    Options by subcommand, remarks, Examples, Stored results), with two
+    deliberate additions: a bold pointer to the technical reference under the
+    title, and an "At a glance" section before Syntax with parqit's purpose and
+    a diagram of its four moves (open, shape, look, get the result), because
+    the maintainer's first priority for the help is to show what parqit is for
+    and what it can do. Text that moved was moved verbatim, only its links
+    retargeted: the contracts were written and audited as they stand, and
+    rewording them would risk changing what they promise. A
+    paragraph-by-paragraph comparison with the former files finds every
+    paragraph in one of the two, apart from the parts written anew for the
+    guide (title, description, map, quick-start comments, menu list, short
+    limitations list), whose substance both keep; the technical Limitations
+    list gained the SPSS and R items the former guide alone listed. No command,
+    option or marker was removed. The marker `options` now names the Options
+    section, as in Stata's help files; the settings section it used to name is
+    `settings`, and the session dialog's Help button opens it.
