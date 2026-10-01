@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.3.1 — the full surface below is implemented and covered by a
+> **Status:** v0.3.2 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,14 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.3.2 refuses, with a message that names both releases, a plugin of
+another release still loaded by Stata — the cause of a BPLIM user's `option
+revalidvars() not allowed` after updating parqit with Stata open (restart Stata
+after updating). `merge`, `append` and `joinby` on a view now take the using
+data's notes and characteristics as native Stata does (`nonotes` leaves the
+notes out; `appendin` gains `nolabel` and `nonotes`), and a variable dropped from
+a view no longer passes its notes to a new variable of the same name.
 
 Version 0.3.1 answers a second round of feedback from BPLIM users. Subcommands
 and options take the abbreviations native Stata accepts (`parqit su price, d`,
@@ -264,7 +272,9 @@ onto your `PLUS` adopath (run `sysdir` to see where):
 ```
 
 After upgrading a plugin already loaded in Stata, **restart Stata** before
-running the checks below. `discard` alone does not guarantee a plugin reload.
+running the checks below. `discard` alone does not guarantee a plugin reload;
+while Stata still holds the plugin of another release, every parqit command
+stops with a message that names the plugin's release and the ado-files'.
 
 ```stata
 . parqit version        // confirms the plugin loaded
@@ -274,7 +284,7 @@ running the checks below. `discard` alone does not guarantee a plugin reload.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.3.1`).
+  `download/vX.Y.Z` (for example, `download/v0.3.2`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 
@@ -904,9 +914,9 @@ parqit collect, clear                       // pick = 0: not drawn
 
 | Command | Compiles to |
 |---|---|
-| `parqit merge 1:1\|m:1\|1:m <keys> using <file\|view:name> [, keep() keepusing() gen() nogenerate encoding()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view**. A non-key variable on both sides takes the using value on using-only rows, as native. Lazy `m:m` is refused; use `joinby` or native `mergein m:m`. |
-| `parqit append using <files\|view:name ...> [, generate() keep() encoding()]` | `UNION BY NAME`, aligning columns by name with safe recasts; sources may be files or views; `keep()` names the variables taken from the using sources (wildcards allowed), and `generate()` marks each row's source with native `append`'s labels |
-| `parqit joinby <keys> using <file\|view:name> [, encoding()]` | many-to-many join |
+| `parqit merge 1:1\|m:1\|1:m <keys> using <file\|view:name> [, keep() keepusing() gen() nogenerate nonotes encoding()]` | `JOIN`, with a Stata-compatible `_merge`; the *using* side stays on disk — a file or **another open view**. A non-key variable on both sides takes the using value on using-only rows, as native. The using data's labels, notes and characteristics come across as with native `merge` (`nonotes` leaves its notes out). Lazy `m:m` is refused; use `joinby` or native `mergein m:m`. |
+| `parqit append using <files\|view:name ...> [, generate() keep() nonotes encoding()]` | `UNION BY NAME`, aligning columns by name with safe recasts; sources may be files or views; `keep()` names the variables taken from the using sources (wildcards allowed), and `generate()` marks each row's source with native `append`'s labels; notes and characteristics come across as with native `append` |
+| `parqit joinby <keys> using <file\|view:name> [, encoding()]` | many-to-many join; notes and characteristics come across as with native `joinby` |
 
 **In-memory + disk, fast.** When your data is already in Stata's memory and you
 want to join a disk file (a small lookup), `parqit mergein`/`parqit appendin` keep
@@ -918,7 +928,7 @@ lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` p
 | Command | Effect |
 |---|---|
 | `parqit mergein 1:1\|m:1\|1:m\|m:m <keys> using <file> [, <merge opts> int64() encoding()]` | Native `merge` of the in-memory data with a disk lookup (read via parqit); the using side is a file, and a `view:` source is refused with the out-of-core alternative |
-| `parqit appendin using <file> [, keep() generate() force int64() encoding()]` | Native `append` of a disk file onto the in-memory data (`generate()` marks the source of each observation, as native `append`); a `view:` source is refused likewise |
+| `parqit appendin using <file> [, keep() generate() nolabel nonotes force int64() encoding()]` | Native `append` of a disk file onto the in-memory data (`generate()` marks the source of each observation, as native `append`); a `view:` source is refused likewise |
 
 ### Materialisers and engine-side result commands
 

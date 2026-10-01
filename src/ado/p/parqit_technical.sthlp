@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.1 30sep2026}{...}
+{* *! version 0.3.2 01oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -1159,6 +1159,21 @@ different Stata columns on the two sides (for example {cmd:A_1} as an alias for
 consistently in the source views first. Case-distinct datasets with already
 aligned names and aliases remain supported.
 
+{pstd}Notes and characteristics of the using data follow native {helpb merge},
+{helpb append} and {helpb joinby}, as read off StataNow 19.5. For the dataset
+({cmd:_dta}) and for every variable the verb keeps from the using data (the keys,
+the variables on both sides and the new ones; with {opt keepusing()} or
+{opt keep()}, only those named), each characteristic the master lacks comes
+across, and the master's wins on a name clash. The notes come across too, unless
+{opt nonotes} ({cmd:merge} and {cmd:append}; {cmd:joinby} has no such option):
+they follow the master's in their order, numbered on from the master's
+{cmd:note0}, which {cmd:notes drop} leaves where it was; a note whose text the
+master already has, compared exactly, is skipped, and one repeated within the
+using data comes across each time. {cmd:append} takes its sources one after
+another, so a later file skips a note that an earlier one brought. A using
+{cmd:view:}{it:name} carries its own. {cmd:mergein} and {cmd:appendin} run the
+native commands, so the same holds there.
+
 {pstd}{cmd:duplicates drop} with no varlist deduplicates on every column and
 needs neither ordering nor {opt force}. With a {it:varlist}, it requires both
 {opt force} and a previous {cmd:parqit sort}; it keeps the first row in that
@@ -2286,7 +2301,9 @@ session and refuses console/batch sessions.
 {help parqit_technical##environment:the technical reference}.
 
 {pstd}Use matching ado and plugin files and restart Stata after an update.
-The numerical protocol check refuses incompatible revisions. A
+Before every command the ado-files check that the plugin is of their own
+release and numerical protocol; a plugin of another release is refused with
+{cmd:r(498)} and a message that names both releases. A
 {cmd:PARQIT_PLUGIN_PATH} global is unnecessary when the matching plugin is
 already found through the adopath.
 
@@ -2323,9 +2340,11 @@ The operating-system variable {cmd:PARQIT_SAVE_NOARROW} selects the batched
 memory writer (see {help parqit_technical##materialisers:Materialisers}).
 
 {pstd}No plugin-path global is needed when matching package files are on the
-adopath. The ado and plugin verify their numerical protocol before operating;
-incompatible files are refused. After updating a loaded package, restart Stata
-so cached programs and the loaded binary belong to the same revision.
+adopath. The ado and plugin verify their release and numerical protocol before
+operating; files of another release are refused. After updating a loaded
+package, restart Stata so cached programs and the loaded binary belong to the
+same release: a running Stata can keep the plugin it loaded first, even after
+{cmd:discard} or {cmd:clear all}.
 
 
 {marker perf}{...}
@@ -2545,8 +2564,11 @@ statistic rows plus free additional specifications; {cmd:contract};
 {p 12 12 2}({cmd:db parqit_combine}) lazy {cmd:merge}, {cmd:append} (several
 sources) and {cmd:joinby} over files, globs, Hive directories or
 {cmd:view:}{it:name}; native {cmd:mergein}/{cmd:appendin} for data already
-in memory, with the native merge options, an {opt int64()} selector and an
-{opt encoding()} field on the {bf:Options} tab. The integer selector applies
+in memory, with native Stata's merge and append options, an {opt int64()}
+selector and an {opt encoding()} field on the {bf:Options} tab. Each option is
+enabled where the command takes it: {opt nonotes} for every merge and append,
+{opt nolabel} for {cmd:mergein} and {cmd:appendin}, the other merge options for
+{cmd:mergein}. The integer selector applies
 only to the memory routes; the encoding field, which names the encoding of the
 using file's text that is not UTF-8, applies to every route. The
 additional-sources field is raw Stata source-list syntax: compound-quote each

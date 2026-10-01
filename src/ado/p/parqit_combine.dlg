@@ -2,7 +2,7 @@
   parqit merge - Combine the view with a file or another view, or join the
   data in memory with a file
 
-*!  VERSION 0.3.1  30sep2026
+*!  VERSION 0.3.2  01oct2026
 
   User > parqit > Combine datasets (merge, append, joinby)...
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
@@ -11,8 +11,10 @@
   is a Parquet file, glob, Hive directory, delimited text, .dta, Excel, SPSS
   .sav/.zsav, R .rds/.rda/.RData (the last five bridged) or another open view
   typed as view:name; and the native in-memory routes (mergein, appendin).
-  Options tab: the native merge options forwarded by mergein, appendin's force,
-  and the code page of a legacy .dta/Excel/SPSS/R using source. Populate fills the key pickers from the
+  Options tab: native Stata's merge and append options, each enabled for the
+  commands that take it (nonotes for every merge and append, nolabel for
+  mergein/appendin, the rest for mergein), appendin's force, and the code page
+  of a legacy .dta/Excel/SPSS/R using source. Populate fills the key pickers from the
   current view (lazy verbs) or from the using file (memory verbs), and the
   using-variable picker from the Parquet footer of the using file.
 */
@@ -141,7 +143,7 @@ END
 DIALOG opt, tabtitle("Options")
 BEGIN
   GROUPBOX gb_native		_lft	_top	_iwd	_ht12,		///
-	label("Native merge options forwarded by mergein")
+	label("Merge and append options, as in native Stata (enabled where the command takes them)")
   CHECKBOX ck_update		_ilft	_ss	_ibwd	.,		///
 	option(update)							///
 	onclickon(opt.ck_mreplace.enable)				///
@@ -314,6 +316,10 @@ BEGIN
 		call opt.tx_enc.enable
 		call opt.cb_enc.enable
 	}
+	if main.rb_merge | main.rb_append | main.rb_mergein | main.rb_appendin {
+		call opt.gb_native.enable
+		call opt.ck_nonotes.enable
+	}
 	if main.rb_mergein {
 		call main.tx_using.setlabel "Using file (Parquet, delimited text, .dta, Excel, SPSS or R):"
 		call opt.tx_int64.enable
@@ -339,6 +345,7 @@ BEGIN
 		call main.tx_gen.enable
 		call main.ed_gen.enable
 		call main.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
+		call opt.ck_nolabel.enable
 		call opt.ck_aforce.enable
 	}
 	call program main_context
@@ -418,6 +425,7 @@ BEGIN
 			if !main.ck_nogen {
 				optionarg main.ed_gen
 			}
+			option opt.ck_nonotes
 			optionarg /hidedefault opt.cb_enc
 		endoptions
 	}
@@ -433,6 +441,7 @@ BEGIN
 			if main.cb_keepus {
 				put "keep(" main.cb_keepus ") "
 			}
+			option opt.ck_nonotes
 			optionarg /hidedefault opt.cb_enc
 		endoptions
 	}
@@ -481,6 +490,8 @@ BEGIN
 				put "keep(" main.cb_keepus ") "
 			}
 			optionarg main.ed_gen
+			option opt.ck_nolabel
+			option opt.ck_nonotes
 			option opt.ck_aforce
 			optionarg /hidedefault opt.cb_int64
 			optionarg /hidedefault opt.cb_enc

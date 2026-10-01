@@ -1,7 +1,7 @@
 /*
   parqit summarize - Summary statistics, tables, correlations, and histograms
 
-*!  VERSION 0.3.1  30sep2026
+*!  VERSION 0.3.2  01oct2026
 
   User > parqit > Summary statistics, tables, and correlations...
   Launch directly with:  db parqit_stats      (menu installed by: parqit menu)

@@ -208,6 +208,11 @@ class View {
         std::string select_sql;       /* boundary-cast scan */
         std::vector<ViewCol> cols;
         nlohmann::json vallabs;       /* definitions carried from its parqit.* */
+        /* TWOTABLE-CHARS-1: its characteristics (notes included), keyed by
+         * exposed name and _dta; notes = false is nonotes, which still takes
+         * its other characteristics, as in native Stata */
+        nlohmann::json chars;
+        bool notes = true;
     };
     /* JOINKEY-1: every join key must exist on both sides with the same kind.
      * merge_with/joinby_with enforce this, but the caller runs the uniqueness
@@ -313,6 +318,8 @@ class View {
      * columns reach the next stage; any other stage drops them */
     void push_stage(const std::string &select_body, const std::string &desc,
                     bool keeps_order = false);
+    /* TWOTABLE-CHARS-1: keep only the characteristics of live columns and _dta */
+    void prune_chars();
 
     bool live_ = false;
     std::string scan_;

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.1 30sep2026}{...}
+{* *! version 0.3.2 01oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -153,9 +153,9 @@ Shape the view (lazy: each verb extends the plan)
 {p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:mer:ge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source}
 [{cmd:,} {opt keep(spec)} {opt keepus:ing(varlist)} {opt gen:erate(newvar)}
-{opt nogen:erate} {opt enc:oding(name)}]{p_end}
+{opt nogen:erate} {opt nonote:s} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:ap:pend} {cmd:using} {it:source} [{it:source} ...] [{cmd:,} {opt gen:erate(newvar)} {opt keep(varlist)}
-{opt enc:oding(name)}]{p_end}
+{opt nonote:s} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit joinby} {it:keys} {cmd:using} {it:source} [{cmd:,} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit query} {cmd:"}{it:SQL fragment}{cmd:"}{p_end}
 
@@ -208,8 +208,9 @@ Work with the dataset in memory
 {p 8 16 2}{cmd:parqit mergein} {cmd:1:1}|{cmd:m:1}|{cmd:1:m}|{cmd:m:m} {it:keys} {cmd:using} {it:file}
 [{cmd:,} {it:merge_options} {opt int64(refuse|round|string)} {opt enc:oding(name)}]{p_end}
 {p 8 16 2}{cmd:parqit appendin using} {it:file}
-[{cmd:,} {opt keep(varlist)} {opt gen:erate(newvar)} {opt force} {opt int64(refuse|round|string)}
-{opt enc:oding(name)}]{space 3}({opt keep()} names variables {it:of the file}, as in native {helpb append}){p_end}
+[{cmd:,} {opt keep(varlist)} {opt gen:erate(newvar)} {opt nol:abel} {opt nonote:s} {opt force}
+{opt int64(refuse|round|string)} {opt enc:oding(name)}]{space 3}({opt keep()} names variables
+{it:of the file}, as in native {helpb append}){p_end}
 {p 8 16 2}{cmd:parqit spssencode} {it:strvar}{cmd:,} {opt g:enerate(newvar)} [{opt l:abel(name)}
 {opt seq:uential}]{space 2}labelled numeric version of a string variable read from an
 SPSS file, or from an R file with haven labels ({help parqit##spss:SPSS files}){p_end}
@@ -504,10 +505,17 @@ cannot represent, in companion columns that {cmd:parqit use} restores.
 
 {phang}
 {opt keep()}, {opt keepusing()}, {opt generate()} and {opt nogenerate} are as in
-{helpb merge}; lazy {cmd:merge} takes only these. {cmd:append} takes
-{opt keep(varlist)}, the variables taken from the using sources, and
+{helpb merge}; lazy {cmd:merge} takes only these and {opt nonotes}. {cmd:append}
+takes {opt keep(varlist)}, the variables taken from the using sources, and
 {opt generate(newvar)}, which marks the master 0 and each source 1, 2, ..., as
 {helpb append} does. {opt encoding()} decodes a using file's legacy text.
+
+{phang}
+As the native commands do, {cmd:merge}, {cmd:append} and {cmd:joinby} take from
+the using data the value labels, notes and characteristics of the variables they
+keep from it and of the dataset; where the master already has one, the master's
+is kept, and a note the master already has is not repeated. {opt nonotes}, with
+{cmd:merge} and {cmd:append}, leaves the using data's notes out.
 
 {dlgtab:mergein, appendin}
 
@@ -515,8 +523,9 @@ cannot represent, in companion columns that {cmd:parqit use} restores.
 {cmd:mergein} passes the options of native {helpb merge} ({opt keepusing()},
 {opt keep()}, {opt generate()}, {opt nogenerate}, {opt update}, {opt replace},
 {opt assert()}, {opt force}, {opt nolabel}, {opt nonotes}, {opt noreport});
-{cmd:appendin} passes {opt keep()}, {opt generate()} and {opt force} to
-{helpb append}. {opt int64()} and {opt encoding()} apply to the file on disk.
+{cmd:appendin} passes {opt keep()}, {opt generate()}, {opt nolabel},
+{opt nonotes} and {opt force} to {helpb append}. {opt int64()} and
+{opt encoding()} apply to the file on disk.
 
 {dlgtab:sample}
 
@@ -786,7 +795,8 @@ the engine's plan. {cmd:parqit query} appends a raw SQL clause to the plan, and
 {cmd:parqit sql} opens a view over any DuckDB query; in SQL, quote a column named
 like a reserved word, such as {cmd:"foreign"}. {cmd:parqit version} and
 {cmd:parqit selftest} check an installation, and {cmd:parqit path} resolves a
-path. Restart Stata after updating parqit. More:
+path. Restart Stata after updating parqit: while Stata still holds the plugin of
+another release, parqit stops with a message that names both releases. More:
 {help parqit_technical##settings:Settings, raw SQL and diagnostics}.
 
 

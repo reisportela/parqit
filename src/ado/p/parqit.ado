@@ -1,4 +1,4 @@
-*! version 0.3.1 30sep2026
+*! version 0.3.2 01oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -47,6 +47,7 @@ program define _parqit_ensure_plugin
     capture plugin call parqit_plugin, ping 03
     if (_rc == 0) {
         _parqit_check_numeric_contract "`parqit_numeric_contract'"
+        _parqit_check_plugin_release "`parqit_plugin_version'"
         exit
     }
 
@@ -86,6 +87,30 @@ program define _parqit_ensure_plugin
 
     plugin call parqit_plugin, ping 03
     _parqit_check_numeric_contract "`parqit_numeric_contract'"
+    _parqit_check_plugin_release "`parqit_plugin_version'"
+end
+
+* PLUGIN-VERSION-1: the plugin must be the release of these ado-files. A
+* running Stata keeps the plugin it loaded first, so an update installed while
+* Stata is open (or a plugin net install could not replace) pairs new
+* ado-files with an old plugin, which used to fail deep inside a command
+* ("option revalidvars() not allowed", BPLIM, 2026-10-01). A plugin older than
+* this check does not report its release to ping.
+program define _parqit_check_plugin_release
+    version 16.0
+    args plugin_version
+    local ado_version "0.3.2"
+    if ("`plugin_version'" == "`ado_version'") exit
+    if ("`plugin_version'" == "") {
+        * an older plugin reports its release to version only
+        capture plugin call parqit_plugin, version
+        local plugin_version `parqit_plugin_version'
+    }
+    local pv = cond("`plugin_version'" == "", "of an earlier release", "version `plugin_version'")
+    di as err "parqit: the plugin in use is `pv', but the ado-files are version `ado_version'"
+    di as err "Stata keeps a plugin loaded until it exits: close Stata and start it again;"
+    di as err "if they still differ, install parqit again in a new Stata session and restart Stata"
+    exit 498
 end
 
 program define _parqit_check_numeric_contract
@@ -3168,7 +3193,8 @@ program define _parqit_merge, rclass
         di as err "parqit merge: key varlist required"
         exit 198
     }
-    syntax using/ [, keep(string) KEEPUSing(string) GENerate(name) NOGENerate ENCoding(string)]
+    syntax using/ [, keep(string) KEEPUSing(string) GENerate(name) NOGENerate ///
+        noNOTEs ENCoding(string)]
     if ("`generate'" != "" & "`nogenerate'" != "") {
         di as err "parqit merge: generate() and nogenerate are mutually exclusive"
         exit 198
@@ -3211,6 +3237,7 @@ program define _parqit_merge, rclass
     local _sq_keepusing `"`keepusing'"'
     local _sq_gen "`generate'"
     local _sq_nogen = ("`nogenerate'" != "")
+    local _sq_nonotes = ("`notes'" == "nonotes")
     local _sq_mask `mask'
     local _sq_owned_n = (`"`bridge'"' != "")
     if (`_sq_owned_n') local _sq_owned_1 `"`bridge'"'
@@ -3231,10 +3258,10 @@ end
 
 program define _parqit_append, rclass
     version 16.0
-    * parqit append using <file> [<file> ...] [, generate(name) keep(varlist)]
+    * parqit append using <file> [<file> ...] [, generate(name) keep(varlist) nonotes]
     gettoken usingtok 0 : 0, parse(" ")
     if (`"`usingtok'"' != "using") {
-        di as err "parqit append: syntax is parqit append using <files> [, generate() keep()]"
+        di as err "parqit append: syntax is parqit append using <files> [, generate() keep() nonotes]"
         exit 198
     }
     local nf 0
@@ -3255,7 +3282,7 @@ program define _parqit_append, rclass
     }
     * APPEND-KEEP-1: keep() names variables of the USING sources (native append
     * semantics, wildcards allowed); the plugin checks it against every source
-    syntax [, GENerate(name) KEEP(string) ENCoding(string)]
+    syntax [, GENerate(name) KEEP(string) noNOTEs ENCoding(string)]
     _parqit_ensure_plugin
     * import any dta/xls/xlsx/csv source to a Parquet bridge; encoding() names
     * the legacy code page of every bridged file (BRIDGE-LOSS-1); the losses of
@@ -3316,6 +3343,7 @@ program define _parqit_append, rclass
     local _sq_nfiles `nf'
     local _sq_gen "`generate'"
     local _sq_keep `"`keep'"'
+    local _sq_nonotes = ("`notes'" == "nonotes")
     mata: _parqit_wr_append_request("`req'")
     capture noisily plugin call parqit_plugin, view_twotable `reqhex'
     local rc = _rc
@@ -3471,8 +3499,10 @@ program define _parqit_appendin
     * keep() names variables of the USING file (native append semantics), so it
     * must not be validated against the in-memory master — pass it through as a
     * string and let native append judge it; generate() marks the source of
-    * each observation (0 = master, 1 = the file), as native append does
-    syntax using/ [, KEEP(string) GENerate(name) FORCE INT64(string) ENCoding(string)]
+    * each observation (0 = master, 1 = the file), as native append does;
+    * nolabel and nonotes are native append's, as in mergein
+    syntax using/ [, KEEP(string) GENerate(name) noLabels NONotes FORCE ///
+        INT64(string) ENCoding(string)]
     _parqit_no_view_using appendin `"`using'"' append
     * INT64-PROTECT-1: the disk side is read by parqit use — forward the option
     _parqit_typeopts, who("parqit appendin") int64(`"`int64'"')
@@ -3501,6 +3531,8 @@ program define _parqit_appendin
     local opts
     if ("`keep'"  != "") local opts `opts' keep(`keep')
     if ("`generate'" != "") local opts `opts' generate(`generate')
+    if ("`labels'" != "") local opts `opts' nolabel
+    if ("`nonotes'" != "") local opts `opts' nonotes
     if ("`force'" != "") local opts `opts' force
     append using `"`tmp'"', `opts'
 end
@@ -5469,6 +5501,8 @@ void _parqit_wr_twotable_request(string scalar req)
                 _parqit_jtext("gen", st_local("_sq_gen")),
                 _parqit_jpair("nogen",
                             st_local("_sq_nogen") == "1" ? "true" : "false"),
+                _parqit_jpair("nonotes",
+                            st_local("_sq_nonotes") == "1" ? "true" : "false"),
                 _parqit_jpair("keep_mask", st_local("_sq_mask")))
     }
     _parqit_emit(req, _parqit_jobj(p))
@@ -5493,6 +5527,7 @@ void _parqit_wr_append_request(string scalar req)
         _parqit_jpair("files", flist),
         _parqit_jpair("keys", "[]"),
         _parqit_jtext("gen", st_local("_sq_gen")),
+        _parqit_jpair("nonotes", st_local("_sq_nonotes") == "1" ? "true" : "false"),
         _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
     if (st_local("_sq_keep") != "") {
         p = (p, _parqit_jpair("keep", _parqit_jlist(tokens(st_local("_sq_keep")))))

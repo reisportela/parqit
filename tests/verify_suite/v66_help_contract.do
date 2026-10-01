@@ -36,14 +36,15 @@ gen double rate = _n / 3
 parqit save `"`lookup'"', replace data
 
 * --- lazy merge is not a wrapper around native merge ------------------------
-* The syntax line promises exactly four options; every other native merge
-* option must be refused, and a refused verb must leave the view usable.
+* The syntax line promises five options (nonotes since TWOTABLE-CHARS-1);
+* every other native merge option must be refused, and a refused verb must
+* leave the view usable.
 parqit use using `"`master'"'
-foreach bad in force update "assert(match)" nolabel nonotes noreport replace {
+foreach bad in force update "assert(match)" nolabel noreport replace {
     capture parqit merge 1:1 id using `"`lookup'"', `bad'
     assert _rc == 198
 }
-parqit merge 1:1 id using `"`lookup'"', keep(match) keepusing(rate) generate(_m)
+parqit merge 1:1 id using `"`lookup'"', keep(match) keepusing(rate) generate(_m) nonotes
 assert _rc == 0
 parqit count
 assert r(N) == 20

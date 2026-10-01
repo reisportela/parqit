@@ -3642,3 +3642,57 @@ entry notes the conservative fallback if the assumption proves wrong.
     option or marker was removed. The marker `options` now names the Options
     section, as in Stata's help files; the settings section it used to name is
     `settings`, and the session dialog's Help button opens it.
+178. **The two-table verbs take the using data's notes and characteristics as
+    native Stata does (TWOTABLE-CHARS-1, 2026-10-01).** A BPLIM report that a
+    saved view lost its metadata did not reproduce (0.3.1, 0.2.5, 0.2.3 and
+    0.1.33; every source kind, 18 verbs, the footers compared with pyarrow),
+    but the search found that lazy `merge`, `append` and `joinby` dropped the
+    using side's characteristics, notes included, in `collect` and `save`
+    alike. `merge` and `append` are built-in (`_merge`, `_append`), so the
+    rules were read off StataNow 19.5 and pinned by `v145`: (1) the owners are
+    `_dta` and each variable the verb keeps from the using data — the keys, the
+    variables on both sides and the new ones, narrowed by `keepusing()` or
+    `keep()`; (2) a characteristic the master's owner lacks is copied, and the
+    master's wins on a name clash; (3) the notes (`note#`) are appended after
+    the master's in their order, numbered on from the master's `note0` (which
+    `notes drop` does not lower, so gaps stay), the using data's own gaps
+    closing up; (4) a using note is skipped when its text, compared exactly
+    and case-sensitively, is already one of the owner's notes before that
+    using file — so a note repeated within one using file comes across each
+    time, and with several files (`append`) a later file skips what an
+    earlier one brought; (5) `nonotes` copies no note but still copies the
+    other characteristics; native `joinby` has no `nonotes` and copies them as
+    `merge` does. `parqit merge`/`append` gain `nonotes`; `appendin` passes
+    `nolabel` and `nonotes` to native `append`, as `mergein` passes them to
+    native `merge`. The view also keeps only the characteristics of its live
+    variables and of `_dta` (pruned after every stage and when a view opens):
+    before, a dropped variable's notes stayed in the view and reached a later
+    `gen`, `egen` or using variable of the same name — and would have counted
+    as the master's in the rules above — while native Stata drops them with
+    the variable (the `gen` case reproduced in 0.2.5 and 0.3.1; pinned by
+    `v145` and the unit test). Spelling: the lazy verbs declare native's
+    `noNOTEs` (shortest form `nonote`); `appendin` follows `mergein`'s existing
+    `noLabels NONotes` (shortest `nol`, `non`); both accept every form native
+    accepts. Residual: a using column whose file name was sanitised still gets
+    no `src_name` provenance characteristic on the using side (the master and
+    the eager reader record it), which is unchanged.
+179. **The ado-files refuse a plugin of another release (PLUGIN-VERSION-1,
+    2026-10-01).** A BPLIM user's `parqit save` of `sysuse auto` stopped with
+    `option revalidvars() not allowed`: the 0.3.x ado-files were running with a
+    plugin from before 0.3.0, which does not return the `transcoded_revalid`
+    results, and an empty `revalid()` was then read by `syntax` as the shortest
+    form of `revalidvars()`. A running Stata keeps the plugin it loaded first
+    (it may survive `discard` and `clear all`), and on Windows `net install`
+    cannot replace a plugin Stata has loaded, so such pairs arise from ordinary
+    updates. The ado↔plugin check was only the numerical protocol (`ping 03`),
+    which changes rarely and which that pair passes. Decision: `ping` also
+    returns the plugin's release, and before every command the ado-files
+    require it to equal their own (`local ado_version`, kept equal to the
+    project version by `release_lint`); otherwise `r(498)` with both releases
+    named — an older plugin, which `ping` does not tell, is asked through
+    `version`, which every release answers — and the remedy (restart Stata;
+    if the releases still differ, install again in a new session). Equal
+    release strings are the contract: a development build between releases
+    keeps the release number, and its ado-files and plugin are built together.
+    Pinned by `v146`, which runs a copy of the ado-files that requires release
+    9.9.9 against the real plugin, both before and after the plugin is loaded.

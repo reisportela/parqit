@@ -115,6 +115,7 @@ void View::open(const std::string &scan_select, std::vector<ViewCol> cols,
     cols_ = std::move(cols);
     vallabs_ = std::move(vallabs);
     chars_ = std::move(chars);
+    prune_chars(); /* a column left out at open takes its characteristics along */
     dtalabel_ = std::move(dtalabel);
     source_desc_ = source_desc;
 }
@@ -246,6 +247,26 @@ void View::push_stage(const std::string &select_body, const std::string &desc,
     if (!keeps_order) order_live_ = false;
     for (const auto &c : order_cols_)
         if (select_body.find(c) == std::string::npos) order_live_ = false;
+    prune_chars();
+}
+
+/* TWOTABLE-CHARS-1 (2026-10-01): native Stata drops a variable's
+ * characteristics, notes included, with the variable. The view kept them after
+ * drop/keep (a save only writes the live ones), so a later gen, egen or new
+ * using variable of the same name took the dropped one's notes, and merge and
+ * append would have treated them as the master's. Every verb names its
+ * columns before its stage (egen adds its column after, once nothing is
+ * stale), so pruning here, and when a view opens, keeps exactly the live
+ * owners; engine names are kept too, as rename reads them. */
+void View::prune_chars() {
+    if (!chars_.is_object()) return;
+    std::set<std::string> live{"_dta"};
+    for (const auto &c : cols_) {
+        live.insert(c.exposed());
+        live.insert(c.name);
+    }
+    for (auto it = chars_.begin(); it != chars_.end();)
+        it = live.count(it.key()) ? std::next(it) : chars_.erase(it);
 }
 
 /* refer to the previous pipeline step */
@@ -1682,6 +1703,73 @@ static void merge_using_meta(View *, nlohmann::json *dst_vallabs,
     }
 }
 
+/* TWOTABLE-CHARS-1: a characteristic named note# is a note; note0 holds the
+ * highest number, which `notes drop` does not lower (it leaves gaps) */
+static bool note_number(const std::string &name, long long *n) {
+    if (name.size() < 5 || name.compare(0, 4, "note") != 0) return false;
+    if (name.size() > 5 && name[4] == '0') return false;
+    long long v = 0;
+    for (size_t i = 4; i < name.size(); i++) {
+        const char ch = name[i];
+        if (ch < '0' || ch > '9' || v > 99999999LL) return false;
+        v = v * 10 + (ch - '0');
+    }
+    *n = v;
+    return true;
+}
+
+/* TWOTABLE-CHARS-1 (2026-10-01): what native merge, append and joinby take
+ * from the using data for each owner they keep from it — _dta, the keys, the
+ * common and the new variables — as {result name, using name} pairs. Each
+ * characteristic the master lacks comes across (the master's wins on a name
+ * clash); unless nonotes, so do the notes, after the master's in their order
+ * and numbered on from its note0, skipping a text the owner already has
+ * (compared exactly; notes taken from an earlier using file count), while a
+ * note repeated within the using data comes across each time. Read off
+ * StataNow 19.5 (ASSUMPTIONS #178). */
+static void merge_using_chars(
+    nlohmann::json *chars, const nlohmann::json &src,
+    const std::vector<std::pair<std::string, std::string>> &owners, bool notes) {
+    if (!src.is_object()) return;
+    for (const auto &o : owners) {
+        const auto s = src.find(o.second);
+        if (s == src.end() || !s->is_object() || s->empty()) continue;
+        if (!chars->is_object()) *chars = nlohmann::json::object();
+        nlohmann::json &dst = (*chars)[o.first];
+        if (!dst.is_object()) dst = nlohmann::json::object();
+        std::set<std::string> have;
+        long long last = 0;
+        for (const auto &kv : dst.items()) {
+            long long n = 0;
+            if (!note_number(kv.key(), &n) || !kv.value().is_string()) continue;
+            const std::string text = kv.value().get<std::string>();
+            if (n == 0)
+                last = std::max(last, std::strtoll(text.c_str(), nullptr, 10));
+            else {
+                last = std::max(last, n);
+                have.insert(text);
+            }
+        }
+        std::map<long long, std::string> incoming; /* in note order */
+        for (const auto &kv : s->items()) {
+            long long n = 0;
+            if (!note_number(kv.key(), &n)) {
+                if (!dst.contains(kv.key())) dst[kv.key()] = kv.value();
+            } else if (notes && n > 0 && kv.value().is_string()) {
+                incoming[n] = kv.value().get<std::string>();
+            }
+        }
+        bool added = false;
+        for (const auto &in : incoming) {
+            if (have.count(in.second)) continue;
+            dst["note" + std::to_string(++last)] = in.second;
+            added = true;
+        }
+        if (added) dst["note0"] = std::to_string(last);
+        if (dst.empty()) chars->erase(o.first);
+    }
+}
+
 /* JOINKEY-1: the one place that decides whether a join key list is usable.
  * merge_with/joinby_with call it, and so does the plugin BEFORE it runs the
  * uniqueness contracts — those queries reference the keys, so an unknown key
@@ -2015,6 +2103,15 @@ std::string View::merge_with(const std::string &kind,
     body = "SELECT " + osel + " FROM (" + body + ")";
 
     merge_using_meta(this, &vallabs_, u.vallabs, warnings);
+    {
+        std::vector<std::pair<std::string, std::string>> owners{{"_dta", "_dta"}};
+        for (const auto &k : keys)
+            owners.push_back({cols_[col_index(k)].exposed(), ucols.at(k)->exposed()});
+        for (const auto &cm : common)
+            owners.push_back({cols_[col_index(cm.first)].exposed(), cm.second->exposed()});
+        for (const ViewCol *c : brought) owners.push_back({c->exposed(), c->exposed()});
+        merge_using_chars(&chars_, u.chars, owners, u.notes);
+    }
     if (!nogen) {
         /* Stata's standard _merge value label (TT-3): tabulate/list show
          * "Master only (1)" etc. like native merge. Numeric values are
@@ -2129,8 +2226,15 @@ std::string View::append_with(std::vector<UsingSide> sources,
      * definitions only after EVERY source passed the kind checks above — a
      * conflict in source 2 must not leave source 1's labels already merged
      * into a view the failed verb then abandons. */
-    for (size_t s = 0; s < sources.size(); s++)
+    for (size_t s = 0; s < sources.size(); s++) {
         merge_using_meta(this, &vallabs_, sources[s].vallabs, warnings);
+        /* TWOTABLE-CHARS-1: file by file, as native append (keep() already
+         * narrowed each source's columns) */
+        std::vector<std::pair<std::string, std::string>> owners{{"_dta", "_dta"}};
+        for (const auto &c : sources[s].cols)
+            owners.push_back({ncols[find_in(c.name)].exposed(), c.exposed()});
+        merge_using_chars(&chars_, sources[s].chars, owners, sources[s].notes);
+    }
 
     std::string prev = prev_name(stages_.size());
     if (!sort_.empty())
@@ -2195,7 +2299,7 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
     std::set<std::string> keyset(keys.begin(), keys.end());
 
     std::vector<ViewCol> ncols = cols_;
-    std::vector<const ViewCol *> brought;
+    std::vector<const ViewCol *> brought, common;
     for (const auto &c : u.cols) {
         if (keyset.count(c.name)) continue;
         const std::string identity = alias_identity_error(cols_, c);
@@ -2203,6 +2307,7 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
         if (col_index(c.name) >= 0) {
             warnings->push_back("variable " + c.name +
                                 " exists in master and using; master values kept");
+            common.push_back(&c);
             continue;
         }
         {
@@ -2231,6 +2336,17 @@ std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
         sel += ", __u." + quote_ident(c->name) + " AS " + quote_ident(c->name);
 
     merge_using_meta(this, &vallabs_, u.vallabs, warnings);
+    {
+        /* TWOTABLE-CHARS-1: native joinby takes the using data's
+         * characteristics as merge does (it has no nonotes) */
+        std::vector<std::pair<std::string, std::string>> owners{{"_dta", "_dta"}};
+        for (const auto &k : keys)
+            owners.push_back({cols_[col_index(k)].exposed(), ucols.at(k)->exposed()});
+        for (const ViewCol *c : common)
+            owners.push_back({cols_[col_index(c->name)].exposed(), c->exposed()});
+        for (const ViewCol *c : brought) owners.push_back({c->exposed(), c->exposed()});
+        merge_using_chars(&chars_, u.chars, owners, u.notes);
+    }
     /* MISS-1: joinby is an inner join today, but its result manifest follows
      * the same two-table contract as merge/append — clear the string flags so
      * a future unmatched() option (or any NULL the combine surfaces) can never

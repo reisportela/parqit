@@ -6,6 +6,52 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-10-01
+
+A BPLIM user's error after an update, and two metadata fixes found while
+checking an earlier report; pinned by `tests/verify_suite/v145_two_table_notes.do`,
+`v146_plugin_version_check.do` and unit tests; ASSUMPTIONS #178 and #179.
+
+### Fixed
+- **A plugin of another release is refused before any work, with a message
+  that says what to do** (PLUGIN-VERSION-1). A running Stata keeps the plugin
+  it loaded first, so parqit updated while Stata was open — or a plugin that
+  `net install` could not replace — paired new ado-files with an old plugin,
+  and the first command failed far from the cause: a BPLIM user's `sysuse
+  auto` then `parqit save …, replace` stopped with `option revalidvars() not
+  allowed` (reproduced with the 0.3.1 ado-files and the 0.2.5 plugin). The
+  only check was the numerical protocol, which that pair passes. Every command
+  now checks that the plugin is of the ado-files' release and otherwise stops
+  with `r(498)`: "the plugin in use is version 0.2.5, but the ado-files are
+  version 0.3.1 … close Stata and start it again". `release_lint` keeps the
+  release the ado-files require equal to the project version.
+- **`parqit merge`, `append` and `joinby` keep the using data's notes and
+  characteristics** (TWOTABLE-CHARS-1). The lazy verbs took the variable
+  labels, formats and value labels of the using data but dropped its notes and
+  other characteristics — the notes of the variables they brought, of the key
+  and shared variables, and of the dataset — so neither `collect` nor `save`
+  had them. They now follow native `merge`, `append` and `joinby`: for the
+  dataset and for each variable kept from the using data, a characteristic
+  the master lacks comes across (the master's wins on a name clash), and the
+  notes are appended after the master's, numbered on from its `note0`,
+  without repeating a text the master already has. Found while checking a BPLIM
+  report that saving a view lost its metadata, which did not reproduce: a view
+  saved from any source, through any verb, keeps the metadata `collect` shows.
+- **A dropped variable's notes and characteristics no longer pass to a new
+  variable of the same name.** After `parqit drop price` (or a `keep` without
+  it), a later `parqit gen price = …` — or a `price` brought by `merge`,
+  `append` or `joinby` — came back with the dropped variable's notes and
+  characteristics in `collect` and `save` (the `gen` case reproduced in 0.2.5
+  and 0.3.1); native Stata drops them with the variable. The view now keeps
+  only the characteristics of its live variables and of the dataset.
+
+### Added
+- `parqit merge …, nonotes` and `parqit append …, nonotes`: leave the using
+  data's notes out and keep its other characteristics, as native.
+- `parqit appendin …, nolabel nonotes`, passed to native `append`, as
+  `mergein` already passes them to native `merge`. The combine dialog offers
+  `nonotes` for every merge and append and `nolabel` for `appendin`.
+
 ## [0.3.1] — 2026-09-30
 
 Second round of BPLIM user feedback (2026-09-29) and a reorganised help;

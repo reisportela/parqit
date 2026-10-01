@@ -3094,6 +3094,11 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
     }
     out->select_sql = "SELECT " + sel + " FROM " + src.scan_sql;
     out->vallabs = meta_ctx.meta.present ? meta_ctx.meta.vallabs : json::object();
+    /* TWOTABLE-CHARS-1: its notes and characteristics, as a view open takes
+     * them (Stata's 67,783-byte limit is applied where they enter Stata) */
+    out->chars = meta_ctx.meta.present && meta_ctx.meta.chars.is_object()
+                     ? meta_ctx.meta.chars
+                     : json::object();
     return 0;
 }
 
@@ -3111,6 +3116,7 @@ ST_retcode using_from_view(Session &s, const std::string &vname,
     out->select_sql = it->second.compile(true);
     out->cols = it->second.cols();
     out->vallabs = it->second.vallabs();
+    out->chars = it->second.chars(); /* TWOTABLE-CHARS-1 */
     return 0;
 }
 
@@ -3298,6 +3304,8 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
     std::vector<std::string> drops, warns;
     ST_retcode rc;
     View candidate = g_view_ref();
+    /* TWOTABLE-CHARS-1: merge's and append's nonotes (joinby has none) */
+    const bool nonotes = req.value("nonotes", false);
 
     if (op == "append") {
         std::string gen;
@@ -3315,6 +3323,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
                 cry("parqit append: " + err);
                 return rc;
             }
+            u.notes = !nonotes;
             sources.push_back(std::move(u));
         }
         /* APPEND-KEEP-1: keep() names the variables taken from the using
@@ -3389,6 +3398,7 @@ ST_retcode cmd_view_twotable(const std::vector<std::string> &args) {
             cry("parqit " + op + ": " + err);
             return rc;
         }
+        u.notes = op == "joinby" || !nonotes;
         /* JOINKEY-1: both verbs validate their keys HERE, before anything else
          * touches them. merge's uniqueness contracts below run queries that
          * reference the keys, so an unknown or type-mismatched key used to

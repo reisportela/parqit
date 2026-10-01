@@ -386,6 +386,10 @@ parqit use using `"`auto'"'
 capture noisily parqit merge m:1 foreign using `"`lookup'"', nogenerate
 _shape `=_rc' "parqit merge m:1 keys using file, nogenerate"
 parqit close _all
+parqit use using `"`auto'"'
+capture noisily parqit merge m:1 foreign using `"`lookup'"', nogenerate nonotes
+_shape `=_rc' "parqit merge m:1 keys using file, nogenerate nonotes"
+parqit close _all
 parqit use using `"`repo'/tests/fixtures/r/rownames.rds"'
 capture noisily parqit merge 1:1 rowname using `"`repo'/tests/fixtures/r/rownames.rds"', keepusing(wt) nogenerate
 _shape `=_rc' "parqit merge 1:1 keys using file.rds, keepusing() nogenerate"
@@ -412,6 +416,8 @@ capture noisily parqit append using `"`auto'"' `"`auto'"', generate(src) encodin
 _shape `=_rc' "parqit append using file file, generate() encoding()"
 capture noisily parqit append using `"`auto'"', generate(src2) keep(make price)
 _shape `=_rc' "parqit append using file, generate() keep()"
+capture noisily parqit append using `"`auto'"', keep(make price) nonotes
+_shape `=_rc' "parqit append using file, keep() nonotes"
 parqit close _all
 parqit use using `"`auto'"'
 capture noisily parqit joinby foreign using `"`lookup'"', encoding(latin1)
@@ -433,6 +439,8 @@ capture noisily parqit appendin using `"`auto'"', keep(make price) generate(src3
 _shape `=_rc' "parqit appendin using file, keep() generate() force"
 capture noisily parqit appendin using `"`auto'"', keep(make price) encoding(latin1)
 _shape `=_rc' "parqit appendin using file, keep() encoding()"
+capture noisily parqit appendin using `"`auto'"', keep(make price) nolabel nonotes force
+_shape `=_rc' "parqit appendin using file, keep() nolabel nonotes force"
 
 * --- Save as Parquet or collect into memory (db parqit_write) -----------------
 di as txt _n "db parqit_write"

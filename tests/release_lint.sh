@@ -35,6 +35,9 @@ cmake_v=$(grep -oE "project\(parqit VERSION $semver" "$REPO/CMakeLists.txt" \
 ado_line=$(sed -n '1p' "$REPO/src/ado/p/parqit.ado")
 ado_v=$(printf '%s' "$ado_line" | grep -oE "version $semver" | grep -oE "$semver")
 ado_d=$(printf '%s' "$ado_line" | grep -oE "$banner_date")
+# PLUGIN-VERSION-1: the release the ado-files require of the plugin
+adoreq_v=$(grep -oE "local ado_version \"$semver\"" "$REPO/src/ado/p/parqit.ado" \
+             | grep -oE "$semver" | head -1)
 
 sthlp_line=$(grep -m1 -E "version $semver" "$REPO/src/ado/p/parqit.sthlp")
 sthlp_v=$(printf '%s' "$sthlp_line" | grep -oE "version $semver" | grep -oE "$semver")
@@ -70,11 +73,12 @@ banner_to_iso() {
 # --- versions agree ----------------------------------------------------------
 [ -n "$cmake_v" ]  || err "could not read project(parqit VERSION) from CMakeLists.txt"
 [ -n "$ado_v" ]    || err "could not read version from parqit.ado banner"
+[ -n "$adoreq_v" ] || err "could not read local ado_version (the plugin release check) from parqit.ado"
 [ -n "$sthlp_v" ]  || err "could not read version from parqit.sthlp banner"
 [ -n "$readme_v" ] || err "could not read **Status:** vX.Y.Z from README.md"
 [ -n "$claude_v" ] || err "could not read Current state: **vX.Y.Z from CLAUDE.md"
 
-for pair in "ado=$ado_v" "sthlp=$sthlp_v" "readme=$readme_v" \
+for pair in "ado=$ado_v" "ado-plugin-check=$adoreq_v" "sthlp=$sthlp_v" "readme=$readme_v" \
             "claude=$claude_v" "citation=$cff_v"; do
     name=${pair%%=*}; val=${pair#*=}
     [ "$val" = "$cmake_v" ] || err "$name version $val != project version $cmake_v"

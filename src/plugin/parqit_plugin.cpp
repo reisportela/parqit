@@ -68,6 +68,8 @@ ST_retcode cmd_ping(const std::vector<std::string> &args) {
     }
     save_local("_parqit_pong", "1");
     save_local("_parqit_numeric_contract", "3");
+    /* PLUGIN-VERSION-1: the ado-files compare it with their own release */
+    save_local("_parqit_plugin_version", PARQIT_VERSION);
     return 0;
 }
 

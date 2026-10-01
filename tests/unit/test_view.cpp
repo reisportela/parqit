@@ -679,6 +679,114 @@ TEST_CASE("a failed append leaves the view untouched (validate-then-mutate)") {
     CHECK(warns.empty());
 }
 
+TEST_CASE("TWOTABLE-CHARS-1: merge, append and joinby take the using data's "
+          "notes and characteristics as native Stata does") {
+    using nlohmann::json;
+    /* master: a gap in its dataset notes (note2 dropped), a shared wage note */
+    auto master = [] {
+        View v;
+        std::vector<ViewCol> cols;
+        for (const char *n : {"id", "year", "wage", "firm"}) {
+            ViewCol c;
+            c.name = n;
+            c.kind = (std::string(n) == "firm") ? 's' : 'n';
+            cols.push_back(c);
+        }
+        json chars = {
+            {"_dta", {{"note0", "3"}, {"note1", "master note"}, {"note3", "shared note"},
+                      {"both", "from master"}}},
+            {"wage", {{"note0", "1"}, {"note1", "shared wage note"}, {"both", "master value"}}}};
+        v.open(kFixture, cols, json::object(), chars, "", "test fixture");
+        return v;
+    };
+    /* using: a repeated note, one differing only by case, a gap (note5) */
+    auto u = make_using("SELECT * FROM (VALUES (1, 100.0, 9.9, 'x')) t(id, tfp, wage, extra)",
+                        {{"id", 'n'}, {"tfp", 'n'}, {"wage", 'n'}, {"extra", 's'}});
+    u.chars = {
+        {"_dta", {{"note0", "6"}, {"note1", "shared note"}, {"note2", "dup"}, {"note3", "dup"},
+                  {"note4", "Shared note"}, {"note6", "using only note"},
+                  {"both", "from using"}, {"uonly", "u"}}},
+        {"id", {{"note0", "1"}, {"note1", "using id note"}, {"ukey", "k"}}},
+        {"wage", {{"note0", "2"}, {"note1", "shared wage note"}, {"note2", "using wage note"},
+                  {"both", "using value"}, {"uc", "c"}}},
+        {"tfp", {{"note0", "1"}, {"note1", "tfp note"}, {"rc", "r"}}},
+        {"extra", {{"note0", "1"}, {"note1", "extra note"}}}};
+    const json dta = {{"note0", "7"}, {"note1", "master note"}, {"note3", "shared note"},
+                      {"note4", "dup"}, {"note5", "dup"}, {"note6", "Shared note"},
+                      {"note7", "using only note"}, {"both", "from master"}, {"uonly", "u"}};
+    const json wage = {{"note0", "2"}, {"note1", "shared wage note"},
+                       {"note2", "using wage note"}, {"both", "master value"}, {"uc", "c"}};
+    std::vector<std::string> warns;
+
+    SUBCASE("merge: keys, common and new variables; keepusing leaves the rest") {
+        View v = master();
+        REQUIRE(v.merge_with("m:1", {"id"}, u, {"tfp", "wage"}, 0, "", false, &warns).empty());
+        const json &c = v.chars();
+        CHECK(c.at("_dta") == dta);
+        CHECK(c.at("id") == u.chars.at("id"));
+        CHECK(c.at("wage") == wage);
+        CHECK(c.at("tfp") == u.chars.at("tfp"));
+        CHECK_FALSE(c.contains("extra"));
+    }
+    SUBCASE("merge, nonotes: the other characteristics only") {
+        View v = master();
+        u.notes = false;
+        REQUIRE(v.merge_with("m:1", {"id"}, u, {}, 0, "", false, &warns).empty());
+        const json &c = v.chars();
+        CHECK(c.at("_dta") == json{{"note0", "3"}, {"note1", "master note"},
+                                   {"note3", "shared note"}, {"both", "from master"},
+                                   {"uonly", "u"}});
+        CHECK(c.at("id") == json{{"ukey", "k"}});
+        CHECK(c.at("wage") == json{{"note0", "1"}, {"note1", "shared wage note"},
+                                   {"both", "master value"}, {"uc", "c"}});
+        CHECK_FALSE(c.contains("extra")); /* it had notes only */
+    }
+    SUBCASE("joinby: as merge, every using variable") {
+        View v = master();
+        REQUIRE(v.joinby_with({"id"}, u, &warns).empty());
+        const json &c = v.chars();
+        CHECK(c.at("_dta") == dta);
+        CHECK(c.at("wage") == wage);
+        CHECK(c.at("extra") == u.chars.at("extra"));
+    }
+    SUBCASE("append: file by file; the second skips what the first brought") {
+        View v = master();
+        auto u2 = u;
+        u2.chars["_dta"]["note7"] = "second note";
+        u2.chars["_dta"]["note0"] = "7";
+        std::vector<View::UsingSide> srcs{u, u2};
+        REQUIRE(v.append_with(std::move(srcs), "", &warns).empty());
+        json want = dta;
+        want["note8"] = "second note";
+        want["note0"] = "8";
+        CHECK(v.chars().at("_dta") == want);
+        CHECK(v.chars().at("wage") == wage);
+    }
+    SUBCASE("a dropped variable's characteristics leave with it") {
+        View v = master();
+        REQUIRE(v.drop_vars({"wage"}).empty());
+        CHECK_FALSE(v.chars().contains("wage"));
+        REQUIRE(v.gen("wage", "", "1", "", false).empty());
+        CHECK_FALSE(v.chars().contains("wage"));
+        CHECK(v.chars().at("_dta") == master().chars().at("_dta"));
+    }
+    SUBCASE("drop, then a merge brings that name: the using data's own") {
+        View v = master();
+        REQUIRE(v.drop_vars({"wage"}).empty());
+        REQUIRE(v.merge_with("m:1", {"id"}, u, {}, 0, "", false, &warns).empty());
+        CHECK(v.chars().at("wage") == u.chars.at("wage"));
+    }
+    SUBCASE("a failed merge leaves the characteristics untouched") {
+        View v = master();
+        auto bad = u;
+        bad.cols.push_back(ViewCol{});
+        bad.cols.back().name = "firm";
+        bad.cols.back().kind = 'n'; /* string in master */
+        CHECK_FALSE(v.merge_with("m:1", {"id"}, bad, {}, 0, "", false, &warns).empty());
+        CHECK(v.chars() == master().chars());
+    }
+}
+
 TEST_CASE("helper names dodge using-side columns in two-table verbs") {
     /* a using column literally named like a generated helper must not make
      * the compiled join reference ambiguous (charter §6.12) */
