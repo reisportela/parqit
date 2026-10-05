@@ -10,18 +10,22 @@ d Variable labels, value labels,
 d notes, display formats and characteristics survive a parqit save /
 d parqit use round-trip through standard Parquet key-value metadata,
 d while files remain plain Parquet for Python (pandas, polars), R,
-d Spark and other tools. SQL is available as an escape hatch (parqit
-d sql), and parqit show prints the generated query.
+d Spark and other tools. parqit also reads delimited text,
+d Stata, Excel, SPSS (.sav, .zsav) and R (.rds, .rda, .RData)
+d files with their labels, and decodes text in legacy
+d encodings. SQL is available as an escape hatch (parqit sql),
+d and parqit show prints the generated query.
 d
 d KW: Parquet
 d KW: DuckDB
 d KW: out-of-core
 d KW: big data
 d KW: data management
+d KW: SPSS
 d
 d Requires: Stata version 16
 d
-d Distribution-Date: 20261001
+d Distribution-Date: 20261005
 d
 d Author: Miguel Portela, Universidade do Minho & NIPE
 d Support: email miguel.portela@@eeg.uminho.pt

@@ -6,6 +6,32 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-10-05
+
+The two crash courses shipped with the package, brought up to date for the SSC
+update, and a package description that names the readers added since 0.1.37.
+The commands behave as in 0.3.2.
+
+### Documentation
+- **`parqit_basics.do` and `parqit_tour.do` follow the current release**
+  (EXAMPLES-REFRESH-1); both were unchanged since 0.1.37. The basics named a
+  write-dialog checkbox that does not exist: it now names the dialog's choice
+  "Write the dataset in Stata memory to Parquet (save, data)" and says that zstd
+  is the default compression (since 0.2.0). It printed three red missing-value
+  warnings (since 0.3.1) without a word on them: it now explains SQL's and
+  Stata's rules before its first filter and keeps the SQL rule with `parqit set
+  statamissing off`. It lists SPSS and R files among the inputs, with the
+  `parqit save … using` conversion, and draws its sample with `cluster(idcode)`,
+  so every sampled worker keeps all their years. The tour said that `discard`
+  resets the engine settings, which it does not reliably do, called
+  `memory_limit` a ceiling, and left the session with two engine threads, a 2GB
+  memory budget and its own spill directory: it now shows `memory_limit` and
+  `tempdir` as comments, changes only the thread count and puts it back from
+  `parqit version`'s `r(cpus)`, and its missing-value comment names the warning.
+- `parqit.pkg`: the description names the delimited-text, Stata, Excel, SPSS
+  and R readers and the decoding of legacy text encodings, with the keyword
+  SPSS.
+
 ## [0.3.2] — 2026-10-01
 
 A BPLIM user's error after an update, and two metadata fixes found while

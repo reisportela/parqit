@@ -109,6 +109,8 @@ return list
 * Comparisons with missing values follow SQL by default, so a missing hours
 * value is excluded by hours > 40. Stata treats missing as larger than any
 * number; switch to that rule when a do-file written for Stata relies on it.
+* Until a rule is chosen, parqit names such a comparison in red; choosing
+* either rule silences that warning for the rest of the session.
 * Menu: User > parqit > Views, SQL, and engine settings...
 parqit count if hours > 40
 parqit set statamissing on
@@ -272,12 +274,17 @@ parqit head 10
 parqit collect, clear
 parqit close
 
-* Engine settings for shared servers and HPC nodes: a memory ceiling, the
-* thread count and the spill directory. They last for the plugin session;
-* -discard- resets them.
-parqit set memory_limit 2GB
+* Engine settings for shared servers and HPC nodes: the engine's memory budget,
+* its thread count and the directory it spills to. A setting lasts for the rest
+* of the Stata session (-discard- does not reliably reset it; restarting Stata
+* does), so a do-file for a shared machine sets them at its top, for example:
+*     parqit set memory_limit 8GB
+*     parqit set tempdir "/scratch/myname"
+* Here only the thread count changes, and it is put back: parqit version returns
+* the CPUs available to Stata, which is the default.
 parqit set threads 2
-parqit set tempdir "$PARQIT_TOUR_DIR"
+parqit version
+parqit set threads `r(cpus)'
 
 * --------------------------------------------------------------------------
 * 7. Read only a small final result into memory when ordinary Stata work is next

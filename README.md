@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.3.2 — the full surface below is implemented and covered by a
+> **Status:** v0.3.3 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,12 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.3.3 brings the two crash courses that ship with the package
+(`parqit_basics.do` and `parqit_tour.do`, see [Tour & examples](#tour--examples))
+up to date: the dialog they name, the missing-value rule and its warning, the
+SPSS and R inputs, a cluster sample of whole panels, and engine settings that
+no longer outlast the tour. The commands behave as in 0.3.2.
 
 Version 0.3.2 refuses, with a message that names both releases, a plugin of
 another release still loaded by Stata — the cause of a BPLIM user's `option
@@ -284,7 +290,7 @@ stops with a message that names the plugin's release and the ado-files'.
 - `replace` upgrades an existing install in place; `ado uninstall parqit` removes it.
 - The URL above always follows the newest public GitHub release.
 - To pin a specific version instead, replace `latest/download` with
-  `download/vX.Y.Z` (for example, `download/v0.3.2`).
+  `download/vX.Y.Z` (for example, `download/v0.3.3`).
 - If your Stata cannot reach GitHub (a corporate proxy or an air-gapped HPC
   cluster), use the offline zip route below — it is byte-for-byte the same package.
 

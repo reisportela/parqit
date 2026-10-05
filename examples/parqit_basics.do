@@ -33,8 +33,8 @@ capture noisily parqit menu
 * --------------------------------------------------------------------------
 * 1. Create an NLS-style worker panel and write the data in memory to Parquet
 * Menu: User > parqit > Save as Parquet or collect into memory...
-* Select "Write the pipeline result to Parquet ... (save)", tick "Write the
-* dataset in memory instead of the view (data)" and pick zstd as Compression.
+* Select "Write the dataset in Stata memory to Parquet (save, data)". zstd is
+* the default Compression; compression(zstd) below only makes it visible.
 clear
 set obs 1440
 generate long   idcode     = ceil(_n / 6)
@@ -119,6 +119,14 @@ assert memory_note[1] == "This dataset remains until collect"
 * Build a plan using Stata-flavoured verbs. Nothing runs yet: each verb adds
 * one stage to a single query, so the same script scales to files far larger
 * than memory.
+* Missing values follow SQL by default: for a missing year, year >= 1983 is
+* unknown and the row is dropped, while native Stata (missing is larger than any
+* number) keeps it. Until a rule is chosen, parqit names in red each comparison
+* whose result could differ. This course keeps the SQL rule for the rest of the
+* session; parqit_tour.do compares the two rules.
+* Menu: User > parqit > Views, SQL, and engine settings...
+parqit set statamissing off
+
 * Menu: User > parqit > Keep or drop observations, or draw a sample...
 parqit keep if year >= 1983 & !missing(ln_wage)
 
@@ -142,9 +150,11 @@ parqit close
 
 * A first look at a large file: prototype on a reproducible engine-side sample
 * (a percentage by default, a number of rows with the count option).
+* cluster() draws whole workers, so every sampled panel keeps all its years;
+* by() would draw within strata.
 * Menu: User > parqit > Keep or drop observations, or draw a sample...
 parqit use using "$PARQIT_WORKERS"
-parqit sample 10, seed(20260825)
+parqit sample 10, cluster(idcode) seed(20260825)
 parqit count
 parqit collect, clear
 summarize ln_wage hours
@@ -232,7 +242,9 @@ list idcode year industry sector productivity in 1/4, noobs
 
 * --------------------------------------------------------------------------
 * 6. Other inputs: a delimited text file converted to Parquet without loading it
-* parqit also opens .csv/.tsv/.txt, Stata .dta and Excel sources as lazy views.
+* parqit also opens .csv/.tsv/.txt/.tab, Stata .dta, Excel, SPSS (.sav, .zsav)
+* and R (.rds, .rda, .RData) files as lazy views; parqit save out.parquet using
+* in.sav (or in.rds) converts an SPSS or R file, labels included, out of core.
 * Text carries no storage types or labels, so the converted file holds plain
 * numbers; the Parquet written in section 1 keeps the typed, labelled data.
 * Menu: User > parqit > Read data (lazy view or into memory)...
