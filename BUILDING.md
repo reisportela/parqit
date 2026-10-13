@@ -17,7 +17,7 @@ notice delivery and absence of a separately installed DLL.
   (GCC ≥ 10 on Linux, GCC 14 on macOS, or MSVC 2019+).
 - Network access on the first configure (CMake fetches pinned sources and
   verifies their SHA256), **or** pre-downloaded archives. DuckDB uses
-  `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.3.tar.gz`.
+  `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.6.tar.gz`.
 - macOS uses Homebrew `gcc@14`; put its `bin` directory on PATH. Build each
   architecture on its corresponding host. The preset rejects a compiler
   targeting the wrong architecture. Its compiler runtime is linked statically.

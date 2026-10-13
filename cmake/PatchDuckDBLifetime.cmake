@@ -34,7 +34,7 @@ parqit_patch_duckdb_lifetime(
 
 parqit_patch_duckdb_lifetime(
     src/transaction/transaction_context.cpp
-    d2e30134b5be1bba1a67864c2b8ef294e5934bbac40dbee03d848d31ea277e1e
-    14216595611a45db38b91aa548fde09eef433ff9dde69af529e1ef178414e684
+    d8048a5cff0bbdda9c4acc54a9f502cc5c5d2899e4094ad64bed15536cc9ce3b
+    968b243a85967ca15cab343efef23c564d89410ac1e8c59eebe6616d69e3ffe8
     ": context(context), auto_commit(true), current_transaction(nullptr) {"
     ": context(context), auto_commit(true), invalidation_policy(TransactionInvalidationPolicy::STANDARD_POLICY),\n      auto_rollback(false), current_transaction(nullptr) {")

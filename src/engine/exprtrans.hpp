@@ -41,6 +41,40 @@ struct ExprSchema {
      * not a per-row isfinite scan. A column absent here (e.g. a gen/replace
      * result, an aggregate, or any compound expression) gets the full check. */
     std::set<std::string> normalized;
+    /* USE-IF-1: SQL to emit for a bare reference to a column instead of its
+     * quoted name — the eager `parqit use ... if` filters the raw scan, whose
+     * dates, booleans and floats are not yet Stata values, so each reference
+     * becomes its boundary cast (a day count, 0/1, a finite double). Absent
+     * columns use quote_ident(name). */
+    std::map<std::string, std::string> column_sql;
+    /* TSSET-1: the view's time-series declaration (parqit tsset/xtset), engine
+     * column names; ts_time empty means none is declared and the operators
+     * L. F. D. S. and tin()/twithin() are refused. ts_time_fmt is the time
+     * variable's Stata display format (%td, %tm, ...), which decides how a
+     * bare date literal in tin()/twithin() is read. */
+    std::string ts_panel;
+    std::string ts_time;
+    double ts_delta = 1.0;
+    std::string ts_time_fmt;
+};
+
+/* ROWCTX-2 (BPLIM feedback, 2026-10-13): a window term the expression needs.
+ * The translator never emits a window function inline — a window cannot sit
+ * in a WHERE clause, inside an aggregate or inside another window — it emits a
+ * placeholder and records the window's SQL here; the view compiler computes
+ * each term as a helper column of a subquery wrapped around the previous stage
+ * and substitutes the helper's name. The SQL of a term that follows the
+ * current order or the by groups carries one of the tokens
+ *   __PARQIT_OVER_ORD__       OVER (PARTITION BY by-keys ORDER BY order)
+ *   __PARQIT_OVER_PART__      OVER (PARTITION BY by-keys)
+ *   __PARQIT_OVER_FULL__      the ordered window over the whole partition
+ *   __PARQIT_OVER_FULL_DESC__ the same, the order reversed
+ * which only the view compiler resolves (the by keys come from a by/bysort
+ * prefix). A time-series term (L. F. D. S.) is complete SQL over the declared
+ * panel and time variables. */
+struct WindowTerm {
+    std::string placeholder; /* the token in ExprResult::sql */
+    std::string sql;         /* the window expression computing it */
 };
 
 struct ExprResult {
@@ -55,6 +89,9 @@ struct ExprResult {
      * expression itself; letting the placeholder reach DuckDB produced a raw
      * Binder Error naming an internal token (charter §5/§6.12). */
     bool uses_rowctx = false;
+    /* ROWCTX-2: the window terms behind the placeholders, in first-use order;
+     * uses_rowctx is true exactly when this is nonempty */
+    std::vector<WindowTerm> windows;
 };
 
 /* Translate a Stata expression. */

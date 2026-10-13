@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.3.3 — the full surface below is implemented and covered by a
+> **Status:** v0.4.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,17 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.4.0 answers the third round of BPLIM feedback: the `if` qualifier
+wherever native Stata has one, the complete native `collapse` statistics and
+`egen` functions, the `by` and `bysort` prefixes with Stata's positional
+subscripts, time-series operators by time after `parqit xtset`/`tsset`, the
+date and time functions, `parqit unique`, a lossless `compress` option and the
+explicit `view` option of `save`. It embeds DuckDB 1.5.6 (from 1.5.3: the
+Parquet reader's out-of-bounds fixes, the hive-partition and caching-operator
+result fixes, the window self-join fix) and corrects the engine's C aggregate
+bridge under DuckDB's window aggregators. Every addition is additive: the
+published commands keep their behaviour.
 
 Version 0.3.3 brings the two crash courses that ship with the package
 (`parqit_basics.do` and `parqit_tour.do`, see [Tour & examples](#tour--examples))
@@ -363,7 +374,7 @@ in the path:
 Needs `git`, CMake ≥ 3.21 and a C++17 compiler. The supported release toolchains
 are GCC on Linux (≥10), GCC 14 on macOS and MSVC 2019+ on Windows; see
 [BUILDING.md](BUILDING.md) for prerequisites and per-platform presets.
-The first build downloads and compiles DuckDB 1.5.3 from source
+The first build downloads and compiles DuckDB 1.5.6 from source
 (SHA256-pinned, with hash-checked local corrections), so allow tens of minutes
 and a few GB of disk, depending on the toolchain and hardware.
 
@@ -502,8 +513,8 @@ scratch data; lazy verbs build the plan while the current dataset stays in place
 ├─ 2  SHAPE ─ lazy verbs; each one extends the plan
 │
 │    rows         keep  drop  sample (strata, whole clusters)  duplicates drop
-│    columns      gen  egen  replace  rename  order
-│    order        sort  gsort
+│    columns      gen  egen  replace  rename  order       (by/bysort prefix)
+│    order        sort  gsort  xtset/tsset (L. F. D. S. by time)
 │    aggregate    collapse  contract  pivot
 │    restructure  reshape long   reshape wide
 │    two tables   merge  append  joinby
@@ -511,7 +522,7 @@ scratch data; lazy verbs build the plan while the current dataset stays in place
 ├─ 3  LOOK ─ runs the plan, shows a summary
 │
 │    shape        describe  glimpse  ds  lookfor  codebook
-│    rows         count  head  list  levelsof  distinct
+│    rows         count  head  list  levelsof  distinct  unique
 │    statistics   summarize  tabstat  tabulate  histogram
 │                 correlate  pwcorr
 │    quality      misstable  duplicates report  duplicates list
@@ -559,7 +570,7 @@ need. Use them when the disk side is a small lookup; use `parqit use` +
 
 | Command | Compiles to | Notes |
 |---|---|---|
-| `parqit use [varlist] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge), or an SPSS `.sav`/`.zsav` (converted out of core to a Parquet bridge, see [SPSS files](#spss-files-sav-zsav)), or an R `.rds`/`.rda`/`.RData` (likewise, see [R data files](#r-data-files-rds-rda-rdata)). With `clear`, reads into memory. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` names the encoding of text that is not UTF-8, in any language — delimited text, a `.dta`/Excel bridge, the code page that replaces the one an SPSS file declares, the encoding R recorded for unmarked strings (see [Text encodings](#text-encodings)); `encoding(name, all)` decodes also text that happens to be valid UTF-8; `object(name)` names the data frame of an R file that holds several; `int64(refuse|round|string)` says what to do with integers outside the protected +/-2^53 range (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
+| `parqit use [varlist] [if exp] using <files>` | `read_parquet(...)` / `read_csv_auto(...)` [`WHERE`] | Parquet file/glob/Hive dir, or delimited text (`.csv`/`.tsv`/`.txt`/`.tab`), or a Stata `.dta` / Excel `.xls`/`.xlsx` (imported to a Parquet bridge), or an SPSS `.sav`/`.zsav` (converted out of core to a Parquet bridge, see [SPSS files](#spss-files-sav-zsav)), or an R `.rds`/`.rda`/`.RData` (likewise, see [R data files](#r-data-files-rds-rda-rdata)). With `clear`, reads into memory (`compress` then narrows the storage types losslessly, as native `compress`). An `if exp` before `using` reads the selected rows, as native `use`: on a view it is the first verb, with `clear` it runs in the engine while the file is read, the condition over any variable of the file. `name()` opens under a view name; `relaxed` unions a mixed-schema glob by column name; `encoding()` names the encoding of text that is not UTF-8, in any language — delimited text, a `.dta`/Excel bridge, the code page that replaces the one an SPSS file declares, the encoding R recorded for unmarked strings (see [Text encodings](#text-encodings)); `encoding(name, all)` decodes also text that happens to be valid UTF-8; `object(name)` names the data frame of an R file that holds several; `int64(refuse|round|string)` says what to do with integers outside the protected +/-2^53 range (default: refuse the read) and `binary(text|hex)` loads a `BLOB` column instead of dropping it; `filename(newvar)` adds a string variable holding the path each row was read from; `csv(...)` forces a delimited-text source's dialect and types instead of inferring them. |
 | `parqit use [varlist] using view:<name>, name(<new>)` | a copy of that view's plan | Copy the plan of an open view into a new view, optionally keeping only `varlist` (without a varlist, `using` may be omitted: `parqit use view:<name>, name(<new>)`); `name()` is required and must differ from the source. The copy reads no rows and leaves the source view unchanged: later verbs on either view do not reach the other, the copy shares the source's temporary bridges, and an unseeded `sample` step keeps its draw. |
 | `parqit open _data [, name() encoding()]` | temporary Parquet snapshot + scan | Snapshot the current in-memory dataset to a package-owned bridge and open a view over it; the current dataset stays in place. |
 
@@ -838,20 +849,22 @@ says what was decoded, from what, and how much (ENC-3, CSV-ENC-1).
 |---|---|
 | `parqit keep [varlist]` / `parqit drop [varlist]` | `SELECT` projection |
 | `parqit keep if <exp>` / `parqit drop if <exp>` | `WHERE` (Stata expression → SQL, with documented missing-value semantics) |
-| `parqit gen <type> v = <exp>` | computed column |
-| `parqit egen v = <fcn>(...) , by()` | window / aggregate column |
-| `parqit replace v = <exp> [if]` | `CASE WHEN` |
+| `parqit gen <type> v = <exp> [if]` | computed column; `_n`, `_N` and Stata's subscripts `x[_n-1]`, `x[1]`, `x[_N]` are windows |
+| `parqit egen v = <fcn>(...) [if] [, by() <options>]` | window / aggregate column: every native egen function except `fill()` and `mtr()`, with its options |
+| `parqit replace v = <exp> [if]` | `CASE WHEN` (a replace reading the replaced variable's other rows is refused: native's is sequential) |
+| `parqit by varlist [(sortvars)]: <verb>` / `parqit bysort ...: <verb>` | `PARTITION BY` for `gen`, `replace`, `egen`, `keep if`, `drop if`; `bysort` sorts first and leaves the view sorted, `by` needs that order |
+| `parqit xtset panelvar timevar [, delta()]` / `parqit tsset` | declares the panel and time variables; `L.` `F.` `D.` `S.` then compile to `RANGE` windows by time (a gap gives missing, as native), `tin()`/`twithin()` to time filters |
 | `parqit rename (old) (new)` | column alias |
 | `parqit order <varlist>` | column order |
 | `parqit sort <varlist>` / `parqit gsort [-]<varlist>` | `ORDER BY` |
-| `parqit collapse (stat) v ... , by()` | `GROUP BY` + aggregates (mean/sum/sd/median/pXX/count/min/max/first/last/firstnm/lastnm) |
-| `parqit contract <varlist> [, freq()]` | grouped counts |
-| `parqit duplicates drop [varlist] [, force]` | `DISTINCT` / dedup |
+| `parqit collapse (stat) v ... [if] , by()` | `GROUP BY` + aggregates: every native statistic (mean sum rawsum sd semean sebinomial sepoisson median pXX iqr count percent min max first last firstnm lastnm) |
+| `parqit contract <varlist> [if] [, freq()]` | grouped counts |
+| `parqit duplicates drop [varlist] [if] [, force]` | `DISTINCT` / dedup (with `if`, inside the condition only) |
 | `parqit keep in <range>` / `parqit drop in <range>` | validated `LIMIT/OFFSET` and its complement (`f`/`l` and negative bounds accepted) |
 | `parqit sample # [, count seed()]` | globally rounded percentage sample, or reservoir rows with `count`; seeded reproducibility requires stable inputs/settings |
 | `parqit sample # [if] [, count seed() by() cluster() any all generate()]` | sampling designs after `sample2` (see [Sampling designs](#sampling-designs)): `if` frame, strata, whole clusters, and an indicator instead of dropping |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
-| `parqit pivot (stat) v ... , rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
+| `parqit pivot (stat) v ... [if], rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
 
 ### Sampling designs
 
@@ -944,8 +957,8 @@ the view without replacing the current dataset.
 
 | Command | Effect |
 |---|---|
-| `parqit collect [, clear int64(refuse|round|string)]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). `int64()` decides what happens to a column whose integers exceed 2^53 (default: refuse); it overrides the value the view was opened with. |
-| `parqit save <dest> [, replace data partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource xmissing]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open; `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree, and a refusal names what differs, variable by variable); `encoding()` names the code page for text that is not valid UTF-8 (any parqit reads; by default the session's, `windows-1252` unless `parqit set encoding`; `encoding(name, all)` for text that is valid UTF-8 by accident); `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match; `xmissing` (a memory save) preserves extended missing values `.a`–`.z` in one `int8` companion column per affected variable (`_parqit_xm_<var>`, 0 = none, 1–26 = `.a`–`.z`, listed under the `parqit.xmissing` footer key) that `parqit use`, `mergein` and `appendin` restore for every numeric storage type; the file stays ordinary Parquet for other readers. |
+| `parqit collect [, clear int64(refuse|round|string) compress]` | Execute once; stream the result into Stata's memory atomically. The view stays open (collecting again re-executes). `int64()` decides what happens to a column whose integers exceed 2^53 (default: refuse); it overrides the value the view was opened with. `compress` runs native `compress` on the loaded result before it replaces the data: lossless, so counts and integral totals become `long`/`int`/`byte` and a double mean stays double. |
+| `parqit save <dest> [, replace data view partition_by() partitions(replace\|append) compression() compression_level() chunk() encoding() copysource xmissing]` | Execute; write Parquet **without loading the result into Stata's current dataset**; `data` explicitly exports the in-memory dataset when a view is open, `view` explicitly the current view (refused when none is open); `partitions(replace)`/`partitions(append)` update an existing Hive tree partition by partition (only the partitions in the result are swapped or extended, the rest stay byte-identical; schema and `parqit.*` metadata must match the tree, and a refusal names what differs, variable by variable); `encoding()` names the code page for text that is not valid UTF-8 (any parqit reads; by default the session's, `windows-1252` unless `parqit set encoding`; `encoding(name, all)` for text that is valid UTF-8 by accident); `copysource` (with `data`) copies the unchanged file loaded by the last `parqit use ..., clear` instead of reading memory, refusing loudly unless the file's identity, names, count and sort order still match; `xmissing` (a memory save) preserves extended missing values `.a`–`.z` in one `int8` companion column per affected variable (`_parqit_xm_<var>`, 0 = none, 1–26 = `.a`–`.z`, listed under the `parqit.xmissing` footer key) that `parqit use`, `mergein` and `appendin` restore for every numeric storage type; the file stays ordinary Parquet for other readers. |
 | `parqit save <dest> using <file.sav> [, replace compression() compression_level() encoding()]` | Convert an SPSS `.sav`/`.zsav` file to Parquet with its whole dictionary, out of core, leaving the dataset in memory and the open views as they were (see [SPSS files](#spss-files-sav-zsav)); returns `r(N)`, `r(k)`, `r(filename)`, `r(source)`, `r(xmissing_vars)`, `r(encoding)`, `r(spss_encoding)`, `r(spss_compression)`. |
 | `parqit save <dest> using <file.rds\|file.RData> [, replace compression() compression_level() encoding() object()]` | Convert the data frame of an R data file to Parquet with its factors, dates, haven labels, missing-value codes and attributes, out of core and without R (see [R data files](#r-data-files-rds-rda-rdata)); `object()` names the data frame when the file holds several; returns `r(N)`, `r(k)`, `r(k_dropped)`, `r(filename)`, `r(source)`, `r(xmissing_vars)`, `r(r_object)`, `r(r_format)`, `r(r_version)`, `r(r_encoding)`, `r(r_compression)`. |
 | `parqit spssencode <strvar>, generate(<newvar>) [label(<name>) sequential]` | Labelled numeric version of a string variable read from an SPSS file (or an R file with haven labels, `char var[r_value_labels]`), from its `char var[spss_value_labels]`: the SPSS codes when they are distinct integers, otherwise 1, 2, … in code order; user-missing codes → `.a`–`.z` (see [SPSS files](#spss-files-sav-zsav)); returns `r(mode)`, `r(label)`, `r(N_labels)`, `r(N_unlabeled)` and `r(missing_map)`. |
@@ -967,6 +980,7 @@ reaching Stata:
 | `parqit misstable [summarize\|patterns]` | Missing counts and shares; pattern frequencies and percentages of the full view (≤14 vars, top 100 patterns) |
 | `parqit levelsof var [, limit()]` | Sorted distinct values → `r(levels)` (refuses beyond the cap, default 5,000) |
 | `parqit distinct [varlist] [, joint missing]` | Distinct values per variable (and of the variables jointly), as the community-contributed `distinct` (SSC) reports them: `Obs` counts the nonmissing observations; `missing` counts missing as one more value |
+| `parqit unique varlist [if] [, by(varlist)]` | The number of unique values of the varlist taken jointly, missing counting as a value, as the community-contributed `unique` (SSC) reports it (`r(unique)`, `r(sum)`, `r(N)`); with several variables a table per variable as well, with `by()` a table per group |
 | `parqit duplicates report\|list [varlist]` | Copies/observations/surplus table; the duplicated observations listed as native `duplicates list` does (Group, Obs, variables); all variables without a varlist |
 | `parqit tabstat varlist, s() [by() save]` | Statistics × variables table (`n mean sd var sum min max range median p##`); `save` returns the computed tables in `r()` |
 | `parqit correlate [varlist]` / `parqit pwcorr [varlist] [, obs sig]` | Listwise / pairwise correlations, with full returned matrices; every numeric variable without a varlist |
@@ -1259,7 +1273,10 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   `merge`'s own within-key order is not reproducible: changing only the
   physical row order of the *using* file makes native `merge m:1` return the
   master in a different order. Code that depends on `_n` or `by:` should sort
-  explicitly after collecting.
+  explicitly after collecting. The same holds for a view with no declared sort
+  once it holds window stages (`egen`, the `by` prefix, the time-series
+  operators): its rows come back in the engine's order, so declare one with
+  `parqit sort` or sort after collecting.
 - **`int64`/`uint64` values above 2^53.** These are outside Stata's
   consecutively exact integer range, so parqit conservatively **refuses
   the read by default**, even if particular larger values are representable
@@ -1343,6 +1360,22 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   rather than written as a duplicate-name file. The exact names restored in
   Stata must also remain unique; distinct existing aliases may still restore
   case-distinct Stata names.
+- **`by` prefix, subscripts and time-series operators.** `parqit by`/`bysort`
+  apply to `gen`, `replace`, `egen`, `keep if` and `drop if` only (other verbs
+  have `by()`); `x[_n-1]` and friends are positional, `L.x` and friends are by
+  time and need `parqit xtset`/`tsset` (an integer-valued time variable,
+  unique within panels, no period below `delta()`, checked with native's
+  rules when declared and not re-checked after a later verb changes it; a
+  missing time is accepted and the operators are missing on that row); a `replace` that reads its own earlier or
+  later rows is refused, since native `replace` is sequential. DuckDB's filter
+  pushdown plans the subtree under every partitioned window twice, so planning
+  grows ~1.8x per stacked window; once a view's stages hold eighteen or more
+  partitioned window terms parqit turns that optimizer off while the view is
+  current, and the view loses the row-group pruning of its own filters
+  (ASSUMPTIONS #189, #191). The window self-join optimizer is also off while
+  a view with stacked windows is current: its 1.5.3 failure on such plans is
+  fixed in the embedded 1.5.6, and the rule now stands on timing grounds
+  only.
 - **Ties in a declared sort follow the files' row order** (ORDER-CARRIER-1). A
   view over Parquet files carries each row's position in its source through the
   verbs that keep rows, so within a tie `_n`, `keep in`, `list in`, `collect`,

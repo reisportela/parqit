@@ -85,14 +85,16 @@ assert `trimrc' == 198
 capture noisily parqit gen z = subinstr(id, "1", "x", .)
 local subrc = _rc
 assert `subrc' == 198
-capture noisily parqit replace id = _n
-assert _rc == 198
-capture noisily parqit gen first = 1 if _n == 1
-assert _rc == 198
+* ROWCTX-2 (2026-10-13): _n is a window over the view's order, so replace and
+* gen's if qualifier take it; the two rows stay, the refused gens left no z
+parqit replace id = _n
+assert _rc == 0
+parqit gen first = 1 if _n == 1
+assert _rc == 0
 parqit count
 assert r(N) == 2
 parqit collect, clear
-assert _N == 2 & id[1] == 1 & id[2] == 2
+assert _N == 2 & id[1] == 1 & id[2] == 2 & first[1] == 1 & first[2] == .
 capture confirm variable z
 assert _rc == 111
 parqit close _all

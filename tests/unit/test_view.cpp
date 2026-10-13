@@ -1097,15 +1097,101 @@ TEST_CASE("CONTRACT-FREQ-1/A2-15.4: contract refuses an existing frequency varia
     CHECK(w.contract({"_freq"}, "cnt").empty());
 }
 
-TEST_CASE("egen refuses row context without changing the view") {
-    for (const char *expr : {"_n", "_N"}) {
-        View v = make_view();
-        const std::string before = v.show();
-        const std::string error = v.egen("n", "max", expr, {}, false);
-        CHECK(error.find("_n/_N are not supported in egen") != std::string::npos);
-        CHECK(error.find("__PARQIT_") == std::string::npos);
-        CHECK(v.show() == before);
-    }
+TEST_CASE("ROWCTX-2: egen computes _n/_N as helper columns before the aggregate") {
+    /* The former refusal is gone: the window terms of the argument become
+     * helper columns of a wrapped source, so the aggregate never nests a
+     * window. max(_N) over six rows is 6; max(_n) within id is the group size. */
+    View v = make_view();
+    REQUIRE(v.egen("n", "max", "_N", {}, false).empty());
+    CHECK(run_scalar("SELECT min(n) FROM (" + v.compile(false) + ")") == "6");
+    View w = make_view();
+    REQUIRE(w.sort({"id", "year"}, {false, false}).empty());
+    REQUIRE(w.egen("k", "max", "_n", {"id"}, false).empty());
+    CHECK(run_scalar("SELECT max(k) || '/' || min(k) FROM (" + w.compile(false) + ")") == "2/2");
+    CHECK(w.show().find("__PARQIT_") == std::string::npos);
+}
+
+TEST_CASE("WINDOW-NEST-1: stacked egen mode() plans run once window_self_join is off") {
+    /* DuckDB 1.5.3's window_self_join optimizer breaks a whole-partition
+     * window aggregate that consumes another window's column (mode: the
+     * frequency, then its maximum, then the modal values): the bind probe
+     * passes, the full result fails with an INTERNAL error. The view flags
+     * such plans and the plugin disables that optimizer while they are
+     * current; here the session is switched directly. Two stacked stages
+     * reproduce the failure. The modes: 3 overall (three 3s, two 5s), 3 in
+     * the first group and 5 in the second. */
+    View v;
+    std::vector<ViewCol> cols;
+    for (const char *n : {"g", "r"}) { ViewCol c; c.name = n; c.kind = 'n'; cols.push_back(c); }
+    v.open("SELECT * FROM (VALUES (1, 3), (1, 3), (1, 4), (1, NULL), (2, 5), (2, 5), (2, 3)) t(g, r)",
+           cols, nlohmann::json::object(), nlohmann::json::object(), "", "mode fixture");
+    View::EgenSpec a;
+    a.name = "m1"; a.fcn = "mode"; a.vars = {"r"};
+    REQUIRE(v.egen(a, false).empty());
+    View::EgenSpec b = a;
+    b.name = "m2"; b.by = {"g"};
+    REQUIRE(v.egen(b, false).empty());
+    CHECK(v.fragile_windows());
+    Session &s = Session::instance();
+    std::string err;
+    REQUIRE(s.set_window_self_join(false, &err));
+    CHECK(run_scalar("SELECT min(m1) || '/' || max(m1) || '/' || count(m1) FROM (" + v.compile(false) + ")") ==
+          "3/3/7");
+    CHECK(run_scalar("SELECT string_agg(CAST(m2 AS VARCHAR), ',' ORDER BY g, r NULLS LAST) FROM (" +
+                     v.compile(false) + ")") == "3,3,3,3,5,5,5");
+    REQUIRE(s.set_window_self_join(true, &err));
+    /* DUCKDB-156: the pinned DuckDB (1.5.6) runs the same plan with the
+     * optimizer on — it no longer rewrites a window over a window — so the
+     * plugin's rule (off for a view with stacked windows) now stands on
+     * timing grounds only; a DuckDB bump that regresses to 1.5.3's INTERNAL
+     * error fails here */
+    CHECK(run_scalar("SELECT min(m1) || '/' || max(m1) || '/' || count(m1) FROM (" + v.compile(false) + ")") ==
+          "3/3/7");
+    CHECK(run_scalar("SELECT string_agg(CAST(m2 AS VARCHAR), ',' ORDER BY g, r NULLS LAST) FROM (" +
+                     v.compile(false) + ")") == "3,3,3,3,5,5,5");
+    /* one single-level window keeps the optimizer; a second window stage
+     * turns it off (12 stacked means planned in 2.5 s with it, 0.016 s without) */
+    View w = make_view();
+    REQUIRE(w.egen("m", "mean", "wage", {"id"}, false).empty());
+    CHECK_FALSE(w.fragile_windows());
+    REQUIRE(w.egen("m2", "max", "wage", {"id"}, false).empty());
+    CHECK(w.fragile_windows());
+    CHECK_FALSE(w.heavy_filter_pushdown());
+    /* filter pushdown doubles the planning work under every partitioned
+     * window (16 means 0.05 s, 20 means 0.6 s, 30 never finish): the view
+     * counts the partitioned window terms and flags the optimizer off from
+     * the 18th; a merge with such a using view inherits the count */
+    CHECK(w.window_terms() == 2);
+    for (int k = 3; k <= View::kHeavyWindowTerms - 1; k++)
+        REQUIRE(w.egen("m" + std::to_string(k), "mean", "wage", {"id"}, false).empty());
+    CHECK(w.window_terms() == View::kHeavyWindowTerms - 1);
+    CHECK_FALSE(w.heavy_filter_pushdown());
+    REQUIRE(w.egen("mlast", "mean", "wage", {"id"}, false).empty());
+    CHECK(w.heavy_filter_pushdown());
+    View::UsingSide u;
+    u.select_sql = w.compile(true);
+    u.cols = w.cols();
+    u.window_terms = w.window_terms();
+    View m = make_view();
+    CHECK_FALSE(m.heavy_filter_pushdown());
+    std::vector<std::string> warnings;
+    REQUIRE(m.append_with({u}, "", &warnings).empty());
+    CHECK(m.heavy_filter_pushdown());
+    /* the using plan is embedded in the append stage's text: counted there,
+     * once (not again from u.window_terms, which serves the plugin's probes) */
+    CHECK(m.window_terms() == w.window_terms());
+    /* the counter reads any spelling a raw fragment may use, and no other */
+    CHECK(View::count_window_terms("sum(x) OVER (PARTITION BY g ORDER BY t)") == 1);
+    CHECK(View::count_window_terms("sum(x) over(partition by g), avg(y) OVER ( Partition BY g )") == 2);
+    CHECK(View::count_window_terms("row_number() OVER (ORDER BY t), count(*) OVER ()") == 0);
+    CHECK(View::count_window_terms("recover (partition by g), 'OVER (PARTITION BY' AS s") == 1);
+    /* a raw scan's own windows count from the start */
+    View r;
+    std::vector<ViewCol> rc;
+    for (const char *n : {"g", "x"}) { ViewCol c; c.name = n; c.kind = 'n'; rc.push_back(c); }
+    r.open("SELECT g, x, sum(x) OVER (PARTITION BY g) AS sx FROM (VALUES (1, 2), (1, 3)) t(g, x)",
+           rc, nlohmann::json::object(), nlohmann::json::object(), "", "raw");
+    CHECK(r.window_terms() == 1);
 }
 
 TEST_CASE("KEYFOLD-1: one missing-key rule for the join and its contracts") {

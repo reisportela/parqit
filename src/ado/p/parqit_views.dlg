@@ -1,7 +1,7 @@
 /*
   parqit view - Manage views, run DuckDB SQL, and set engine options
 
-*!  VERSION 0.3.3  05oct2026
+*!  VERSION 0.4.0  13oct2026
 
   User > parqit > Views, SQL, and engine settings...
   Launch directly with:  db parqit_views      (menu installed by: parqit menu)
@@ -178,6 +178,8 @@ BEGIN
 	Copy a view into a new view (use ... using view:)
 	Open a view from a DuckDB SQL query (sql)
 	Add a SQL fragment to the pipeline (query)
+	Declare panel and time variables (xtset)
+	Declare a time variable (tsset)
 	Set missing-value mode (set statamissing)
 	Set integer precision (set int64)
 	Set the code page of undeclared text (set encoding)
@@ -197,6 +199,8 @@ BEGIN
 	copy
 	sql
 	query
+	xtset
+	tsset
 	statamissing
 	int64
 	encoding
@@ -216,6 +220,8 @@ BEGIN
 	script op_copy
 	script op_sql
 	script op_query
+	script op_xtset
+	script op_tsset
 	script op_statamissing
 	script op_int64
 	script op_encoding
@@ -288,6 +294,31 @@ BEGIN
 	main.tx_value.enable
 	main.tx_value.setlabel "Name of the new view:"
 	main.ed_newname.show
+END
+
+SCRIPT op_xtset
+BEGIN
+	script all_off
+	main.tx_name.enable
+	main.ed_name.enable
+	main.tx_name.setlabel "Panel variable:"
+	main.tx_cmd.enable
+	main.ed_cmd.enable
+	main.tx_cmd.setlabel "Time variable (integer-valued; L. F. D. S. work by time):"
+	main.tx_value.enable
+	main.tx_value.setlabel "Delta, periods between observations (optional):"
+	main.ed_value.show
+END
+
+SCRIPT op_tsset
+BEGIN
+	script all_off
+	main.tx_cmd.enable
+	main.ed_cmd.enable
+	main.tx_cmd.setlabel "Time variable (integer-valued; L. F. D. S. work by time):"
+	main.tx_value.enable
+	main.tx_value.setlabel "Delta, periods between observations (optional):"
+	main.ed_value.show
 END
 
 SCRIPT op_sql
@@ -473,6 +504,25 @@ BEGIN
 		require main.ed_sql
 		put "parqit query "
 		put /smartquote main.ed_sql
+	}
+	if main.lb_op.equals("xtset") {
+		require main.ed_name
+		require main.ed_cmd
+		put "parqit xtset " main.ed_name " " main.ed_cmd
+		beginoptions
+			if main.ed_value {
+				put "delta(" main.ed_value ")"
+			}
+		endoptions
+	}
+	if main.lb_op.equals("tsset") {
+		require main.ed_cmd
+		put "parqit tsset " main.ed_cmd
+		beginoptions
+			if main.ed_value {
+				put "delta(" main.ed_value ")"
+			}
+		endoptions
 	}
 	if main.lb_op.equals("statamissing") {
 		put "parqit set statamissing " main.cb_sm

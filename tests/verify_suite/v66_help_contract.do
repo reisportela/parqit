@@ -6,8 +6,9 @@
 *   - lazy `parqit merge` takes only keep/keepusing/generate/nogenerate;
 *   - `parqit correlate` takes no options, `parqit pwcorr` takes obs/sig;
 *   - save's r(ext_missing)/r(frac_dates) exist only when a loss occurred;
-*   - _n/_N: keep if/drop if and gen's main expression yes; gen's if qualifier,
-*     replace, and the read-only count if/list if filters no;
+*   - _n/_N: keep if/drop if, gen (expression and if qualifier), replace and
+*     egen yes (ROWCTX-2, 2026-10-13); the read-only count if/list if
+*     filters no;
 *   - `using` may be omitted from `parqit use` when no varlist is given.
 clear all
 set more off
@@ -100,16 +101,24 @@ assert _rc == 0
 parqit count
 assert r(N) == 12
 
-* refused: _n inside gen's if qualifier, and anywhere in replace
-capture parqit gen double bad = wage if _n > 3
-assert _rc == 198
-capture parqit replace wage = _n
-assert _rc == 198
-capture parqit replace wage = wage if _n > 3
-assert _rc == 198
-* the refusals left the view exactly as it was
+* ROWCTX-2 (2026-10-13): gen's if qualifier and replace take _n too, as the
+* help now says; the values follow the view's order (sorted by id)
+parqit gen double bad = wage if _n > 3
+assert _rc == 0
+parqit gen double w2 = wage
+parqit replace w2 = _n
+assert _rc == 0
+parqit replace w2 = w2 + 100 if _n > 3
+assert _rc == 0
 parqit count
 assert r(N) == 12
+parqit collect, clear
+sort id
+assert missing(bad[3]) & bad[4] == wage[4] & w2[3] == 3 & w2[4] == 104 & w2[12] == 112
+parqit close _all
+parqit use using `"`master'"'
+parqit sort id
+parqit keep if _n <= 12
 
 * refused: the read-only stats filters. These used to escape as the engine's
 * rc 920 with a raw Binder Error naming __PARQIT_ROW__; ROWCTX-1 made the

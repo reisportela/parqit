@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -11,6 +12,7 @@
 #include <sstream>
 #include <vector>
 
+#include "engine/datefn.hpp"
 #include "engine/session.hpp" /* quote_ident / quote_literal / dtoa */
 #include "engine/typemap.hpp" /* kStataMissThreshold */
 
@@ -23,6 +25,8 @@ namespace {
 enum class Tok {
     End, Num, MissingDot, String, Ident, SysN, SysBigN,
     LParen, RParen, Comma,
+    LBracket, RBracket, /* ROWCTX-2: explicit subscripts x[_n-1] */
+    TsVar,              /* TSSET-1: L2D.x — text is "ops.name" */
     Or, And, Not,
     Eq, Ne, Lt, Gt, Le, Ge,
     Plus, Minus, Star, Slash, Caret,
@@ -33,6 +37,20 @@ struct Token {
     std::string text;   /* ident name / string payload / number literal */
     size_t pos = 0;
 };
+
+/* TSSET-1: "L", "l2", "LD", "F3", "S12", "L2D" ... — operators L F D S, each
+ * followed by an optional count; anything else is an ordinary identifier */
+static bool is_ts_ops(const std::string &t) {
+    if (t.empty()) return false;
+    size_t i = 0;
+    while (i < t.size()) {
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(t[i])));
+        if (c != 'L' && c != 'F' && c != 'D' && c != 'S') return false;
+        i++;
+        while (i < t.size() && std::isdigit(static_cast<unsigned char>(t[i]))) i++;
+    }
+    return true;
+}
 
 struct Lexer {
     const std::string &s;
@@ -144,6 +162,19 @@ struct Lexer {
             size_t j = i;
             while (j < s.size() && ident_char(static_cast<unsigned char>(s[j]))) j++;
             tok.text = s.substr(i, j - i);
+            /* TSSET-1: Stata's time-series operators — a run of L F D S, each
+             * with an optional lag count, then a period and the variable:
+             * L.x L2.x F.x D.x S4.x LD.x L2D.x (lowercase accepted). A plain
+             * variable is never followed by `.name`, so the form is unambiguous. */
+            if (j + 1 < s.size() && s[j] == '.' &&
+                ident_start(static_cast<unsigned char>(s[j + 1])) && is_ts_ops(tok.text)) {
+                size_t k = j + 1;
+                while (k < s.size() && ident_char(static_cast<unsigned char>(s[k]))) k++;
+                tok.t = Tok::TsVar;
+                tok.text = tok.text + "." + s.substr(j + 1, k - j - 1);
+                i = k;
+                return tok;
+            }
             i = j;
             if (tok.text == "_n") tok.t = Tok::SysN;
             else if (tok.text == "_N") tok.t = Tok::SysBigN;
@@ -177,6 +208,8 @@ struct Lexer {
         case '>': tok.t = Tok::Gt; i++; return tok;
         case '(': tok.t = Tok::LParen; i++; return tok;
         case ')': tok.t = Tok::RParen; i++; return tok;
+        case '[': tok.t = Tok::LBracket; i++; return tok;
+        case ']': tok.t = Tok::RBracket; i++; return tok;
         case ',': tok.t = Tok::Comma; i++; return tok;
         case '+': tok.t = Tok::Plus; i++; return tok;
         case '-': tok.t = Tok::Minus; i++; return tok;
@@ -385,6 +418,21 @@ struct Parser {
     /* ROWCTX-1: set when _n/_N is consumed, so the caller can tell whether the
      * emitted SQL still needs the view compiler's row-context substitution. */
     bool used_rowctx = false;
+    /* ROWCTX-2: the window terms behind the placeholders (see WindowTerm);
+     * identical windows share one placeholder */
+    std::vector<WindowTerm> wins;
+    std::string add_window(const std::string &sql, const std::string &fixed_name = "") {
+        for (const auto &w : wins)
+            if (w.sql == sql) return w.placeholder;
+        WindowTerm w;
+        w.placeholder = fixed_name.empty()
+                            ? "__PARQIT_WIN_" + std::to_string(wins.size() + 1) + "__"
+                            : fixed_name;
+        w.sql = sql;
+        wins.push_back(w);
+        used_rowctx = true;
+        return w.placeholder;
+    }
 
     /* STATAMISS-WARN-1: analysis state, filled only when `collect` is set (by
      * missing_rule_differences); a translating Parser never reads it, so the
@@ -651,6 +699,157 @@ struct Parser {
     /* function call: name already consumed */
     bool call(const std::string &fname, Val *out);
 
+    /* ROWCTX-2: explicit subscripting, Stata's positional access within the
+     * current order (and by groups): x[_n-1] x[_n+2] x[1] x[_N] x[_N-1]. These
+     * are the positional neighbours — SQL's lag/lead — not the time-series
+     * operators (L. is by time; see ts_operator). A position outside 1.._N is
+     * missing, as in Stata. The integer offset is a literal; any other
+     * subscript is refused loudly rather than guessed. */
+    bool subscript(const std::string &name, Val *out) {
+        advance(); /* [ */
+        const std::string ref = quote_ident(name);
+        const char *what = "subscript must be _n, _n+#, _n-#, #, _N or _N-#";
+        auto integer_literal = [&](long long *k) {
+            if (cur.t != Tok::Num) return false;
+            double v = 0;
+            if (!atod(cur.text, &v) || v != std::trunc(v) || std::fabs(v) > 1e15) return false;
+            *k = static_cast<long long>(v);
+            advance();
+            return true;
+        };
+        std::string sql;
+        if (cur.t == Tok::SysN || cur.t == Tok::SysBigN) {
+            const bool bigN = cur.t == Tok::SysBigN;
+            advance();
+            long long off = 0;
+            if (cur.t == Tok::Plus || cur.t == Tok::Minus) {
+                const bool minus = cur.t == Tok::Minus;
+                advance();
+                long long k = 0;
+                if (!integer_literal(&k) || k < 0) return fail(what);
+                off = minus ? -k : k;
+            }
+            if (!bigN) {
+                if (off == 0) sql = ref;
+                else if (off < 0)
+                    sql = add_window("lag(" + ref + ", " + std::to_string(-off) +
+                                     ") __PARQIT_OVER_ORD__");
+                else
+                    sql = add_window("lead(" + ref + ", " + std::to_string(off) +
+                                     ") __PARQIT_OVER_ORD__");
+            } else {
+                if (off > 0) sql = "NULL"; /* beyond the last observation */
+                else if (off == 0)
+                    sql = add_window("last_value(" + ref + ") __PARQIT_OVER_FULL__");
+                else
+                    sql = add_window("nth_value(" + ref + ", " + std::to_string(-off + 1) +
+                                     ") __PARQIT_OVER_FULL_DESC__");
+            }
+        } else {
+            bool neg = false;
+            if (cur.t == Tok::Minus) { neg = true; advance(); }
+            long long k = 0;
+            if (!integer_literal(&k)) return fail(what);
+            if (neg || k < 1) sql = "NULL"; /* before the first observation */
+            else sql = add_window("nth_value(" + ref + ", " + std::to_string(k) +
+                                  ") __PARQIT_OVER_FULL__");
+        }
+        if (!expect(Tok::RBracket, "] after the subscript")) return false;
+        out->sql = sql;
+        computed(out); /* a neighbour's value is not the bare column */
+        return true;
+    }
+
+    /* TSSET-1: L#. F#. D#. S#. and their products, by TIME, not by position:
+     * L2.x at t is x at t - 2*delta when that observation exists in the panel,
+     * missing otherwise — a RANGE window picks exactly that row, so a gap in
+     * the panel gives missing, as native Stata does, where a positional
+     * lag(x, 2) would silently return the wrong period. The operator chain is
+     * expanded as a polynomial in L (F = L^-1, D = 1 - L, S# = 1 - L^#): each
+     * power j becomes one window term, and the result is their signed sum,
+     * which is missing whenever a term is missing. */
+    bool ts_operator(const std::string &text, Val *out) {
+        const size_t dot = text.find('.');
+        const std::string ops = text.substr(0, dot), name = text.substr(dot + 1);
+        if (schema.ts_time.empty())
+            return fail(ops + "." + name + ": the time-series operators need the panel "
+                        "and time variables; declare them with parqit xtset or parqit tsset");
+        auto it = schema.kinds.find(name);
+        if (it == schema.kinds.end())
+            return fail("variable " + name + " not found in the view");
+        if (it->second == 's') return fail(ops + "." + name + " needs a numeric variable");
+        if (name == schema.ts_time || name == schema.ts_panel)
+            return fail(ops + "." + name + ": the time and panel variables cannot be lagged");
+        std::map<long long, double> poly{{0, 1.0}};
+        size_t i = 0;
+        while (i < ops.size()) {
+            const char op = static_cast<char>(std::toupper(static_cast<unsigned char>(ops[i++])));
+            long long k = 0;
+            bool has = false;
+            while (i < ops.size() && std::isdigit(static_cast<unsigned char>(ops[i]))) {
+                k = k * 10 + (ops[i++] - '0');
+                has = true;
+            }
+            if (!has) k = 1;
+            if (k < 0 || k > 10000) return fail(ops + ".: lag count out of range");
+            std::map<long long, double> next;
+            if (op == 'L' || op == 'F') {
+                const long long shift = op == 'L' ? k : -k;
+                for (const auto &t : poly) next[t.first + shift] += t.second;
+            } else if (op == 'D') {
+                next = poly;
+                for (long long r = 0; r < k; r++) { /* (1 - L)^k */
+                    std::map<long long, double> d;
+                    for (const auto &t : next) {
+                        d[t.first] += t.second;
+                        d[t.first + 1] -= t.second;
+                    }
+                    next = d;
+                }
+            } else { /* S#: 1 - L^k */
+                for (const auto &t : poly) {
+                    next[t.first] += t.second;
+                    next[t.first + k] -= t.second;
+                }
+            }
+            poly = next;
+        }
+        const std::string ref = quote_ident(name);
+        std::vector<std::pair<double, std::string>> terms;
+        for (const auto &t : poly) {
+            if (t.second == 0) continue;
+            std::string term;
+            if (t.first == 0) term = ref;
+            else {
+                const double off = std::fabs(static_cast<double>(t.first)) * schema.ts_delta;
+                const char *dir = t.first > 0 ? "PRECEDING" : "FOLLOWING";
+                std::string over = "OVER (";
+                if (!schema.ts_panel.empty())
+                    over += "PARTITION BY " + quote_ident(schema.ts_panel) + " ";
+                over += "ORDER BY " + quote_ident(schema.ts_time) + " RANGE BETWEEN " +
+                        dtoa(off) + " " + dir + " AND " + dtoa(off) + " " + dir + ")";
+                /* a row whose time is missing has no lag or lead (native);
+                 * the RANGE frame of a dated row never reaches such rows */
+                term = "(CASE WHEN " + quote_ident(schema.ts_time) + " IS NULL THEN NULL ELSE " +
+                       add_window("max(" + ref + ") " + over) + " END)";
+            }
+            terms.emplace_back(t.second, term);
+        }
+        if (terms.empty()) out->sql = "0"; /* an identity such as S0. */
+        else if (terms.size() == 1 && terms[0].first == 1.0)
+            out->sql = terms[0].second; /* L#.x, F#.x or the variable itself */
+        else {
+            std::string sum;
+            for (size_t k = 0; k < terms.size(); k++)
+                sum += std::string(k ? " + " : "") + "(" + dtoa(terms[k].first) +
+                       " * __parqit_double(" + terms[k].second + "))";
+            out->sql = "parqit_finite(" + sum + ")";
+        }
+        out->kind = 'n';
+        computed(out);
+        return true;
+    }
+
     bool primary(Val *out) {
         if (!error.empty()) return false;
         switch (cur.t) {
@@ -703,17 +902,22 @@ struct Parser {
             advance();
             return true;
         case Tok::SysN:
-            out->sql = "__PARQIT_ROW__"; /* resolved by the view compiler */
+            /* resolved by the view compiler: row_number() over the by groups
+             * and the current order (ROWCTX-2 keeps the ROWCTX-1 token) */
+            out->sql = add_window("row_number() __PARQIT_OVER_ORD__", "__PARQIT_ROW__");
             out->kind = 'n';
-            used_rowctx = true;
             advance();
             return true;
         case Tok::SysBigN:
-            out->sql = "__PARQIT_NROWS__";
+            out->sql = add_window("count(*) __PARQIT_OVER_PART__", "__PARQIT_NROWS__");
             out->kind = 'n';
-            used_rowctx = true;
             advance();
             return true;
+        case Tok::TsVar: {
+            const std::string text = cur.text;
+            advance();
+            return ts_operator(text, out);
+        }
         case Tok::LParen: {
             advance();
             if (!or_expr(out)) return false;
@@ -738,10 +942,12 @@ struct Parser {
             auto it = schema.kinds.find(name);
             if (it == schema.kinds.end())
                 return fail("variable " + name + " not found in the view");
-            out->sql = quote_ident(name);
+            const auto ov = schema.column_sql.find(name); /* USE-IF-1 */
+            out->sql = ov == schema.column_sql.end() ? quote_ident(name) : ov->second;
             out->kind = it->second == 's' ? 's' : 'n';
             out->col = name; /* MISS-1: remember this is a bare column ref */
             out->float32 = schema.float_columns.count(name) != 0;
+            if (cur.t == Tok::LBracket) return subscript(name, out);
             return true;
         }
         default:
@@ -983,8 +1189,96 @@ struct Parser {
     }
 };
 
+/* TSSET-1: a bound of tin()/twithin(): a number, or a date literal written the
+ * way the time variable's format displays it (td: 1jan2020; tm: 2020m1; tq;
+ * th; tw; ty: 2020; tc/tC: 1jan2020 10:30:00) */
+static bool parse_time_bound(const std::string &raw, const std::string &fmt, long long *out,
+                             std::string *why) {
+    std::string t;
+    for (char c : raw)
+        if (c != ' ' && c != '\t') t.push_back(c);
+    double v = 0;
+    if (!t.empty() && atod(t, &v) && std::isfinite(v)) {
+        *out = static_cast<long long>(v);
+        if (static_cast<double>(*out) != v) {
+            *why = "a whole number";
+            return false;
+        }
+        return true;
+    }
+    int y = 0, m = 0, d = 0, n = 0;
+    const std::string f = fmt.size() >= 3 ? fmt.substr(0, 3) : "";
+    if (f == "%td") {
+        if (!parse_dmy(raw, &d, &m, &y)) { *why = "ddmonyyyy"; return false; }
+        *out = stata_days(y, m, d);
+        return true;
+    }
+    if (f == "%tm" || f == "%tq" || f == "%th" || f == "%tw") {
+        const char sep = f[2];
+        const int maxn = sep == 'm' ? 12 : sep == 'q' ? 4 : sep == 'h' ? 2 : 52;
+        if (!parse_period(raw, sep, maxn, &y, &n)) {
+            *why = std::string("yyyy") + sep + "#";
+            return false;
+        }
+        *out = static_cast<long long>(y - 1960) * maxn + (n - 1);
+        return true;
+    }
+    if (f == "%tc" || f == "%tC") {
+        const size_t timepos = raw.find(':');
+        const size_t cut = timepos == std::string::npos ? std::string::npos
+                                                        : raw.substr(0, timepos).rfind(' ');
+        long long ms = 0;
+        if (timepos == std::string::npos || cut == std::string::npos ||
+            !parse_dmy(raw.substr(0, cut), &d, &m, &y) || !parse_hms(raw.substr(cut + 1), &ms)) {
+            *why = "ddmonyyyy hh:mm:ss";
+            return false;
+        }
+        *out = stata_days(y, m, d) * 86400000LL + ms;
+        return true;
+    }
+    *why = "a number";
+    return false;
+}
+
 bool Parser::call(const std::string &fname, Val *out) {
     *out = Val{};
+    /* TSSET-1: tin(a, b) / twithin(a, b) on the declared time variable; the
+     * bounds are literals (a number, or a date written as the time variable's
+     * format displays it), consumed as raw text like the date literals */
+    if (fname == "tin" || fname == "twithin") {
+        if (schema.ts_time.empty())
+            return fail(fname + "(): declare the time variable first with parqit tsset "
+                        "or parqit xtset");
+        size_t start = cur.pos, depth = 1, j = start;
+        while (j < src.size() && depth > 0) {
+            if (src[j] == '(') depth++;
+            else if (src[j] == ')') depth--;
+            if (depth == 0) break;
+            j++;
+        }
+        if (depth != 0) return fail("unterminated " + fname + "()");
+        const std::string raw = src.substr(start, j - start);
+        lex.i = j + 1;
+        advance();
+        const size_t comma = raw.find(',');
+        if (comma == std::string::npos) return fail(fname + "() takes two bounds");
+        long long lo = 0, hi = 0;
+        std::string why;
+        if (!parse_time_bound(raw.substr(0, comma), schema.ts_time_fmt, &lo, &why) ||
+            !parse_time_bound(raw.substr(comma + 1), schema.ts_time_fmt, &hi, &why))
+            return fail(fname + "(): each bound must be " + why +
+                        " (the time variable's format is " +
+                        (schema.ts_time_fmt.empty() ? std::string("numeric") : schema.ts_time_fmt) +
+                        ")");
+        const std::string t = quote_ident(schema.ts_time);
+        const std::string a = std::to_string(lo), b = std::to_string(hi);
+        /* a missing time is outside any interval (native: 0, not missing) */
+        out->sql = fname == "tin"
+                       ? "coalesce(" + t + " >= " + a + " AND " + t + " <= " + b + ", FALSE)"
+                       : "coalesce(" + t + " > " + a + " AND " + t + " < " + b + ", FALSE)";
+        out->kind = 'b';
+        return true;
+    }
     /* ---- date/time literal pseudofunctions: consume raw text to ')' ---- */
     if (fname == "td" || fname == "tm" || fname == "tq" || fname == "th" ||
         fname == "tw" || fname == "ty" || fname == "tc" || fname == "tC") {
@@ -1534,6 +1828,188 @@ bool Parser::call(const std::string &fname, Val *out) {
         return true;
     }
 
+    /* ---- DATEFN-1 (BPLIM feedback 2026-10-13): the rest of Stata's date and
+     * time functions. Day counts floor (DATE-2), results outside Stata's
+     * calendar are missing (DATE-DOMAIN-1), and every arithmetic is in double
+     * with the finite guard; values verified against native (nat_sem.log,
+     * nat_dates2.log). The period constructors are linear in a fractional
+     * period, as native ym(2020, 7.9) = 726.9. ---------------------------- */
+    auto nums = [&](size_t lo, size_t hi) {
+        if (!need(lo, hi)) return false;
+        for (size_t k = 0; k < args.size(); k++)
+            if (args[k].kind == 's') return fail(fname + "() needs numeric arguments");
+        return true;
+    };
+    auto fin = [&](const std::string &sql) { return "parqit_finite(" + sql + ")"; };
+    auto numeric_out = [&](const std::string &sql) {
+        out->sql = sql;
+        out->kind = 'n';
+        return true;
+    };
+    /* y + period count constructors: ym yq yh yw — missing outside 1..per */
+    if (fname == "ym" || fname == "yq" || fname == "yh" || fname == "yw") {
+        if (!nums(2, 2)) return false;
+        const int per = fname == "ym" ? 12 : fname == "yq" ? 4 : fname == "yh" ? 2 : 52;
+        const std::string y = as_real(args[0]), n = as_real(args[1]);
+        return numeric_out("(CASE WHEN " + n + " >= 1 AND " + n + " < " + std::to_string(per + 1) +
+                           " AND " + y + " BETWEEN 100 AND 9999 THEN " +
+                           fin("(" + y + " - 1960) * " + std::to_string(per) + " + " + n + " - 1") +
+                           " ELSE NULL END)");
+    }
+    /* day of the first day of a period: dofq dofh dofy dofw (dofm exists) */
+    if (fname == "dofq" || fname == "dofh" || fname == "dofy" || fname == "dofw") {
+        if (!nums(1, 1)) return false;
+        const std::string v = "floor(" + as_real(args[0]) + ")";
+        if (fname == "dofy")
+            return numeric_out("(CASE WHEN " + v + " BETWEEN 100 AND 9999 THEN try(make_date(CAST(" + v +
+                               " AS INTEGER), 1, 1) - DATE '1960-01-01') ELSE NULL END)");
+        const int per = fname == "dofq" ? 4 : fname == "dofh" ? 2 : 52;
+        const std::string yr = "(1960 + CAST(floor(" + v + " / " + std::to_string(per) + ".0) AS INTEGER))";
+        const std::string idx = "CAST(" + v + " - " + std::to_string(per) + " * floor(" + v + " / " +
+                                std::to_string(per) + ".0) AS INTEGER)";
+        std::string day;
+        if (fname == "dofw")
+            day = "try(make_date(" + yr + ", 1, 1) + " + idx + " * 7 - DATE '1960-01-01')";
+        else
+            day = "try(make_date(" + yr + ", 1 + " + idx + " * " + std::to_string(12 / per) +
+                  ", 1) - DATE '1960-01-01')";
+        return numeric_out("(CASE WHEN " + yr + " BETWEEN 100 AND 9999 THEN " + day + " ELSE NULL END)");
+    }
+    /* period of a day: qofd hofd wofd (mofd, yofd exist); week, halfyear */
+    if (fname == "qofd" || fname == "hofd" || fname == "wofd" || fname == "week" ||
+        fname == "halfyear") {
+        if (!need(1, 1)) return false;
+        if (args[0].kind == 's') return fail(fname + "() needs a numeric date");
+        const std::string dd = day_arg(0);
+        /* least() ignores a NULL, so a missing date is tested first */
+        const std::string week = "(CASE WHEN " + dd + " IS NULL THEN NULL ELSE least(52, (dayofyear(" +
+                                 dd + ") - 1) // 7 + 1) END)";
+        if (fname == "week") return numeric_out(week);
+        if (fname == "halfyear")
+            return numeric_out("(CASE WHEN " + dd + " IS NULL THEN NULL WHEN month(" + dd +
+                               ") > 6 THEN 2 ELSE 1 END)");
+        if (fname == "wofd") return numeric_out("((year(" + dd + ") - 1960) * 52 + " + week + " - 1)");
+        if (fname == "qofd") return numeric_out("((year(" + dd + ") - 1960) * 4 + quarter(" + dd + ") - 1)");
+        return numeric_out("((year(" + dd + ") - 1960) * 2 + CASE WHEN month(" + dd + ") > 6 THEN 1 ELSE 0 END)");
+    }
+    /* clock arithmetic */
+    if (fname == "dofc" || fname == "dofC") {
+        if (!nums(1, 1)) return false;
+        return numeric_out(fin("floor(" + as_real(args[0]) + " / 86400000.0)"));
+    }
+    if (fname == "cofd") {
+        if (!nums(1, 1)) return false;
+        return numeric_out(fin("floor(" + as_real(args[0]) + ") * 86400000.0"));
+    }
+    if (fname == "hh" || fname == "mm" || fname == "ss") {
+        if (!nums(1, 1)) return false;
+        const std::string tod = "__parqit_mod(floor(" + as_real(args[0]) + "), 86400000.0)";
+        if (fname == "hh") return numeric_out(fin("floor(" + tod + " / 3600000.0)"));
+        if (fname == "mm") return numeric_out(fin("floor(__parqit_mod(" + tod + ", 3600000.0) / 60000.0)"));
+        return numeric_out(fin("__parqit_mod(" + tod + ", 60000.0) / 1000.0"));
+    }
+    if (fname == "hms") {
+        if (!nums(3, 3)) return false;
+        return numeric_out(fin(as_real(args[0]) + " * 3600000.0 + " + as_real(args[1]) + " * 60000.0 + " +
+                               as_real(args[2]) + " * 1000.0"));
+    }
+    if (fname == "dhms") {
+        if (!nums(4, 4)) return false;
+        return numeric_out(fin("floor(" + as_real(args[0]) + ") * 86400000.0 + " + as_real(args[1]) +
+                               " * 3600000.0 + " + as_real(args[2]) + " * 60000.0 + " + as_real(args[3]) +
+                               " * 1000.0"));
+    }
+    if (fname == "mdyhms") {
+        if (!nums(6, 6)) return false;
+        const std::string yy = "floor(" + as_num(args[2]) + ")", mm = "floor(" + as_num(args[0]) + ")",
+                          dd = "floor(" + as_num(args[1]) + ")";
+        const std::string day = "(CASE WHEN " + yy + " BETWEEN 100 AND 9999 AND " + mm +
+                                " BETWEEN 1 AND 12 AND " + dd + " BETWEEN 1 AND 31 THEN try(make_date(CAST(" +
+                                yy + " AS INTEGER), CAST(" + mm + " AS INTEGER), CAST(" + dd +
+                                " AS INTEGER)) - DATE '1960-01-01') ELSE NULL END)";
+        return numeric_out(fin("__parqit_double(" + day + ") * 86400000.0 + " + as_real(args[3]) +
+                               " * 3600000.0 + " + as_real(args[4]) + " * 60000.0 + " + as_real(args[5]) +
+                               " * 1000.0"));
+    }
+    if (fname == "hours" || fname == "minutes" || fname == "seconds") {
+        if (!nums(1, 1)) return false;
+        const char *div = fname == "hours" ? "3600000.0" : fname == "minutes" ? "60000.0" : "1000.0";
+        return numeric_out(fin(as_real(args[0]) + " / " + div));
+    }
+    if (fname == "msofhours" || fname == "msofminutes" || fname == "msofseconds") {
+        if (!nums(1, 1)) return false;
+        const char *mul = fname == "msofhours" ? "3600000.0" : fname == "msofminutes" ? "60000.0" : "1000.0";
+        return numeric_out(fin(as_real(args[0]) + " * " + mul));
+    }
+    /* calendar differences: datediff(d1, d2, "unit"), age(dob, d) — full
+     * units, the day of the month deciding (31jan to 29feb is 0 months) */
+    if (fname == "datediff" || fname == "age") {
+        if (fname == "datediff") {
+            if (!need(3, 3)) return false;
+            if (args[2].kind != 's' || args[2].sql.empty() || args[2].sql[0] != '\'')
+                return fail("datediff(): the unit must be a string literal: \"day\", \"month\" or \"year\"");
+        } else if (!need(2, 2)) return false;
+        if (args[0].kind == 's' || args[1].kind == 's') return fail(fname + "() needs numeric dates");
+        const std::string a = day_arg(0), b = day_arg(1);
+        std::string unit = "year";
+        if (fname == "datediff") {
+            std::string u = args[2].sql.substr(1, args[2].sql.size() - 2);
+            for (auto &ch : u) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (u == "d" || u == "day" || u == "days") unit = "day";
+            else if (u == "m" || u == "month" || u == "months") unit = "month";
+            else if (u == "y" || u == "year" || u == "years") unit = "year";
+            else return fail("datediff(): the unit must be \"day\", \"month\" or \"year\"");
+        }
+        if (unit == "day") return numeric_out(fin(as_real(args[1]) + " - " + as_real(args[0])));
+        /* full months from the earlier date to the later one: months apart,
+         * one fewer when the later day of the month has not reached the
+         * earlier's; negative when d2 precedes d1 (native: the same count
+         * taken the other way round, negated); age() is missing then */
+        auto months_from = [&](const std::string &x, const std::string &y) {
+            return "((year(" + y + ") - year(" + x + ")) * 12 + month(" + y + ") - month(" + x +
+                   ") - CASE WHEN day(" + y + ") < day(" + x + ") THEN 1 ELSE 0 END)";
+        };
+        const std::string fwd = months_from(a, b), back = months_from(b, a);
+        const std::string before = "(" + as_real(args[1]) + " < " + as_real(args[0]) + ")";
+        if (fname == "age")
+            return numeric_out("(CASE WHEN " + before + " THEN NULL ELSE " +
+                               fin("__parqit_double(CAST(floor(" + fwd + " / 12.0) AS INTEGER))") + " END)");
+        if (unit == "month")
+            return numeric_out("(CASE WHEN " + before + " THEN " + fin("-__parqit_double(" + back + ")") +
+                               " ELSE " + fin("__parqit_double(" + fwd + ")") + " END)");
+        return numeric_out("(CASE WHEN " + before + " THEN " +
+                           fin("-__parqit_double(CAST(floor(" + back + " / 12.0) AS INTEGER))") + " ELSE " +
+                           fin("__parqit_double(CAST(floor(" + fwd + " / 12.0) AS INTEGER))") + " END)");
+    }
+    /* text readers: date daily clock monthly quarterly halfyearly weekly yearly */
+    if (fname == "date" || fname == "daily" || fname == "clock" || fname == "monthly" ||
+        fname == "quarterly" || fname == "halfyearly" || fname == "weekly" || fname == "yearly") {
+        const bool reads_top = fname == "date" || fname == "daily" || fname == "clock";
+        if (!need(2, reads_top ? 3 : 2)) return false;
+        if (args[0].kind != 's') return fail(fname + "() reads a string; use string() to convert a number");
+        if (args[1].kind != 's' || args[1].sql.empty() || args[1].sql[0] != '\'')
+            return fail(fname + "(): the mask must be a string literal, such as \"DMY\"");
+        /* undo quote_literal for the translate-time check of the mask */
+        std::string mask;
+        for (size_t k = 1; k + 1 < args[1].sql.size(); k++) {
+            if (args[1].sql[k] == '\'' && k + 2 < args[1].sql.size() && args[1].sql[k + 1] == '\'') k++;
+            mask.push_back(args[1].sql[k]);
+        }
+        const char kind = fname == "clock" ? 'c' : fname == "monthly" ? 'm' : fname == "quarterly" ? 'q'
+                        : fname == "halfyearly" ? 'h' : fname == "weekly" ? 'w' : fname == "yearly" ? 'y' : 'd';
+        const std::string merr = datefn::check_mask(mask, kind);
+        if (!merr.empty()) return fail(fname + "(): " + merr);
+        std::string top = "0";
+        if (args.size() == 3) {
+            if (args[2].kind == 's') return fail(fname + "(): topyear must be a number");
+            top = "CAST(floor(" + as_num(args[2]) + ") AS BIGINT)";
+        }
+        const std::string text = "coalesce(" + args[0].sql + ", '')";
+        if (kind == 'd') return numeric_out("__parqit_date(" + text + ", " + args[1].sql + ", " + top + ")");
+        if (kind == 'c') return numeric_out("__parqit_clock(" + text + ", " + args[1].sql + ", " + top + ")");
+        return numeric_out("__parqit_period(" + text + ", " + args[1].sql + ", " + quote_literal(std::string(1, kind)) + ")");
+    }
+
     return fail("function " + fname +
                 "() is not supported in parqit expressions (yet); see help parqit "
                 "for the supported list, or use parqit sql");
@@ -1557,6 +2033,7 @@ ExprResult translate_expression(const std::string &expr, const ExprSchema &schem
     }
     r.ok = true;
     r.uses_rowctx = p.used_rowctx;
+    r.windows = p.wins; /* ROWCTX-2 */
     r.sql = v.kind == 'b'
                 ? "(CASE WHEN " + v.sql + " THEN 1 WHEN NOT (" + v.sql +
                       ") THEN 0 ELSE NULL END)"
@@ -1596,6 +2073,7 @@ ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
     r.ok = true;
     r.kind = 'b';
     r.uses_rowctx = p.used_rowctx;
+    r.windows = p.wins; /* ROWCTX-2 */
     /* Stata `keep if x`: a row is kept when x is nonzero OR missing (a missing
      * value is treated as true), matching as_bool(). */
     r.sql = (v.kind == 'b')

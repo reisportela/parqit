@@ -270,6 +270,37 @@ TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infi
     CHECK(p.transfer == Transfer::TimestampUs);
 }
 
+TEST_CASE("TIME-NS-FLOOR-1: nanosecond times of day floor to the millisecond, never round") {
+    /* CAST(TIME_NS AS TIME) rounds to the microsecond, so the last 500 ns
+     * before a millisecond boundary read one millisecond later (the last
+     * microsecond of a day became 24:00:00); the plan floors epoch_ns() in
+     * integer arithmetic (Codex review, 2026-10-13) */
+    parqit::Session &s = parqit::Session::instance();
+    std::string v, err;
+    REQUIRE(s.ensure_open());
+    ColumnPlan p = plan_for(DUCKDB_TYPE_TIME_NS, "t");
+    CHECK(p.cast_sql.find("epoch_ns(") != std::string::npos);
+    CHECK(p.transfer == Transfer::TimeUs);
+    struct Sample { const char *lit; const char *us; };
+    const Sample samples[] = {
+        {"00:00:00", "0"},
+        {"00:00:00.000999999", "0"},
+        {"10:30:45.678901234", "37845678000"},
+        {"10:30:45.678999999", "37845678000"},
+        {"23:59:59.999000000", "86399999000"},
+        {"23:59:59.999999999", "86399999000"},
+    };
+    for (const auto &smp : samples) {
+        std::string sql = p.cast_sql;
+        const std::string ref = "\"t\"";
+        size_t pos;
+        while ((pos = sql.find(ref)) != std::string::npos)
+            sql.replace(pos, ref.size(), std::string("TIME_NS '") + smp.lit + "'");
+        REQUIRE_MESSAGE(s.query_scalar("SELECT CAST(epoch_us(" + sql + ") AS VARCHAR)", &v, &err), err);
+        CHECK_MESSAGE(v == smp.us, smp.lit);
+    }
+}
+
 TEST_CASE("TS-NS-MIN-1: nanosecond floor covers every finite int64 boundary") {
     Session &s = Session::instance();
     REQUIRE(s.ensure_open());

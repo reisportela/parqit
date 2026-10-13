@@ -29,10 +29,17 @@ foreach cmd in "misstable x absent" "misstable patterns x absent" "codebook x ab
 }
 parqit count
 assert r(N) == 1
-capture noisily parqit egen z = max(_n)
+capture noisily parqit egen z = nosuchfcn(x)
 assert _rc == 198
 parqit describe
 assert r(n_steps) == 0
+quietly datasignature
+assert `"`r(datasignature)'"' == `"`signature'"'
+* ROWCTX-2 (2026-10-13): _n in an egen argument is a window over the view's
+* order, accepted; the Stata dataset is still untouched
+parqit egen z = max(_n)
+parqit describe
+assert r(n_steps) == 1
 quietly datasignature
 assert `"`r(datasignature)'"' == `"`signature'"'
 

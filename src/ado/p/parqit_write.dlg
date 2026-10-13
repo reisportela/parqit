@@ -1,7 +1,7 @@
 /*
   parqit save - Write Parquet or collect a view into memory
 
-*!  VERSION 0.3.3  05oct2026
+*!  VERSION 0.4.0  13oct2026
 
   User > parqit > Save as Parquet or collect into memory...
   Launch directly with:  db parqit_write      (menu installed by: parqit menu)
@@ -55,6 +55,9 @@ BEGIN
   CHECKBOX ck_repl		_ilft	_ss	_ibwd	.,		///
 	option(clear)							///
 	label("Replace data in memory even when they have unsaved changes (clear)")
+  CHECKBOX ck_compress		_ilft	_ss	_ibwd	.,		///
+	option(compress)						///
+	label("Narrow the storage types losslessly after loading, as compress does (compress)")
 
   TEXT tx_spss			_ilft	_ls	250	.,		///
 	label("SPSS or R file to convert:")
@@ -280,6 +283,7 @@ PROGRAM main_mode
 BEGIN
 	if main.rb_collect {
 		call main.ck_repl.enable
+		call main.ck_compress.enable
 		call main.tx_int64.enable
 		call main.cb_int64.enable
 		call main.tx_out.disable
@@ -310,6 +314,7 @@ BEGIN
 	}
 	if main.rb_save | main.rb_data {
 		call main.ck_repl.disable
+		call main.ck_compress.disable
 		call main.tx_int64.disable
 		call main.cb_int64.disable
 		call main.tx_spss.disable
@@ -350,6 +355,7 @@ BEGIN
 	}
 	if main.rb_spss {
 		call main.ck_repl.disable
+		call main.ck_compress.disable
 		call main.tx_int64.disable
 		call main.cb_int64.disable
 		call main.tx_spss.enable
@@ -415,6 +421,7 @@ BEGIN
 		put "parqit view " pq_view_name ": collect"
 		beginoptions
 			option main.ck_repl
+			option main.ck_compress
 			optionarg /hidedefault main.cb_int64
 		endoptions
 	}
@@ -442,6 +449,9 @@ BEGIN
 			optionarg /hidedefault main.cb_enc
 			if main.rb_data {
 				put "data "
+			}
+			else {
+				put "view "
 			}
 			option main.ck_copy
 			option main.ck_xmiss

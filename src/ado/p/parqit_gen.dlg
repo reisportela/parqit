@@ -1,7 +1,7 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.3.3  05oct2026
+*!  VERSION 0.4.0  13oct2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)
@@ -17,7 +17,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 450
+DEFINE _dlght 530
 INCLUDE header
 HELP hlp1, view("help parqit##expressions")
 RESET res1
@@ -86,7 +86,7 @@ BEGIN
 	label("Create...")
 
   TEXT tx_if			_lft	_ls	_iwd	.,		///
-	label("If (expression) (optional; generate and replace only):")
+	label("If (expression) (optional):")
   EXP ex_if			@	_ss	@	.,		///
 	label("Create...")
 
@@ -98,6 +98,16 @@ BEGIN
 	contents(vv_list)						///
 	option(by)							///
 	label("Group variables")
+  TEXT tx_eopt			_lft	_ls	_iwd	.,		///
+	label("Other egen options, typed as in Stata, for example p(25) or punct(-) or missing:")
+  EDIT ed_eopt			@	_ss	@	.,		///
+	label("egen options")
+  TEXT tx_bys			_lft	_ls	_iwd	.,		///
+	label("by/bysort prefix: group variables [(sort variables)] (optional; gen, replace, egen):")
+  EDIT ed_bys			@	_ss	300	.,		///
+	label("bysort prefix")
+  CHECKBOX ck_nosort		320	@	160	.,		///
+	label("Already sorted (by, not bysort)")
 
   TEXT tx_src			_lft	_ls	280	.,		///
 	label("SPSS- or R-labelled string variable in memory:")
@@ -116,7 +126,7 @@ BEGIN
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
-  TEXT tx_context _lft 405 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 485 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -152,6 +162,38 @@ BEGIN
 	min
 	max
 	count
+	median
+	pctile
+	iqr
+	kurt
+	skew
+	mad
+	mdev
+	std
+	pc
+	rank
+	mode
+	seq
+	group
+	tag
+	anycount
+	anymatch
+	anyvalue
+	concat
+	cut
+	diff
+	ends
+	rowtotal
+	rowmean
+	rowmin
+	rowmax
+	rowmiss
+	rownonmiss
+	rowsd
+	rowfirst
+	rowlast
+	rowmedian
+	rowpctile
 END
 
 PROGRAM main_mode
@@ -175,6 +217,11 @@ BEGIN
 		call main.ex_if.enable
 		call main.tx_by.disable
 		call main.cb_by.disable
+		call main.tx_eopt.disable
+		call main.ed_eopt.disable
+		call main.tx_bys.enable
+		call main.ed_bys.enable
+		call main.ck_nosort.enable
 		call main.bu_pop.disable
 	}
 	if main.rb_egen {
@@ -182,10 +229,15 @@ BEGIN
 		call main.cb_type.enable
 		call main.tx_fcn.enable
 		call main.cb_fcn.enable
-		call main.tx_if.disable
-		call main.ex_if.disable
+		call main.tx_if.enable
+		call main.ex_if.enable
 		call main.tx_by.enable
 		call main.cb_by.enable
+		call main.tx_eopt.enable
+		call main.ed_eopt.enable
+		call main.tx_bys.enable
+		call main.ed_bys.enable
+		call main.ck_nosort.enable
 		call main.bu_pop.enable
 	}
 	if main.rb_repl {
@@ -197,6 +249,11 @@ BEGIN
 		call main.ex_if.enable
 		call main.tx_by.disable
 		call main.cb_by.disable
+		call main.tx_eopt.disable
+		call main.ed_eopt.disable
+		call main.tx_bys.enable
+		call main.ed_bys.enable
+		call main.ck_nosort.enable
 		call main.bu_pop.disable
 	}
 	if main.rb_spss {
@@ -210,6 +267,11 @@ BEGIN
 		call main.ex_if.disable
 		call main.tx_by.disable
 		call main.cb_by.disable
+		call main.tx_eopt.disable
+		call main.ed_eopt.disable
+		call main.tx_bys.disable
+		call main.ed_bys.disable
+		call main.ck_nosort.disable
 		call main.bu_pop.disable
 		call main.tx_src.enable
 		call main.vn_src.enable
@@ -238,7 +300,17 @@ END
 PROGRAM command
 BEGIN
 	if main.rb_gen {
-		put "parqit gen "
+		if main.ed_bys {
+			if main.ck_nosort {
+				put "parqit by " main.ed_bys ": gen "
+			}
+			else {
+				put "parqit bysort " main.ed_bys ": gen "
+			}
+		}
+		else {
+			put "parqit gen "
+		}
 		if !main.cb_type.isdefault() {
 			put main.cb_type " "
 		}
@@ -255,20 +327,48 @@ BEGIN
 			stopbox stop "egen functions produce numeric results." ///
 				"Choose (default), byte, int, long, float, or double."
 		}
-		put "parqit egen "
+		if main.ed_bys {
+			if main.ck_nosort {
+				put "parqit by " main.ed_bys ": egen "
+			}
+			else {
+				put "parqit bysort " main.ed_bys ": egen "
+			}
+		}
+		else {
+			put "parqit egen "
+		}
 		if !main.cb_type.isdefault() {
 			put main.cb_type " "
 		}
 		require main.ed_name
 		put main.ed_name " = " main.cb_fcn "("
-		require main.ex_exp
-		put main.ex_exp ")"
+		if main.ex_exp {
+			put main.ex_exp
+		}
+		put ")"
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 		beginoptions
 			optionarg main.cb_by
+			if main.ed_eopt {
+				put main.ed_eopt
+			}
 		endoptions
 	}
 	if main.rb_repl {
-		put "parqit replace "
+		if main.ed_bys {
+			if main.ck_nosort {
+				put "parqit by " main.ed_bys ": replace "
+			}
+			else {
+				put "parqit bysort " main.ed_bys ": replace "
+			}
+		}
+		else {
+			put "parqit replace "
+		}
 		require main.ed_name
 		put main.ed_name " = "
 		require main.ex_exp

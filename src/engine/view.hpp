@@ -22,6 +22,8 @@
 
 #include "json.hpp"
 
+#include "engine/exprtrans.hpp"
+
 namespace parqit {
 
 struct ViewCol {
@@ -58,9 +60,10 @@ struct ViewCol {
  * mean of x[np], x[np+1]; else x[ceil(np)]. Shared by collapse and
  * summarize-detail. */
 /* Stata's percentile rule over per-group ranks (PCT-WINDOW-1): `prn` ranks
- * the nonmissing values within the group, `pn` counts them. */
+ * the nonmissing values within the group, `pn` counts them. `over` is "" for
+ * an aggregate (collapse) and an OVER clause for a window (egen). */
 std::string pct_window_sql(const std::string &ref, const std::string &prn,
-                           const std::string &pn, double p);
+                           const std::string &pn, double p, const std::string &over = "");
 
 /* KEYFOLD-1: the ONE rule that decides when a merge/joinby key value is
  * "missing" — used by the join itself (key_value in view.cpp) and by every
@@ -149,15 +152,74 @@ class View {
     std::string expand_patterns(const std::vector<std::string> &patterns,
                                 std::vector<std::string> *out) const;
 
+    /* WINDOW-NEST-1 (2026-10-13): true once the plan stacks a window over the
+     * result of another window of the same partition (egen median/pctile/iqr/
+     * mad/mdev/std/mode). DuckDB 1.5.3's window_self_join optimizer rewrites
+     * such whole-partition window aggregates into aggregate + self-join and
+     * then fails to bind the inner window's column (INTERNAL Error "Failed to
+     * bind column reference", or "_Map_base::at"); the plugin disables that
+     * one optimizer while a plan with this flag is current (disabling it for
+     * every query costs 3-6x on the ordinary single-level windows, measured on
+     * 20M rows). A copy, a merge/append/joinby with such a using view and a
+     * raw fragment keep the flag. */
+    bool fragile_windows() const { return fragile_windows_ || window_stages_ >= 2; }
+    /* WINDOW-NEST-1: DuckDB 1.5.3's filter pushdown rewrites the subtree
+     * under every partitioned WINDOW operator twice (PushdownWindow rewrites
+     * the child, then FinishPushdown rewrites it again), so planning grows
+     * ~1.8x per stacked window: 16 stacked means plan in 0.05 s, 20 in 0.6 s,
+     * 30 in more than a minute, and the 52 egen stages of v149 never finished
+     * (0.08 s with the optimizer off). The view counts the partitioned window
+     * terms its stages add — an upper bound of the operators, since terms in
+     * one SELECT level plan as one — and from the 18th the plugin turns that
+     * optimizer off while the view is current, at the cost of the row-group
+     * pruning of the view's own filters. A merge/append/joinby adds the
+     * using view's count. */
+    bool heavy_filter_pushdown() const { return window_terms_ >= kHeavyWindowTerms; }
+    int window_terms() const { return window_terms_; }
+    static constexpr int kHeavyWindowTerms = 18;
+    /* the partitioned window terms of a SQL text: "OVER (PARTITION BY" in any
+     * case and spacing (raw fragments write it as they like); counted for the
+     * scan of open() and every stage, so a using view's plan embedded by a
+     * two-table verb is counted once, as text */
+    static int count_window_terms(const std::string &sql);
+    /* TSSET-1: the time-series declaration of the view (parqit tsset/xtset);
+     * engine column names, delta > 0. tsset() validates the names and kinds
+     * and stores the declaration; the plugin runs the uniqueness/missing probe
+     * (tsset_probe_sql) before calling it. A declaration whose variables a
+     * later verb removes is silently void (expr_schema() reports none). */
+    std::string tsset(const std::string &panel, const std::string &time, double delta);
+    void clear_tsset() { ts_panel_.clear(); ts_time_.clear(); ts_delta_ = 1.0; }
+    bool ts_declared() const;
+    const std::string &ts_panel() const { return ts_panel_; }
+    const std::string &ts_time() const { return ts_time_; }
+    double ts_delta() const { return ts_delta_; }
+    /* "<missing time>|<duplicate (panel,time) rows>|<min time>|<max time>|<panels>|<gaps>"
+     * over the current plan; panels and gaps are 0 without a panel variable */
+    std::string tsset_probe_sql(const std::string &panel, const std::string &time,
+                                double delta) const;
+    /* the expression translator's view of the live columns, with the
+     * time-series declaration when its variables are live */
+    ExprSchema expr_schema() const;
+
     /* ---- verbs; each returns "" or an error message ------------------- */
+    /* BY-PREFIX-1: `by` are the keys of a by/bysort prefix (patterns, expanded
+     * exactly), `sortvars` the (sortvars) part. The view must already be
+     * sorted by by+sortvars — bysort sorts first (the plugin does it), by
+     * alone is refused with "not sorted", as native r(5). Under a prefix _n,
+     * _N and the subscripts x[...] are windows within each by group. */
     std::string keep_vars(const std::vector<std::string> &patterns);
     std::string drop_vars(const std::vector<std::string> &patterns);
-    std::string filter(const std::string &stata_expr, bool drop, bool statamissing);
+    std::string filter(const std::string &stata_expr, bool drop, bool statamissing,
+                       const std::vector<std::string> &by = {},
+                       const std::vector<std::string> &sortvars = {});
     std::string gen(const std::string &name, const std::string &type_req,
                     const std::string &expr, const std::string &if_expr,
-                    bool statamissing);
+                    bool statamissing, const std::vector<std::string> &by = {},
+                    const std::vector<std::string> &sortvars = {});
     std::string replace(const std::string &name, const std::string &expr,
-                        const std::string &if_expr, bool statamissing);
+                        const std::string &if_expr, bool statamissing,
+                        const std::vector<std::string> &by = {},
+                        const std::vector<std::string> &sortvars = {});
     std::string rename(const std::string &oldn, const std::string &newn);
     std::string rename_many(const std::vector<std::string> &old_names,
                             const std::vector<std::string> &new_names);
@@ -165,15 +227,22 @@ class View {
     std::string sort(const std::vector<std::string> &keys,
                      const std::vector<bool> &desc);
     struct CollapseSpec {
-        std::string stat; /* mean sum sd median pNN count min max first last
-                             firstnm lastnm */
+        std::string stat; /* mean sum rawsum sd semean sebinomial sepoisson
+                             median pNN iqr count percent min max first last
+                             firstnm lastnm (COLLAPSE-STATS-2: the full native
+                             list; weights are refused upstream) */
         std::string target;
         std::string source;
     };
     std::string collapse(const std::vector<CollapseSpec> &specs,
                          const std::vector<std::string> &by);
     std::string contract(const std::vector<std::string> &by, const std::string &freq);
-    std::string duplicates_drop(const std::vector<std::string> &by, bool force);
+    /* IF-ALL-1: with if_expr, only the rows the condition selects are
+     * deduplicated (the first of each group in the current order stays); every
+     * other row is kept, as native `duplicates drop ... if` does. */
+    std::string duplicates_drop(const std::vector<std::string> &by, bool force,
+                                const std::string &if_expr = "",
+                                bool statamissing = false);
     std::string keep_in(long long f, long long l);
     /* drop in f/l: the complement of keep in over the same (declared or
      * engine) order, validated against the real count the same way. */
@@ -197,6 +266,52 @@ class View {
                                     const std::vector<std::string> &by,
                                     const std::string &cluster, bool statamissing,
                                     std::string *sql);
+    /* EGEN-ALL-1 (BPLIM feedback, 2026-10-13): the native egen functions.
+     * `expr` is the argument of an expression function (total mean sd min
+     * max count median pctile iqr kurt skew mad mdev std pc rank), `vars`
+     * the varlist of a varlist function (mode cut anyvalue ends take one;
+     * group tag anycount anymatch concat diff row*), `by` the groups of a
+     * by() option or by prefix (refused for the functions native refuses it
+     * for), `if_expr` the qualifier — the statistic is computed over the
+     * selected rows and only they receive a value (tag, anycount and
+     * anymatch give 0 and the string functions "" to the others, as native).
+     * The options are native egen's. `probe_rows` holds the rows of
+     * egen_probe_sql() when a function needs data before it can be compiled
+     * (cut's group() cutpoints, group's label texts); the plugin runs it. */
+    struct EgenSpec {
+        std::string name, fcn, type_req;
+        std::string expr;
+        std::vector<std::string> vars;
+        std::vector<std::string> by;
+        std::string if_expr;
+        bool has_p = false;
+        double p = 50;
+        std::vector<double> values;
+        std::string punct;      /* concat joins end to end unless punct() is given */
+        bool has_punct = false; /* ends() separates by one space unless given */
+        std::string format;
+        bool decode = false;
+        long long maxlength = 0;
+        bool missing = false, minmode = false, maxmode = false;
+        long long nummode = 0;
+        bool field = false, track = false, unique = false;
+        bool has_from = false, has_to = false;
+        double from = 1, to = 0;
+        long long block = 1;
+        double mean = 0, sd = 1;
+        std::vector<double> at;
+        long long group = 0;
+        bool icodes = false, label = false;
+        bool prop = false, strok = false, head = false, last = false, tail = false, trim = false;
+        std::string lname;
+        long long truncate = 0;
+        std::vector<std::vector<std::string>> probe_rows;
+    };
+    /* "" when the function needs no data before compiling; otherwise the
+     * query whose rows the plugin must put in spec.probe_rows (text cells) */
+    std::string egen_probe_sql(const EgenSpec &spec, bool statamissing, std::string *sql) const;
+    std::string egen(const EgenSpec &spec, bool statamissing, const std::string &arg_type = "");
+    /* the former entry point: an expression function with by() and no if */
     std::string egen(const std::string &name, const std::string &fcn,
                      const std::string &arg_expr, const std::vector<std::string> &by,
                      bool statamissing, const std::string &type_req = "",
@@ -213,6 +328,8 @@ class View {
          * its other characteristics, as in native Stata */
         nlohmann::json chars;
         bool notes = true;
+        bool fragile_windows = false; /* WINDOW-NEST-1: the using view's flags */
+        int window_terms = 0;
     };
     /* JOINKEY-1: every join key must exist on both sides with the same kind.
      * merge_with/joinby_with enforce this, but the caller runs the uniqueness
@@ -308,12 +425,28 @@ class View {
      * current stage carries them — the list a row-preserving verb selects */
     std::string stage_list() const;
     std::string order_by_sql() const;
-    /* wrap `prev` in a subquery exposing ONLY the row-context windows *sql
-     * references: row_number() for _n (a streaming window) and count(*) OVER ()
-     * for _N (a blocking window). Placeholders in *sql are substituted in place.
-     * Emitting the blocking count only when _N is actually used keeps the common
-     * _n-only idiom streaming instead of buffering the whole input (PERF-1). */
-    std::string rowctx_wrap(std::string *sql, const std::string &prev);
+    /* ROWCTX-2: wrap `prev` in a subquery computing, as helper columns, every
+     * window term the translated expressions need (row_number() for _n — a
+     * streaming window — count(*) for _N, lag/lead/nth_value for subscripts,
+     * the RANGE windows of L./F./D./S.), each over the by partition `part`
+     * (quoted, normalized key SQL) and the current order; the placeholders in
+     * each SQL string are substituted by the helper names. Each item carries
+     * its own windows, since two translations number theirs independently.
+     * Only the terms actually used are emitted, so the common _n-only idiom
+     * stays streaming instead of buffering the whole input (PERF-1). Returns
+     * `prev` untouched when no item has windows. */
+    struct RowCtxItem {
+        std::string *sql;
+        const std::vector<WindowTerm> *windows;
+    };
+    std::string rowctx_wrap(const std::vector<RowCtxItem> &items, const std::string &prev,
+                            const std::vector<std::string> &part);
+    /* BY-PREFIX-1: expand the prefix keys, check the view is sorted by
+     * by+sortvars (ascending, in that order) and return the partition SQL */
+    std::string by_partition(const std::vector<std::string> &by,
+                             const std::vector<std::string> &sortvars,
+                             std::vector<std::string> *part) const;
+    std::string order_by_sql_reversed() const; /* for x[_N-k] */
     /* keeps_order: the stage selects stage_list(), so the physical order
      * columns reach the next stage; any other stage drops them */
     void push_stage(const std::string &select_body, const std::string &desc,
@@ -328,6 +461,11 @@ class View {
     std::string int64_mode_;    /* int64() carried from the open; "" = session */
     std::string src_filename_col_; /* FILENAME-1 provenance column, "" if none */
     std::vector<std::string> xm_folded_; /* XMISS-1 columns read as plain . */
+    std::string ts_panel_, ts_time_;     /* TSSET-1 declaration ("" = none) */
+    double ts_delta_ = 1.0;
+    bool fragile_windows_ = false;       /* WINDOW-NEST-1 */
+    int window_stages_ = 0;              /* egen stages with a window */
+    int window_terms_ = 0;               /* "OVER (PARTITION BY" terms over the stages */
     std::vector<std::string> stages_; /* each a full SELECT … FROM <prev> */
     std::vector<std::string> descs_;
     std::vector<ViewCol> cols_;

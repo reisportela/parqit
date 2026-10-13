@@ -79,6 +79,14 @@ class Session {
     /* Default temp spill directory to use when none has been configured;
      * set once by the plugin from Stata's tmpdir before first open. */
     void set_default_temp_dir(const std::string &dir) { default_temp_dir_ = dir; }
+    /* WINDOW-NEST-1: enable or disable DuckDB's window_self_join optimizer
+     * for the session (SET/RESET disabled_optimizers, issued only on a
+     * change); see View::fragile_windows(). */
+    bool set_window_self_join(bool enabled, std::string *err) {
+        return set_optimizers(enabled, filter_pushdown_, err);
+    }
+    /* WINDOW-NEST-1: the two optimizers parqit turns off per view */
+    bool set_optimizers(bool window_self_join, bool filter_pushdown, std::string *err);
 
     Session(const Session &) = delete;
     Session &operator=(const Session &) = delete;
@@ -91,6 +99,8 @@ class Session {
     duckdb_connection con_ = nullptr;
     std::string last_error_;
     std::string default_temp_dir_;
+    bool window_self_join_ = true; /* WINDOW-NEST-1: the optimizers' state */
+    bool filter_pushdown_ = true;
     bool stats_fallback_ready_ = false;
 
     /* pending configuration (applied on open; SET when already open) */

@@ -721,3 +721,201 @@ TEST_CASE("STATAMISS-WARN-1: the verdict agrees with both modes on real rows") {
         CHECK(count_where(e) != count_where(e, true));
     }
 }
+
+
+/* ---- BPLIM third round, 2026-10-13 ------------------------------------- */
+
+TEST_CASE("ROWCTX-2: subscripts and _n/_N become window terms the compiler resolves") {
+    ExprResult r = translate_expression("x[_n-1] + x[_n+2] - x[1] + x[_N] + x[_N-1] + x[_n]",
+                                        test_schema(), false);
+    REQUIRE_MESSAGE(r.ok, r.error);
+    CHECK(r.uses_rowctx);
+    /* six references, five windows: x[_n] is the column itself */
+    CHECK(r.windows.size() == 5);
+    CHECK(r.windows[0].sql == "lag(\"x\", 1) __PARQIT_OVER_ORD__");
+    CHECK(r.windows[1].sql == "lead(\"x\", 2) __PARQIT_OVER_ORD__");
+    CHECK(r.windows[2].sql == "nth_value(\"x\", 1) __PARQIT_OVER_FULL__");
+    CHECK(r.windows[3].sql == "last_value(\"x\") __PARQIT_OVER_FULL__");
+    CHECK(r.windows[4].sql == "nth_value(\"x\", 2) __PARQIT_OVER_FULL_DESC__");
+    for (const auto &w : r.windows) CHECK(r.sql.find(w.placeholder) != std::string::npos);
+    /* out of range is missing; the same term is shared; _n and _N keep their tokens */
+    ExprResult z = translate_expression("x[0] + x[_N+1] + x[-2]", test_schema(), false);
+    REQUIRE(z.ok);
+    CHECK(z.windows.empty());
+    ExprResult two = translate_expression("x[_n-1] * x[_n-1] + _n + _N", test_schema(), false);
+    REQUIRE(two.ok);
+    CHECK(two.windows.size() == 3);
+    CHECK(two.sql.find("__PARQIT_ROW__") != std::string::npos);
+    CHECK(two.sql.find("__PARQIT_NROWS__") != std::string::npos);
+    /* refused forms: a non-literal offset, a string subscript, no bracket */
+    CHECK_FALSE(translate_expression("x[_n-y]", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("x[s]", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("x[_n-1", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("x[1.5]", test_schema(), false).ok);
+}
+
+TEST_CASE("TSSET-1: L. F. D. S. are RANGE windows by time, refused without a declaration") {
+    ExprSchema plain = test_schema();
+    CHECK_FALSE(translate_expression("L.x", plain, false).ok);
+    CHECK(translate_expression("L.x", plain, false).error.find("xtset") != std::string::npos);
+    ExprSchema ts = test_schema();
+    ts.kinds["id"] = 'n';
+    ts.kinds["t"] = 'n';
+    ts.ts_panel = "id";
+    ts.ts_time = "t";
+    ts.ts_delta = 1;
+    ExprResult l1 = translate_expression("L.x", ts, false);
+    REQUIRE_MESSAGE(l1.ok, l1.error);
+    REQUIRE(l1.windows.size() == 1);
+    CHECK(l1.windows[0].sql ==
+          "max(\"x\") OVER (PARTITION BY \"id\" ORDER BY \"t\" RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING)");
+    /* the term itself, masked on a missing time (native: no lag there) */
+    CHECK(l1.sql == "(CASE WHEN \"t\" IS NULL THEN NULL ELSE " + l1.windows[0].placeholder + " END)");
+    ExprResult f2 = translate_expression("f2.x", ts, false);
+    REQUIRE(f2.ok);
+    CHECK(f2.windows[0].sql.find("RANGE BETWEEN 2 FOLLOWING AND 2 FOLLOWING") != std::string::npos);
+    /* D2.x = x - 2 L.x + L2.x: two lag terms, signed, finite-guarded */
+    ExprResult d2 = translate_expression("D2.x", ts, false);
+    REQUIRE(d2.ok);
+    CHECK(d2.windows.size() == 2);
+    CHECK(d2.sql.find("parqit_finite(") == 0);
+    CHECK(d2.sql.find("(-2 * __parqit_double(") != std::string::npos);
+    /* LD.x = L.x - L2.x; S3.x = x - L3.x; delta scales the offsets */
+    ExprResult ld = translate_expression("LD.x", ts, false);
+    REQUIRE(ld.ok);
+    CHECK(ld.windows.size() == 2);
+    ts.ts_delta = 4;
+    ExprResult s3 = translate_expression("S3.x", ts, false);
+    REQUIRE(s3.ok);
+    CHECK(s3.windows[0].sql.find("12 PRECEDING AND 12 PRECEDING") != std::string::npos);
+    /* refused: the time and panel variables, a string, a missing count */
+    CHECK_FALSE(translate_expression("L.t", ts, false).ok);
+    CHECK_FALSE(translate_expression("L.id", ts, false).ok);
+    CHECK_FALSE(translate_expression("L.s", ts, false).ok);
+    /* a variable that merely looks like an operator is still a variable */
+    ExprSchema odd = test_schema();
+    odd.kinds["L2"] = 'n';
+    ExprResult plainvar = translate_expression("L2 + 1", odd, false);
+    REQUIRE_MESSAGE(plainvar.ok, plainvar.error);
+    CHECK(plainvar.windows.empty());
+}
+
+TEST_CASE("TSSET-1: tin() and twithin() read the time variable's format") {
+    ExprSchema ts = test_schema();
+    ts.kinds["t"] = 'n';
+    ts.ts_time = "t";
+    ts.ts_delta = 1;
+    ExprResult a = translate_filter("tin(2001, 2003)", ts, false);
+    REQUIRE_MESSAGE(a.ok, a.error);
+    CHECK(a.sql == "coalesce(\"t\" >= 2001 AND \"t\" <= 2003, FALSE)");
+    ExprResult b = translate_filter("twithin(2001, 2003)", ts, false);
+    REQUIRE(b.ok);
+    CHECK(b.sql == "coalesce(\"t\" > 2001 AND \"t\" < 2003, FALSE)");
+    ts.ts_time_fmt = "%td";
+    ExprResult c = translate_filter("tin(01jan2020, 31dec2020)", ts, false);
+    REQUIRE_MESSAGE(c.ok, c.error);
+    CHECK(c.sql == "coalesce(\"t\" >= 21915 AND \"t\" <= 22280, FALSE)");
+    ts.ts_time_fmt = "%tm";
+    ExprResult d = translate_filter("tin(2020m1, 2020m12)", ts, false);
+    REQUIRE_MESSAGE(d.ok, d.error);
+    CHECK(d.sql == "coalesce(\"t\" >= 720 AND \"t\" <= 731, FALSE)");
+    CHECK_FALSE(translate_filter("tin(2020m1, 2020m12)", test_schema(), false).ok);
+    ts.ts_time_fmt = "%tq";
+    CHECK_FALSE(translate_filter("tin(2020m1, 2020m12)", ts, false).ok);
+}
+
+TEST_CASE("DATEFN-1: the date functions translate and evaluate as native Stata") {
+    make_fixture();
+    /* d: 21915 = 01jan2020 (row 1), 21916 (row 2), NULL (row 3) */
+    CHECK(eval_at("week(d)", 1) == "1");
+    CHECK(eval_at("week(d)", 3) == "");
+    CHECK(eval_at("halfyear(d)", 3) == "");
+    CHECK(eval_at("qofd(d)", 1) == "240");
+    CHECK(eval_at("hofd(d)", 1) == "120");
+    CHECK(eval_at("wofd(d)", 1) == "3120");
+    CHECK(eval_at("dofw(3120)", 1) == "21915");
+    CHECK(eval_at("dofq(242)", 1) == "22097");
+    CHECK(eval_at("dofh(121)", 1) == "22097");
+    CHECK(eval_at("dofy(2020)", 1) == "21915");
+    CHECK(eval_at("ym(2020, 7)", 1) == "726.0");
+    CHECK(eval_at("ym(2020, 7.9)", 1) == "726.9");
+    CHECK(eval_at("ym(2020, 0)", 1) == "");
+    CHECK(eval_at("yw(2020, 53)", 1) == "");
+    CHECK(eval_at("hh(1894703445678)", 1) == "10.0");
+    CHECK(eval_at("mm(1894703445678)", 1) == "30.0");
+    CHECK(eval_at("ss(1894703445678)", 1) == "45.678");
+    CHECK(eval_at("dofc(1894703445678)", 1) == "21929.0");
+    CHECK(eval_at("cofd(d)", 1) == "1893456000000.0");
+    CHECK(eval_at("hms(10, 30, 45)", 1) == "37845000.0");
+    CHECK(eval_at("datediff(td(31jan2020), td(29feb2020), \"month\")", 1) == "0.0");
+    CHECK(eval_at("datediff(td(31jan2020), td(01mar2020), \"month\")", 1) == "1.0");
+    CHECK(eval_at("datediff(td(22dec2020), td(26mar2020), \"month\")", 1) == "-8.0");
+    CHECK(eval_at("datediff(td(01jan1960), td(01jan1961), \"year\")", 1) == "1.0");
+    CHECK(eval_at("age(td(26mar2020), td(22dec2020))", 1) == "0.0");
+    CHECK(eval_at("age(td(22dec2020), td(26mar2020))", 1) == "");
+    CHECK_FALSE(translate_expression("datediff(d, d, \"week\")", test_schema(), false).ok);
+    /* the text readers: native's rules on the oracle strings (nat_dates2.log) */
+    CHECK(eval_at("date(\"15jan2020\", \"DMY\")", 1) == "21929");
+    CHECK(eval_at("date(\"15jan2020 10:30\", \"DMY\")", 1) == "");
+    CHECK(eval_at("date(\"20200115\", \"YMD\")", 1) == "21929");
+    CHECK(eval_at("date(\"2006125\", \"YMD\")", 1) == "17140");
+    CHECK(eval_at("date(\"2006125\", \"DMY\")", 1) == "-670049");
+    CHECK(eval_at("date(\"1/15/08\", \"MDY\")", 1) == "");
+    CHECK(eval_at("date(\"1/15/08\", \"MD20Y\")", 1) == "17546");
+    CHECK(eval_at("date(\"1/15/08\", \"MDY\", 2050)", 1) == "17546");
+    CHECK(eval_at("date(\"15jan99\", \"DMY\", 2020)", 1) == "14259");
+    CHECK(eval_at("date(\"jan 15, 2020\", \"MDY\")", 1) == "21929");
+    CHECK(eval_at("date(\"15 January 2020\", \"DMY\")", 1) == "21929");
+    CHECK(eval_at("date(\"29feb2019\", \"DMY\")", 1) == "");
+    CHECK(eval_at("date(\"15jan0099\", \"DMY\")", 1) == "");
+    CHECK(eval_at("clock(\"15jan2020 10:30:45.678\", \"DMYhms\")", 1) == "1894703445678");
+    CHECK(eval_at("clock(\"15jan2020 10:30:45.6789\", \"DMYhms\")", 1) == "");
+    CHECK(eval_at("clock(\"15jan2020 10:30:45 pm\", \"DMYhms\")", 1) == "1894746645000");
+    CHECK(eval_at("clock(\"15jan2020 24:00:00\", \"DMYhms\")", 1) == "");
+    CHECK(eval_at("clock(\"20200115103045\", \"YMDhms\")", 1) == "1894703445000");
+    CHECK(eval_at("clock(\"15jan2020\", \"DMY\")", 1) == "1894665600000");
+    CHECK(eval_at("monthly(\"2020q3\", \"YM\")", 1) == "722");
+    CHECK(eval_at("monthly(\"July 2020\", \"MY\")", 1) == "726");
+    CHECK(eval_at("weekly(\"2020w53\", \"YW\")", 1) == "");
+    CHECK(eval_at("quarterly(\"2020q3\", \"YQ\")", 1) == "242");
+    CHECK(eval_at("yearly(\"2020\", \"Y\")", 1) == "2020");
+    CHECK(eval_at("date(s, \"DMY\")", 3) == ""); /* an empty string */
+    /* the third oracle (nat extra3): # takes one field anywhere, the rest as
+     * the last letter; a stray word elsewhere is missing; the first am/pm
+     * counts, a second is a word; dots separate a date; the fraction of a
+     * second is the last field only when the others come out even */
+    CHECK(eval_at("date(\"15jan2020 extra\", \"DMY#\")", 1) == "21929");
+    CHECK(eval_at("date(\"15jan2020 extra\", \"DMY\")", 1) == "");
+    CHECK(eval_at("date(\"extra 15jan2020\", \"#DMY\")", 1) == "21929");
+    CHECK(eval_at("date(\"extra 15jan2020\", \"DMY#\")", 1) == "");
+    CHECK(eval_at("date(\"15jan2020\", \"DMY#\")", 1) == "21929");
+    CHECK(eval_at("date(\"15jan2020\", \"#DMY\")", 1) == "");
+    CHECK(eval_at("date(\"15 jan 2020 foo bar\", \"DMY#\")", 1) == "21929");
+    CHECK(eval_at("date(\"15jan2020 10:30 am pm\", \"DMY#\")", 1) == "21929");
+    CHECK(eval_at("clock(\"15jan2020 10:30 am pm\", \"DMYhm\")", 1) == "");
+    CHECK(eval_at("clock(\"15jan2020 10:30 am pm\", \"DMYhm#\")", 1) == "1894703400000");
+    CHECK(eval_at("clock(\"15jan2020 extra 10:30\", \"DMY#hm\")", 1) == "1894703400000");
+    CHECK(eval_at("clock(\"15jan2020 10:30 extra\", \"DMY#hm\")", 1) == "");
+    CHECK(eval_at("clock(\"15.01.2020 10:30:45\", \"DMYhms\")", 1) == "1894703445000");
+    CHECK(eval_at("clock(\"15.01.2020 10:30:45\", \"DMYhm#\")", 1) == "1894703400000");
+    CHECK(eval_at("clock(\"2020.01.15\", \"YMD\")", 1) == "1894665600000");
+    CHECK(eval_at("clock(\"2020.01.15\", \"YMDhm\")", 1) == "");
+    CHECK(eval_at("clock(\"20200115103045.678\", \"YMDhms\")", 1) == "1894703445678");
+    CHECK(eval_at("clock(\"15jan2020 10:30.5\", \"DMYhms\")", 1) == "1894703405000");
+    CHECK(eval_at("clock(\"15jan2020 10:30.5\", \"DMYhm\")", 1) == "");
+    CHECK(eval_at("clock(\"15jan2020 10.30\", \"DMYhm\")", 1) == "1894703400000");
+    CHECK(eval_at("clock(\"15jan2020 103045.5\", \"DMYhms\")", 1) == "1894703445500");
+    CHECK(eval_at("clock(\"15jan2020 1030\", \"DMYhm\")", 1) == "1894703400000");
+    CHECK(eval_at("monthly(\"x2020m7\", \"YM\")", 1) == "");
+    CHECK(eval_at("monthly(\"m7 2020\", \"MY\")", 1) == "");
+    CHECK(eval_at("monthly(\"2020 m7\", \"YM\")", 1) == "726");
+    CHECK(eval_at("monthly(\"2020j7\", \"YM\")", 1) == "726");
+    CHECK(eval_at("monthly(\"2020m7 am\", \"YM\")", 1) == "");
+    CHECK(eval_at("monthly(\"2020m7 extra\", \"YM\")", 1) == "");
+    /* a mask that is not a literal, or malformed, is refused when translated */
+    CHECK_FALSE(translate_expression("date(s, s)", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("date(s, \"DMX\")", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("clock(s, \"DMYms\")", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("monthly(s, \"YQ\")", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("date(x, \"DMY\")", test_schema(), false).ok);
+}

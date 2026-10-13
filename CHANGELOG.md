@@ -6,6 +6,156 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-13
+
+The third round of BPLIM feedback (Rute Costa and Marta Silva, after the
+presentation of 9 October 2026): the if qualifier wherever native Stata has
+one, the complete native collapse statistics and egen functions, the by and
+bysort prefixes with Stata's positional subscripts, time-series operators by
+time after a declaration, the date and time functions, `parqit unique`, a
+lossless `compress` option, and the explicit `view` option of save. Every
+addition is additive: the published commands keep their behaviour. Pinned by
+`tests/verify_suite/v147`–`v153` and unit tests; ASSUMPTIONS #180–#191; the
+analysis in `feedback/Parqit_Rute_13OUT2026_analise.md`. The embedded DuckDB
+moves from 1.5.3 to 1.5.6 (see Changed).
+
+### Changed
+- **DuckDB 1.5.6** (from 1.5.3; DUCKDB-156): the three bugfix releases bring
+  the Parquet reader's out-of-bounds read fixes (dictionary strings, byte-array
+  decimals, RLE), result fixes parqit's paths can meet (`MAX` on a hive
+  partition column after file pruning, doubly emitted chunks from caching
+  operators, `common_subplan` with shared join subtrees, very long integer
+  literals silently truncated to HUGEINT), a segfault fix in the external hash
+  aggregate, the `TIME_NS` Parquet round-trip, and the window self-join
+  optimizer's new guard (it no longer rewrites a window over a window: the
+  1.5.3 internal error behind WINDOW-NEST-1 is gone, measured and pinned by
+  the unit test; parqit still turns that optimizer off for a view with
+  stacked windows, now on timing grounds, a one-line choice to revisit on a
+  quiet host; the filter-pushdown doubling is unchanged and keeps its
+  trigger). The four source corrections parqit
+  applies at configure time carry over unchanged (the patched files are
+  byte-identical in 1.5.6, except the transaction context, whose constructor
+  line is the same); the scalar C API guard was reviewed and re-pinned, and
+  the deprecated C API functions parqit already used stay available.
+  Measurements, the A/B timings against 1.5.3 and the published 0.3.3
+  (inconclusive on a loaded host: no gain claimed), and v154 (the engine
+  changes that could alter a result silently, against pyarrow and native
+  oracles) are in ASSUMPTIONS #191.
+- **Nanosecond times of day floor to the millisecond** (TIME-NS-FLOOR-1):
+  the engine's TIME_NS to TIME cast rounds to the microsecond, so the last
+  500 ns before a millisecond boundary read one millisecond later (the last
+  microsecond of a day became 24:00:00); the plan now floors the exact
+  nanosecond count, as TS-NS-FLOOR-1 does for nanosecond timestamps.
+
+### Added
+- **A glibc ceiling in the CI's Linux plugin verification**
+  (`tests/verify_collected_plugin.sh`): the collected EL8 plugin may need no
+  symbol version above `GLIBC_2.28` (the HPC contract), on top of the
+  stripped-symbols, export-table and embedded-runtime checks.
+- **`if` on every verb native Stata gives one to** (IF-ALL-1): `egen`,
+  `collapse`, `contract`, `pivot`, `duplicates drop` and `use` (`parqit use
+  [varlist] [if exp] using file`, lazy or with `clear`). The semantics are
+  native's: `collapse … if` aggregates the selected rows (`percent` is relative
+  to them), `egen … if` computes the statistic over the selected rows and only
+  they receive a value, `duplicates drop … if` removes duplicates inside the
+  condition and keeps every other row, and `use … if, clear` reads the
+  selected rows through the eager path — dates and booleans compared as Stata
+  values, the `.a`–`.z` companions restored, the condition evaluated before
+  the varlist is applied.
+- **collapse and pivot take every native statistic** (COLLAPSE-STATS-2):
+  `semean`, `sebinomial`, `sepoisson`, `rawsum`, `percent` and `iqr`, with
+  native's values on the edge groups (all missing, one observation, a mean
+  outside 0–1, a negative mean). Results stay `double` (ASSUMPTIONS #122).
+- **The native egen functions** (EGEN-ALL-1): `median`, `pctile`, `iqr`,
+  `kurt`, `skew`, `mad`, `mdev`, `std`, `pc`, `rank`, `mode`, `seq`, `group`,
+  `tag`, `anycount`, `anymatch`, `anyvalue`, `concat`, `cut`, `diff`, `ends`
+  and the row functions `rowtotal rowmean rowmin rowmax rowmiss rownonmiss
+  rowsd rowfirst rowlast rowmedian rowpctile`, each with its native options
+  (`p()`, `values()`, `punct()`, `format()`, `decode`, `maxlength()`,
+  `missing`, `minmode`/`maxmode`/`nummode()`, `field`/`track`/`unique`,
+  `from()`/`to()`/`block()`, `mean()`/`sd()`, `at()`/`group()`/`icodes`/
+  `label`, `prop`, `strok`, `head`/`last`/`tail`/`trim`, `lname()`,
+  `truncate()`). `fill()` and `mtr()` are refused with a message; `cut,
+  group()` and `group, label` read the data once when issued, like merge's
+  key checks. Percentiles follow Stata's rule by rank, out of core.
+- **`by` and `bysort` prefixes** (BY-PREFIX-1): `parqit by varlist
+  [(sortvars)]: cmd` and `parqit bysort … : cmd` (`bys` too) for `gen`,
+  `replace`, `egen`, `keep if` and `drop if`; `_n`, `_N` and the subscripts
+  count within each group; `bysort` sorts first and leaves the view sorted,
+  `by` alone requires that order (`not sorted`, as native r(5)).
+- **Explicit subscripts** (ROWCTX-2): `x[_n-1]`, `x[_n+2]`, `x[1]`, `x[_N]`,
+  `x[_N-1]` in `gen`, `replace`, `keep if`, `drop if` and `egen` — positional,
+  as in Stata (`x[_n-1]` is SQL's `lag`). `_n`/`_N` are now accepted in
+  `replace` and in the `if` of `gen`. A `replace` that reads its own earlier
+  or later rows is refused: native replace is sequential (each new value feeds
+  the next row), a lazy plan computes every row from the values before the
+  command (REPLACE-SELF-1).
+- **Time-series operators by time** (TSSET-1): `parqit xtset panelvar
+  timevar [, delta(#)]` and `parqit tsset [panelvar] timevar` declare the
+  panel and time variables of the view (checked once, with native's rules
+  and words: integer-valued, unique within panels, no period below delta;
+  a missing time is accepted and the operators are missing on that row) and
+  show the range and gaps;
+  then `L.`, `L2.`, `F.`, `D.`, `D2.`, `S2.`, `LD.` … compute by time, so a
+  gap gives missing, as native, where a positional lag would return the wrong
+  period; `tin()` and `twithin()` take numbers or the time variable's date
+  format. `parqit xtset` alone shows the declaration; `, clear` removes it.
+- **The date and time functions** (DATEFN-1): `ym yq yh yw dofq dofh dofy dofw
+  qofd hofd wofd week halfyear dofc cofd hh mm ss hms dhms mdyhms hours minutes
+  seconds msofhours msofminutes msofseconds datediff age`, and the text readers
+  `date daily clock monthly quarterly halfyearly weekly yearly` with a literal
+  mask (`20Y`/`19Y` centuries, topyear, month names, am/pm, `#` for a field
+  to skip or the rest to ignore, run-together digits, the fraction of a
+  second), implemented in the engine with native's rules: extra or missing
+  fields, stray words, a second am/pm, impossible dates, 24:00, a 60th second
+  and more than three decimals are missing.
+- **`parqit unique varlist [if] [, by(varlist)]`** (UNIQUE-1): the number of
+  unique values of the varlist taken jointly, missing counting as a value, as
+  the community-contributed `unique` reports it (`r(unique)`, `r(sum)`,
+  `r(N)`), plus a table per variable with several variables and a table per
+  group with `by()` (no variable is generated; `generate()` and `detail` are
+  refused with the note). `parqit distinct` is unchanged.
+- **`compress` on `collect` and `use …, clear`** (COMPRESS-1): native
+  `compress` runs on the staged result before it replaces the data — lossless
+  by construction, so counts and integral totals become `long`/`int`/`byte`
+  and a double mean stays double.
+- **`parqit save …, view`** (SAVE-VIEW-1): names the current view explicitly,
+  the symmetric of `data`, and is refused when no view is open.
+- **`partitions(replace|append)` without `partition_by()`** names the keys
+  the existing tree is partitioned by in its refusal (PART-KEYS-1).
+- The dialogs follow: every egen function and its options, the by/bysort
+  prefix and the egen `if` (Create or change variables), `unique` (Describe
+  and explore), `xtset`/`tsset` (Views, SQL and settings), `compress` and
+  `view` (Save or collect).
+
+### Fixed
+- **The C aggregate bridge under DuckDB's window constant aggregator**
+  (WINDOW-STATE-1): with `window_self_join` off, a whole-partition window
+  (`egen mean(), by()` and the like) reaches a DuckDB aggregator that passes
+  the engine's C aggregate bridge a constant state vector; parqit 0.1.35's
+  correction of that bridge flattened the vector in place, a use after free
+  that crashed on a 20M-row file and could add a partition's rows to another
+  partition's state. The bridge now spreads the state pointers without
+  touching the vector (`cmake/PatchDuckDBCapi.cmake`); released versions did not take
+  this path as far as the optimizer's conditions reach (every C aggregate
+  window they emitted stood alone in its node, which the self-join optimizer
+  rewrote), and the planner workaround below opens it.
+- **Stacked window stages and DuckDB 1.5.3's planner** (WINDOW-NEST-1): the
+  engine's `window_self_join` optimizer rewrites a whole-partition window
+  aggregate that reads another window's column and then fails with an
+  internal error, and makes any stack of partitioned window stages plan
+  exponentially (12 stacked `egen mean(), by()`: 2.5 s on 74 rows, 0.016 s
+  without it); its filter pushdown plans the subtree under every partitioned
+  window twice, so a stack of window stages plans in time growing ~1.8x per
+  window (16 stacked means: 0.05 s, 20: 0.6 s, 30: more than a minute; 0.08 s
+  without it). parqit turns the first off while a view with two or more window
+  stages (or a median/pctile/iqr/mad/mdev/std/mode) is current, and the second
+  once the view's stages hold eighteen or more partitioned window terms, at
+  the cost of that view's row-group pruning; a two-table verb takes both
+  sides' needs before its probes, the eager reads restore the full set, and
+  everything else keeps both optimizers (disabling the first for every query
+  costs 3–6x on a single large window).
+
 ## [0.3.3] — 2026-10-05
 
 The two crash courses shipped with the package, brought up to date for the SSC

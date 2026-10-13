@@ -185,6 +185,13 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
     if (cmd == "echo") return cmd_echo(args);
     if (cmd == "version") return cmd_version(args);
     if (cmd == "selftest") return cmd_selftest(args);
+    parqit_plugin::begin_call(); /* WINDOW-NEST-1: a previous join's using needs end here */
+    /* WINDOW-NEST-1: an eager subcommand plans nothing of the current view —
+     * it must not inherit the optimizers a heavy view switched off */
+    if (cmd == "use_prepare" || cmd == "use_fetch" || cmd == "describe" ||
+        cmd == "save_data" || cmd == "save_data_direct" || cmd == "bridge_new" ||
+        cmd == "text_prepare" || cmd == "spss_convert" || cmd == "rdata_convert")
+        parqit_plugin::eager_optimizers();
     if (cmd == "use_prepare") return parqit_plugin::cmd_use_prepare(args);
     if (cmd == "use_fetch") return parqit_plugin::cmd_use_fetch(args);
     if (cmd == "describe") return parqit_plugin::cmd_describe(args);

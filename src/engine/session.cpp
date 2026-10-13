@@ -1,4 +1,5 @@
 #include "engine/session.hpp"
+#include "engine/datefn.hpp"
 #include "engine/typemap.hpp"
 #include "engine/stats_overflow.hpp"
 #include "engine/statistics.hpp"
@@ -231,6 +232,49 @@ static void parqit_substr_bytes_fn(duckdb_function_info, duckdb_data_chunk input
     }
 }
 
+/* DATEFN-1: __parqit_date(s, mask, topyear) / __parqit_clock / __parqit_period
+ * (s, mask, unit) — Stata's text-to-date readers; NULL (missing) whenever the
+ * text does not read as the mask says, as native. topyear <= 0 means none. */
+template <char Kind>
+static void parqit_datefn_fn(duckdb_function_info, duckdb_data_chunk input, duckdb_vector output) {
+    idx_t n = duckdb_data_chunk_get_size(input);
+    duckdb_vector sv = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector mv = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_vector tv = duckdb_data_chunk_get_vector(input, 2);
+    auto *sdata = static_cast<duckdb_string_t *>(duckdb_vector_get_data(sv));
+    auto *mdata = static_cast<duckdb_string_t *>(duckdb_vector_get_data(mv));
+    uint64_t *svalid = duckdb_vector_get_validity(sv);
+    uint64_t *mvalid = duckdb_vector_get_validity(mv);
+    uint64_t *tvalid = duckdb_vector_get_validity(tv);
+    auto *out_vals = static_cast<int64_t *>(duckdb_vector_get_data(output));
+    duckdb_vector_ensure_validity_writable(output);
+    uint64_t *out_validity = duckdb_vector_get_validity(output);
+    for (idx_t r = 0; r < n; r++) {
+        bool ok = valid_row(svalid, r) && valid_row(mvalid, r);
+        long long v = 0;
+        if (ok) {
+            const std::string s = duck_string_to_std(&sdata[r]);
+            const std::string mask = duck_string_to_std(&mdata[r]);
+            if (Kind == 'd' || Kind == 'c') {
+                auto *tdata = static_cast<int64_t *>(duckdb_vector_get_data(tv));
+                const long long top = valid_row(tvalid, r) ? static_cast<long long>(tdata[r]) : 0;
+                ok = Kind == 'd' ? parqit::datefn::parse_date(s, mask, top, &v)
+                                 : parqit::datefn::parse_clock(s, mask, top, &v);
+            } else {
+                auto *udata = static_cast<duckdb_string_t *>(duckdb_vector_get_data(tv));
+                const std::string unit = valid_row(tvalid, r) ? duck_string_to_std(&udata[r]) : "";
+                ok = unit.size() == 1 && parqit::datefn::parse_period(s, mask, unit[0], 0, &v);
+            }
+        }
+        if (ok) {
+            out_vals[r] = v;
+            duckdb_validity_set_row_valid(out_validity, r);
+        } else {
+            duckdb_validity_set_row_invalid(out_validity, r);
+        }
+    }
+}
+
 /* parqit_finite(x): x when it is a value Stata can hold, else NULL. A
  * generated double can be NaN/±Inf (exp(800), 1e300*1e300) or reach the
  * missing-code region |x| >= 2^1023; native Stata reports every one of those
@@ -401,6 +445,12 @@ static bool register_internal_functions(duckdb_connection con, std::string *err)
                            DUCKDB_TYPE_VARCHAR, parqit_substr_bytes_fn, err) &&
            register_scalar(con, "parqit_finite", {DUCKDB_TYPE_DOUBLE},
                            DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err) &&
+           register_scalar(con, "__parqit_date", {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_BIGINT},
+                           DUCKDB_TYPE_BIGINT, parqit_datefn_fn<'d'>, err) &&
+           register_scalar(con, "__parqit_clock", {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_BIGINT},
+                           DUCKDB_TYPE_BIGINT, parqit_datefn_fn<'c'>, err) &&
+           register_scalar(con, "__parqit_period", {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR},
+                           DUCKDB_TYPE_BIGINT, parqit_datefn_fn<'p'>, err) &&
            register_scalar(con, "__parqit_date_days", {DUCKDB_TYPE_DATE},
                            DUCKDB_TYPE_BIGINT,
                            temporal_boundary_fn<duckdb_date, int64_t, 1, kEpochShiftDays>, err, true,
@@ -569,6 +619,19 @@ bool Session::set_streaming_buffer_bytes(long long bytes, std::string *err) {
      * StreamingBufferSizeSetting::SetLocal parses the value with
      * DBConfig::ParseMemoryLimit (src/main/settings/custom_settings.cpp:1600-1603). */
     return exec("SET streaming_buffer_size = '" + std::to_string(bytes) + "B'", err);
+}
+
+bool Session::set_optimizers(bool window_self_join, bool filter_pushdown, std::string *err) {
+    if (window_self_join == window_self_join_ && filter_pushdown == filter_pushdown_) return true;
+    std::string off;
+    if (!window_self_join) off += "window_self_join";
+    if (!filter_pushdown) off += std::string(off.empty() ? "" : ",") + "filter_pushdown";
+    if (!exec(off.empty() ? "RESET disabled_optimizers"
+                          : "SET disabled_optimizers = '" + off + "'", err))
+        return false;
+    window_self_join_ = window_self_join;
+    filter_pushdown_ = filter_pushdown;
+    return true;
 }
 
 bool Session::exec(const std::string &sql, std::string *err) {

@@ -2,7 +2,7 @@
 
 | Component | Version | Source | License | Where |
 |---|---|---|---|---|
-| DuckDB | **1.5.3** (source tree, SHA256-pinned, fetched at configure) | `https://github.com/duckdb/duckdb/archive/refs/tags/v1.5.3.tar.gz` | MIT | CMake FetchContent (see `CMakeLists.txt`); offline: `-DPARQIT_DUCKDB_ARCHIVE=` |
+| DuckDB | **1.5.6** (source tree, SHA256-pinned, fetched at configure) | `https://github.com/duckdb/duckdb/archive/refs/tags/v1.5.6.tar.gz` | MIT | CMake FetchContent (see `CMakeLists.txt`); offline: `-DPARQIT_DUCKDB_ARCHIVE=` |
 | Stata Plugin Interface | **3.0.0** | `https://www.stata.com/plugins/` | StataCorp (distributed for plugin authors) | `stata/stplugin.c`, `stata/stplugin.h` |
 | Arrow C Data Interface | spec header (stable ABI) | `https://raw.githubusercontent.com/apache/arrow/main/cpp/src/arrow/c/abi.h` | Apache-2.0 | `arrow/abi.h` |
 | nlohmann/json | **3.12.0** | `https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp` | MIT | `json/json.hpp` |

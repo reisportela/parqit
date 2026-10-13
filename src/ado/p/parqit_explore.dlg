@@ -1,7 +1,7 @@
 /*
   parqit describe - Describe and explore a view or a Parquet file
 
-*!  VERSION 0.3.3  05oct2026
+*!  VERSION 0.4.0  13oct2026
 
   User > parqit > Describe and explore data...
   Launch directly with:  db parqit_explore      (menu installed by: parqit menu)
@@ -132,6 +132,7 @@ BEGIN
 	Missing patterns (misstable patterns)
 	Levels of one variable (levelsof)
 	Distinct values (distinct)
+	Unique values, jointly and per variable (unique)
 	Report duplicates (duplicates report)
 	List duplicates (duplicates list)
 END
@@ -151,6 +152,7 @@ BEGIN
 	misspatterns
 	levelsof
 	distinct
+	unique
 	dupreport
 	duplist
 END
@@ -170,6 +172,7 @@ BEGIN
 	script op_patterns
 	script op_levelsof
 	script op_distinct
+	script op_unique
 	script op_keys
 	script op_keys
 END
@@ -295,6 +298,15 @@ BEGIN
 	script vars_on
 	main.ck_joint.enable
 	main.ck_dmiss.enable
+	main.tx_if.enable
+	main.ex_if.enable
+END
+
+SCRIPT op_unique
+BEGIN
+	script all_off
+	script vars_on
+	main.tx_vars.setlabel "Variables (counted jointly; missing is a value):"
 	main.tx_if.enable
 	main.ex_if.enable
 END
@@ -434,6 +446,13 @@ BEGIN
 			option main.ck_joint
 			option main.ck_dmiss
 		endoptions
+	}
+	if main.lb_op.equals("unique") {
+		require main.cb_vars
+		put "parqit unique " main.cb_vars
+		if main.ex_if {
+			put " if " main.ex_if
+		}
 	}
 	if main.lb_op.equals("dupreport") {
 		put "parqit duplicates report"

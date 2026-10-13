@@ -15,6 +15,7 @@
 #include <functional>
 #include <iomanip>
 #include <map>
+#include <stdexcept>
 #include <random>
 #include <set>
 #include <sstream>
@@ -120,14 +121,7 @@ bool g_statamissing_chosen = false;
 long long g_collect_counter = 0;
 
 parqit::ExprSchema expr_schema_of(const View &v) {
-    parqit::ExprSchema s;
-    for (const auto &c : v.cols()) {
-        s.kinds[c.name] = c.kind;
-        s.numeric_types[c.name] = c.physical_type;
-        if (c.is_float()) s.float_columns.insert(c.name);
-        if (c.normalized) s.normalized.insert(c.name);
-    }
-    return s;
+    return v.expr_schema(); /* TSSET-1: carries the time-series declaration */
 }
 
 /* Persistent adapter/open-data bridges are reserved by the plugin, then move
@@ -250,9 +244,36 @@ bool validate_pending_claim(const std::vector<std::string> &files,
 }
 
 /* current view (creates a dead placeholder if absent; require_view guards
- * before any use) */
+ * before any use). WINDOW-NEST-1: every access keeps the session's
+ * window_self_join optimizer in step with the current view — off while a
+ * plan with stacked windows is current, on otherwise — so each query over
+ * the view, whichever command runs it, sees the right setting; the switch is
+ * issued only when the state changes. */
+/* WINDOW-NEST-1: what a using view taken by the two-table command in
+ * progress needs; every g_view_ref() access during that call takes the
+ * union with the master (the probes and the bind run over the using plan
+ * before the result exists), and the dispatcher clears it at the next call */
+bool g_using_fragile = false;
+int g_using_terms = 0;
+
 View &g_view_ref() {
-    return g_views[g_current];
+    View &v = g_views[g_current];
+    std::string err;
+    const bool live = v.live();
+    /* DuckDB 1.5.6 no longer rewrites a window over a window (its self-join
+     * optimizer skips a child chain holding one; the unit test pins it), so
+     * the correctness reason for turning window_self_join off is gone; the
+     * rule stays for a view with stacked windows because the Stata-side
+     * timings with it on were slower on every paired round and the paired
+     * driver runs were inconclusive under load (ASSUMPTIONS #191): a one-line
+     * choice to revisit on a quiet host. A failed SET would leave the
+     * session on the wrong optimizers: the command stops here, before any
+     * query, through the plugin's catch-all (nonzero rc plus the message). */
+    if (!Session::instance().set_optimizers(
+            !((live && v.fragile_windows()) || g_using_fragile),
+            !((live ? v.window_terms() : 0) + g_using_terms >= View::kHeavyWindowTerms), &err))
+        throw std::runtime_error("parqit: could not set the engine's optimizers for this view: " + err);
+    return v;
 }
 
 /* STATAMISS-WARN-1: the comparisons of an expression over the current view
@@ -741,6 +762,47 @@ std::vector<std::string> detect_frac_rounding(Session &s, const View &v) {
 
 } // namespace
 
+/* USE-IF-1: see plugin_view.hpp */
+bool eager_filter_sql(const std::string &scan_sql, const std::string &expr,
+                      std::string *where_sql, std::string *err) {
+    Session &s = Session::instance();
+    duckdb_result res;
+    if (!s.query("SELECT * FROM " + scan_sql + " LIMIT 0", &res, err)) return false;
+    parqit::ExprSchema schema;
+    const idx_t ncol = duckdb_column_count(&res);
+    for (idx_t c = 0; c < ncol; c++) {
+        const char *nm = duckdb_column_name(&res, c);
+        const std::string name = nm ? nm : "";
+        duckdb_logical_type lt = duckdb_column_logical_type(&res, c);
+        const duckdb_type id = duckdb_get_type_id(lt);
+        const BoundaryCol b = boundary_for(name, lt);
+        duckdb_destroy_logical_type(&lt);
+        const bool text = id == DUCKDB_TYPE_VARCHAR || id == DUCKDB_TYPE_BLOB;
+        schema.kinds[name] = text ? 's' : 'n';
+        schema.numeric_types[name] = b.physical_type;
+        if (id == DUCKDB_TYPE_FLOAT) schema.float_columns.insert(name);
+        /* the boundary cast nulls IEEE specials and folds a NULL string to "",
+         * exactly what MISS-1 means by normalized */
+        schema.normalized.insert(name);
+        schema.column_sql[name] = b.sql;
+    }
+    duckdb_destroy_result(&res);
+    parqit::ExprResult r = parqit::translate_filter(expr, schema, g_statamissing);
+    if (!r.ok) {
+        *err = r.error;
+        return false;
+    }
+    if (!r.windows.empty()) {
+        *err = "_n/_N and subscripts are not available in the if of parqit use; "
+               "open the file as a view (parqit use using ...) and keep if there";
+        return false;
+    }
+    if (!g_statamissing && !g_statamissing_chosen) /* STATAMISS-WARN-1 */
+        warn_missing_rules(parqit::missing_rule_differences(expr, schema, true));
+    *where_sql = r.sql;
+    return true;
+}
+
 bool view_is_live() {
     auto it = g_views.find(g_current);
     return it != g_views.end() && it->second.live();
@@ -1152,6 +1214,20 @@ ST_retcode cmd_bridge_discard(const std::vector<std::string> &args) {
 }
 
 /* ======================================================== view_open ===== */
+
+/* WINDOW-NEST-1: exported for the dispatcher (the helpers above live in
+ * this file's anonymous namespace; an unexported definition here would
+ * link and then kill Stata with "symbol lookup error", exit 127) */
+void eager_optimizers() {
+    std::string err;
+    if (!Session::instance().set_optimizers(true, true, &err))
+        throw std::runtime_error("parqit: could not restore the engine's optimizers: " + err);
+}
+
+void begin_call() {
+    g_using_fragile = false;
+    g_using_terms = 0;
+}
 
 ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     std::string err;
@@ -1742,6 +1818,22 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             if (std::find(miss_cmps.begin(), miss_cmps.end(), m) == miss_cmps.end())
                 miss_cmps.push_back(std::move(m));
     };
+    /* BY-PREFIX-1: `by varlist [(sortvars)]:` and `bysort ...:` — the keys
+     * partition _n/_N and the subscripts; bysort sorts by keys+sortvars first
+     * (the sort stays, as native leaves the data sorted), by alone requires
+     * that order already (the engine refuses "not sorted") */
+    const std::vector<std::string> by = req_list_or_empty(req, "by");
+    const std::vector<std::string> by_sortvars = req_list_or_empty(req, "sortvars");
+    const bool bysort = req.value("bysort", false);
+    if (!by.empty() && bysort) {
+        std::vector<std::string> keys = by;
+        keys.insert(keys.end(), by_sortvars.begin(), by_sortvars.end());
+        e = candidate.sort(keys, std::vector<bool>(keys.size(), false));
+        if (!e.empty()) {
+            cry("parqit bysort: " + e);
+            return kRcUsage;
+        }
+    }
     if (op == "keep_vars") e = candidate.keep_vars(req_list_or_empty(req, "names"));
     else if (op == "drop_vars") e = candidate.drop_vars(req_list_or_empty(req, "names"));
     else if (op == "keep_if" || op == "drop_if") {
@@ -1750,7 +1842,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = candidate.filter(ex, op == "drop_if", g_statamissing);
+        e = candidate.filter(ex, op == "drop_if", g_statamissing, by, by_sortvars);
         add_miss(missing_rule_cmps(ex, true));
     } else if (op == "gen") {
         std::string name, type, ex, ifex;
@@ -1761,7 +1853,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        e = candidate.gen(name, type, ex, ifex, g_statamissing);
+        e = candidate.gen(name, type, ex, ifex, g_statamissing, by, by_sortvars);
         add_miss(missing_rule_cmps(ex, false, ifex));
         add_miss(missing_rule_cmps(ifex, true));
     } else if (op == "replace") {
@@ -1780,7 +1872,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                 old_meta = c.meta_type;
                 break;
             }
-        e = candidate.replace(name, ex, ifex, g_statamissing);
+        e = candidate.replace(name, ex, ifex, g_statamissing, by, by_sortvars);
         if (e.empty() && (old_meta == "float" || old_meta == "double")) {
             replace_storage_name = name;
             replace_storage_type = old_meta;
@@ -1822,14 +1914,39 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                 specs.push_back(sp);
             }
         }
-        e = candidate.collapse(specs, req_list_or_empty(req, "by"));
+        /* IF-ALL-1: native `collapse ... if exp` aggregates the selected rows
+         * only — a filter stage, then the aggregate, in the one transaction */
+        std::string ifex;
+        if (!parqit::req_text(req, "ifexpr", &ifex, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        if (!ifex.empty()) {
+            e = candidate.filter(ifex, false, g_statamissing);
+            add_miss(missing_rule_cmps(ifex, true));
+        }
+        if (e.empty()) e = candidate.collapse(specs, req_list_or_empty(req, "by"));
     } else if (op == "contract") {
-        std::string freq;
+        std::string freq, ifex;
         parqit::req_text(req, "freq", &freq, &err, false);
-        e = candidate.contract(req_list_or_empty(req, "names"), freq);
+        if (!parqit::req_text(req, "ifexpr", &ifex, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        if (!ifex.empty()) { /* IF-ALL-1 */
+            e = candidate.filter(ifex, false, g_statamissing);
+            add_miss(missing_rule_cmps(ifex, true));
+        }
+        if (e.empty()) e = candidate.contract(req_list_or_empty(req, "names"), freq);
     } else if (op == "dupdrop") {
+        std::string ifex;
+        if (!parqit::req_text(req, "ifexpr", &ifex, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
         e = candidate.duplicates_drop(req_list_or_empty(req, "names"),
-                                      req.value("force", false));
+                                      req.value("force", false), ifex, g_statamissing);
+        add_miss(missing_rule_cmps(ifex, true));
     } else if (op == "keep_in") {
         e = candidate.keep_in(req.value("f", 0LL), req.value("l", 0LL));
     } else if (op == "drop_in") {
@@ -1858,17 +1975,85 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                                             g_statamissing);
             add_miss(missing_rule_cmps(ifx, true));
         }
+    } else if (op == "tsset") {
+        /* TSSET-1: validate, probe the plan once (missing times, repeated
+         * (panel, time) pairs — both refused, as native), then declare */
+        std::string panel, time;
+        if (!parqit::req_text(req, "panel", &panel, &err, false) ||
+            !parqit::req_text(req, "time", &time, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        const double delta = req.value("delta", 1.0);
+        if (req.value("clear", false)) {
+            candidate.clear_tsset();
+        } else {
+            e = candidate.tsset(panel, time, delta);
+            if (e.empty()) {
+                Session &s = Session::instance();
+                if (validate_ranges(s, candidate, &err) != 0) e = err;
+                std::string out;
+                if (e.empty() &&
+                    !s.query_scalar(candidate.tsset_probe_sql(candidate.ts_panel(),
+                                                              candidate.ts_time(), delta),
+                                    &out, &err))
+                    e = "tsset check failed: " + err;
+                if (e.empty()) {
+                    std::vector<std::string> f;
+                    size_t p0 = 0;
+                    for (size_t p = out.find('|'); ; p = out.find('|', p0)) {
+                        f.push_back(out.substr(p0, p == std::string::npos ? std::string::npos : p - p0));
+                        if (p == std::string::npos) break;
+                        p0 = p + 1;
+                    }
+                    /* native tsset's rules, in its words: a missing time is
+                     * allowed (the operators are missing on that row), a
+                     * fractional one, a repeated one and a period below
+                     * delta() are refused */
+                    if (f.size() != 8) e = "tsset check returned " + out;
+                    else if (f[1] != "0")
+                        e = "time variable " + candidate.ts_time() +
+                            " must contain only integer values (" + f[1] + " row(s) are not)";
+                    else if (f[2] != "0")
+                        e = (candidate.ts_panel().empty()
+                                 ? "repeated time values in " + candidate.ts_time()
+                                 : "repeated time values within panel: " + f[2] + " row(s) share a (" +
+                                       candidate.ts_panel() + ", " + candidate.ts_time() + ") pair") +
+                            "; each time value must occur once" +
+                            (candidate.ts_panel().empty() ? "" : " per panel");
+                    else if (f[7] != "0")
+                        e = "time values with period less than delta() found (" + f[7] +
+                            " consecutive pair(s) closer than " + parqit::dtoa(delta) + ")";
+                    else {
+                        save_local("_parqit_ts_min", f[3]);
+                        save_local("_parqit_ts_max", f[4]);
+                        save_local("_parqit_ts_panels", f[5]);
+                        save_local("_parqit_ts_gaps", f[6]);
+                        save_local("_parqit_ts_missing", f[0]);
+                    }
+                }
+            }
+        }
+        if (e.empty()) {
+            save_local("_parqit_ts_panel", parqit::hex_encode(candidate.ts_panel()));
+            save_local("_parqit_ts_time", parqit::hex_encode(candidate.ts_time()));
+            save_local("_parqit_ts_delta", parqit::dtoa(candidate.ts_delta()));
+            std::string fmt;
+            for (const auto &c : candidate.cols())
+                if (c.name == candidate.ts_time()) fmt = c.fmt;
+            save_local("_parqit_ts_fmt", parqit::hex_encode(fmt));
+        }
     } else if (op == "egen") {
         std::string name, fcn, ex, ty;
         if (!parqit::req_text(req, "name", &name, &err) ||
             !parqit::req_text(req, "fcn", &fcn, &err) ||
             !parqit::req_text(req, "type", &ty, &err, false) ||
-            !parqit::req_text(req, "expr", &ex, &err)) {
+            !parqit::req_text(req, "expr", &ex, &err, false)) {
             cry(err);
             return kRcUsage;
         }
         std::string arg_type;
-        if (fcn == "total" && ty.empty()) {
+        if ((fcn == "total" || fcn == "sum") && ty.empty() && !ex.empty()) {
             parqit::ExprSchema schema;
             for (const auto &c : candidate.cols()) {
                 schema.kinds[c.name] = c.kind;
@@ -1891,9 +2076,84 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
                 duckdb_destroy_result(&probe);
             }
         }
-        e = candidate.egen(name, fcn, ex, req_list_or_empty(req, "by"),
-                           g_statamissing, ty, arg_type);
-        add_miss(missing_rule_cmps(ex, false));
+        /* BY-PREFIX-1: the prefix keys ARE the groups; combined with by()
+         * they must agree, as native egen refuses the two together */
+        std::vector<std::string> egen_by = req_list_or_empty(req, "egen_by");
+        if (!by.empty() && !egen_by.empty() && egen_by != by) {
+            cry("parqit egen: the by prefix and the by() option name different "
+                "variables; use one of them");
+            return kRcUsage;
+        }
+        if (egen_by.empty()) egen_by = by;
+        /* EGEN-ALL-1: the whole native option set travels in the request */
+        View::EgenSpec sp;
+        sp.name = name;
+        sp.fcn = fcn;
+        sp.type_req = ty;
+        sp.expr = ex;
+        sp.vars = req_list_or_empty(req, "vars");
+        sp.by = egen_by;
+        if (!parqit::req_text(req, "ifexpr", &sp.if_expr, &err, false) ||
+            !parqit::req_text(req, "punct", &sp.punct, &err, false) ||
+            !parqit::req_text(req, "format", &sp.format, &err, false) ||
+            !parqit::req_text(req, "lname", &sp.lname, &err, false)) {
+            cry(err);
+            return kRcUsage;
+        }
+        sp.has_punct = req.contains("punct");
+        if (req.contains("p") && req["p"].is_number()) { sp.has_p = true; sp.p = req["p"].get<double>(); }
+        auto numbers = [&](const char *key, std::vector<double> *out) {
+            if (req.contains(key) && req[key].is_array())
+                for (const auto &x : req[key])
+                    if (x.is_number()) out->push_back(x.get<double>());
+        };
+        numbers("values", &sp.values);
+        numbers("at", &sp.at);
+        sp.decode = req.value("decode", false);
+        sp.maxlength = req.value("maxlength", 0LL);
+        sp.missing = req.value("missing", false);
+        sp.minmode = req.value("minmode", false);
+        sp.maxmode = req.value("maxmode", false);
+        sp.nummode = req.value("nummode", 0LL);
+        sp.field = req.value("field", false);
+        sp.track = req.value("track", false);
+        sp.unique = req.value("unique", false);
+        if (req.contains("from") && req["from"].is_number()) { sp.has_from = true; sp.from = req["from"].get<double>(); }
+        if (req.contains("to") && req["to"].is_number()) { sp.has_to = true; sp.to = req["to"].get<double>(); }
+        sp.block = req.value("block", 1LL);
+        if (req.contains("mean") && req["mean"].is_number()) sp.mean = req["mean"].get<double>();
+        if (req.contains("sd") && req["sd"].is_number()) sp.sd = req["sd"].get<double>();
+        sp.group = req.value("group", 0LL);
+        sp.icodes = req.value("icodes", false);
+        sp.label = req.value("label", false);
+        sp.prop = req.value("prop", false);
+        sp.strok = req.value("strok", false);
+        sp.head = req.value("head", false);
+        sp.last = req.value("last", false);
+        sp.tail = req.value("tail", false);
+        sp.trim = req.value("trim", false);
+        sp.truncate = req.value("truncate", 0LL);
+        /* a function that needs data first (cut group(), group label) */
+        std::string probe;
+        e = candidate.egen_probe_sql(sp, g_statamissing, &probe);
+        if (e.empty() && !probe.empty()) {
+            Session &s = Session::instance();
+            if (validate_ranges(s, candidate, &err) != 0) e = err;
+            duckdb_result pres;
+            if (e.empty() && !s.query(probe, &pres, &err)) e = "parqit egen: " + err;
+            if (e.empty()) {
+                const idx_t nr = duckdb_row_count(&pres), ncol = duckdb_column_count(&pres);
+                for (idx_t r = 0; r < nr; r++) {
+                    std::vector<std::string> row;
+                    for (idx_t cc = 0; cc < ncol; cc++) row.push_back(text_cell(pres, cc, r));
+                    sp.probe_rows.push_back(row);
+                }
+                duckdb_destroy_result(&pres);
+            }
+        }
+        if (e.empty()) e = candidate.egen(sp, g_statamissing, arg_type);
+        if (!ex.empty()) add_miss(missing_rule_cmps(ex, false));
+        add_miss(missing_rule_cmps(sp.if_expr, true));
     } else {
         cry("parqit: unknown view operation '" + op + "'");
         return kRcUsage;
@@ -1950,6 +2210,14 @@ ST_retcode cmd_view_info(const std::vector<std::string> &args) {
     if (!w.open(respfile, &err)) {
         cry(err);
         return kRcEngine;
+    }
+    if (what == "tsset") { /* TSSET-1: the declaration, for parqit tsset/xtset without arguments */
+        const View &v = g_view_ref();
+        const bool on = v.ts_declared();
+        save_local("_parqit_ts_panel", parqit::hex_encode(on ? v.ts_panel() : std::string()));
+        save_local("_parqit_ts_time", parqit::hex_encode(on ? v.ts_time() : std::string()));
+        save_local("_parqit_ts_delta", parqit::dtoa(v.ts_delta()));
+        return 0;
     }
     if (what == "show") {
         w.rec("sql", {}, {g_view_ref().show()});
@@ -3111,12 +3379,21 @@ ST_retcode using_from_view(Session &s, const std::string &vname,
         *err = "no view named " + vname + " is open";
         return kRcUsage;
     }
+    /* WINDOW-NEST-1: the range probe, the key probes and the join's bind
+     * run over this view's plan before the result exists; from here to the
+     * end of the command every g_view_ref() access takes what this view
+     * needs as well (several using views of an append accumulate) */
+    g_using_fragile = g_using_fragile || it->second.fragile_windows();
+    g_using_terms += it->second.window_terms();
+    (void)g_view_ref(); /* applies the union now; a failure is reported there */
     ST_retcode rc = validate_ranges(s, it->second, err);
     if (rc != 0) return rc;
     out->select_sql = it->second.compile(true);
     out->cols = it->second.cols();
     out->vallabs = it->second.vallabs();
     out->chars = it->second.chars(); /* TWOTABLE-CHARS-1 */
+    out->fragile_windows = it->second.fragile_windows(); /* WINDOW-NEST-1 */
+    out->window_terms = it->second.window_terms();
     return 0;
 }
 
@@ -3826,6 +4103,20 @@ ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
 
     View saved = g_view_ref(); /* both stages land, or neither */
 
+    /* IF-ALL-1: pivot shares collapse's grammar, so it takes its if too */
+    std::string ifex;
+    if (!parqit::req_text(req, "ifexpr", &ifex, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    if (!ifex.empty()) {
+        e = g_view_ref().filter(ifex, false, g_statamissing);
+        if (!e.empty()) {
+            g_view_ref() = saved;
+            cry("parqit pivot: " + e);
+            return kRcUsage;
+        }
+    }
     std::vector<std::string> by = rowv;
     by.push_back(col);
     e = g_view_ref().collapse(specs, by);
@@ -3860,6 +4151,7 @@ ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
         cry("parqit pivot: " + err);
         return kRcEngine;
     }
+    if (!ifex.empty()) warn_missing_rules(missing_rule_cmps(ifex, true)); /* STATAMISS-WARN-1 */
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     return 0;
 }
@@ -4737,6 +5029,90 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                   {targets[ti].first, cell(off + 2), cell(off + 3), lab});
         }
         duckdb_destroy_result(&res);
+    } else if (what == "unique") {
+        /* UNIQUE-1 (BPLIM feedback, 2026-10-13): the community-contributed
+         * unique (Brady/Hills, SSC): the number of distinct values of the
+         * varlist taken jointly, missing counting as a value, over the
+         * observations selected; per variable too when there are several
+         * (parqit's addition), and per group with by() — a table, not the
+         * generated variable the SSC command creates */
+        if (vars.empty()) {
+            cry("parqit unique: variable list required");
+            return kRcUsage;
+        }
+        for (const auto &t : vars) {
+            bool found = false;
+            for (const auto &c : g_view_ref().cols()) found = found || c.name == t;
+            if (!found) {
+                cry("parqit unique: variable " + t + " not found in the view");
+                return kRcVarNotFound;
+            }
+        }
+        /* a struct row keeps a NULL field as a value, so a missing value is
+         * one more unique value, for one variable as for several */
+        std::string tup;
+        for (size_t i = 0; i < vars.size(); i++) tup += (i ? ", " : "") + norm_view_key(vars[i]);
+        tup = "row(" + tup + ")";
+        std::string sel = "count(*), count(DISTINCT " + tup + ")";
+        for (const auto &t : vars) sel += ", count(DISTINCT " + norm_view_key(t) + ") + "
+                                          "CASE WHEN count(*) > count(" + norm_view_key(t) +
+                                          ") THEN 1 ELSE 0 END";
+        duckdb_result res;
+        if (!s.query("SELECT " + sel + " FROM " + base, &res, &err)) {
+            cry("parqit unique: " + err);
+            return kRcEngine;
+        }
+        const long long total = duckdb_value_int64(&res, 0, 0);
+        const long long joint = duckdb_value_int64(&res, 1, 0);
+        for (size_t t = 0; t < vars.size(); t++)
+            w.rec("unq", {std::to_string(duckdb_value_int64(&res, 2 + static_cast<idx_t>(t), 0))},
+                  {vars[t]});
+        duckdb_destroy_result(&res);
+        w.rec("unqn", {std::to_string(total), std::to_string(joint)}, {});
+        std::string byvar;
+        parqit::req_text(req, "by", &byvar, &err, false);
+        if (!byvar.empty()) {
+            std::vector<std::string> byn;
+            const std::string berr = g_view_ref().expand_patterns({byvar}, &byn);
+            if (!berr.empty()) {
+                cry("parqit unique: " + berr);
+                return kRcVarNotFound;
+            }
+            std::string bykeys;
+            for (size_t i = 0; i < byn.size(); i++) bykeys += (i ? ", " : "") + norm_view_key(byn[i]);
+            std::string bysel;
+            for (size_t i = 0; i < byn.size(); i++)
+                bysel += (i ? ", " : "") + ("encode(CAST(" + norm_view_key(byn[i]) + " AS VARCHAR))");
+            duckdb_result bres;
+            if (!s.query("SELECT " + bysel + ", count(DISTINCT " + tup + "), count(*) FROM " + base +
+                             " GROUP BY " + bykeys + " ORDER BY " + bykeys + " NULLS LAST LIMIT 10001",
+                         &bres, &err)) {
+                cry("parqit unique: " + err);
+                return kRcEngine;
+            }
+            const idx_t nr = duckdb_row_count(&bres);
+            if (nr > 10000) {
+                duckdb_destroy_result(&bres);
+                cry("parqit unique: by() has more than 10,000 groups; collapse the view instead");
+                return kRcUsage;
+            }
+            for (idx_t r = 0; r < nr; r++) {
+                std::vector<std::string> keys;
+                for (size_t i = 0; i < byn.size(); i++) {
+                    const bool isnull = duckdb_value_is_null(&bres, static_cast<idx_t>(i), r);
+                    keys.push_back(isnull ? "" : text_cell(bres, static_cast<idx_t>(i), r));
+                }
+                std::vector<std::string> nums = {
+                    std::to_string(duckdb_value_int64(&bres, static_cast<idx_t>(byn.size()), r)),
+                    std::to_string(duckdb_value_int64(&bres, static_cast<idx_t>(byn.size()) + 1, r))};
+                w.rec("unqb", nums, keys);
+            }
+            duckdb_destroy_result(&bres);
+            std::vector<std::string> bynames = byn;
+            w.rec("unqby", {}, bynames);
+        }
+        save_local("_parqit_n", std::to_string(total));
+        save_local("_parqit_unique", std::to_string(joint));
     } else if (what == "distinct") {
         std::vector<std::string> targets = vars;
         if (targets.empty())

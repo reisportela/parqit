@@ -15,6 +15,7 @@
  *  - §6.9: fetch fills a tempframe the ado swaps in only on success.
  */
 #include "plugin/plugin_io.hpp"
+#include "plugin/plugin_view.hpp" /* USE-IF-1: eager_filter_sql */
 
 #include <algorithm>
 #include <atomic>
@@ -2826,7 +2827,32 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         return kRcUsage;
     }
     if (!partition_mode.empty() && partition_by.empty()) {
-        *err = "partitions(" + partition_mode + ") needs partition_by()";
+        /* PART-KEYS-1 (BPLIM feedback, 2026-10-13): name the keys the existing
+         * tree is partitioned by (its first branch's key=value directories),
+         * so the remedy is one copy away; the choice stays explicit */
+        std::string found;
+        std::error_code ec0;
+        fs::path at = user_dest;
+        while (fs::is_directory(at, ec0) && !ec0) {
+            fs::path next;
+            for (const auto &e : fs::directory_iterator(at, ec0)) {
+                const std::string name = e.path().filename().u8string();
+                std::error_code ecd;
+                const size_t eq = name.find('=');
+                if (name.empty() || name[0] == '.' || !e.is_directory(ecd) || eq == std::string::npos ||
+                    eq == 0)
+                    continue;
+                found += (found.empty() ? "" : " ") + name.substr(0, eq);
+                next = e.path();
+                break;
+            }
+            if (next.empty()) break;
+            at = next;
+        }
+        *err = "partitions(" + partition_mode + ") needs partition_by()" +
+               (found.empty() ? std::string(" naming the keys of the tree")
+                              : "; the tree " + user_dest + " is partitioned by " + found +
+                                    ": add partition_by(" + found + ")");
         return kRcUsage;
     }
     if (!partition_mode.empty() && replace) {
@@ -3305,14 +3331,31 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
             return prc;
         }
     }
-    const Source src = source_for(files, req.value("relaxed", false),
-                                  req.value("csv", false), filename_col,
-                                  csv_opts);
+    Source src = source_for(files, req.value("relaxed", false),
+                            req.value("csv", false), filename_col,
+                            csv_opts);
     ST_retcode grc = strict_schema_gate(s, src, files, req.value("relaxed", false),
                                         req.value("csv", false), &err);
     if (grc != 0) {
         cry("parqit use: " + err);
         return grc;
+    }
+    /* USE-IF-1: `parqit use [varlist] if exp using file, clear` — the
+     * condition filters the scan the fetch reads, before the projection, so a
+     * variable outside the varlist may be tested; the read stays the eager one
+     * (footer-sized types, the .a-.z companions restored, the same fill) */
+    std::string ifexpr;
+    if (!parqit::req_text(req, "ifexpr", &ifexpr, &err, false)) {
+        cry(err);
+        return kRcUsage;
+    }
+    if (!ifexpr.empty()) {
+        std::string where;
+        if (!eager_filter_sql(src.scan_sql, ifexpr, &where, &err)) {
+            cry("parqit use: " + err);
+            return kRcUsage;
+        }
+        src.scan_sql = "(SELECT * FROM " + src.scan_sql + " WHERE " + where + ")";
     }
     PlanContext ctx;
     /* INT64-PROTECT-1 / BINARY-DECODE-1: the read-time type options. Absent
@@ -3378,10 +3421,10 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
      * copy-the-source fast path for it (the save's own name check would refuse
      * it later anyway, further from the cause) */
     if (!req.value("csv", false) && !req.value("relaxed", false) &&
-        filename_col.empty() && files.size() == 1) {
+        filename_col.empty() && files.size() == 1 && ifexpr.empty()) {
         /* COPYSOURCE-1: the load-time identity an explicit `parqit save,
          * copysource` must match exactly (FP-2: size, mtime, ctime, inode and
-         * the footer digest) */
+         * the footer digest); a filtered read (USE-IF-1) is not the file */
         FileIdentity id;
         if (file_identity(files[0], &id, true) && !id.footer.empty()) {
             save_local("_parqit_fast_source_ok", "1");

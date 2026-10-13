@@ -3696,3 +3696,410 @@ entry notes the conservative fallback if the assumption proves wrong.
     keeps the release number, and its ado-files and plugin are built together.
     Pinned by `v146`, which runs a copy of the ado-files that requires release
     9.9.9 against the real plugin, both before and after the plugin is loaded.
+
+180. **The if qualifier on every verb native Stata gives one to (IF-ALL-1,
+    2026-10-13, BPLIM third round).** `egen`, `collapse`, `contract`, `pivot`,
+    `duplicates drop` and `use` take `[if exp]`; the statistics commands, `gen`,
+    `replace`, `sample`, `count` and `list` already did. Semantics verified
+    natively (`local/rute_2026-10-13/oracles/nat_sem.log`): `collapse …
+    if` is a filter stage then the aggregate in one transaction, so a group
+    absent from the subset vanishes and `percent` is relative to the subset;
+    `contract … if` likewise; `duplicates drop [varlist] if` numbers the
+    selected rows within their group (the condition is part of the partition)
+    and keeps `rn = 1` or every row outside the condition — the no-varlist
+    path without `if` keeps its cheaper hash aggregate; `egen … if` takes the
+    condition as `FILTER (WHERE c)` on its aggregate windows and masks the rows
+    outside it (see #182 for the per-function exceptions). `parqit use` cannot
+    use `syntax`'s `[if]`, which evaluates the expression against the dataset
+    in memory (verified: "nonexistent not found"), so the ado splits the
+    condition off as text before `syntax` (`_parqit_split_using`,
+    `_parqit_split_if`). The eager `use … if, clear` is NOT a temporary view:
+    the Codex review (2026-10-13) pointed out that a view folds `.a`–`.z` to
+    `.` while the eager path restores them, so the condition is a WHERE on the
+    eager scan, translated over the raw columns with each reference replaced by
+    its boundary cast (`ExprSchema::column_sql`; dates as day counts,
+    booleans 0/1, floats finite-guarded — `eager_filter_sql`), before the
+    varlist projection as native `use varlist if` does; `copysource` is not
+    offered after a filtered read. `in` is not taken (not asked for; `keep in`
+    exists on the view). Pinned by v147.
+
+181. **collapse and pivot take every native statistic (COLLAPSE-STATS-2,
+    2026-10-13).** `semean = sd/sqrt(n)`, `sebinomial = sqrt(p(1-p)/n)` with
+    p the mean, `sepoisson = sqrt(mean/n)`, `rawsum = sum` (no weights, so
+    the two coincide), `percent = 100 * count / sum(count) OVER ()` (the share
+    of the nonmissing observations of that variable, over every group, after
+    the if — native's definition, verified: 70.27/29.73 on auto), `iqr = p75 -
+    p25` under the percentile rule over the same ranks. The precise
+    accumulators are reused (`__parqit_stats`/`__parqit_total`); the roots are
+    finite-guarded because DuckDB throws on `sqrt` of a negative number (a
+    mean above 1 or negative gives missing, as native; n = 0 or 1 gives
+    missing through the division). Storage stays `double` where native stores
+    float (#122): the comparison in v147 rounds parqit's double to float and
+    expects native's float exactly. Native's edge values pinned: an all-missing
+    group has mean `.`, sum 0, count 0, percent 0.
+
+182. **The native egen functions on a view (EGEN-ALL-1, 2026-10-13).**
+    Implemented: `total mean sd min max count median pctile iqr kurt skew mad
+    mdev std pc rank` (an expression, by() allowed), `mode seq group tag`
+    (by() allowed for mode and seq; group and tag refuse it as native),
+    `anycount anymatch anyvalue concat cut diff ends` and `rowtotal rowmean
+    rowmin rowmax rowmiss rownonmiss rowsd rowfirst rowlast rowmedian
+    rowpctile` (a varlist; by() refused, as native). Refused: `fill()` (its
+    pattern is inferred from a numlist; `_n` or `seq()` expresses the common
+    cases) and `mtr()` (the US tax table). Rules fixed against native egen
+    (`nat_egen_if.log`, `nat_collapse.log`, `strfmt.log`): under `if`, `tag`,
+    `anycount` and `anymatch` give 0 and `concat`/`ends` "" to the rows
+    outside the condition, every other function missing; `total, missing`
+    distinguishes an all-missing group (missing) from a group without
+    selected rows (missing too); `max, missing` is missing when the group has
+    a missing value; `group()` numbers in the sort order of the keys, a row
+    with a missing key gets missing unless `missing`; `tag()` tags the first
+    row of each key tuple in the view's order; `seq()` counts the selected
+    rows in the view's order within by groups (`from()/to()/block()` as
+    native, decreasing when to < from); `rank()` is the average rank with the
+    tie multiplicity (`(2*rank + count - 1)/2`), `field` 1 for the highest,
+    `track` 1 for the lowest, `unique` the row number in (value, view order)
+    — native breaks ties "arbitrarily" (an unstable sort), so only the
+    properties of unique ranks are tested; `mode()` is missing with several
+    modes unless `minmode`/`maxmode`/`nummode(#)`, `missing` counts a missing
+    value, and `nummode(#)` beyond a group's number of modes gives missing
+    where native stops with r(198) over the whole data (documented
+    difference); `std()` is `(x - mean)/sd * sd() + mean()`; `pc()` is 100
+    (or 1 with `prop`) times the share of the group's total; `concat()` joins
+    end to end unless `punct()`, converts numbers with `string()`'s default
+    (`parqit_stata_string`), `.` for missing, `format(%w.df|%0w.df)` through
+    `printf` (unpadded, as `string(x, fmt)`), `decode` through the value label
+    carried by the view and `maxlength()` only with it; `cut()` with `at()`
+    takes the left-hand end of the interval (`icodes` the index), a value
+    below the first or at or above the last cutpoint is missing, `group(#)`
+    takes the `# - 1` quantiles of the selected nonmissing values under the
+    percentile rule (one probe query when issued, as `pctile, nq()`) and
+    implies `icodes`, `label` defines the native `a-` labels; `group(),
+    label` defines the native texts (decoded labels or values, joined by a
+    space, `truncate()` per piece) from one probe (capped at 65,536 groups);
+    `ends()` is `head` unless `last`/`tail`, one space unless `punct()`,
+    `trim` trims; the row functions ignore missing, `rowtotal` is 0 (missing
+    with `missing`) when every value is missing, `rownonmiss, strok` counts a
+    nonempty string, `rowsd` is the sample sd of the row's values
+    (`stddev_samp`), `rowmedian`/`rowpctile` apply the percentile rule to the
+    sorted list. Percentiles over groups use one rank level and picks over
+    it (PCT-WINDOW-1), `mad` two such rounds, `mdev` and `std` a mean/sd level
+    then the deviation. Storage types: `tag`, `anycount`, `anymatch` and
+    `diff` are `byte`, the engine's type otherwise (refined on collect), an
+    explicit type is value semantics (EGEN-STORAGE-1). The ado parses the
+    function's argument by matching parentheses, then `[if] [, options]`
+    with `syntax` (`values()` and `at()` as numlists; `punct()` without
+    `asis`, so `punct(" ")` is one space, as native). Pinned by v149; the
+    smoke runs of 2026-10-13 compared 55 commands with native.
+
+183. **The by and bysort prefixes, _n/_N within groups and the explicit
+    subscripts (BY-PREFIX-1, ROWCTX-2, 2026-10-13).** `parqit by varlist
+    [(sortvars)]: cmd` and `parqit bysort … : cmd` (abbreviations `bys`,
+    `byso`, `bysor`, as native) apply to `gen`, `replace`, `egen`, `keep if`
+    and `drop if`; other commands are refused with the alternative (`collapse`
+    has `by()`). The keys travel to the inner command through globals
+    (`PARQIT_BY`, `PARQIT_BYSORTVARS`, `PARQIT_BYSORT`), cleared whatever
+    happens; the inner command is an ordinary `parqit` call, so its own
+    missing-value warning prints as usual. `bysort` sorts the view by
+    keys+sortvars first and leaves it sorted, as native leaves the data;
+    `by` alone requires the view's declared sort to start with keys+sortvars
+    (ascending, in that order; a longer sort is fine) and is refused with
+    "not sorted" otherwise, as native r(5). The translator no longer emits
+    window functions inline: every row-context term (`_n`, `_N`, `x[_n-k]`,
+    `x[_n+k]`, `x[k]`, `x[_N]`, `x[_N-k]`, and the time-series terms of #184)
+    is a `WindowTerm` placeholder that the view compiler computes as a helper
+    column of a subquery wrapped around the previous stage, partitioned by
+    the by keys and ordered by the declared sort (the order carrier kept for
+    ties); `x[_N-k]` is `nth_value(x, k+1)` over the reversed order (DuckDB
+    refuses a window inside `nth_value`'s count); a position outside 1.._N is
+    missing. Each translation numbers its terms independently, so `gen`'s
+    value and its `if` are wrapped as two items. `_n`/`_N` are therefore
+    accepted in `replace`, in the `if` of `gen`, and in `egen`'s argument (the
+    windows are plain columns by the time the aggregate runs); the read-only
+    statistics filters still refuse them (#88). A `replace` whose value or
+    condition reads the replaced variable's other rows (`replace x = x[_n-1] if
+    missing(x)`, `L.x`) is refused (REPLACE-SELF-1): native replace is
+    sequential — the Codex review's blocker — and a lazy plan reads the values
+    before the command; a new variable or `parqit sql` expresses it. Pinned by
+    v148 (the native oracle: `bysort foreign (price): gen … price[_n-1]`,
+    `price[_N-1]`, `price[0]`, `price[_N+1]`, `replace … if _n == 1`, `keep if
+    _n <= 2`, `drop if _n > 3`).
+
+184. **Time-series operators by time (TSSET-1, 2026-10-13).** `parqit xtset
+    panelvar timevar [, delta(#)]` and `parqit tsset [panelvar] timevar [,
+    delta(#)]` declare the view's panel and time variables (plan state,
+    copied with the view, following a rename, void once a verb removes the
+    variables); `parqit xtset` alone shows the declaration, `, clear` removes
+    it. Native's contract applies (`tsset.ado:142`, `:488`): the time variable
+    must be integer-valued and nonmissing, unique within each panel, and
+    delta a positive whole number; the plugin runs one probe over the plan
+    when the declaration is made and refuses otherwise (r(198); native
+    r(451)/r(198)). Rute's warning is the design: SQL's `lag()` is `x[_n-1]`;
+    `L#.x` is the value at `t - #*delta` in the same panel, computed as
+    `max(x) OVER (PARTITION BY panel ORDER BY time RANGE BETWEEN k PRECEDING
+    AND k PRECEDING)` — one ordering expression, the time variable alone (the
+    Codex review), never the view's sort — so a gap gives missing, as native
+    (verified: `L2.x` at 2003 is the 2001 value with 2002 absent, `D.x` and
+    `LD.x` missing around the gap). Operator chains (`LD`, `L2D`, `S4`,
+    lowercase too) are expanded as a polynomial in L (F = L⁻¹, D = 1 - L, S#
+    = 1 - L^#) into signed window terms, missing whenever a term is missing;
+    the Codex review notes that algebraic equivalence is not rounding
+    equivalence (`D2.x` is `x - 2 L.x + L2.x` here and `(x - L.x) - (L.x -
+    L2.x)` natively): equal on the oracle's values, documented as a
+    last-ulp caveat for extreme magnitudes. The operators cannot be applied
+    to the time or panel variable, nor to a string. `tin(a, b)` (inclusive)
+    and `twithin(a, b)` (exclusive) take numbers or the time variable's
+    display format (`td` ddmonyyyy, `tm` yyyymN, …). Invalidation (the Codex
+    review): the declaration is plan state checked once; a later verb that
+    changes the keys or builds rows is not re-probed — documented in the help
+    as the user's responsibility to re-declare, like native after `replace`.
+    Pinned by v148.
+
+185. **The date and time functions (DATEFN-1, 2026-10-13).** The SQL-level
+    functions `ym yq yh yw` (linear in a fractional period, as native `ym(2020,
+    7.9) = 726.9`; missing outside 1..per), `dofq dofh dofy dofw qofd hofd
+    wofd week halfyear` (week = min(52, (doy-1)//7 + 1), as native: day 365
+    is week 52), `dofc cofd hh mm ss hms dhms mdyhms hours minutes seconds
+    msofhours msofminutes msofseconds`, `datediff(d1, d2, "day|month|year")`
+    and `age(dob, d)` (full months by the day of the month: 31jan→29feb is 0
+    months, as native; "week" is refused where native returns missing). The
+    text readers `date daily clock monthly quarterly halfyearly weekly yearly`
+    are C++ scalar functions registered in the session (`__parqit_date`,
+    `__parqit_clock`, `__parqit_period`; `src/engine/datefn.cpp`, unit-tested
+    without DuckDB) with native's rules verified in `nat_dates2.log`: fields
+    are runs of digits, month names (a prefix of three or more letters) and
+    am/pm, other letters separate (`2020q3` read with `YM` is month 3, as
+    native); the mask letters take the fields in order and `#` skips one; a
+    string with more or fewer fields than the mask is missing (`15jan2020
+    10:30` with `DMY` is missing, as native); run-together digits are split by
+    the letters' widths (Y 4, the others 2, the last letter of the run taking
+    the rest: `2006125` is 20jun0125 with `DMY` and 05dec2006 with `YMD`); a
+    one- or two-digit year needs `20Y`/`19Y` in the mask or topyear (the
+    latest year not after it with those digits), else missing; year 100–9999,
+    an impossible date, 24:00, a 60th second and a fraction of a second beyond
+    three decimals are missing. The mask must be a string literal, checked
+    when translated (a wrong letter is an error, not a silent missing).
+    `Cofc`/`cofC` stay out (parqit has no leap-second table: `tC` = `tc`).
+    Pinned by v150 against native on the same strings.
+
+186. **`parqit unique` (UNIQUE-1, 2026-10-13).** Rute asked to replace
+    `distinct` by `unique` with the separate and joint counts by default. The
+    published `distinct` stays (the README is additive); `parqit unique
+    varlist [if] [, by(varlist)]` follows the community-contributed `unique`
+    (Brady/Hills 1.2.4, installed here as the oracle): the varlist is counted
+    jointly and a missing value counts as a value (`unique rep78` on auto is
+    6), the two lines "Number of unique values of … is" and "Number of
+    records is", `r(unique) = r(sum)` the joint count and `r(N)` the records
+    selected. parqit's additions, the Codex review's wording: a table per
+    variable when there are several, and with `by()` a table per group
+    (capped at 10,000 groups) where the SSC command generates a variable;
+    `generate()` and `detail` are refused with that note; `in` is not taken.
+    Pinned by v151 (egen group(), missing as the native count; the SSC command
+    when installed).
+
+187. **`compress` on collect and use (COMPRESS-1, 2026-10-13).** Marta's
+    "built-in compress" after collapse/egen. Not an engine type decision: the
+    results are not all double (counts are `long`, min/max keep the source
+    type, the engine's integer types are refined by range on collect — the
+    Codex review's correction to the analysis), and narrowing a double mean
+    to native's float would reduce precision (#122, the maintainer's rule).
+    Native `compress` is lossless by construction (an integral double becomes
+    `long`/`int`/`byte`, double→float only when every value is exactly a
+    float), so `parqit collect, compress` and `parqit use …, clear compress`
+    run it on the staged frame, inside the loader's error handling and before
+    the atomic swap — a failure leaves the dataset untouched. It is a pass
+    over memory after the load, not a reduction of the peak nor of a Parquet
+    file written by `save` (which keeps the engine's types). `compress`
+    without `clear` on `use` is refused (a lazy view has no storage types to
+    compress). Pinned by v147 (native compress changes nothing afterwards).
+
+188. **Three of Rute's points were not taken, one was taken in a smaller form
+    (2026-10-13).** (i) Swapping the default of `save` (memory by default,
+    `data` for the view): refused — `save` is the materialiser of the
+    pipeline (brief §3/§6), every published example depends on it, and Rute
+    was unsure; instead `save …, view` names the current view explicitly, the
+    symmetric of `data`, refused when no view is open (SAVE-VIEW-1). (ii)
+    `statamissing on` by default: refused — the brief §7 fixes the SQL
+    default and the EXPR-2/3 decision stands; the Codex review preferred an
+    explicit `parqit set statamissing on` in the do-file to an environment
+    variable, so none was added (the analysis records the one-line change
+    should the maintainer decide otherwise). (iii) Removing `head` and
+    `glimpse` (and `distinct`): refused by the non-regression rule; the help
+    presents `glimpse` as a synonym of `describe` and `head #` as `list in
+    1/#`. (iv) "Review partitions()": no concrete complaint; the Codex review
+    advised against inferring `partition_by()` from the tree (the choice stays
+    explicit), so the refusal now names the keys the existing tree is
+    partitioned by, read from its first branch of `key=value` directories
+    (PART-KEYS-1), and the user adds `partition_by(keys)`.
+
+189. **DuckDB 1.5.3's planner and stacked window stages (WINDOW-NEST-1,
+    2026-10-13).** Found while testing EGEN-ALL-1: (a) the `window_self_join`
+    optimizer rewrites a whole-partition window aggregate that reads another
+    window's column (mode: the frequency, its maximum, the modal values) and
+    then fails to bind the inner column — `INTERNAL Error: Failed to bind
+    column reference ""` or `Invalid Error: _Map_base::at` — on the full
+    result only (the bind probe and `count(*)` prune the windows and pass);
+    (b) with it, any stack of partitioned window stages plans exponentially
+    (12 stacked `egen mean(), by()`: 2.5 s on 74 rows, 0.016 s without it);
+    (c) `filter_pushdown` rewrites the subtree under every partitioned
+    WINDOW operator twice (`PushdownWindow` rewrites the child, then
+    `FinishPushdown` rewrites it again — `src/optimizer/pushdown/
+    pushdown_window.cpp`), so planning grows ~1.8x per stacked window:
+    16 stacked `egen mean(), by()` plan in 0.05 s, 18 in 0.19 s, 20 in
+    0.6 s, 30 in more than a minute; a mode stage counts for ~2.6 windows
+    (8 stacked: 11.6 s), a mad stage for 3 (6 stacked: 11 s); the 52 egen
+    stages of v149 never finished (killed after 12 minutes, 5 GB peak),
+    0.08 s with the optimizer off. The first reading of this cost — eight
+    stacked percentile stages — was the same doubling seen through one
+    function; a standalone reproduction with the measurements is in
+    `audit_repro/window_nest_20261013/`. The DuckDB CLI on this host
+    (1.5.0-dev) shows none of these. Partitioning the windows by a computed
+    boolean condition column was worse still (exponential with every
+    optimizer), which is why the `if` of egen is a `FILTER` and a sort key
+    rather than a partition key. Decision: the view counts its window stages
+    (`fragile_windows()`: a median/pctile/iqr/mad/mdev/std/mode, or two or
+    more window stages) and the `OVER (PARTITION BY` terms its stages add
+    (`window_terms()`, an upper bound of the window operators, since the
+    terms of one SELECT level plan as one; `heavy_filter_pushdown()` from
+    the eighteenth, `View::kHeavyWindowTerms`, where the worst measured
+    plan is 0.2 s; a merge/append/joinby adds the using view's count), the
+    plugin keeps the session's `disabled_optimizers` in step with the
+    current view on every access (`g_view_ref`), the eager subcommands (use,
+    describe, save data, the bridge, the text/SPSS/R converters) restore the
+    full set before they run (`eager_optimizers`, so a heavy view left open
+    never slows an eager read), copies and the two-table verbs carry the
+    flags, and everything else keeps both optimizers:
+    disabling `window_self_join` for every query was measured at 3–6x on a
+    single large window (20M rows: 0.03→0.19 s with 100 groups, 0.23→1.1 s
+    with 1M groups), and disabling `filter_pushdown` costs the view's
+    row-group pruning — measured at the trigger on a 20M-row file with a
+    `keep if` selecting one row group of twenty (the best case for pruning)
+    and 18 stacked means: the full result takes 2.9 s against 2.4 s with the
+    optimizer kept (`audit_repro/window_nest_20261013/README.md`); the
+    trigger sits where the growth is still cheap (18 means plan in 0.19 s
+    with the optimizer on, 20 in 0.6 s, 30 never finish), so the pruning is
+    given up before the cliff — acceptable for such a stack. A minimal
+    reproduction for an upstream report is the WINDOW-NEST-1 unit test's
+    two-stage mode plan, and `audit_repro/window_nest_20261013/` for the
+    doubling. Revisit on a DuckDB bump.
+
+190. **The C aggregate bridge and DuckDB's window constant aggregator
+    (WINDOW-STATE-1, 2026-10-13).** Found while measuring WINDOW-NEST-1 on a
+    20M-row file: with `window_self_join` off — as parqit sets it while a view
+    with two or more window stages is current — a whole-partition window such
+    as `egen mean(), by()` runs through DuckDB's window constant aggregator
+    (`window_constant_aggregator.cpp`), which keeps a CONSTANT pointer vector
+    (`statep`), rewrites its single slot per partition and holds its own
+    pointer into that buffer. DuckDB's C aggregate bridge
+    (`aggregate_function-c.cpp`, `CAPIAggregateUpdate`) reads the state
+    vector as flat (slot 0 only exists); parqit 0.1.35's correction
+    (`cmake/PatchDuckDBCapi.cmake`) flattened it in place, which replaces the
+    buffer under the aggregator's pointer: a use after free, seen as a
+    SIGSEGV in `statistics.cpp`'s update (a 20M-row Parquet file, `keep if`,
+    three `egen mean(), by()` over 1,000 groups) and, in principle, as the
+    rows of a later partition in the same chunk added to an earlier state.
+    Released versions never reached this path, as far as the optimizer's
+    conditions reach (`window_self_join.cpp`: a window aggregate with no
+    ORDER BY, no EXCLUDE, a partition, and every window of the node on the
+    same partition): every C-API window aggregate a released verb emitted —
+    `__parqit_total`, `__parqit_detail` for egen's mean/total/sd/std/skew/
+    kurt by group — stood alone in its node on one partition, so
+    `window_self_join`, always on, rewrote it into an aggregate plus a join;
+    the native `max`/`count`/`row_number` windows of the percentile and mode
+    stages take DuckDB's own bridge-free paths. The
+    bridge now spreads the state pointers into a local array through
+    `UnifiedVectorFormat` and never touches the vector (the patch recognises
+    the pinned source, the 0.1.35 state and the corrected state by hash).
+    Verified: the crashing driver runs (`audit_repro/window_nest_20261013/`),
+    1,000 partitions over 1M rows equal DuckDB's own `avg() OVER` with the
+    optimizer off, v153 against native `egen double` over 1,004 groups.
+    Worth an upstream report: the C API's aggregate bridge cannot serve the
+    window constant aggregator as shipped.
+
+191. **DuckDB 1.5.3 → 1.5.6 (DUCKDB-156, 2026-10-13).** The three bugfix
+    releases (1.5.4 2026-06-17, 1.5.5 2026-07-22, 1.5.6 2026-09-28) bring
+    the Parquet reader's out-of-bounds read fixes, result fixes on paths
+    parqit uses (MAX on a hive partition column after file pruning, doubly
+    emitted chunks from caching operators, `common_subplan` over UNION ALL
+    arms sharing a join, very long integer literals truncated to HUGEINT),
+    a segfault fix in the external hash aggregate, TIME_NS in Parquet, and
+    the window self-join optimizer's guard (`#22844`: no rewrite when the
+    window's child chain holds anything but scans, projections, aggregates
+    and filters; `std::exception` caught). Decisions, discussed with the
+    Codex review (`local/rute_2026-10-13/codex_astra_review4.md`):
+    (a) the pin moves to 1.5.6 (SHA256 `1fadcbe9…2099b`); of the five
+    patched sources four are byte-identical to the 1.5.3 originals (the
+    corrections apply unchanged: none of those bugs was fixed upstream), the
+    transaction context gained `autocheckpoint_error` with its constructor
+    line unchanged (new hashes), and the scalar C API guard was re-pinned
+    after reading its only change (a try/catch); the regenerated `duckdb.h`
+    marks as deprecated functions parqit already used (streaming pending,
+    Arrow array scan, `duckdb_value_*`) — they stay declared because the
+    header enables `DUCKDB_API_ALLOW_DEPRECATED` by default; migrating them
+    is a separate task. (b) WINDOW-NEST-1 on 1.5.6, measured with the
+    `audit_repro/window_nest_20261013/` drivers relinked: the two-stage mode
+    plan runs with `window_self_join` on and gives the values the unit test
+    pins (1.5.3: INTERNAL error), so the correctness reason for turning
+    that optimizer off is gone and the unit test now also checks the plan
+    with it on. The rule itself stays for a view with stacked windows
+    (`fragile_windows()`, as in 1.5.3): with the optimizer on, the Stata
+    three-egen case was slower on all five paired rounds (0.72 vs 0.65 s,
+    a comparison that also mixed the engine versions), while paired driver
+    runs on 1.5.6 with it on or off were inconclusive under a load of
+    20–31 (three windows on 20M rows 1.12/1.24/1.50 vs 1.25/1.55/1.47 s; on
+    1M rows 0.65/0.68/0.64 vs 0.62/0.58/0.69 s); a single whole-partition
+    window, which the rule never touched, is faster with it (0.32 vs
+    0.47 s). The choice is one line in `g_view_ref` and a quiet-host
+    measurement should settle it. A failed `SET` of the optimizers now
+    aborts the command through the plugin's catch-all (Codex round 5)
+    instead of being reported and ignored; no injected-failure test
+    exercises that path. The filter-pushdown doubling
+    is unchanged (`pushdown_window.cpp` identical: 18 means plan in 0.17 s,
+    20 in 0.5 s, 24 in 7 s), so the 18-term trigger stays, with the same
+    pruning cost (18 means over one row group of twenty: 3.1 s against
+    2.6 s). The constant aggregator is unchanged, so WINDOW-STATE-1 (#190)
+    stays necessary — and more plans reach it now that the first window of
+    a stack is the only one rewritten. (c) v154 pins the engine changes
+    that could alter a result silently against pyarrow and native oracles
+    (hive MAX/MIN after pruning, TIME_NS, DATE comparisons both ways, a
+    30-digit literal, an append of two filtered views over one merge, and
+    parqit's own messages — one representative case each; the fuller
+    matrices the Codex review asked for, huge literals above 39 digits and
+    through `parqit sql`, DATE/TIMESTAMP predicates with fractions and
+    frames, temporal boundaries through eager, collect and save, shared-join
+    unions with NULL and duplicates, the caching-operator flush of DuckDB
+    #25331, a spill-forced aggregation and malformed Parquet, are listed as
+    follow-up). (d) A/B/P timings, interleaved on this host
+    under other users' load (1-minute load 17–31): 1.5.6 against 1.5.3 on
+    the same code is within noise on every operation (20M-row script,
+    medians of five rounds: use/collect 0.400 vs 0.412 s, filtered read
+    0.130 vs 0.153 s, collapse by 1,000 groups 0.197 vs 0.190 s, save 1.76
+    vs 1.85 s, merge m:1 1.27 vs 1.24 s, summarize detail 0.89 vs 0.93 s,
+    duplicates drop 1.07 vs 1.08 s; three stacked egen 0.72 vs 0.65 s — a
+    confounded pair, the 1.5.3 plugin still turning window_self_join off
+    for such a view, and paired driver runs on 1.5.6 with the optimizer on
+    or off are mixed under this load), and the feature benchmark's
+    seven workflows sit at ratios 0.96–1.08; against the published 0.3.3 the
+    release reads and filters faster (0.84, 0.80), collapses and saves
+    faster (0.91) and is equal elsewhere (the published plugin is the CI's
+    Release build with the EL8 toolchain, the others local RelWithDebInfo
+    builds). The reading is bounded: performance is inconclusive on this
+    host (noise ±10–20 %); the three-egen ratio of 1.12 was the optimizer
+    rule, not the engine — with the same rule on both sides, five more
+    interleaved rounds gave a paired B/A of 0.97 (medians 0.637 vs
+    0.684 s), while use/collect and summarize moved to 1.10 in that run
+    (0.96 in the first): ±10 % is the noise band here — and the gains
+    against 0.3.3 are of the same order as the noise. The bump's value is
+    correctness and security (`audit_repro/release_0_4_0_20261013/
+    benchmarks/`). Defect found and fixed through v154 (TIME-NS-FLOOR-1):
+    the engine's TIME_NS → TIME cast rounds to the microsecond, so the last
+    500 ns before every millisecond boundary read one millisecond later
+    (23:59:59.999999999 became 24:00:00, 00:00:00.000999999 became 1 ms);
+    the plan now floors `epoch_ns()` in integer arithmetic, as
+    TS-NS-FLOOR-1 already did for TIMESTAMP_NS (unit test, v154). Scope of
+    upstream's new `autocheckpoint_error` in the transaction context: it is
+    raised after a commit when an automatic checkpoint failed, and parqit's
+    session is an in-memory database (`duckdb_open_ext(nullptr, …)`) that
+    never checkpoints, so the path is unreachable here. (d) A/B timings against the same host, same
+    data and interleaved runs, with the published 0.3.3 as a third arm, are
+    in `audit_repro/release_0_4_0_20261013/`.

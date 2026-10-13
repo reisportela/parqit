@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.3.3 LANGUAGES C CXX)
+project(parqit VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,8 +53,8 @@ set(PARQIT_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 # amalgamation is the bare engine without either — verified 2026-06-12).
 # Offline builds: -DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-<ver>.tar.gz
 # ---------------------------------------------------------------------------
-set(PARQIT_DUCKDB_VERSION "1.5.3")
-set(PARQIT_DUCKDB_SHA256 "f22a7cfb3e72be3010f4a7f2fbdd8de7d62fa036b838543acb663a722a7a71df")
+set(PARQIT_DUCKDB_VERSION "1.5.6")
+set(PARQIT_DUCKDB_SHA256 "1fadcbe9e69e1470f9093b6bcde08daf477d729c449e59a807f45c346622099b")
 set(PARQIT_DUCKDB_ARCHIVE "" CACHE FILEPATH
     "Optional path to a local duckdb-${PARQIT_DUCKDB_VERSION}.tar.gz for offline builds")
 
@@ -126,6 +126,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/sanitize.cpp
     src/engine/request.cpp
     src/engine/exprtrans.cpp
+    src/engine/datefn.cpp
     src/engine/view.cpp
     src/engine/spss_reader.cpp
     src/engine/spss_plan.cpp

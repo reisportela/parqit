@@ -110,6 +110,7 @@ void View::open(const std::string &scan_select, std::vector<ViewCol> cols,
     close();
     live_ = true;
     scan_ = scan_select;
+    window_terms_ = count_window_terms(scan_select); /* WINDOW-NEST-1: a raw scan's windows */
     order_cols_ = std::move(order_cols); /* ORDER-CARRIER-1 */
     order_live_ = !order_cols_.empty();
     cols_ = std::move(cols);
@@ -237,10 +238,34 @@ std::vector<std::string> View::sortedby_names() const {
     return out;
 }
 
+int View::count_window_terms(const std::string &sql) {
+    int n = 0;
+    const size_t len = sql.size();
+    auto lower = [&](size_t k) { return static_cast<char>(std::tolower(static_cast<unsigned char>(sql[k]))); };
+    for (size_t i = 0; i + 4 <= len; i++) {
+        if (lower(i) != 'o' || lower(i + 1) != 'v' || lower(i + 2) != 'e' || lower(i + 3) != 'r') continue;
+        if (i > 0 && (std::isalnum(static_cast<unsigned char>(sql[i - 1])) || sql[i - 1] == '_'))
+            continue; /* ...cover (... */
+        size_t j = i + 4;
+        while (j < len && std::isspace(static_cast<unsigned char>(sql[j]))) j++;
+        if (j >= len || sql[j] != '(') continue;
+        j++;
+        while (j < len && std::isspace(static_cast<unsigned char>(sql[j]))) j++;
+        static const char kw[] = "partition";
+        size_t k = 0;
+        while (k < 9 && j + k < len && lower(j + k) == kw[k]) k++;
+        if (k == 9 && j + 9 < len && std::isspace(static_cast<unsigned char>(sql[j + 9]))) n++;
+    }
+    return n;
+}
+
 void View::push_stage(const std::string &select_body, const std::string &desc,
                       bool keeps_order) {
     stages_.push_back(select_body);
     descs_.push_back(desc);
+    /* WINDOW-NEST-1: the partitioned window terms this stage adds (a using
+     * plan embedded by a two-table verb is in this text, counted here once) */
+    window_terms_ += count_window_terms(select_body);
     /* ORDER-CARRIER-1: the order columns survive only a stage that declares
      * it keeps them AND selects them; any other stage ends the carrier, and
      * the view falls back to ordering by its declared keys alone */
@@ -397,11 +422,88 @@ static ExprSchema schema_of(const std::vector<ViewCol> &cols) {
     return s;
 }
 
-/* replace the _n/_N placeholders; returns true when present */
-static bool uses_rowctx(const std::string &sql) {
-    return sql.find("__PARQIT_ROW__") != std::string::npos ||
-           sql.find("__PARQIT_NROWS__") != std::string::npos;
+bool View::ts_declared() const {
+    return !ts_time_.empty() && col_index(ts_time_) >= 0 &&
+           (ts_panel_.empty() || col_index(ts_panel_) >= 0);
 }
+
+ExprSchema View::expr_schema() const {
+    ExprSchema s = schema_of(cols_);
+    if (ts_declared()) { /* TSSET-1 */
+        s.ts_panel = ts_panel_;
+        s.ts_time = ts_time_;
+        s.ts_delta = ts_delta_;
+        s.ts_time_fmt = cols_[static_cast<size_t>(col_index(ts_time_))].fmt;
+    }
+    return s;
+}
+
+std::string View::tsset(const std::string &panel, const std::string &time, double delta) {
+    std::vector<std::string> names;
+    std::string err = expand_patterns({time}, &names);
+    if (!err.empty()) return err;
+    if (names.size() != 1 || time.find('*') != std::string::npos ||
+        time.find('?') != std::string::npos)
+        return "tsset: the time variable must be one variable, named exactly";
+    const std::string tname = names[0];
+    if (cols_[static_cast<size_t>(col_index(tname))].kind != 's')
+        ; /* numeric: fine */
+    else
+        return "tsset: time variable " + time + " is a string; a time variable is numeric";
+    std::string pname;
+    if (!panel.empty()) {
+        std::vector<std::string> pn;
+        err = expand_patterns({panel}, &pn);
+        if (!err.empty()) return err;
+        if (pn.size() != 1 || panel.find('*') != std::string::npos ||
+            panel.find('?') != std::string::npos)
+            return "tsset: the panel variable must be one variable, named exactly";
+        pname = pn[0];
+        if (pname == tname) return "tsset: the panel and time variables must differ";
+    }
+    if (!(delta > 0) || !std::isfinite(delta)) return "tsset: delta() must be a positive number";
+    ts_panel_ = pname;
+    ts_time_ = tname;
+    ts_delta_ = delta;
+    return "";
+}
+
+std::string View::tsset_probe_sql(const std::string &panel, const std::string &time,
+                                  double delta) const {
+    const std::string t = quote_ident(time);
+    const std::string p = panel.empty() ? std::string() : quote_ident(panel);
+    /* the fields, in order: missing times (allowed, as native tsset allows
+     * them: the operators are missing on those rows); fractional times
+     * (native: "time variable must contain only integer values"); duplicates:
+     * nonmissing times minus distinct (panel, time) pairs among them; min,
+     * max, panels; gaps: a panel whose distinct times are fewer than its span
+     * allows; periods below delta: consecutive nonmissing times closer than
+     * delta (native: "time values with period less than delta() found") */
+    const std::string pair = p.empty() ? t : "CASE WHEN " + t + " IS NOT NULL THEN (" + p + ", " + t + ") END";
+    const std::string lagw = p.empty() ? "OVER (ORDER BY " + t + ")"
+                                       : "OVER (PARTITION BY " + p + " ORDER BY " + t + ")";
+    const std::string period = "(SELECT count(*) FROM (SELECT " + t + " - lag(" + t + ") " + lagw +
+                               " AS d FROM (" + compile(false) + ") WHERE " + t +
+                               " IS NOT NULL) WHERE d < " + dtoa(delta) + ")";
+    std::string sql = "SELECT format('{}|{}|{}|{}|{}|{}|{}|{}', "
+                      "count(*) FILTER (WHERE " + t + " IS NULL), "
+                      "count(*) FILTER (WHERE " + t + " <> floor(" + t + ")), "
+                      "count(" + t + ") - count(DISTINCT " + pair + "), "
+                      /* every time missing: a NULL would void format() */
+                      "coalesce(CAST(min(" + t + ") AS VARCHAR), ''), "
+                      "coalesce(CAST(max(" + t + ") AS VARCHAR), ''), ";
+    if (p.empty())
+        sql += "0, CASE WHEN count(DISTINCT " + t + ") < floor((max(" + t + ") - min(" + t +
+               ")) / " + dtoa(delta) + " + 1e-9) + 1 THEN 1 ELSE 0 END, " + period + ") FROM (" +
+               compile(false) + ")";
+    else
+        sql += "count(DISTINCT " + p + "), (SELECT count(*) FROM (SELECT " + p + ", count(DISTINCT " +
+               t + ") AS nt, min(" + t + ") AS lo, max(" + t + ") AS hi FROM (" + compile(false) +
+               ") WHERE " + t + " IS NOT NULL GROUP BY " + p + ") WHERE nt < floor((hi - lo) / " +
+               dtoa(delta) + " + 1e-9) + 1), " + period + ") FROM (" + compile(false) + ")";
+    return sql;
+}
+
 static void substitute(std::string *sql, const std::string &from,
                        const std::string &to) {
     size_t p = 0;
@@ -416,24 +518,99 @@ std::string View::row_number_over() const {
     return ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
 }
 
-std::string View::rowctx_wrap(std::string *sql, const std::string &prev) {
-    bool needs_row = sql->find("__PARQIT_ROW__") != std::string::npos;
-    bool needs_n = sql->find("__PARQIT_NROWS__") != std::string::npos;
-    std::string wins;
-    if (needs_row) {
-        std::string rn = fresh_helper("rn");
-        substitute(sql, "__PARQIT_ROW__", quote_ident(rn));
-        std::string ord = order_by_sql();
-        std::string over = ord.empty() ? "OVER ()" : "OVER (" + ord.substr(1) + ")";
-        wins = "row_number() " + over + " AS " + quote_ident(rn);
+std::string View::order_by_sql_reversed() const {
+    if (sort_.empty() && !order_live_) return "";
+    std::string o = " ORDER BY ";
+    bool first = true;
+    for (const auto &key : sort_) {
+        const std::string desc = " DESC";
+        std::string k = key;
+        bool was_desc = false;
+        if (k.size() > desc.size() && k.compare(k.size() - desc.size(), desc.size(), desc) == 0) {
+            k.resize(k.size() - desc.size());
+            was_desc = true;
+        }
+        /* ascending NULLS LAST reversed is descending NULLS FIRST, and vice versa */
+        o += std::string(first ? "" : ", ") + k + (was_desc ? " NULLS FIRST" : " DESC NULLS FIRST");
+        first = false;
     }
-    if (needs_n) {
-        std::string nn = fresh_helper("nn");
-        substitute(sql, "__PARQIT_NROWS__", quote_ident(nn));
-        if (!wins.empty()) wins += ", ";
-        wins += "count(*) OVER () AS " + quote_ident(nn);
+    if (order_live_)
+        for (const auto &c : order_cols_) {
+            o += std::string(first ? "" : ", ") + c + " DESC";
+            first = false;
+        }
+    return o;
+}
+
+std::string View::by_partition(const std::vector<std::string> &by,
+                               const std::vector<std::string> &sortvars,
+                               std::vector<std::string> *part) const {
+    part->clear();
+    if (by.empty()) return "";
+    std::vector<std::string> keys, svars;
+    std::string err = expand_patterns(by, &keys);
+    if (!err.empty()) return err;
+    if (!sortvars.empty()) {
+        err = expand_patterns(sortvars, &svars);
+        if (!err.empty()) return err;
     }
-    return "(SELECT *, " + wins + " FROM " + prev + ")";
+    /* native by: requires the data sorted by the keys (and the sortvars) —
+     * ascending, in that order; a longer sort is fine */
+    std::vector<std::string> need = keys;
+    need.insert(need.end(), svars.begin(), svars.end());
+    bool sorted = sort_.size() >= need.size();
+    for (size_t i = 0; sorted && i < need.size(); i++)
+        sorted = sort_[i] == quote_ident(need[i]);
+    if (!sorted) {
+        std::string list;
+        for (size_t i = 0; i < need.size(); i++) list += (i ? " " : "") + need[i];
+        return "not sorted: by " + list + ": needs the view sorted by " + list +
+               " (parqit sort " + list + " first, or use parqit bysort)";
+    }
+    for (const auto &k : keys)
+        part->push_back(norm_group_key(quote_ident(k), cols_[static_cast<size_t>(col_index(k))].kind));
+    return "";
+}
+
+std::string View::rowctx_wrap(const std::vector<RowCtxItem> &items, const std::string &prev,
+                              const std::vector<std::string> &part) {
+    bool any = false;
+    for (const auto &it : items) any = any || !it.windows->empty();
+    if (!any) return prev;
+    std::string partition;
+    for (size_t i = 0; i < part.size(); i++) partition += (i ? ", " : "") + part[i];
+    const std::string ord = order_by_sql(), rord = order_by_sql_reversed();
+    auto over = [&](const std::string &o, const std::string &frame) {
+        std::string body;
+        if (!partition.empty()) body += "PARTITION BY " + partition;
+        if (!o.empty()) body += (body.empty() ? "" : " ") + o.substr(1);
+        if (!frame.empty()) body += (body.empty() ? "" : " ") + frame;
+        return "OVER (" + body + ")";
+    };
+    const std::string full = "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING";
+    const std::string over_ord = over(ord, ""), over_part = over("", ""),
+                      over_full = over(ord, full), over_full_desc = over(rord, full);
+    std::string sel;
+    for (const auto &it : items) {
+        for (const auto &w : *it.windows) {
+            const std::string helper = quote_ident(fresh_helper("win"));
+            std::string wsql = w.sql;
+            substitute(&wsql, "__PARQIT_OVER_ORD__", over_ord);
+            substitute(&wsql, "__PARQIT_OVER_PART__", over_part);
+            substitute(&wsql, "__PARQIT_OVER_FULL_DESC__", over_full_desc);
+            substitute(&wsql, "__PARQIT_OVER_FULL__", over_full);
+            sel += ", " + wsql + " AS " + helper;
+            substitute(it.sql, w.placeholder, helper);
+        }
+    }
+    return "(SELECT *" + sel + " FROM " + prev + ")";
+}
+
+static std::string by_desc(const std::vector<std::string> &by) {
+    if (by.empty()) return "";
+    std::string d = "by ";
+    for (size_t i = 0; i < by.size(); i++) d += (i ? " " : "") + by[i];
+    return d + ": ";
 }
 
 /* ---------------------------------------------------------------- verbs --- */
@@ -525,34 +702,37 @@ std::string View::drop_vars(const std::vector<std::string> &patterns) {
 }
 
 std::string View::filter(const std::string &stata_expr, bool drop,
-                         bool statamissing) {
-    ExprResult r = translate_filter(stata_expr, schema_of(cols_), statamissing);
+                         bool statamissing, const std::vector<std::string> &by,
+                         const std::vector<std::string> &sortvars) {
+    std::vector<std::string> part;
+    std::string err = by_partition(by, sortvars, &part);
+    if (!err.empty()) return err;
+    ExprResult r = translate_filter(stata_expr, expr_schema(), statamissing);
     if (!r.ok) return r.error;
     /* keep if: WHERE expr (missing ⇒ dropped, exactly Stata's outcome);
      * drop if: keep rows where the condition is NOT TRUE — missing kept */
     std::string cond =
         drop ? "((" + r.sql + ") IS DISTINCT FROM TRUE)" : "(" + r.sql + ")";
     const std::string prev = prev_name(stages_.size());
-    if (uses_rowctx(cond)) {
-        std::string src = rowctx_wrap(&cond, prev);
-        push_stage("SELECT " + stage_list() + " FROM " + src + " WHERE " + cond,
-                   (drop ? "drop if " : "keep if ") + stata_expr, true);
-    } else {
-        push_stage("SELECT " + stage_list() + " FROM " + prev + " WHERE " + cond,
-                   (drop ? "drop if " : "keep if ") + stata_expr, true);
-    }
+    const std::string src = rowctx_wrap({{&cond, &r.windows}}, prev, part);
+    push_stage("SELECT " + stage_list() + " FROM " + src + " WHERE " + cond,
+               by_desc(by) + (drop ? "drop if " : "keep if ") + stata_expr, true);
     return "";
 }
 
 std::string View::gen(const std::string &name, const std::string &type_req,
                       const std::string &expr, const std::string &if_expr,
-                      bool statamissing) {
+                      bool statamissing, const std::vector<std::string> &by,
+                      const std::vector<std::string> &sortvars) {
     if (col_index(name) >= 0) return "variable " + name + " already defined";
     {
         const std::string cig = ci_guard(name);
         if (!cig.empty()) return cig;
     }
-    ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
+    std::vector<std::string> part;
+    std::string perr = by_partition(by, sortvars, &part);
+    if (!perr.empty()) return perr;
+    ExprResult r = translate_expression(expr, expr_schema(), statamissing);
     if (!r.ok) return r.error;
     /* GEN-TYPEFAMILY-1: native Stata rejects an explicit storage type whose
      * family disagrees with the expression (gen str# x = <numeric> and
@@ -578,41 +758,44 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     const std::string effective_type =
         (type_req.empty() && r.kind != 's') ? "double" : type_req;
     std::string vexpr = coerce_storage(r.sql, effective_type, r.kind);
-    std::string value = vexpr;
+    std::string cond;
+    ExprResult c;
     if (!if_expr.empty()) {
-        ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
+        c = translate_filter(if_expr, expr_schema(), statamissing);
         if (!c.ok) return c.error;
-        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + vexpr +
-                " ELSE NULL END)";
-        if (uses_rowctx(c.sql)) return "_n/_N are not supported in the if "
-                                       "qualifier of gen (yet)";
+        cond = c.sql;
     }
     const std::string prev = prev_name(stages_.size());
-    std::string body;
-    if (uses_rowctx(value)) {
-        std::string src = rowctx_wrap(&value, prev);
-        body = "SELECT " + stage_list() + ", " + value + " AS " + quote_ident(name) +
-               " FROM " + src;
-    } else {
-        body = "SELECT " + stage_list() + ", " + value + " AS " + quote_ident(name) +
-               " FROM " + prev;
-    }
+    /* ROWCTX-2: the value's and the condition's window terms (each numbered
+     * by its own translation) become helper columns of one wrapped source */
+    const std::string src = rowctx_wrap({{&vexpr, &r.windows}, {&cond, &c.windows}}, prev, part);
+    const std::string value = if_expr.empty()
+                                  ? vexpr
+                                  : "(CASE WHEN coalesce(" + cond + ", FALSE) THEN " + vexpr +
+                                        " ELSE NULL END)";
+    const std::string body = "SELECT " + stage_list() + ", " + value + " AS " +
+                             quote_ident(name) + " FROM " + src;
     ViewCol nc;
     nc.name = name;
     nc.kind = (r.kind == 's' ? 's' : 'n');
     nc.meta_type = effective_type; /* untyped numeric gen is contractual double */
     nc.normalized = nc.kind == 'n'; /* coerce_storage already normalizes numeric results */
     cols_.push_back(nc);
-    push_stage(body, "gen " + name + " = " + expr +
+    push_stage(body, by_desc(by) + "gen " + name + " = " + expr +
                          (if_expr.empty() ? "" : " if " + if_expr), true);
     return "";
 }
 
 std::string View::replace(const std::string &name, const std::string &expr,
-                          const std::string &if_expr, bool statamissing) {
+                          const std::string &if_expr, bool statamissing,
+                          const std::vector<std::string> &by,
+                          const std::vector<std::string> &sortvars) {
     int idx = col_index(name);
     if (idx < 0) return "variable " + name + " not found in the view";
-    ExprResult r = translate_expression(expr, schema_of(cols_), statamissing);
+    std::vector<std::string> part;
+    std::string perr = by_partition(by, sortvars, &part);
+    if (!perr.empty()) return perr;
+    ExprResult r = translate_expression(expr, expr_schema(), statamissing);
     if (!r.ok) return r.error;
     char newkind = (r.kind == 's' ? 's' : 'n');
     if (newkind != cols_[idx].kind)
@@ -625,17 +808,27 @@ std::string View::replace(const std::string &name, const std::string &expr,
      * in the lazy plan; collect-time type planning and lazy-save meta_type
      * casting preserve the old type when it still fits and promote when it
      * does not. */
-    const std::string assigned = r.sql;
-    std::string value = assigned;
+    std::string assigned = r.sql, cond;
+    ExprResult c;
     if (!if_expr.empty()) {
-        ExprResult c = translate_filter(if_expr, schema_of(cols_), statamissing);
+        c = translate_filter(if_expr, expr_schema(), statamissing);
         if (!c.ok) return c.error;
-        if (uses_rowctx(c.sql) || uses_rowctx(r.sql))
-            return "_n/_N are not supported in replace (yet)";
-        value = "(CASE WHEN coalesce(" + c.sql + ", FALSE) THEN " + assigned +
-                " ELSE " + quote_ident(name) + " END)";
-    } else if (uses_rowctx(value)) {
-        return "_n/_N are not supported in replace (yet)";
+        cond = c.sql;
+    }
+    /* REPLACE-SELF-1: native replace is sequential — `replace x = x[_n-1] if
+     * missing(x)` carries each new value into the next row (the fill-down
+     * idiom), and so does L.x on the replaced variable. A lazy plan computes
+     * every row from the values before the command, so such a replace is
+     * refused rather than returned wrong; a new variable, or parqit sql, is
+     * the way to express it (Codex review, 2026-10-13). */
+    {
+        const std::string self = quote_ident(name);
+        for (const auto &win : r.windows)
+            if (win.sql.find(self) != std::string::npos)
+                return "replace " + name + " from its own earlier or later rows (" + expr +
+                       ") is sequential in native Stata — each new value feeds the next row — "
+                       "and a lazy plan computes every row from the values before the command; "
+                       "generate a new variable instead, or use parqit sql";
     }
     /* SEM-006: sort_ describes the values at the moment sort ran.  Replacing a
      * key must first bake that old order into the input, then truncate Stata's
@@ -654,6 +847,13 @@ std::string View::replace(const std::string &name, const std::string &expr,
         source = bake_order(source);
         sort_.resize(changed_sort);
     }
+    /* ROWCTX-2: _n/_N, subscripts and time-series terms in either half are
+     * helper columns of the wrapped source (the old refusal is gone) */
+    source = rowctx_wrap({{&assigned, &r.windows}, {&cond, &c.windows}}, source, part);
+    const std::string value =
+        if_expr.empty() ? assigned
+                        : "(CASE WHEN coalesce(" + cond + ", FALSE) THEN " + assigned +
+                              " ELSE " + quote_ident(name) + " END)";
 
     std::string sel;
     for (size_t i = 0; i < cols_.size(); i++) {
@@ -678,7 +878,7 @@ std::string View::replace(const std::string &name, const std::string &expr,
              cols_[idx].meta_type != "double")
         cols_[idx].meta_type.clear();
     push_stage("SELECT " + sel + " FROM " + source,
-               "replace " + name + " = " + expr +
+               by_desc(by) + "replace " + name + " = " + expr +
                    (if_expr.empty() ? "" : " if " + if_expr), true);
     return "";
 }
@@ -712,6 +912,8 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
         if (k == quote_ident(oldn)) k = quote_ident(newn);
         if (k == quote_ident(oldn) + " DESC") k = quote_ident(newn) + " DESC";
     }
+    if (ts_time_ == oldn) ts_time_ = newn;   /* TSSET-1: the declaration follows */
+    if (ts_panel_ == oldn) ts_panel_ = newn;
     if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
         for (const auto &c : order_cols_) sel += ", " + c;
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
@@ -857,15 +1059,16 @@ std::string View::sort(const std::vector<std::string> &keys,
  * matching rank and yields NULL. The rank window spills to the temp
  * directory, which the per-group list_sort(list(x)) it replaced never did. */
 std::string pct_window_sql(const std::string &ref, const std::string &prn,
-                           const std::string &pn, double p) {
+                           const std::string &pn, double p, const std::string &over) {
     const std::string n = quote_ident(pn), rn = quote_ident(prn);
+    const std::string w = over.empty() ? "" : " " + over;
     if (p == std::trunc(p)) {
         const std::string product = "(CAST(" + n + " AS HUGEINT) * " + std::to_string(static_cast<int>(p)) + ")";
         const std::string quotient = "(" + product + " // 100)", remainder = "(" + product + " % 100)";
         const std::string first = "greatest(1, " + quotient + " + CASE WHEN " + remainder + " = 0 THEN 0 ELSE 1 END)";
         const std::string second = "greatest(1, least(" + quotient + " + 1, " + n + "))";
         return "__parqit_midpoint(max(CASE WHEN " + rn + " = " + first + " THEN " + ref +
-               " END), max(CASE WHEN " + rn + " = " + second + " THEN " + ref + " END))";
+               " END)" + w + ", max(CASE WHEN " + rn + " = " + second + " THEN " + ref + " END)" + w + ")";
     }
     const std::string np = "(" + n + " * " + dtoa(p) + " / 100.0)";
     const std::string integral = np + " = floor(" + np + ")";
@@ -873,7 +1076,7 @@ std::string pct_window_sql(const std::string &ref, const std::string &prn,
     const std::string k2 = "(CASE WHEN " + integral + " THEN least(" + np + " + 1, " + n +
                            ") ELSE ceil(" + np + ") END)";
     return "__parqit_midpoint(max(CASE WHEN " + rn + " = " + k1 + " THEN " + ref +
-           " END), max(CASE WHEN " + rn + " = greatest(1, " + k2 + ") THEN " + ref + " END))";
+           " END)" + w + ", max(CASE WHEN " + rn + " = greatest(1, " + k2 + ") THEN " + ref + " END)" + w + ")";
 }
 
 std::string View::collapse(const std::vector<CollapseSpec> &specs,
@@ -939,7 +1142,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         std::set<std::string> pct_sources;
         for (const auto &sp : specs) {
             double p = 0;
-            const bool is_pct = sp.stat == "median" ||
+            /* COLLAPSE-STATS-2: iqr is p75 - p25 over the same ranks */
+            const bool is_pct = sp.stat == "median" || sp.stat == "iqr" ||
                                 (sp.stat.size() >= 2 && sp.stat[0] == 'p' &&
                                  atod(sp.stat.substr(1), &p) && p > 0 && p < 100);
             if (is_pct && col_index(sp.source) >= 0 &&
@@ -977,7 +1181,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         ncols.push_back(cols_[col_index(b)]);
     }
     std::set<std::string> outnames(byn.begin(), byn.end()), dispersion;
-    for (const auto &sp : specs) if (sp.stat == "sd") dispersion.insert(sp.source);
+    for (const auto &sp : specs)
+        if (sp.stat == "sd" || sp.stat == "semean") dispersion.insert(sp.source);
     for (const auto &sp : specs) {
         int sidx = col_index(sp.source);
         if (sidx < 0) return "variable " + sp.source + " not found in the view";
@@ -992,9 +1197,43 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
                                   "__parqit_stats(" : "__parqit_total(") + ref + "))";
         const bool floating = scol.physical_type == "FLOAT" || scol.physical_type == "DOUBLE" ||
                               (scol.physical_type.empty() && (scol.meta_type == "float" || scol.meta_type == "double"));
+        /* COLLAPSE-STATS-2 (BPLIM feedback, 2026-10-13): the native list is
+         * complete — semean = sd/sqrt(n), sebinomial = sqrt(p(1-p)/n) with p
+         * the mean, sepoisson = sqrt(mean/n), rawsum = sum (weights are not
+         * supported, so the two coincide), percent = the group's share of the
+         * nonmissing observations over every group, iqr = p75 - p25 under the
+         * percentile rule. A nonreal root (sebinomial of a mean above 1) is
+         * missing, as native. Values pinned against native collapse (v147). */
         if (sp.stat == "mean") agg = stat + ".mean";
-        else if (sp.stat == "sum") agg = floating ? stat + ".sum" : "coalesce(sum(" + ref + "), 0)";
+        else if (sp.stat == "sum" || sp.stat == "rawsum")
+            agg = floating ? stat + ".sum" : "coalesce(sum(" + ref + "), 0)";
         else if (sp.stat == "sd") agg = stat + ".sd";
+        else if (sp.stat == "semean")
+            agg = "parqit_finite(" + stat + ".sd / sqrt(CAST(" + stat + ".n AS DOUBLE)))";
+        else if (sp.stat == "sebinomial" || sp.stat == "sepoisson") {
+            /* DuckDB throws on the square root of a negative number, so the
+             * radicand is tested first: a mean outside 0..1 (binomial) or
+             * negative (Poisson) is missing, as native */
+            const std::string rad = sp.stat == "sebinomial"
+                ? stat + ".mean * (1 - " + stat + ".mean) / CAST(" + stat + ".n AS DOUBLE)"
+                : stat + ".mean / CAST(" + stat + ".n AS DOUBLE)";
+            agg = "(CASE WHEN (" + rad + ") >= 0 THEN parqit_finite(sqrt(" + rad + ")) END)";
+        }
+        else if (sp.stat == "percent") {
+            /* native: 100 * (nonmissing in the group) / (nonmissing over all
+             * groups) — a window over the aggregate; a string source counts
+             * its nonempty values, as (count) does */
+            const std::string cnt = scol.kind == 's'
+                ? "count(*) FILTER (WHERE coalesce(" + ref + ", '') <> '')"
+                : "count(" + ref + ")";
+            /* native's evaluation order is (n/N)*100 — 1/3 then *100 gives
+             * 33.333333333333329, (100*1)/3 gives ...336: one ulp apart (the
+             * oracle: collapse (percent) on 1/3, 5/7, 3/11, 8/11) */
+            /* no nonmissing value anywhere: 0/0 is NaN under IEEE division,
+             * missing after the finite guard — native collapse gives missing */
+            agg = "parqit_finite((CAST(" + cnt + " AS DOUBLE) / CAST(sum(" + cnt +
+                  ") OVER () AS DOUBLE)) * 100.0)";
+        }
         else if (sp.stat == "min") agg = "min(" + ref + ")";
         else if (sp.stat == "max") agg = "max(" + ref + ")";
         else if (sp.stat == "count")
@@ -1005,17 +1244,20 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
             agg = scol.kind == 's'
                       ? "count(*) FILTER (WHERE coalesce(" + ref + ", '') <> '')"
                       : "count(" + ref + ")";
-        else if (sp.stat == "median" ||
+        else if (sp.stat == "median" || sp.stat == "iqr" ||
                  (sp.stat.size() >= 2 && sp.stat[0] == 'p')) {
             double p = 50;
-            if (sp.stat != "median" &&
+            if (sp.stat != "median" && sp.stat != "iqr" &&
                 (!atod(sp.stat.substr(1), &p) || p <= 0 || p >= 100))
                 return "collapse: unknown statistic (" + sp.stat + ")";
             if (scol.kind != 'n')
                 return "collapse: " + sp.stat + " needs a numeric variable (" +
                        sp.source + " is string)";
             const auto &h = pct_helpers.at(sp.source);
-            agg = pct_window_sql(ref, h.first, h.second, p);
+            agg = sp.stat == "iqr"
+                      ? "__parqit_difference(" + pct_window_sql(ref, h.first, h.second, 75) +
+                            ", " + pct_window_sql(ref, h.first, h.second, 25) + ")"
+                      : pct_window_sql(ref, h.first, h.second, p);
             /* Native collapse stores a float source's percentile as float;
              * tabstat uses the unrounded double statistic. typeof is resolved
              * by the binder, including for a foreign FLOAT without metadata. */
@@ -1072,7 +1314,9 @@ std::string View::collapse(const std::vector<CollapseSpec> &specs,
         } else if (sp.stat == "count") {
             nc.meta_type = "long";
         }
-        if (sp.stat == "mean" || sp.stat == "sd" || (sp.stat == "sum" && floating)) {
+        if (sp.stat == "mean" || sp.stat == "sd" || sp.stat == "semean" ||
+            sp.stat == "sebinomial" || sp.stat == "sepoisson" || sp.stat == "percent" ||
+            ((sp.stat == "sum" || sp.stat == "rawsum") && floating)) {
             nc.physical_type = "DOUBLE";
             nc.normalized = true;
         } else if (sp.stat == "count") {
@@ -1171,8 +1415,48 @@ std::string View::contract(const std::vector<std::string> &by,
     return "";
 }
 
-std::string View::duplicates_drop(const std::vector<std::string> &by, bool force) {
+std::string View::duplicates_drop(const std::vector<std::string> &by, bool force,
+                                  const std::string &if_expr, bool statamissing) {
     const std::string prev = prev_name(stages_.size());
+    if (!if_expr.empty()) {
+        /* IF-ALL-1: native `duplicates drop [varlist] if exp` deduplicates the
+         * rows the condition selects — the first of each group in the current
+         * order stays — and keeps every other row where it is. Number the
+         * selected rows within their group (the condition is part of the
+         * partition, so an unselected row never takes a selected group's
+         * first place) and keep rn = 1 or the rows outside the condition.
+         * A missing condition is false, as in native if. */
+        ExprResult c = translate_filter(if_expr, expr_schema(), statamissing);
+        if (!c.ok) return c.error;
+        if (!c.windows.empty())
+            return "_n/_N are not supported in the if of duplicates drop";
+        std::vector<std::string> byn;
+        if (by.empty()) {
+            for (const auto &col : cols_) byn.push_back(col.name);
+        } else {
+            if (!force) return "duplicates drop with a varlist requires the force option";
+            if (sort_.empty())
+                return "duplicates drop <varlist> needs a defined order to be "
+                       "deterministic: run parqit sort first";
+            std::string err = expand_patterns(by, &byn);
+            if (!err.empty()) return err;
+        }
+        const std::string cond = quote_ident(fresh_helper("dupif"));
+        const std::string rn = quote_ident(fresh_helper("rn"));
+        std::string part;
+        for (size_t i = 0; i < byn.size(); i++) {
+            if (i) part += ", ";
+            part += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
+        }
+        push_stage("SELECT " + stage_list() + " FROM (SELECT *, " + cond +
+                       ", row_number() OVER (PARTITION BY " + part + ", " + cond +
+                       order_by_sql() + ") AS " + rn + " FROM (SELECT *, coalesce(" +
+                       c.sql + ", FALSE) AS " + cond + " FROM " + prev + ")) WHERE NOT " +
+                       cond + " OR " + rn + " = 1",
+                   "duplicates drop" + std::string(by.empty() ? "" : " (by varlist)") +
+                       " if " + if_expr, true);
+        return "";
+    }
     if (by.empty()) {
         /* GROUPKEY-1 for the no-varlist form too: a raw SELECT DISTINCT would
          * keep a ('', NULL) string pair — or a NaN beside a NULL numeric, both
@@ -1307,70 +1591,696 @@ std::string View::egen(const std::string &name, const std::string &fcn,
                        const std::string &arg_expr,
                        const std::vector<std::string> &by, bool statamissing,
                        const std::string &type_req, const std::string &arg_type) {
+    EgenSpec sp;
+    sp.name = name;
+    sp.fcn = fcn;
+    sp.expr = arg_expr;
+    sp.by = by;
+    sp.type_req = type_req;
+    return egen(sp, statamissing, arg_type);
+}
+
+namespace {
+
+/* the function families of egen (EGEN-ALL-1) */
+bool egen_expr_fcn(const std::string &f) {
+    static const std::set<std::string> k = {"total", "sum", "mean", "sd", "min", "max",
+        "count", "median", "pctile", "iqr", "kurt", "skew", "mad", "mdev", "std", "pc", "rank"};
+    return k.count(f) != 0;
+}
+bool egen_row_fcn(const std::string &f) {
+    return f.rfind("row", 0) == 0 && f.size() > 3;
+}
+/* functions native egen refuses with by */
+bool egen_no_by(const std::string &f) {
+    static const std::set<std::string> k = {"anycount", "anymatch", "anyvalue", "concat",
+        "cut", "diff", "ends", "fill", "group", "mtr", "tag"};
+    return k.count(f) != 0 || egen_row_fcn(f);
+}
+/* Stata's %w.df / %0w.df as a printf format; "" for anything else */
+std::string printf_of_stata_fixed(const std::string &fmt) {
+    if (fmt.size() < 4 || fmt[0] != '%' || fmt.back() != 'f') return "";
+    const std::string body = fmt.substr(1, fmt.size() - 2);
+    const size_t dot = body.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= body.size()) return "";
+    for (size_t i = 0; i < body.size(); i++)
+        if (i != dot && !std::isdigit(static_cast<unsigned char>(body[i]))) return "";
+    const bool zero = body[0] == '0';
+    return std::string("%") + (zero ? body : body.substr(dot)) + "f";
+}
+std::string label_text_of(const nlohmann::json &vallabs, const std::string &lab,
+                          const std::string &value, bool *found) {
+    *found = false;
+    if (lab.empty() || !vallabs.is_object() || !vallabs.contains(lab)) return "";
+    const auto &def = vallabs.at(lab);
+    if (!def.is_object() || !def.contains("entries") || !def["entries"].is_array()) return "";
+    for (const auto &e : def["entries"]) {
+        if (!e.is_array() || e.size() < 2) continue;
+        std::string k = e[0].is_string() ? e[0].get<std::string>() : e[0].dump();
+        if (k == value) {
+            *found = true;
+            return e[1].is_string() ? e[1].get<std::string>() : e[1].dump();
+        }
+    }
+    return "";
+}
+std::string utf8_prefix(const std::string &s, long long n) {
+    if (n <= 0) return s;
+    long long count = 0;
+    size_t i = 0;
+    while (i < s.size() && count < n) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
+        i += len;
+        count++;
+    }
+    return s.substr(0, std::min(i, s.size()));
+}
+
+} // namespace
+
+std::string View::egen_probe_sql(const EgenSpec &sp, bool statamissing, std::string *sql) const {
+    sql->clear();
+    if (sp.fcn == "cut" && sp.group > 0) {
+        /* native: pctile x, nq(#) — the # - 1 quantiles under the percentile
+         * rule, over the selected nonmissing values; plus min and max */
+        if (sp.vars.size() != 1) return "egen cut() takes one variable";
+        std::vector<std::string> v;
+        std::string err = expand_patterns(sp.vars, &v);
+        if (!err.empty()) return err;
+        if (cols_[static_cast<size_t>(col_index(v[0]))].kind != 'n')
+            return "egen cut() needs a numeric variable";
+        if (sp.group < 2 || sp.group > 100000) return "egen cut(): group() must be between 2 and 100000";
+        std::string where = "TRUE";
+        if (!sp.if_expr.empty()) {
+            ExprResult c = translate_filter(sp.if_expr, expr_schema(), statamissing);
+            if (!c.ok) return c.error;
+            if (!c.windows.empty()) return "_n/_N are not supported in the if of egen cut()";
+            where = "coalesce(" + c.sql + ", FALSE)";
+        }
+        const std::string x = quote_ident(v[0]);
+        std::string sel = "min(" + x + "), max(" + x + ")";
+        for (long long j = 1; j < sp.group; j++)
+            sel += ", " + pct_window_sql(x, "prn", "pn", 100.0 * static_cast<double>(j) /
+                                                            static_cast<double>(sp.group));
+        *sql = "SELECT " + sel + " FROM (SELECT " + x + ", row_number() OVER (ORDER BY " + x +
+               ") AS \"prn\", count(*) OVER () AS \"pn\" FROM (" + compile(false) + ") WHERE " + where +
+               " AND " + x + " IS NOT NULL)";
+        return "";
+    }
+    if (sp.fcn == "group" && sp.label) {
+        std::vector<std::string> keys;
+        std::string err = expand_patterns(sp.vars, &keys);
+        if (!err.empty()) return err;
+        if (keys.empty()) return "egen group() needs a varlist";
+        std::string where = "TRUE";
+        if (!sp.if_expr.empty()) {
+            ExprResult c = translate_filter(sp.if_expr, expr_schema(), statamissing);
+            if (!c.ok) return c.error;
+            if (!c.windows.empty()) return "_n/_N are not supported in the if of egen group()";
+            where = "coalesce(" + c.sql + ", FALSE)";
+        }
+        std::string sel, grp, nonmiss;
+        for (size_t i = 0; i < keys.size(); i++) {
+            const ViewCol &c = cols_[static_cast<size_t>(col_index(keys[i]))];
+            const std::string k = norm_group_key(quote_ident(keys[i]), c.kind);
+            sel += (i ? ", " : "") + (c.kind == 's' ? "coalesce(" + k + ", '')"
+                                                     : "CAST(" + k + " AS VARCHAR)");
+            grp += (i ? ", " : "") + k;
+            nonmiss += (i ? " AND " : "") + k + " IS NOT NULL";
+        }
+        /* the groups in key order, missing groups last only with missing */
+        *sql = "SELECT " + sel + " FROM (" + compile(false) + ") WHERE " + where +
+               (sp.missing ? "" : " AND " + nonmiss) + " GROUP BY " + grp + " ORDER BY " + grp +
+               " LIMIT 65537";
+        return "";
+    }
+    return "";
+}
+
+std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string &arg_type) {
+    const std::string &name = sp.name, &fcn = sp.fcn, &type_req = sp.type_req;
     if (col_index(name) >= 0) return "variable " + name + " already defined";
     {
         const std::string cig = ci_guard(name);
         if (!cig.empty()) return cig;
     }
-    ExprResult a = translate_expression(arg_expr, schema_of(cols_), statamissing);
-    if (!a.ok) return a.error;
-    if (a.uses_rowctx)
-        return "_n/_N are not supported in egen; generate a row variable first";
-    if (a.kind == 's') return "egen " + fcn + "() needs a numeric expression";
-    std::string part;
-    if (!by.empty()) {
-        std::vector<std::string> byn;
-        std::string err = expand_patterns(by, &byn);
+    if (fcn == "fill" || fcn == "mtr")
+        return "egen function " + fcn + "() is not available in a lazy view" +
+               std::string(fcn == "fill" ? " (its pattern is inferred from a numlist; generate the "
+                                           "sequence with _n or egen seq() instead)"
+                                         : " (it needs the US marginal tax rate table)");
+    const bool expr_fn = egen_expr_fcn(fcn), row_fn = egen_row_fcn(fcn);
+    static const std::set<std::string> known = {"anycount", "anymatch", "anyvalue", "concat",
+        "cut", "diff", "ends", "group", "mode", "seq", "tag"};
+    if (!expr_fn && !row_fn && !known.count(fcn))
+        return "egen function " + fcn + "() is not supported; see help parqit for the list";
+    static const std::set<std::string> rows = {"rowfirst", "rowlast", "rowmax", "rowmean",
+        "rowmedian", "rowmin", "rowmiss", "rownonmiss", "rowpctile", "rowsd", "rowtotal"};
+    if (row_fn && !rows.count(fcn))
+        return "egen function " + fcn + "() is not supported; see help parqit for the list";
+    if (!sp.by.empty() && egen_no_by(fcn))
+        return "egen " + fcn + "() may not be combined with by";
+
+    /* ---- the groups and the condition ---------------------------------- */
+    std::vector<std::string> byn, part;
+    if (!sp.by.empty()) {
+        std::string err = expand_patterns(sp.by, &byn);
         if (!err.empty()) return err;
-        for (size_t i = 0; i < byn.size(); i++) {
-            if (i) part += ", ";
-            /* GROUPKEY-1: per-group window keys fold ''/NaN to missing like Stata */
-            part += norm_group_key(quote_ident(byn[i]), cols_[col_index(byn[i])].kind);
+        for (const auto &b : byn)
+            part.push_back(norm_group_key(quote_ident(b), cols_[static_cast<size_t>(col_index(b))].kind));
+    }
+    ExprResult cond;
+    std::string cond_sql = "TRUE";
+    if (!sp.if_expr.empty()) {
+        cond = translate_filter(sp.if_expr, expr_schema(), statamissing);
+        if (!cond.ok) return cond.error;
+        cond_sql = "coalesce(" + cond.sql + ", FALSE)";
+    }
+    /* ---- the argument ---------------------------------------------------- */
+    ExprResult arg;
+    std::vector<std::string> vars;
+    char vkind = 'n';
+    if (expr_fn) {
+        if (sp.expr.empty()) return "egen " + fcn + "() needs an expression";
+        arg = translate_expression(sp.expr, expr_schema(), statamissing);
+        if (!arg.ok) return arg.error;
+        if (arg.kind == 's') return "egen " + fcn + "() needs a numeric expression";
+    } else if (fcn != "seq") {
+        if (sp.vars.empty()) return "egen " + fcn + "() needs a variable list";
+        std::string err = expand_patterns(sp.vars, &vars);
+        if (!err.empty()) return err;
+        const bool single = fcn == "mode" || fcn == "cut" || fcn == "anyvalue" || fcn == "ends";
+        if (single && vars.size() != 1) return "egen " + fcn + "() takes one variable";
+        for (const auto &v : vars) {
+            const ViewCol &c = cols_[static_cast<size_t>(col_index(v))];
+            const bool numeric_only = fcn == "cut" || fcn == "anyvalue" || fcn == "anycount" ||
+                                      fcn == "anymatch" ||
+                                      (row_fn && !(fcn == "rownonmiss" && sp.strok));
+            if (numeric_only && c.kind == 's')
+                return "egen " + fcn + "(): " + v + " is a string variable" +
+                       (fcn == "rownonmiss" ? "; use the strok option" : "");
+            if (fcn == "ends" && c.kind != 's') return "egen ends() needs a string variable";
         }
+        if (single) vkind = cols_[static_cast<size_t>(col_index(vars[0]))].kind;
     }
-    std::string over = part.empty() ? "OVER ()" : "OVER (PARTITION BY " + part + ")";
-    std::string agg;
-    if (fcn == "total") {
-        const bool exact_storage = type_req.empty() && !arg_type.empty() &&
-                                   arg_type != "FLOAT" && arg_type != "DOUBLE";
-        agg = exact_storage ? "coalesce(sum(" + a.sql + ") " + over + ", 0)"
-                            : "(__parqit_total(" + a.sql + ") " + over + ").sum";
-    }
-    else if (fcn == "mean") agg = "(__parqit_total(" + a.sql + ") " + over + ").mean";
-    else if (fcn == "sd") agg = "(__parqit_stats(" + a.sql + ") " + over + ").sd";
-    else if (fcn == "min") agg = "min(" + a.sql + ") " + over;
-    else if (fcn == "max") agg = "max(" + a.sql + ") " + over;
-    else if (fcn == "count") agg = "count(" + a.sql + ") " + over;
-    else
-        return "egen function " + fcn + "() is not supported (yet); supported: "
-               "total mean sd min max count";
-    /* EGEN-STORAGE-1: an explicit storage type on egen is value semantics, not
-     * just metadata, exactly like generate. A string storage type is a type
-     * mismatch for these numeric egen functions (native r(109)); a narrow
-     * numeric type truncates toward zero and sends out-of-range results to
-     * missing (e.g. native `egen byte t = total(x)` with sum 200 is `.`, not
-     * 200). Reject strings loudly and coerce the numeric aggregate so the
-     * collected value matches native Stata, not just the recorded meta_type. */
     if (!type_req.empty()) {
         StType mt;
         int mb = 0;
+        const bool string_result = fcn == "concat" || fcn == "ends" ||
+                                   ((fcn == "mode" || fcn == "anyvalue") && vkind == 's');
         if (sttype_parse(type_req, &mt, &mb) &&
-            (mt == StType::Str || mt == StType::StrL))
-            return "type mismatch: egen " + fcn +
-                   "() produces a numeric result, not " + type_req;
+            (mt == StType::Str || mt == StType::StrL) != string_result)
+            return "type mismatch: egen " + fcn + "() produces a " +
+                   (string_result ? "string" : "numeric") + " result, not " + type_req;
     }
-    const bool finite_double = fcn == "total" || fcn == "mean" || fcn == "sd";
-    std::string stored = type_req == "double" && finite_double ? agg : coerce_storage(agg, type_req, 'n');
-    push_stage("SELECT " + stage_list() + ", " + stored + " AS " +
-                   quote_ident(name) + " FROM " + prev_name(stages_.size()),
-               "egen " + name + " = " + fcn + "(...)" +
-                   (by.empty() ? "" : ", by(...)"), true);
+
+    /* ---- level 0: the previous stage with the window terms of the
+     * expression and the condition as helper columns; level 1: the condition
+     * (c, only with an if) and the argument (e) as helper columns, so every
+     * later window is a plain reference.
+     * WINDOW-PART-1: the condition is never a PARTITION BY key. Partitioning
+     * a window by a computed boolean column makes DuckDB 1.5.3's planner
+     * exponential in the number of stacked stages (8 mode() stages: 30 s on
+     * 74 rows; none of ORDER BY, CASE or constant folding mattered) and, bare,
+     * fails with an internal error. So an aggregate window takes the
+     * condition as FILTER (WHERE c), a ranking window orders the selected rows
+     * first (c DESC) so they get the ranks 1..n, and the final CASE masks the
+     * rows outside the condition; without an if none of this is emitted. */
+    const bool has_if = !sp.if_expr.empty();
+    std::string c_sql = cond_sql, e_sql = expr_fn ? arg.sql : "NULL";
+    std::string lvl = rowctx_wrap({{&c_sql, &cond.windows}, {&e_sql, &arg.windows}},
+                                  prev_name(stages_.size()), part);
+    const std::string c = has_if ? quote_ident(fresh_helper("c")) : "TRUE";
+    /* the argument is a helper column only where several levels read it (the
+     * multi-level functions); a single-level aggregate takes the expression
+     * inline, the plan shape of 0.3.3 — a helper projection under every
+     * stacked window made DuckDB 1.5.3's planner superlinear in the number of
+     * stages (12 stacked mean(): 2.8 s on 74 rows, 0.07 s inline) */
+    static const std::set<std::string> multi_level = {"median", "pctile", "iqr", "mad", "mdev",
+                                                      "std", "mode"};
+    const bool helper_e = expr_fn && multi_level.count(fcn) != 0;
+    const std::string e = helper_e ? quote_ident(fresh_helper("e")) : "(" + e_sql + ")";
+    {
+        std::string defs;
+        if (has_if) defs += c_sql + " AS " + c;
+        if (helper_e) defs += std::string(defs.empty() ? "" : ", ") + e_sql + " AS " + e;
+        lvl = defs.empty() ? lvl : "(SELECT *, " + defs + " FROM " + lvl + ")";
+    }
+    auto level = [&](const std::string &defs) { lvl = "(SELECT *, " + defs + " FROM " + lvl + ")"; };
+    /* the window over the by groups (plus `extra` keys), ordered by `order` */
+    auto over = [&](const std::string &extra, const std::string &order) {
+        std::string body;
+        for (const auto &k : part) body += (body.empty() ? "" : ", ") + k;
+        if (!extra.empty()) body += (body.empty() ? "" : ", ") + extra;
+        std::string o = order;
+        if (has_if && !o.empty()) o = c + " DESC, " + o; /* the selected rows first */
+        else if (has_if) o = c + " DESC";
+        return "OVER (" + (body.empty() ? std::string() : "PARTITION BY " + body) +
+               (o.empty() ? std::string() : std::string(body.empty() ? "" : " ") + "ORDER BY " + o) + ")";
+    };
+    const std::string filt = has_if ? " FILTER (WHERE " + c + ")" : "";
+    const std::string ord = order_by_sql(); /* " ORDER BY ..." or "" */
+    const std::string row_order = ord.empty() ? "" : ord.substr(10); /* after " ORDER BY " */
+    /* an aggregate window over the whole group (no order) */
+    std::string wbody;
+    for (const auto &k : part) wbody += (wbody.empty() ? "" : ", ") + k;
+    const std::string w = "OVER (" + (wbody.empty() ? std::string() : "PARTITION BY " + wbody) + ")";
+    auto wagg = [&](const std::string &agg) { return agg + filt + " " + w; };
+    auto wagg_extra = [&](const std::string &agg, const std::string &extra) {
+        return agg + filt + " OVER (PARTITION BY " + (wbody.empty() ? "" : wbody + ", ") + extra + ")";
+    };
+    auto mask = [&](const std::string &r) {
+        return has_if ? "CASE WHEN " + c + " THEN " + r + " END" : r;
+    };
+    auto mask_else = [&](const std::string &r, const std::string &other) {
+        return has_if ? "CASE WHEN " + c + " THEN " + r + " ELSE " + other + " END" : r;
+    };
+    std::string result;
+    char rkind = 'n';
+    bool normalized = true;
+    std::string cast; /* a value-label name carried to the column */
+
+    if (expr_fn) {
+        const std::string eref = e;
+        if (fcn == "total" || fcn == "sum") {
+            const bool exact_storage = type_req.empty() && !arg_type.empty() &&
+                                       arg_type != "FLOAT" && arg_type != "DOUBLE";
+            const std::string sum = exact_storage ? wagg("sum(" + eref + ")")
+                                                  : "(" + wagg("__parqit_total(" + eref + ")") + ").sum";
+            result = sp.missing ? "CASE WHEN " + wagg("count(" + eref + ")") + " = 0 THEN NULL ELSE " + sum + " END"
+                                : "coalesce(" + sum + ", 0)";
+        } else if (fcn == "mean") {
+            result = "(" + wagg("__parqit_total(" + eref + ")") + ").mean";
+        } else if (fcn == "sd") {
+            result = "(" + wagg("__parqit_stats(" + eref + ")") + ").sd";
+        } else if (fcn == "min") {
+            result = wagg("min(" + eref + ")");
+        } else if (fcn == "max") {
+            result = sp.missing ? "CASE WHEN " + wagg("count(*)") + " > " + wagg("count(" + eref + ")") +
+                                      " THEN NULL ELSE " + wagg("max(" + eref + ")") + " END"
+                                : wagg("max(" + eref + ")");
+        } else if (fcn == "count") {
+            result = wagg("count(" + eref + ")");
+        } else if (fcn == "kurt" || fcn == "skew") {
+            result = "(" + wagg("__parqit_detail(" + eref + ")") + ")." +
+                     (fcn == "kurt" ? "kurtosis" : "skewness");
+        } else if (fcn == "mdev") {
+            const std::string m = quote_ident(fresh_helper("m"));
+            level("(" + wagg("__parqit_total(" + eref + ")") + ").mean AS " + m);
+            result = "(" + wagg("__parqit_total(abs(__parqit_double(" + eref + ") - " + m + "))") + ").mean";
+        } else if (fcn == "std") {
+            const std::string m = quote_ident(fresh_helper("m")), sdv = quote_ident(fresh_helper("s"));
+            level("(" + wagg("__parqit_stats(" + eref + ")") + ").mean AS " + m + ", (" +
+                  wagg("__parqit_stats(" + eref + ")") + ").sd AS " + sdv);
+            result = "parqit_finite((__parqit_double(" + eref + ") - " + m + ") / " + sdv + " * " +
+                     dtoa(sp.sd) + " + " + dtoa(sp.mean) + ")";
+        } else if (fcn == "pc") {
+            result = "parqit_finite(__parqit_double(" + eref + ") * " + (sp.prop ? "1.0" : "100.0") +
+                     " / (" + wagg("__parqit_total(" + eref + ")") + ").sum)";
+        } else if (fcn == "rank") {
+            if ((sp.field ? 1 : 0) + (sp.track ? 1 : 0) + (sp.unique ? 1 : 0) > 1)
+                return "egen rank(): field, track and unique are mutually exclusive";
+            const std::string nn = "(" + eref + " IS NULL)";
+            std::string r;
+            if (sp.unique)
+                r = "row_number() " + over(nn, eref + (row_order.empty() ? "" : ", " + row_order));
+            else if (sp.field)
+                r = "rank() " + over(nn, eref + " DESC");
+            else if (sp.track)
+                r = "rank() " + over(nn, eref);
+            else
+                r = "(2 * rank() " + over(nn, eref) + " + " + wagg_extra("count(*)", eref) +
+                    " - 1) / 2.0";
+            result = "CASE WHEN " + eref + " IS NOT NULL THEN " + r + " END";
+        } else { /* median pctile iqr mad */
+            double p = 50;
+            if (fcn == "pctile") {
+                p = sp.has_p ? sp.p : 50;
+                if (!(p > 0 && p < 100)) return "egen pctile(): p() must be between 0 and 100";
+            }
+            /* the rank of each selected nonmissing value within its group and
+             * the group's count of them; a row outside the condition has no
+             * rank, so the picks below never see it */
+            auto rank_level = [&](const std::string &x, std::string *prn, std::string *pn) {
+                *prn = fresh_helper("prn");
+                *pn = fresh_helper("pn");
+                level("(CASE WHEN " + x + " IS NULL" + (has_if ? " OR NOT " + c : "") +
+                      " THEN NULL ELSE row_number() " + over("(" + x + " IS NULL)", x) + " END) AS " +
+                      quote_ident(*prn) + ", " + wagg("count(" + x + ")") + " AS " + quote_ident(*pn));
+            };
+            std::string prn, pn;
+            rank_level(eref, &prn, &pn);
+            if (fcn == "iqr")
+                result = "__parqit_difference(" + pct_window_sql(eref, prn, pn, 75, w) + ", " +
+                         pct_window_sql(eref, prn, pn, 25, w) + ")";
+            else if (fcn == "mad") {
+                const std::string m = quote_ident(fresh_helper("m")), d = quote_ident(fresh_helper("d"));
+                level(pct_window_sql(eref, prn, pn, 50, w) + " AS " + m);
+                level("abs(__parqit_double(" + eref + ") - " + m + ") AS " + d);
+                std::string prn2, pn2;
+                rank_level(d, &prn2, &pn2);
+                result = pct_window_sql(d, prn2, pn2, 50, w);
+            } else
+                result = pct_window_sql(eref, prn, pn, p, w);
+        }
+        result = mask(result);
+        normalized = true;
+    } else if (fcn == "seq") {
+        const std::string rn = quote_ident(fresh_helper("rn"));
+        level("row_number() " + over("", row_order) + " AS " + rn);
+        if (sp.block < 1) return "egen seq(): block() must be a positive whole number";
+        const std::string k = "((" + rn + " - 1) // " + std::to_string(sp.block) + ")";
+        std::string v;
+        if (!sp.has_to) v = dtoa(sp.from) + " + " + k;
+        else if (sp.to >= sp.from)
+            v = dtoa(sp.from) + " + (" + k + " % " + dtoa(sp.to - sp.from + 1) + ")";
+        else
+            v = dtoa(sp.from) + " - (" + k + " % " + dtoa(sp.from - sp.to + 1) + ")";
+        result = mask(v);
+    } else if (fcn == "mode") {
+        const std::string v = quote_ident(vars[0]);
+        if ((sp.minmode ? 1 : 0) + (sp.maxmode ? 1 : 0) + (sp.nummode > 0 ? 1 : 0) > 1)
+            return "egen mode(): minmode, maxmode and nummode() are mutually exclusive";
+        const std::string vv = vkind == 's' ? "nullif(" + v + ", '')" : v;
+        const std::string f = quote_ident(fresh_helper("f"));
+        /* the frequency of each value among the selected rows; 0 for a
+         * missing value unless missing counts it */
+        level((sp.missing ? wagg_extra("count(*)", vv)
+                          : "CASE WHEN " + vv + " IS NULL THEN 0 ELSE " + wagg_extra("count(*)", vv) + " END") +
+              " AS " + f);
+        const std::string fm = quote_ident(fresh_helper("fm")), md = quote_ident(fresh_helper("md"));
+        level(wagg("max(" + f + ")") + " AS " + fm);
+        level("(" + (has_if ? c + " AND " : "") + f + " = " + fm + " AND " + fm + " > 0) AS " + md);
+        const std::string lo = quote_ident(fresh_helper("lo")), hi = quote_ident(fresh_helper("hi")),
+                          nm = quote_ident(fresh_helper("nm"));
+        std::string defs = "min(CASE WHEN " + md + " THEN " + vv + " END) " + w + " AS " + lo +
+                           ", max(CASE WHEN " + md + " THEN " + vv + " END) " + w + " AS " + hi +
+                           ", max(CASE WHEN " + md + " AND " + vv + " IS NULL THEN 1 ELSE 0 END) " + w +
+                           " AS " + nm;
+        std::string pick;
+        if (sp.nummode > 0) {
+            /* the modal values ranked from the lowest: the modal rows sort
+             * first, so their dense ranks are 1..K and the others are masked */
+            const std::string dr = quote_ident(fresh_helper("dr"));
+            defs += ", (CASE WHEN " + md + " THEN dense_rank() OVER (" +
+                    (wbody.empty() ? "" : "PARTITION BY " + wbody + " ") + "ORDER BY " + md +
+                    " DESC, " + vv + ") END) AS " + dr;
+            level(defs);
+            pick = quote_ident(fresh_helper("pk"));
+            level("max(CASE WHEN " + dr + " = " + std::to_string(sp.nummode) + " THEN " + vv +
+                  " END) " + w + " AS " + pick);
+        } else
+            level(defs);
+        std::string r;
+        if (sp.minmode) r = lo;
+        else if (sp.maxmode) r = "CASE WHEN " + nm + " = 1 THEN NULL ELSE " + hi + " END";
+        else if (sp.nummode > 0) r = pick;
+        else r = "CASE WHEN " + nm + " = 0 AND " + lo + " = " + hi + " THEN " + lo + " END";
+        result = mask(r);
+        rkind = vkind;
+        normalized = false;
+    } else if (fcn == "group" || fcn == "tag") {
+        std::string keys, anymiss;
+        for (size_t i = 0; i < vars.size(); i++) {
+            const ViewCol &col = cols_[static_cast<size_t>(col_index(vars[i]))];
+            const std::string k = norm_group_key(quote_ident(vars[i]), col.kind);
+            keys += (i ? ", " : "") + k;
+            anymiss += (i ? " OR " : "") + k + " IS NULL";
+        }
+        /* a row outside the condition, or with a missing key (unless missing
+         * counts it), takes no group: it sorts after every row that does, so
+         * the numbering of those is 1..G, and the CASE masks it */
+        std::string out_of = sp.missing ? "FALSE" : "(" + anymiss + ")";
+        if (has_if) out_of = "(NOT " + c + (sp.missing ? "" : " OR " + anymiss) + ")";
+        if (fcn == "group") {
+            result = "CASE WHEN NOT " + out_of + " THEN dense_rank() OVER (ORDER BY " +
+                     (out_of == "FALSE" ? "" : out_of + ", ") + keys + ") END";
+            if (sp.label) {
+                /* the group texts, from the probe: decoded labels or values */
+                if (sp.probe_rows.size() > 65536)
+                    return "egen group(), label: more than 65,536 groups; omit label";
+                std::string lab = sp.lname.empty() ? name : sp.lname;
+                if (vallabs_.is_object() && vallabs_.contains(lab) && sp.lname.empty()) {
+                    int k = 1;
+                    while (vallabs_.contains(lab + std::to_string(k))) k++;
+                    lab += std::to_string(k);
+                }
+                nlohmann::json entries = nlohmann::json::array();
+                long long code = 0;
+                for (const auto &row : sp.probe_rows) {
+                    std::string text;
+                    for (size_t i = 0; i < vars.size() && i < row.size(); i++) {
+                        const ViewCol &col = cols_[static_cast<size_t>(col_index(vars[i]))];
+                        bool found = false;
+                        std::string piece = col.kind == 'n'
+                            ? label_text_of(vallabs_, col.vallab, row[i], &found) : row[i];
+                        if (!found && col.kind == 'n') piece = row[i].empty() ? "." : row[i];
+                        if (sp.truncate > 0) piece = utf8_prefix(piece, sp.truncate);
+                        text += (i ? " " : "") + piece;
+                    }
+                    entries.push_back(nlohmann::json::array({std::to_string(++code), text}));
+                }
+                if (!vallabs_.is_object()) vallabs_ = nlohmann::json::object();
+                vallabs_[lab] = {{"entries", entries}};
+                cast = lab; /* carried to the column below */
+            }
+        } else {
+            result = "CASE WHEN NOT " + out_of + " AND row_number() OVER (PARTITION BY " + keys +
+                     " ORDER BY " + (out_of == "FALSE" ? "" : out_of + (row_order.empty() ? "" : ", ")) +
+                     row_order + ") = 1 THEN 1 ELSE 0 END";
+            if (out_of == "FALSE" && row_order.empty())
+                result = "CASE WHEN row_number() OVER (PARTITION BY " + keys + ") = 1 THEN 1 ELSE 0 END";
+            result = "CAST(" + result + " AS TINYINT)";
+        }
+    } else if (fcn == "anycount" || fcn == "anymatch" || fcn == "anyvalue") {
+        if (sp.values.empty()) return "egen " + fcn + "(): values() is required";
+        std::string list;
+        for (size_t i = 0; i < sp.values.size(); i++) list += (i ? ", " : "") + dtoa(sp.values[i]);
+        if (fcn == "anyvalue") {
+            const std::string v = quote_ident(vars[0]);
+            result = mask("CASE WHEN " + v + " IN (" + list + ") THEN " + v + " END");
+        } else {
+            std::string sum;
+            for (size_t i = 0; i < vars.size(); i++)
+                sum += (i ? " + " : "") + std::string("(CASE WHEN ") + quote_ident(vars[i]) +
+                       " IN (" + list + ") THEN 1 ELSE 0 END)";
+            result = fcn == "anycount" ? mask_else("(" + sum + ")", "0")
+                                       : mask_else("(CASE WHEN (" + sum + ") > 0 THEN 1 ELSE 0 END)", "0");
+            result = "CAST(" + result + " AS TINYINT)";
+        }
+    } else if (fcn == "concat") {
+        std::string pf;
+        if (!sp.format.empty()) {
+            pf = printf_of_stata_fixed(sp.format);
+            if (pf.empty())
+                return "egen concat(): format() takes a fixed format such as %9.2f or %03.0f";
+        }
+        std::string joined;
+        for (size_t i = 0; i < vars.size(); i++) {
+            const ViewCol &col = cols_[static_cast<size_t>(col_index(vars[i]))];
+            const std::string v = quote_ident(vars[i]);
+            std::string piece;
+            if (col.kind == 's') piece = "coalesce(" + v + ", '')";
+            else if (sp.decode && !col.vallab.empty() && vallabs_.is_object() &&
+                     vallabs_.contains(col.vallab) && vallabs_[col.vallab].contains("entries")) {
+                std::string cases;
+                for (const auto &en : vallabs_[col.vallab]["entries"]) {
+                    if (!en.is_array() || en.size() < 2) continue;
+                    const std::string k = en[0].is_string() ? en[0].get<std::string>() : en[0].dump();
+                    std::string t = en[1].is_string() ? en[1].get<std::string>() : en[1].dump();
+                    if (sp.maxlength > 0) t = utf8_prefix(t, sp.maxlength);
+                    cases += " WHEN " + k + " THEN " + quote_literal(t);
+                }
+                piece = "(CASE " + v + cases + " ELSE parqit_stata_string(__parqit_double(" + v + ")) END)";
+            } else if (!pf.empty())
+                piece = "(CASE WHEN " + v + " IS NULL THEN '.' ELSE printf(" + quote_literal(pf) +
+                        ", __parqit_double(" + v + ")) END)";
+            else
+                piece = "parqit_stata_string(__parqit_double(" + v + "))";
+            joined += (i ? " || " + quote_literal(sp.punct) + " || " : "") + piece;
+        }
+        result = mask_else("(" + joined + ")", "''");
+        rkind = 's';
+        normalized = false;
+    } else if (fcn == "cut") {
+        const std::string x = quote_ident(vars[0]);
+        std::vector<double> at = sp.at;
+        bool icodes = sp.icodes || sp.label;
+        if (!at.empty() && sp.group > 0) return "egen cut(): cannot specify both at() and group()";
+        if (at.empty() && sp.group == 0) return "egen cut(): one of at() or group() must be specified";
+        if (sp.group > 0) {
+            if (sp.probe_rows.size() != 1 || sp.probe_rows[0].size() != static_cast<size_t>(sp.group + 1))
+                return "egen cut(): the cutpoint probe returned nothing (no selected nonmissing values?)";
+            const auto &row = sp.probe_rows[0];
+            if (row[0].empty()) return "egen cut(): no nonmissing values to cut";
+            at.clear();
+            at.push_back(std::strtod(row[0].c_str(), nullptr));
+            for (long long j = 1; j < sp.group; j++)
+                at.push_back(std::strtod(row[static_cast<size_t>(1 + j)].c_str(), nullptr));
+            at.push_back(std::strtod(row[1].c_str(), nullptr) + 1);
+            icodes = true;
+        }
+        for (size_t i = 1; i < at.size(); i++)
+            if (!(at[i] >= at[i - 1])) return "egen cut(): at() must be in ascending order";
+        if (at.size() < 2) return "egen cut(): at() needs at least two cutpoints";
+        std::string cases = "CASE";
+        for (size_t i = at.size() - 1; i-- > 0;) {
+            cases += " WHEN " + x + " >= " + dtoa(at[i]) + " THEN " +
+                     (icodes ? std::to_string(i) : dtoa(at[i]));
+        }
+        cases += " END";
+        result = mask("CASE WHEN " + x + " IS NOT NULL AND " + x + " < " + dtoa(at.back()) + " THEN " +
+                      cases + " END");
+        if (sp.label) {
+            std::string lab = sp.lname.empty() ? name : sp.lname;
+            nlohmann::json entries = nlohmann::json::array();
+            for (size_t i = 0; i + 1 < at.size(); i++)
+                entries.push_back(nlohmann::json::array({std::to_string(i), dtoa(at[i]) + "-"}));
+            if (!vallabs_.is_object()) vallabs_ = nlohmann::json::object();
+            vallabs_[lab] = {{"entries", entries}};
+            cast = lab;
+        }
+    } else if (fcn == "diff") {
+        std::string cmp;
+        for (size_t i = 1; i < vars.size(); i++) {
+            const ViewCol &a = cols_[static_cast<size_t>(col_index(vars[0]))];
+            const ViewCol &b = cols_[static_cast<size_t>(col_index(vars[i]))];
+            if (a.kind != b.kind) return "egen diff(): " + vars[0] + " and " + vars[i] +
+                                        " are not both numeric or both string";
+            const std::string l = a.kind == 's' ? "coalesce(" + quote_ident(vars[0]) + ", '')"
+                                                : quote_ident(vars[0]);
+            const std::string r = b.kind == 's' ? "coalesce(" + quote_ident(vars[i]) + ", '')"
+                                                : quote_ident(vars[i]);
+            cmp += (cmp.empty() ? "" : " OR ") + l + " IS DISTINCT FROM " + r;
+        }
+        if (cmp.empty()) cmp = "FALSE";
+        result = mask("(CASE WHEN " + cmp + " THEN 1 ELSE 0 END)");
+        result = "CAST(" + result + " AS TINYINT)";
+    } else if (fcn == "ends") {
+        if ((sp.head ? 1 : 0) + (sp.last ? 1 : 0) + (sp.tail ? 1 : 0) > 1)
+            return "egen ends(): head, last and tail are mutually exclusive";
+        const std::string str = "coalesce(" + quote_ident(vars[0]) + ", '')";
+        const std::string pch = quote_literal(sp.has_punct ? sp.punct : " ");
+        std::string v;
+        if (sp.last) v = "list_extract(string_split(" + str + ", " + pch + "), -1)";
+        else if (sp.tail)
+            v = "CASE WHEN strpos(" + str + ", " + pch + ") > 0 THEN substr(" + str + ", strpos(" + str +
+                ", " + pch + ") + length(" + pch + ")) ELSE '' END";
+        else v = "list_extract(string_split(" + str + ", " + pch + "), 1)";
+        if (sp.trim) v = "trim(" + v + ")";
+        result = mask_else("(" + v + ")", "''");
+        rkind = 's';
+        normalized = false;
+    } else { /* the row functions */
+        std::string list, nonmiss, total, firsts, lasts;
+        for (size_t i = 0; i < vars.size(); i++) {
+            const ViewCol &col = cols_[static_cast<size_t>(col_index(vars[i]))];
+            const std::string v = quote_ident(vars[i]);
+            const std::string present = col.kind == 's' ? "coalesce(" + v + ", '') <> ''" : v + " IS NOT NULL";
+            nonmiss += (i ? " + " : "") + std::string("(CASE WHEN ") + present + " THEN 1 ELSE 0 END)";
+            if (col.kind == 'n') {
+                const std::string d = "__parqit_double(" + v + ")";
+                list += (list.empty() ? "" : ", ") + d;
+                total += (total.empty() ? "" : " + ") + ("coalesce(" + d + ", 0)");
+                firsts += (firsts.empty() ? "" : ", ") + d;
+            }
+        }
+        for (size_t i = vars.size(); i-- > 0;) {
+            if (cols_[static_cast<size_t>(col_index(vars[i]))].kind != 'n') continue;
+            lasts += (lasts.empty() ? "" : ", ") + ("__parqit_double(" + quote_ident(vars[i]) + ")");
+        }
+        const std::string l = "list_filter([" + list + "], x -> x IS NOT NULL)";
+        const std::string n = "(" + nonmiss + ")";
+        std::string v;
+        if (fcn == "rowtotal")
+            v = "CASE WHEN " + n + " = 0 THEN " + (sp.missing ? "NULL" : "0") + " ELSE parqit_finite(" +
+                total + ") END";
+        else if (fcn == "rowmean")
+            v = "CASE WHEN " + n + " = 0 THEN NULL ELSE parqit_finite((" + total + ") / " + n + ") END";
+        else if (fcn == "rowmin") v = "least(" + list + ")";
+        else if (fcn == "rowmax") v = "greatest(" + list + ")";
+        else if (fcn == "rowmiss") v = std::to_string(vars.size()) + " - " + n;
+        else if (fcn == "rownonmiss") v = n;
+        else if (fcn == "rowfirst") v = "coalesce(" + firsts + ")";
+        else if (fcn == "rowlast") v = "coalesce(" + lasts + ")";
+        else if (fcn == "rowsd")
+            v = "CASE WHEN " + n + " < 2 THEN NULL ELSE list_aggregate(" + l + ", 'stddev_samp') END";
+        else { /* rowmedian, rowpctile: the percentile rule over the sorted values */
+            double p = 50;
+            if (fcn == "rowpctile") {
+                p = sp.has_p ? sp.p : 50;
+                if (!(p > 0 && p < 100)) return "egen rowpctile(): p() must be between 0 and 100";
+            }
+            const std::string ls = "list_sort(" + l + ")";
+            const std::string np = "(" + n + " * " + dtoa(p) + " / 100.0)";
+            v = "CASE WHEN " + n + " = 0 THEN NULL WHEN " + np + " = floor(" + np + ") THEN __parqit_midpoint(list_extract(" +
+                ls + ", CAST(" + np + " AS INTEGER)), list_extract(" + ls + ", CAST(least(" + np + " + 1, " + n +
+                ") AS INTEGER))) ELSE list_extract(" + ls + ", CAST(ceil(" + np + ") AS INTEGER)) END";
+        }
+        result = mask("(" + v + ")");
+    }
+
+    /* EGEN-STORAGE-1: an explicit storage type is value semantics */
+    std::string stored = result;
+    if (!type_req.empty()) {
+        const bool finite_double = rkind == 'n';
+        stored = (type_req == "double" && finite_double) ? "parqit_finite(__parqit_double(" + result + "))"
+                                                         : coerce_storage(result, type_req, rkind);
+    }
+    /* WINDOW-NEST-1: these functions stack a window over a window's result;
+     * every window stage counts, since DuckDB 1.5.3's window_self_join
+     * rewrite also makes a stack of single-level windows plan exponentially
+     * (12 stacked mean(): 2.5 s on 74 rows, 0.016 s without it) */
+    if (fcn == "median" || fcn == "pctile" || fcn == "iqr" || fcn == "mad" || fcn == "mdev" ||
+        fcn == "std" || fcn == "mode")
+        fragile_windows_ = true;
+    if (expr_fn || fcn == "seq" || fcn == "mode" || fcn == "group" || fcn == "tag") window_stages_++;
+    std::string desc = "egen " + name + " = " + fcn + "(...)";
+    if (!sp.by.empty()) desc += ", by(...)";
+    if (!sp.if_expr.empty()) desc += " if " + sp.if_expr;
+    push_stage("SELECT " + stage_list() + ", " + stored + " AS " + quote_ident(name) + " FROM " + lvl,
+               desc, true);
     ViewCol nc;
     nc.name = name;
-    nc.kind = 'n';
+    nc.kind = rkind;
     nc.meta_type = type_req;
-    nc.normalized = fcn == "total" || fcn == "mean" || fcn == "sd" ||
-                    fcn == "count" || !type_req.empty();
+    nc.normalized = rkind == 'n' && normalized;
+    if (fcn == "group" || fcn == "cut") {
+        if (!cast.empty()) nc.vallab = cast;
+        if (fcn == "group") nc.varlab = "group(" + [&] {
+            std::string t;
+            for (size_t i = 0; i < vars.size(); i++) t += (i ? " " : "") + vars[i];
+            return t;
+        }() + ")";
+    } else if (fcn == "tag") {
+        nc.varlab = "tag(" + [&] {
+            std::string t;
+            for (size_t i = 0; i < vars.size(); i++) t += (i ? " " : "") + vars[i];
+            return t;
+        }() + ")";
+        nc.meta_type = type_req.empty() ? "byte" : type_req;
+    } else if (fcn == "std") {
+        nc.varlab = "Standardized values of " + sp.expr;
+    } else if (fcn == "rank") {
+        nc.varlab = std::string(sp.field ? "field " : sp.track ? "track " : sp.unique ? "unique " : "") +
+                    "rank of (" + sp.expr + ")" + (byn.empty() ? "" : " by " + [&] {
+            std::string t;
+            for (size_t i = 0; i < byn.size(); i++) t += (i ? " " : "") + byn[i];
+            return t;
+        }());
+    } else if (fcn == "anycount" || fcn == "anymatch" || fcn == "anyvalue") {
+        std::string t, vl;
+        for (size_t i = 0; i < vars.size(); i++) t += (i ? " " : "") + vars[i];
+        for (size_t i = 0; i < sp.values.size(); i++) vl += (i ? " " : "") + dtoa(sp.values[i]);
+        nc.varlab = t + (fcn == "anyvalue" ? " if " : " == ") + vl;
+        if (fcn != "anyvalue") nc.meta_type = type_req.empty() ? "byte" : type_req;
+    } else if (fcn == "diff") {
+        std::string t;
+        for (size_t i = 0; i < vars.size(); i++) t += (i ? " " : "") + vars[i];
+        nc.varlab = "diff " + t;
+        nc.meta_type = type_req.empty() ? "byte" : type_req;
+    }
     cols_.push_back(nc);
     return "";
 }
@@ -1473,9 +2383,9 @@ static std::string sample_design_parts(const View &v, const std::string &if_expr
         return cols.front(); /* unreachable: expand_patterns returns live names */
     };
     if (!if_expr.empty()) {
-        ExprResult c = translate_filter(if_expr, schema_of(cols), statamissing);
+        ExprResult c = translate_filter(if_expr, v.expr_schema(), statamissing);
         if (!c.ok) return c.error;
-        if (uses_rowctx(c.sql)) return "_n and _N are not supported in the if of sample";
+        if (!c.windows.empty()) return "_n and _N are not supported in the if of sample";
         out->frame = "coalesce(" + c.sql + ", FALSE)";
     }
     if (!by.empty()) {
@@ -1809,6 +2719,7 @@ std::string View::merge_with(const std::string &kind,
                              int keep_mask, const std::string &gen_name,
                              bool nogen, std::vector<std::string> *warnings) {
     if (keys.empty()) return "merge: key varlist required";
+    fragile_windows_ = fragile_windows_ || u.fragile_windows; /* WINDOW-NEST-1 */
     if (kind != "1:1" && kind != "m:1" && kind != "1:m" && kind != "m:m")
         return "merge: kind must be 1:1, m:1, 1:m or m:m";
 
@@ -2135,6 +3046,9 @@ std::string View::append_with(std::vector<UsingSide> sources,
                               const std::string &gen_name,
                               std::vector<std::string> *warnings) {
     if (sources.empty()) return "append: at least one using file required";
+    for (const auto &u : sources) {
+        fragile_windows_ = fragile_windows_ || u.fragile_windows;
+    }
     if (!gen_name.empty() && col_index(gen_name) >= 0)
         return "append: generate() variable " + gen_name + " already exists";
     if (!gen_name.empty()) {
@@ -2294,6 +3208,7 @@ std::string View::append_with(std::vector<UsingSide> sources,
 std::string View::joinby_with(const std::vector<std::string> &keys, UsingSide u,
                               std::vector<std::string> *warnings) {
     if (keys.empty()) return "joinby: key varlist required";
+    fragile_windows_ = fragile_windows_ || u.fragile_windows; /* WINDOW-NEST-1 */
     std::string kerr = join_keys_error("joinby", keys, u);
     if (!kerr.empty()) return kerr;
     std::set<std::string> keyset(keys.begin(), keys.end());

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.3.3 05oct2026}{...}
+{* *! version 0.4.0 13oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -117,7 +117,7 @@ The rest of this entry gives the syntax, the options and worked examples;
 Open a view over a file, or read a file into memory
 
 {p 8 16 2}
-{cmd:parqit} {cmdab:u:se} [{it:varlist}] {cmd:using} {it:filename} [{cmd:,}
+{cmd:parqit} {cmdab:u:se} [{it:varlist}] [{cmd:if} {it:exp}] {cmd:using} {it:filename} [{cmd:,}
 {it:{help parqit##use_options:use_options}}]
 
 {p 8 16 2}
@@ -139,18 +139,24 @@ Shape the view (lazy: each verb extends the plan)
 {p 8 16 2}{cmd:parqit drop} {it:varlist} | {cmd:parqit drop if} {it:exp} | {cmd:parqit drop in} {it:f}[{cmd:/}{it:l}]{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:g:enerate} [{it:type}] {it:newvar} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit replace} {it:var} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
-{p 8 16 2}{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:fcn}{cmd:(}{it:exp}{cmd:)} [{cmd:,} {opt by(varlist)}]{p_end}
+{p 8 16 2}{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:fcn}{cmd:(}{it:arguments}{cmd:)} [{cmd:if} {it:exp}]
+[{cmd:,} {opt by(varlist)} {it:fcn_options}]{p_end}
+{p 8 16 2}{cmd:parqit by} {it:varlist} [{cmd:(}{it:sortvars}{cmd:)}]{cmd::} {it:parqit_command}{space 4}(gen, replace, egen, keep if, drop if){p_end}
+{p 8 16 2}{cmd:parqit} {cmdab:bys:ort} {it:varlist} [{cmd:(}{it:sortvars}{cmd:)}]{cmd::} {it:parqit_command}{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:ren:ame} {it:old} {it:new}{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:ren:ame} {cmd:(}{it:oldlist}{cmd:)} {cmd:(}{it:newlist}{cmd:)}{p_end}
 {p 8 16 2}{cmd:parqit order} {it:varlist}{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:so:rt} {it:varlist} | {cmd:parqit gsort} [{cmd:+}|{cmd:-}]{it:varname} ...{p_end}
-{p 8 16 2}{cmd:parqit collapse} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... [{cmd:,} {opt by(varlist)}]{p_end}
-{p 8 16 2}{cmd:parqit contract} {it:varlist} [{cmd:,} {opt f:req(newvar)}]{p_end}
-{p 8 16 2}{cmd:parqit duplicates drop} [{it:varlist}{cmd:,} {opt force}]{p_end}
+{p 8 16 2}{cmd:parqit collapse} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... [{cmd:if} {it:exp}] [{cmd:,} {opt by(varlist)}]{p_end}
+{p 8 16 2}{cmd:parqit contract} {it:varlist} [{cmd:if} {it:exp}] [{cmd:,} {opt f:req(newvar)}]{p_end}
+{p 8 16 2}{cmd:parqit duplicates drop} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:,} {opt force}]{p_end}
 {p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:if} {it:exp}] [{cmd:,} {opt c:ount} {opt seed(#)} {opt by(varlist)}
 {opt cl:uster(varname)} {opt any} {opt all} {opt gen:erate(newvar)} {opt keep(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit reshape} {cmd:long}|{cmd:wide} {it:stubs}{cmd:,} {opt i(varlist)} {opt j(name)}{p_end}
-{p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... {cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
+{p 8 16 2}{cmd:parqit pivot} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... [{cmd:if} {it:exp}]{cmd:,} {opt r:ows(varlist)} {opt c:ols(varname)}{p_end}
+{p 8 16 2}{cmd:parqit xtset} {it:panelvar} {it:timevar} [{cmd:,} {opt d:elta(#)}]
+| {cmd:parqit tsset} [{it:panelvar}] {it:timevar} [{cmd:,} {opt d:elta(#)}]{p_end}
+{p 8 16 2}{cmd:parqit xtset} | {cmd:parqit xtset, clear}{space 4}(show, or remove, the declaration; {cmd:tsset} likewise){p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:mer:ge} {cmd:1:1}|{cmd:m:1}|{cmd:1:m} {it:keys} {cmd:using} {it:source}
 [{cmd:,} {opt keep(spec)} {opt keepus:ing(varlist)} {opt gen:erate(newvar)}
 {opt nogen:erate} {opt nonote:s} {opt enc:oding(name)}]{p_end}
@@ -175,6 +181,7 @@ ignores them; {opt nolabel} shows codes instead of value labels){p_end}
 {p 8 16 2}{cmd:parqit levelsof} {it:varname} [{cmd:if} {it:exp}] [{cmd:,} {opt l:imit(#)}]{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:cou:nt} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit distinct} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:,} {opt j:oint} {opt m:issing}]{p_end}
+{p 8 16 2}{cmd:parqit unique} {it:varlist} [{cmd:if} {it:exp}] [{cmd:,} {opt by(varlist)}]{p_end}
 {p 8 16 2}{cmd:parqit duplicates} {cmdab:r:eport}|{cmdab:l:ist} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:,} {opt l:imit(#)}]{p_end}
 {p 8 16 2}{cmd:parqit tabstat} {it:varlist} [{cmd:if} {it:exp}] [{cmd:,} {opt s:tatistics(stats)} {opt by(varname)} {opt save}]
 {space 2}({opt stats()} is a synonym for {opt statistics()}, as in Stata){p_end}
@@ -192,8 +199,8 @@ native does.{p_end}
 {pstd}
 Get the result
 
-{p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear} {opt int64(refuse|round|string)}]{space 2}stream the result into memory (atomically){p_end}
-{p 8 16 2}{cmd:parqit} {cmdab:sa:ve} {it:filename} [{cmd:,} {opt replace} {opt d:ata}
+{p 8 16 2}{cmd:parqit collect} [{cmd:,} {opt clear} {opt int64(refuse|round|string)} {opt comp:ress}]{space 2}stream the result into memory (atomically){p_end}
+{p 8 16 2}{cmd:parqit} {cmdab:sa:ve} {it:filename} [{cmd:,} {opt replace} {opt d:ata} {opt view}
 {opt comp:ression(codec)} {opt compression_level(#)} {opt part:ition_by(varlist)}
 {opt partitions(replace|append)} {opt c:hunk(#)} {opt enc:oding(name)} {opt copy:source}
 {opt xmiss:ing}]{p_end}
@@ -406,7 +413,16 @@ comparison where this can change a result.
 {phang}
 {opt clear} reads the whole result into memory, atomically, instead of opening a
 view. As with {helpb use}, changed data in memory need {opt clear}; open views
-are left as they were.
+are left as they were. An {cmd:if} {it:exp} before {cmd:using} reads the rows it
+selects, as native {cmd:use}: the condition may use any variable of the file,
+also one outside {it:varlist}; with {opt clear} it runs in the engine while the
+file is read, and on a view it is the view's first verb.
+
+{phang}
+{opt compress}, with {opt clear}, runs native {helpb compress} on the data
+once loaded and before they replace the dataset in memory: a storage type is
+narrowed only when every value fits it exactly, so an integral total becomes
+{cmd:long}, {cmd:int} or {cmd:byte} and a double mean stays {cmd:double}.
 
 {phang}
 {opt name(viewname)} opens the view under {it:viewname}, replacing an open view
@@ -456,7 +472,8 @@ several.
 
 {phang}
 {opt data} saves the dataset in memory even when a view is open; without a view,
-{cmd:parqit save} saves memory anyway.
+{cmd:parqit save} saves memory anyway. {opt view} says explicitly that the
+current view is what is written, and is refused when no view is open.
 
 {phang}
 {opt compression(codec)} chooses {cmd:zstd} (the default), {cmd:snappy},
@@ -471,7 +488,8 @@ value of {it:varlist}, which later reads can skip.
 {opt partitions(replace|append)} updates an existing tree partition by partition
 instead of rewriting it: {cmd:replace} swaps the partitions present in the
 result and keeps the others, {cmd:append} adds files to them. The tree's columns
-and parqit metadata must match the result.
+and parqit metadata must match the result, and {opt partition_by()} must name
+the tree's keys: left out, the refusal names them.
 
 {phang}
 {opt chunk(#)} sets the number of rows per Parquet row group.
@@ -499,7 +517,58 @@ cannot represent, in companion columns that {cmd:parqit use} restores.
 
 {phang}
 {opt clear} permits {cmd:parqit collect} to replace changed data in memory.
-{opt int64()} is as for {cmd:parqit use}.
+{opt int64()} and {opt compress} are as for {cmd:parqit use}: {opt compress}
+narrows the storage types losslessly after the result is loaded, which is
+where the {cmd:double} results of {cmd:collapse} and {cmd:egen} become
+{cmd:long}, {cmd:int} or {cmd:byte} when their values allow it.
+
+{dlgtab:collapse, egen, by, xtset}
+
+{phang}
+{cmd:collapse} and {cmd:pivot} take every native statistic: {cmd:mean},
+{cmd:sum}, {cmd:rawsum}, {cmd:sd}, {cmd:semean}, {cmd:sebinomial},
+{cmd:sepoisson}, {cmd:median}, {cmd:p}{it:##}, {cmd:iqr}, {cmd:count},
+{cmd:percent}, {cmd:min}, {cmd:max}, {cmd:first}, {cmd:last}, {cmd:firstnm} and
+{cmd:lastnm}, without weights.
+
+{phang}
+{cmd:egen} takes the native functions and their options. With an expression:
+{cmd:total} ({opt missing}), {cmd:mean}, {cmd:sd}, {cmd:min}, {cmd:max}
+({opt missing}), {cmd:count}, {cmd:median}, {cmd:pctile} ({opt p(#)}),
+{cmd:iqr}, {cmd:kurt}, {cmd:skew}, {cmd:mad}, {cmd:mdev}, {cmd:std}
+({opt mean(#)} {opt sd(#)}), {cmd:pc} ({opt prop}), {cmd:rank} ({opt field}
+{opt track} {opt unique}). With a varlist: {cmd:group} ({opt missing}
+{opt label} {opt lname(name)} {opt truncate(#)}), {cmd:tag} ({opt missing}),
+{cmd:anycount}, {cmd:anymatch}, {cmd:anyvalue} ({opt values(numlist)}),
+{cmd:concat} ({opt punct(chars)} {opt format(%fmt)} {opt decode}
+{opt maxlength(#)}), {cmd:diff}, {cmd:rowtotal} ({opt missing}), {cmd:rowmean},
+{cmd:rowmin}, {cmd:rowmax}, {cmd:rowmiss}, {cmd:rownonmiss} ({opt strok}),
+{cmd:rowsd}, {cmd:rowfirst}, {cmd:rowlast}, {cmd:rowmedian}, {cmd:rowpctile}
+({opt p(#)}). With one variable: {cmd:mode} ({opt minmode} {opt maxmode}
+{opt nummode(#)} {opt missing}), {cmd:cut} ({opt at(numlist)} or
+{opt group(#)}, {opt icodes}, {opt label}), {cmd:ends} ({opt punct(chars)}
+{opt head} {opt last} {opt tail} {opt trim}). With no argument: {cmd:seq}
+({opt from(#)} {opt to(#)} {opt block(#)}). {opt by()} is allowed where native
+allows it. {cmd:fill()} and {cmd:mtr()} are not available.
+
+{phang}
+{cmd:by} and {cmd:bysort} prefix {cmd:gen}, {cmd:replace}, {cmd:egen},
+{cmd:keep if} and {cmd:drop if}: {cmd:_n}, {cmd:_N} and the subscripts count
+within each group of {it:varlist}, ordered by {it:sortvars}. {cmd:bysort} sorts
+the view by {it:varlist} and {it:sortvars} first and leaves it sorted; {cmd:by}
+requires that order already ("not sorted" otherwise). {cmd:bys} is {cmd:bysort}.
+
+{phang}
+{cmd:xtset} and {cmd:tsset} declare the panel and time variables of the view,
+as their native namesakes do for the data in memory: the time variable is
+integer-valued and unique within each panel, no two consecutive times closer
+than {opt delta(#)}, a whole number of periods; a missing time is accepted, and
+the operators are missing on that row. The operators {cmd:L.}, {cmd:F.}, {cmd:D.} and {cmd:S.} and
+the functions {cmd:tin()} and {cmd:twithin()} then work in expressions, by time.
+
+{phang}
+{cmd:unique} takes {opt by(varlist)}, a table of the count per group, and the
+{cmd:if} of the statistics commands.
 
 {dlgtab:merge, append, joinby}
 
@@ -592,9 +661,14 @@ accept the wildcards {cmd:*} and {cmd:?}.
 {pstd}
 Where parqit differs from native Stata:
 
-{phang2}{cmd:•} {cmd:collapse} and {cmd:pivot} take the statistics {cmd:mean},
-{cmd:sum}, {cmd:sd}, {cmd:count}, {cmd:min}, {cmd:max}, {cmd:median}, {cmd:p}{it:##},
-{cmd:first}, {cmd:last}, {cmd:firstnm} and {cmd:lastnm}, without weights.{p_end}
+{phang2}{cmd:•} {cmd:collapse} and {cmd:pivot} take every native statistic,
+without weights; {cmd:egen} takes every native function except {cmd:fill()} and
+{cmd:mtr()} (see {help parqit##options:Options}). Means, sums and the like are
+kept in {cmd:double}; {cmd:collect, compress} narrows what fits.{p_end}
+{phang2}{cmd:•} A {cmd:replace} that reads the replaced variable's other rows
+({cmd:replace x = x[_n-1] if missing(x)}) is refused: native {cmd:replace} is
+sequential, each new value feeding the next row, and a lazy plan computes every
+row from the values before the command. Generate a new variable instead.{p_end}
 {phang2}{cmd:•} {cmd:pivot} is a pivot table in one verb: {cmd:collapse} by rows
 and columns, then {cmd:reshape wide}. {cmd:reshape wide} and {cmd:pivot} spread at
 most 2,000 values.{p_end}
@@ -683,7 +757,10 @@ moments{p_end}
 {p2col:{cmd:histogram}}a histogram whose bins the engine computes{p_end}
 {p2col:{cmd:misstable}}missing values by variable, or their patterns{p_end}
 {p2col:{cmd:levelsof}}the distinct values of a variable{p_end}
-{p2col:{cmd:distinct}}the number of distinct values{p_end}
+{p2col:{cmd:distinct}}the number of distinct values, as the SSC {cmd:distinct}{p_end}
+{p2col:{cmd:unique}}the number of unique values of a varlist taken jointly,
+missing counting as a value, as the SSC {cmd:unique}; per variable and per
+group too{p_end}
 {p2col:{cmd:duplicates}}a report or a list of duplicated observations{p_end}
 {p2colreset}{...}
 
@@ -749,15 +826,33 @@ string concatenation, and these functions:
 {p 8 8 2}{cmd:strlen length ustrlen upper strupper ustrupper lower strlower}
 {cmd:ustrlower trim strtrim ltrim rtrim substr strpos subinstr string strofreal}
 {cmd:real regexm}{p_end}
-{p 8 8 2}{cmd:year month day quarter dow doy mdy dofm mofd yofd} and the
+{p 8 8 2}{cmd:year month day quarter dow doy week halfyear mdy dofm mofd yofd ym yq yh yw}
+{cmd:dofq dofh dofy dofw qofd hofd wofd dofc dofC cofd hh mm ss hms dhms mdyhms}
+{cmd:hours minutes seconds msofhours msofminutes msofseconds datediff age}{p_end}
+{p 8 8 2}{cmd:date daily clock monthly quarterly halfyearly weekly yearly}
+(a string and a literal mask){p_end}
+{p 8 8 2}{cmd:tin twithin} (after a panel and time declaration) and the
 date literals {cmd:td tc tC tm tq th tw ty}{p_end}
 {* parqit-lint: expression-function-list end}{...}
 
 {pstd}
+The text readers take the string and a mask, written as in Stata:
+{cmd:date(s, "DMY")}, {cmd:clock(s, "YMDhms")}, {cmd:date(s, "MD20Y")},
+{cmd:date(s, "MDY", 2050)}, {cmd:monthly(s, "YM")}.
+
+{pstd}
 Dates are their Stata numbers, and the date literals ({cmd:td(01jan2015)},
-{cmd:tm(2015m1)}, {cmd:tc(01jan2015 09:30:00)}, ...) are constants. {cmd:_n} and
-{cmd:_N} work in {cmd:keep if}, {cmd:drop if} and the main expression of
-{cmd:gen}. An unsupported function is an error that names it; {cmd:parqit query}
+{cmd:tm(2015m1)}, {cmd:tc(01jan2015 09:30:00)}, ...) are constants. The text
+readers follow Stata's rules: the mask letters take the fields of the string in
+order, a two-digit year needs {cmd:20Y}/{cmd:19Y} or a topyear, month names and
+am/pm are read, and a string that does not fit the mask is missing.
+{cmd:_n}, {cmd:_N} and Stata's subscripts — {cmd:x[_n-1]}, {cmd:x[_n+1]},
+{cmd:x[1]}, {cmd:x[_N]}, {cmd:x[_N-1]}, positional, within the groups of a
+{cmd:by} prefix — work in {cmd:keep if}, {cmd:drop if}, {cmd:gen}, {cmd:replace}
+and {cmd:egen}. After {cmd:parqit xtset}, {cmd:L.x}, {cmd:L2.x}, {cmd:F.x},
+{cmd:D.x}, {cmd:S2.x}, {cmd:LD.x} ... are by time: a gap in the panel gives
+missing, as native, where {cmd:x[_n-1]} would give the previous row. An
+unsupported function is an error that names it; {cmd:parqit query}
 and {cmd:parqit sql} are the escape hatches.
 
 {pstd}

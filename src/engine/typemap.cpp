@@ -266,7 +266,13 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.note_subms = true; /* encoding note above is not about sub-ms loss */
         break;
     case DUCKDB_TYPE_TIME_NS:
-        p.cast_sql = "CAST(DATE '1970-01-01' + CAST(" + ref + " AS TIME) AS TIMESTAMP)";
+        /* TIME-NS-FLOOR-1 (Codex review, 2026-10-13): CAST(TIME_NS AS TIME)
+         * rounds to the microsecond, so the last 500 ns before every
+         * millisecond boundary read one millisecond LATER (23:59:59.999999999
+         * became 24:00:00). epoch_ns() is the exact nanosecond count and the
+         * floor to the millisecond is integer arithmetic on it; the instant
+         * is rebuilt at that millisecond on 1970-01-01. */
+        p.cast_sql = "make_timestamp((epoch_ns(" + ref + ") // 1000000) * 1000)";
         p.transfer = Transfer::TimeUs;
         p.stata_type = StType::Double;
         p.stata_format = "%tcHH:MM:SS";

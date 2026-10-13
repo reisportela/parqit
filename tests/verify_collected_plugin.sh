@@ -28,6 +28,14 @@ case "$PLATFORM" in
         if readelf -d -W "$FILE_PATH" | grep -Eq 'NEEDED.*(libstdc\+\+|libgcc_s|libgomp|libi?omp)'; then
             die "Linux artifact must embed its C++ runtime and have no OpenMP dependency"
         fi
+        # The EL8 contract (AlmaLinux 8 container, glibc 2.28): no symbol
+        # version newer than the HPC clusters' glibc may be required.
+        max_glibc="${PARQIT_MAX_GLIBC:-2.28}"
+        need="$(readelf --dyn-syms -W "$FILE_PATH" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -k3,3n -u | tail -1)"
+        [ -n "$need" ] || die "no versioned glibc symbol found (unexpected for a Linux plugin)"
+        newest="$(printf '%s\n' "$need" "$max_glibc" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+        [ "$newest" = "$max_glibc" ] || \
+            die "Linux artifact needs GLIBC_$need, above the $max_glibc ceiling of the EL8 build"
         ;;
     macos)
         command -v nm >/dev/null 2>&1 || die "nm is required"
