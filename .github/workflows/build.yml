@@ -69,6 +69,9 @@ jobs:
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
+      - name: Verify cached-source reconfiguration
+        run: cmake --preset ${{ matrix.preset }}
+
       - name: Build through the source-archive entrypoint (Linux)
         if: matrix.label == 'linux-x86_64'
         run: bash build.sh 4

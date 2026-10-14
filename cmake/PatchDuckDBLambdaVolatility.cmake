@@ -1,13 +1,13 @@
 # Bound lambda bodies are stored in bind data rather than expression children.
 set(_parqit_lambda_file "${duckdb_SOURCE_DIR}/src/planner/expression/bound_function_expression.cpp")
-file(SHA256 "${_parqit_lambda_file}" _parqit_lambda_hash)
+include("${CMAKE_CURRENT_LIST_DIR}/ReadPinnedSource.cmake")
+parqit_read_pinned_source("${_parqit_lambda_file}" _parqit_lambda_source _parqit_lambda_hash)
 if(_parqit_lambda_hash STREQUAL "6cace450998dd5deae9de93e722004f354b3577fc53aae2ee6e842a86f55fd49")
     return()
 endif()
 if(NOT _parqit_lambda_hash STREQUAL "e4d2ed917ba3d114008f12f3fa10895b3c4957c98405bd4084adccfbca9b2a89")
     message(FATAL_ERROR "Unexpected DuckDB bound-function source; preserving local changes")
 endif()
-file(READ "${_parqit_lambda_file}" _parqit_lambda_source)
 string(REPLACE "bool BoundFunctionExpression::IsVolatile() const {\n"
     [=[bool BoundFunctionExpression::IsVolatile() const {
 	// PARQIT-LAMBDA-VOLATILE-1: lambda bodies live in bind data, not children.
@@ -27,8 +27,9 @@ if(EXISTS "${_parqit_lambda_file}.parqit-lambda-patch")
     message(FATAL_ERROR "Existing DuckDB lambda staging file preserved: ${_parqit_lambda_file}.parqit-lambda-patch")
 endif()
 file(WRITE "${_parqit_lambda_file}.parqit-lambda-patch" "${_parqit_lambda_source}")
+parqit_verify_pinned_write("${_parqit_lambda_file}.parqit-lambda-patch" "${_parqit_lambda_patched_hash}")
 file(RENAME "${_parqit_lambda_file}.parqit-lambda-patch" "${_parqit_lambda_file}")
-file(SHA256 "${_parqit_lambda_file}" _parqit_lambda_written_hash)
+parqit_read_pinned_source("${_parqit_lambda_file}" _parqit_lambda_written _parqit_lambda_written_hash)
 if(NOT _parqit_lambda_written_hash STREQUAL _parqit_lambda_patched_hash)
     message(FATAL_ERROR "DuckDB lambda source failed verification after writing")
 endif()

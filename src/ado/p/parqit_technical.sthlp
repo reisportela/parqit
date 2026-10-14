@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.2 14oct2026}{...}
+{* *! version 0.4.3 14oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}

@@ -67,6 +67,10 @@ cmake --preset windows && cmake --build --preset windows
 The plugin lands at `build/<preset>/parqit.plugin`. The first build compiles
 DuckDB from source and takes several minutes; afterwards only parqit's own
 files recompile. The pinned engine also receives hash-checked local fixes:
+source pins accept uniform LF or CRLF encodings, with the same canonical hash;
+mixed endings and unknown content are refused. Staging is verified before a
+source is replaced, and CI also reconfigures the already-patched source tree.
+The fixes cover
 uniform SQL reservoir sampling, C-API aggregate state flattening for windows,
 safe block-allocator shutdown and initialized transaction error-policy flags.
 The streaming buffer also preserves the executor's original worker error

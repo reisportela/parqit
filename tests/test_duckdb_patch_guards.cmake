@@ -28,6 +28,7 @@ function(check_case name patch relative source expected_hash expected_error stag
     get_filename_component(parent "${path}" DIRECTORY)
     file(MAKE_DIRECTORY "${parent}")
     file(WRITE "${path}" "${source}")
+    file(SHA256 "${path}" before_hash)
     if(NOT staging STREQUAL "")
         file(WRITE "${path}${staging}" "existing staging must survive")
     endif()
@@ -41,7 +42,15 @@ function(check_case name patch relative source expected_hash expected_error stag
     elseif(status EQUAL 0 OR NOT "${stdout}${stderr}" MATCHES "${expected_error}")
         message(FATAL_ERROR "${name} did not give its expected refusal: ${status}: ${stdout}${stderr}")
     endif()
-    file(SHA256 "${path}" actual_hash)
+    file(SHA256 "${path}" after_hash)
+    if(NOT expected_error STREQUAL "" OR name MATCHES "idempotent")
+        if(NOT before_hash STREQUAL after_hash)
+            message(FATAL_ERROR "${name} did not preserve the original physical bytes")
+        endif()
+    endif()
+    file(READ "${path}" actual)
+    string(REPLACE "\r\n" "\n" actual "${actual}")
+    string(SHA256 actual_hash "${actual}")
     if(NOT actual_hash STREQUAL expected_hash)
         message(FATAL_ERROR "${name} changed unexpected bytes")
     endif()
@@ -56,6 +65,7 @@ endfunction()
 
 set(window_path "src/optimizer/window_self_join.cpp")
 file(READ "${DUCKDB_SOURCE_DIR}/${window_path}" window_fixed)
+string(REPLACE "\r\n" "\n" window_fixed "${window_fixed}")
 set(window_fixed_hash "9666fa348eec85dc76341819a5e599d0e1d1c4b3128416ccf85553d7c96ef104")
 string(SHA256 hash "${window_fixed}")
 if(NOT hash STREQUAL window_fixed_hash)
@@ -95,6 +105,7 @@ check_case(window_staging PatchDuckDBWindowSelfJoin.cmake "${window_path}"
 
 set(lambda_path "src/planner/expression/bound_function_expression.cpp")
 file(READ "${DUCKDB_SOURCE_DIR}/${lambda_path}" lambda_fixed)
+string(REPLACE "\r\n" "\n" lambda_fixed "${lambda_fixed}")
 set(lambda_fixed_hash "6cace450998dd5deae9de93e722004f354b3577fc53aae2ee6e842a86f55fd49")
 string(SHA256 hash "${lambda_fixed}")
 if(NOT hash STREQUAL lambda_fixed_hash)
@@ -117,3 +128,27 @@ check_case(lambda_unknown PatchDuckDBLambdaVolatility.cmake "${lambda_path}"
     "${unknown}" "${unknown_hash}" "Unexpected DuckDB" "")
 check_case(lambda_staging PatchDuckDBLambdaVolatility.cmake "${lambda_path}"
     "${lambda_original}" "${lambda_original_hash}" "Existing DuckDB" ".parqit-lambda-patch")
+
+# Windows' native writes already exercise CRLF. On Unix, construct those
+# physical bytes explicitly as a second encoding of each pinned source.
+if(NOT WIN32)
+    foreach(kind window lambda)
+        string(REPLACE "\n" "\r\n" crlf "${${kind}_original}")
+        if(kind STREQUAL "window")
+            set(patch PatchDuckDBWindowSelfJoin.cmake)
+        else()
+            set(patch PatchDuckDBLambdaVolatility.cmake)
+        endif()
+        check_case(${kind}_crlf ${patch} "${${kind}_path}"
+            "${crlf}" "${${kind}_fixed_hash}" "" "")
+        string(REPLACE "\n" "\r\n" crlf "${${kind}_fixed}")
+        check_case(${kind}_crlf_idempotent ${patch} "${${kind}_path}"
+            "${crlf}" "${${kind}_fixed_hash}" "" "")
+        string(FIND "${${kind}_original}" "\n" first_newline)
+        string(SUBSTRING "${${kind}_original}" 0 ${first_newline} prefix)
+        math(EXPR rest "${first_newline}+1")
+        string(SUBSTRING "${${kind}_original}" ${rest} -1 suffix)
+        check_case(${kind}_mixed_refusal ${patch} "${${kind}_path}"
+            "${prefix}\r\n${suffix}" "${${kind}_original_hash}" "Unexpected DuckDB" "")
+    endforeach()
+endif()

@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.4.2 — the full surface below is implemented and covered by a
+> **Status:** v0.4.3 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,11 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.4.3 makes the pinned source corrections portable across LF and CRLF
+build environments, retaining the same content hashes and refusal of unknown
+edits. It includes the numerical, performance and documentation work below;
+the v0.4.2 candidate was held back by its Windows configure gate.
 
 Version 0.4.2 integrates the follow-up numerical corrections and independent
 aggregate-window optimisation. It protects volatile inputs and lambda bodies

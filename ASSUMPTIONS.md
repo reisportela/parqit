@@ -4288,3 +4288,13 @@ entry notes the conservative fallback if the assumption proves wrong.
     validation, checksums and an isolated installation. The local diagnostic
     build is not a substitute for the EL8 release binary. Existing unrelated
     work and the global ado/Stata installation stay outside this operation.
+
+201. **Portable pinned-source verification (PATCH-EOL-1, 2026-10-14).**
+    The v0.4.2 Windows configure stopped at the post-write source check.
+    Pin canonical LF content while admitting only its uniform LF and CRLF
+    physical encodings; reject mixed endings and unknown content. This keeps
+    numerical source pins identical across platforms and makes a second
+    configure safe. Verify owned staging before replacing a known source and
+    preserve existing staging in every patch. The failed v0.4.2 tag remains
+    immutable; v0.4.3 carries this build correction and requires all platform
+    gates again before publication.

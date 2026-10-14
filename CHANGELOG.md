@@ -6,6 +6,18 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-10-14
+
+### Fixed
+
+- Pinned DuckDB patches now validate both uniform LF and CRLF source encodings
+  (PATCH-EOL-1), preserving the same canonical content hashes. The v0.4.2
+  candidate's Windows configure correctly stopped when its post-write byte
+  hash differed. Mixed line endings and unknown edits remain refusals; staged
+  contents are verified before replacing a source, and pre-existing staging
+  is preserved for every patch. CI configures each platform twice to pin
+  cached-source idempotence. The failed v0.4.2 tag is retained, not republished.
+
 ## [0.4.2] — 2026-10-14
 
 ### Fixed
