@@ -186,10 +186,12 @@ class View {
      * engine column names, delta > 0. tsset() validates the names and kinds
      * and stores the declaration; the plugin runs the uniqueness/missing probe
      * (tsset_probe_sql) before calling it. A declaration whose variables a
-     * later verb removes is silently void (expr_schema() reports none). */
+     * later verb removes is cleared; reusing the name cannot revive it. */
     std::string tsset(const std::string &panel, const std::string &time, double delta);
     void clear_tsset() { ts_panel_.clear(); ts_time_.clear(); ts_delta_ = 1.0; }
     bool ts_declared() const;
+    std::string check_by_order(const std::vector<std::string> &by,
+                               const std::vector<std::string> &sortvars) const;
     const std::string &ts_panel() const { return ts_panel_; }
     const std::string &ts_time() const { return ts_time_; }
     double ts_delta() const { return ts_delta_; }
@@ -447,6 +449,7 @@ class View {
                              const std::vector<std::string> &sortvars,
                              std::vector<std::string> *part) const;
     std::string order_by_sql_reversed() const; /* for x[_N-k] */
+    std::string sort_key_sql(const std::string &key) const;
     /* keeps_order: the stage selects stage_list(), so the physical order
      * columns reach the next stage; any other stage drops them */
     void push_stage(const std::string &select_body, const std::string &desc,
@@ -478,6 +481,7 @@ class View {
      * current last stage still exposes them. */
     std::vector<std::string> order_cols_;
     bool order_live_ = false;
+    bool order_baked_ = false; /* an explicit past sort, even after its keys vanish */
     std::vector<PendingRange> ranges_;
     nlohmann::json vallabs_;
     nlohmann::json chars_;

@@ -6,6 +6,80 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-14
+
+Corrections from an adversarial review of 0.4.0's new features (AUDIT-157,
+AUDIT-158, AUDIT-159), pinned by `tests/verify_suite/v157`–`v159`, unit tests
+and native oracles; the receipts are in
+`audit_repro/adversarial_opus55_20261013/`. No command changes its documented
+behaviour except where 0.4.0 departed from native Stata, as listed.
+
+### Fixed
+- **Adversarial review with Opus 5.5 (AUDIT-158/159):** a failed lazy
+  `use ... if ...` or initial projection preserves the prior named view,
+  current view and owned bridges. Filtering and projection now bind on the
+  candidate before it is committed. Replacing a sort key evaluates its own
+  positional expressions in the complete old order, including CSV sources
+  without a physical row carrier.
+- String NULLs introduced by two-table verbs sort like native empty strings;
+  `egen group(), missing` uses that same order for codes and labels. Numeric
+  group labels match integer spellings such as `1.0` and `1` without rounding
+  wide values. `concat(), decode` handles extended-missing label definitions
+  after the view's documented missing-value collapse and does not round an
+  integer label code onto a FLOAT value.
+- Subscripts and single-term time-series windows retain the FLOAT evaluation
+  context, so comparisons with integers above 2^24 and subsequent arithmetic
+  promote to double. The `by` prefix now checks declared order for `egen` as
+  it already did for `gen` and `replace`; `by()` remains independent of sort.
+- Fractional numeric `egen` options produce valid JSON, with 17 significant
+  digits at the Mata/JSON boundary. The earlier native Stata `real`/`numlist`
+  parsing is unchanged and may itself round a literal before that boundary.
+- `dofq()`, `dofh()` and `dofw()` test the calendar domain before narrowing
+  integer casts. `hms()`, `dhms()` and `mdyhms()` enforce native component and
+  calendar limits, truncate hours/minutes and fractional milliseconds as
+  native does, and return missing per invalid row. Clock masks accept spaces
+  between fields. Malformed date/clock literals cannot wrap integer fields;
+  numeric `tin()` bounds are checked before conversion to signed 64-bit.
+- A time-series declaration still leaves the view's positional order alone.
+  When panel/time order is absent, it now says which `parqit sort` to use;
+  an unsorted `by` on the panel also suggests the time key. This preserves
+  existing lazy execution while making the difference from native `tsset`
+  explicit. V158 and V159 pin these corrections with native oracles.
+- Ordering that must survive replacement or removal of its keys is frozen
+  once and carried through later windows, including CSV sources and ties.
+  Plain views without an explicitly frozen order retain their existing plan.
+  Numeric clock constructors validate and convert components in one vector
+  pass; this avoids the repeated projections of the initial correction.
+  The README's native-function claim is narrowed to the implemented set;
+  documented exclusions such as `egen fill()` and `mtr()` remain unchanged.
+- **Lazy expression and plan state (AUDIT-157):** `replace` now applies its
+  existing sequential-self-reference refusal to the `if` condition too.
+  Window placeholders are substituted only as SQL tokens, so literals and
+  quoted column names containing `__PARQIT_WIN_1__` or a frame placeholder
+  retain their values. A simultaneous `rename` maps each sort key once,
+  including cycles and descending keys, and carries the time-series
+  declaration with the renamed variables. Removing a declaration key clears
+  that declaration permanently; reusing the name cannot reactivate it.
+  Native Stata and independent Parquet payload checks cover the corrections
+  in `v157_lazy_state_adversarial.do`.
+- **Parser integer bounds (AUDIT-157):** oversized time-series operator counts
+  are refused before integer overflow can turn them into a different lag
+  (`L18446744073709551616.x` previously became `L0.x`). Date masks validate
+  the two-digit century before converting it, avoiding signed overflow on
+  malformed long masks. Valid leading-zero lag counts remain accepted.
+- **Date precision documentation:** clarify the existing last-bit rounding
+  difference between `ss()` and native Stata. A Decimal-80 oracle over 5,000
+  clocks confirms the existing parqit result; the calculation is unchanged.
+
+### Documentation
+- **Help brought in line with 0.4.0 and 0.4.1:** the user guide says that
+  `xtset`/`tsset` do not sort the view, that the `replace` refusal covers its
+  `if` as well, and how `#` works in the text readers' masks; both help files
+  list the stored results of `xtset`/`tsset` and `unique`; the technical
+  reference describes the text readers' rules as implemented (stray words,
+  `#`, a second am/pm, the unit letter of the period readers, a fraction of a
+  second) and notes that DuckDB's CSV encoder is unchanged in 1.5.6.
+
 ## [0.4.0] — 2026-10-13
 
 The third round of BPLIM feedback (Rute Costa and Marta Silva, after the

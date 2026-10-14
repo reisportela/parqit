@@ -4103,3 +4103,83 @@ entry notes the conservative fallback if the assumption proves wrong.
     never checkpoints, so the path is unreachable here. (d) A/B timings against the same host, same
     data and interleaved runs, with the published 0.3.3 as a third arm, are
     in `audit_repro/release_0_4_0_20261013/`.
+
+192. **Adversarial lazy-state and parser corrections (AUDIT-157, 2026-10-13).**
+    The 0.4.0 audit reproduced sequential self-references in `replace`'s
+    condition, window-token substitution inside user literals, cascading
+    sort-key remaps in simultaneous renames, lost time-series identities on
+    grouped rename, and a dropped declaration key reactivated by a new column
+    with the same name. These are corrections to the existing contracts:
+    inspect both sides of `replace` before mutation; substitute only bare SQL
+    tokens, respecting doubled quotes; map old rename identities once; clear
+    a declaration when either key is removed. The pre-existing refusal of
+    `__PARQIT_ROW__`/`__PARQIT_NROWS__` in user expressions remains unchanged.
+    A time-series operator count is checked after every digit, before another
+    multiplication; its existing limit of 10,000 and valid leading zeros are
+    preserved. A date mask checks the century's width before numeric conversion.
+    UBSan independently demonstrated signed overflow in the original mask
+    parser. Native Stata, pyarrow and executed C++ regressions pin the fixes;
+    the new tests were first run against the original implementation and failed.
+    Revalidation after modifying existing time/panel values or building new
+    rows remains the documented caller obligation, not an added full-data scan
+    on every lazy verb. Changes remain unreleased and local; the evidence and
+    recoverable original files are in
+    `audit_repro/adversarial_opus55_20261013/`.
+    An additional 5,000-row date matrix over years 0100–9999 compared 19
+    functions with native Stata. Eighteen agreed exactly; `ss()` differed in
+    374 cells by at most 8.881784197001252e-16. An independent Decimal-80
+    remainder/1,000 oracle found parqit's result correctly rounded in every
+    cell, closer in all 374 differences and never worse. The original and
+    corrected plugins behave identically here. Preserve that precision and
+    document the native-rounding difference; do not weaken the strict native
+    comparison's recorded failure or claim bit-for-bit equivalence for `ss()`.
+
+193. **Opus 5.5 review, native rebuttals and transactional opening
+    (AUDIT-158/159, 2026-10-13).** Root reproduced the advisor's string
+    ordering/grouping, grouped labels, failed-use state loss, float-window
+    comparison, decode, calendar-domain, fractional-JSON and by-prefix
+    findings. A CSV sort-key replacement disagreed with native in 20 of 20
+    runs over one million rows; its row context now precedes order truncation.
+    An open with a filter and projection builds and binds one candidate before
+    replacing a view or releasing its bridges. String sorting folds NULL only
+    where the column has not already been normalised at its boundary. Group
+    label-code matching normalises integer spellings as text, never through a
+    potentially lossy double conversion. Decode promotes a FLOAT key when
+    comparing numeric label codes and excludes folded extended-missing keys.
+    The calendar constructors use the observed native domains and truncation
+    rules, including hours/minutes with fractions and sub-millisecond seconds.
+    The time declaration remains independent of positional order; adding an
+    implicit sort would change existing result order and execution cost, so
+    the declaration now gives an explicit sort hint when needed instead.
+    Native source and controlled observations refuted the proposed global
+    qualifier for `egen total()`: the local `_gtotal` evaluates its condition
+    within groups, and unqualified native sorting makes ties unstable. Keep
+    the documented grouped context and pin it with an explicit sort in V158.
+    `unique`'s returned sum matched SSC 1.2.4; the suggested `cut(), group(3)`
+    discrepancy did not reproduce for N=3,6,...,45. No speculative fix was made.
+    JSON emits 17 significant digits after Stata has parsed numeric options;
+    native `syntax real` and `numlist` themselves turn the tested literal
+    .30000000000000004 into .3. Keep this native grammar, record the limit,
+    and do not describe the full option path as an exact literal round-trip.
+    The advisor's pivot-exception concern and unordered positional windows
+    remain separately classified; passing local tests is not universal
+    platform, resource or performance certification.
+
+194. **Closing the advisor's follow-up controls (2026-10-13).** The first
+    sort-key correction still allowed later windows to reorder CSV ties:
+    five one-million-row runs produced between 175,000 and 230,000 rows whose
+    first generated sequence value was not one. Freeze one ordinal before
+    evaluating the replacement's windows and reuse it afterwards, even when
+    every declared sort key has disappeared. A private `order_baked_` flag
+    distinguishes this explicit past order from an ordinary unordered source;
+    normal source reads acquire no new sort. V159 now tests the command, later
+    windows, ties and replacement of the only sort key. The advisor's claim
+    that the 10,000 operator-count cap was new was refuted against the original
+    `exprtrans.cpp:794`; the cap remains and is now documented. Native integer
+    options, by() without sort, use-if/keep-if warning and sample equivalence,
+    and comma decimal display passed the closing controls. The initial clock
+    guards suggested a cost in interleaved timing, so they were consolidated
+    into bounded scalar callbacks over each DuckDB vector, with identical
+    native component and calendar rules. NULLs are checked before reading their
+    payloads; accepted results are exact millisecond integers below 2^53.
+    The clock callbacks additionally passed a targeted Valgrind run.

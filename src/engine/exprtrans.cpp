@@ -260,12 +260,14 @@ bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
     /* ddmonyyyy with optional spaces: "1 jan 2020", "01jan2020" */
     std::string t;
     for (char c : raw)
-        if (c != ' ' && c != '\t') t.push_back(static_cast<char>(std::tolower(c)));
+        if (c != ' ' && c != '\t') t.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     size_t p = 0;
     if (p >= t.size() || !std::isdigit(static_cast<unsigned char>(t[p]))) return false;
     int d = 0;
-    while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p])))
+    while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p]))) {
         d = d * 10 + (t[p++] - '0');
+        if (d > 31) return false;
+    }
     if (p + 3 > t.size()) return false;
     std::string mon = t.substr(p, 3);
     int m = 0;
@@ -277,6 +279,7 @@ bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
     int y = 0;
     size_t yd = 0;
     while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p]))) {
+        if (yd == 4) return false;
         y = y * 10 + (t[p++] - '0');
         yd++;
     }
@@ -295,11 +298,12 @@ bool parse_dmy(const std::string &raw, int *dd, int *mm, int *yy) {
 bool parse_period(const std::string &raw, char sep, int maxn, int *yy, int *nn) {
     std::string t;
     for (char c : raw)
-        if (c != ' ') t.push_back(static_cast<char>(std::tolower(c)));
+        if (c != ' ') t.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     size_t p = 0;
     int y = 0;
     size_t yd = 0;
     while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p]))) {
+        if (yd == 4) return false;
         y = y * 10 + (t[p++] - '0');
         yd++;
     }
@@ -309,6 +313,7 @@ bool parse_period(const std::string &raw, char sep, int maxn, int *yy, int *nn) 
     size_t nd = 0;
     while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p]))) {
         n = n * 10 + (t[p++] - '0');
+        if (n > maxn) return false;
         nd++;
     }
     if (!nd || p != t.size() || n < 1 || n > maxn) return false;
@@ -325,19 +330,20 @@ bool parse_hms(const std::string &raw, long long *ms_out) {
     std::string t;
     for (char c : raw)
         if (c != ' ') t.push_back(c);
-    auto num = [&](int *out) {
+    auto num = [&](int *out, int limit) {
         int v = 0;
         size_t d = 0;
         while (p < t.size() && std::isdigit(static_cast<unsigned char>(t[p]))) {
             v = v * 10 + (t[p++] - '0');
+            if (v > limit) return false;
             d++;
         }
         *out = v;
         return d > 0;
     };
-    if (!num(&h)) return false;
+    if (!num(&h, 23)) return false;
     if (p >= t.size() || t[p++] != ':') return false;
-    if (!num(&m)) return false;
+    if (!num(&m, 59)) return false;
     if (p < t.size() && t[p] == ':') {
         p++;
         size_t start = p;
@@ -757,6 +763,7 @@ struct Parser {
         if (!expect(Tok::RBracket, "] after the subscript")) return false;
         out->sql = sql;
         computed(out); /* a neighbour's value is not the bare column */
+        out->float32 = schema.float_columns.count(name) != 0;
         return true;
     }
 
@@ -788,6 +795,9 @@ struct Parser {
             bool has = false;
             while (i < ops.size() && std::isdigit(static_cast<unsigned char>(ops[i]))) {
                 k = k * 10 + (ops[i++] - '0');
+                /* Bound every digit before the next multiplication: 2^64
+                 * otherwise wraps to zero and silently becomes L0.x. */
+                if (k > 10000) return fail(ops + ".: lag count out of range");
                 has = true;
             }
             if (!has) k = 1;
@@ -847,6 +857,10 @@ struct Parser {
         }
         out->kind = 'n';
         computed(out);
+        /* A pure lag/lead retains the source's physical FLOAT type. Its
+         * later comparison/arithmetic must still promote as Stata does. */
+        out->float32 = terms.size() == 1 && terms[0].first == 1.0 &&
+                       schema.float_columns.count(name) != 0;
         return true;
     }
 
@@ -926,10 +940,9 @@ struct Parser {
         case Tok::Ident: {
             std::string name = cur.text;
             advance();
-            /* INJID-1: the row-context sentinels are substituted by a raw
-             * find/replace in the view compiler; a column (or function) named
-             * with one would be corrupted into malformed SQL. Reject it loudly
-             * here, mirroring the string-literal guard above. */
+            /* INJID-1: retain the established refusal of these reserved _n/_N
+             * markers. Other window tokens are resolved with SQL quoting
+             * respected by the view compiler. */
             if (name.find("__PARQIT_ROW__") != std::string::npos ||
                 name.find("__PARQIT_NROWS__") != std::string::npos)
                 return fail("identifier may not contain the reserved token "
@@ -1199,6 +1212,10 @@ static bool parse_time_bound(const std::string &raw, const std::string &fmt, lon
         if (c != ' ' && c != '\t') t.push_back(c);
     double v = 0;
     if (!t.empty() && atod(t, &v) && std::isfinite(v)) {
+        if (v < -0x1p63 || v >= 0x1p63) {
+            *why = "a whole number within the signed 64-bit range";
+            return false;
+        }
         *out = static_cast<long long>(v);
         if (static_cast<double>(*out) != v) {
             *why = "a whole number";
@@ -1873,7 +1890,9 @@ bool Parser::call(const std::string &fname, Val *out) {
         else
             day = "try(make_date(" + yr + ", 1 + " + idx + " * " + std::to_string(12 / per) +
                   ", 1) - DATE '1960-01-01')";
-        return numeric_out("(CASE WHEN " + yr + " BETWEEN 100 AND 9999 THEN " + day + " ELSE NULL END)");
+        return numeric_out("(CASE WHEN " + v + " BETWEEN " + std::to_string((100 - 1960) * per) +
+                           " AND " + std::to_string((10000 - 1960) * per - 1) +
+                           " THEN " + day + " ELSE NULL END)");
     }
     /* period of a day: qofd hofd wofd (mofd, yofd exist); week, halfyear */
     if (fname == "qofd" || fname == "hofd" || fname == "wofd" || fname == "week" ||
@@ -1908,28 +1927,12 @@ bool Parser::call(const std::string &fname, Val *out) {
         if (fname == "mm") return numeric_out(fin("floor(__parqit_mod(" + tod + ", 3600000.0) / 60000.0)"));
         return numeric_out(fin("__parqit_mod(" + tod + ", 60000.0) / 1000.0"));
     }
-    if (fname == "hms") {
-        if (!nums(3, 3)) return false;
-        return numeric_out(fin(as_real(args[0]) + " * 3600000.0 + " + as_real(args[1]) + " * 60000.0 + " +
-                               as_real(args[2]) + " * 1000.0"));
-    }
-    if (fname == "dhms") {
-        if (!nums(4, 4)) return false;
-        return numeric_out(fin("floor(" + as_real(args[0]) + ") * 86400000.0 + " + as_real(args[1]) +
-                               " * 3600000.0 + " + as_real(args[2]) + " * 60000.0 + " + as_real(args[3]) +
-                               " * 1000.0"));
-    }
-    if (fname == "mdyhms") {
-        if (!nums(6, 6)) return false;
-        const std::string yy = "floor(" + as_num(args[2]) + ")", mm = "floor(" + as_num(args[0]) + ")",
-                          dd = "floor(" + as_num(args[1]) + ")";
-        const std::string day = "(CASE WHEN " + yy + " BETWEEN 100 AND 9999 AND " + mm +
-                                " BETWEEN 1 AND 12 AND " + dd + " BETWEEN 1 AND 31 THEN try(make_date(CAST(" +
-                                yy + " AS INTEGER), CAST(" + mm + " AS INTEGER), CAST(" + dd +
-                                " AS INTEGER)) - DATE '1960-01-01') ELSE NULL END)";
-        return numeric_out(fin("__parqit_double(" + day + ") * 86400000.0 + " + as_real(args[3]) +
-                               " * 3600000.0 + " + as_real(args[4]) + " * 60000.0 + " + as_real(args[5]) +
-                               " * 1000.0"));
+    if (fname == "hms" || fname == "dhms" || fname == "mdyhms") {
+        const size_t n = fname == "hms" ? 3 : fname == "dhms" ? 4 : 6;
+        if (!nums(n, n)) return false;
+        std::string params;
+        for (size_t k = 0; k < n; k++) params += (k ? ", " : "") + as_num(args[k]);
+        return numeric_out("__parqit_" + fname + "(" + params + ")");
     }
     if (fname == "hours" || fname == "minutes" || fname == "seconds") {
         if (!nums(1, 1)) return false;

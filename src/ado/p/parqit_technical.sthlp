@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.0 13oct2026}{...}
+{* *! version 0.4.1 14oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -1075,7 +1075,9 @@ percentile rule to the row's sorted values. {cmd:tag}, {cmd:anycount},
 engine's type, refined by range on collect (an integral count is {cmd:long}, a
 mean {cmd:double}); an explicit type is value semantics as for {cmd:gen}, and
 a
-string type is a type mismatch for a numeric function. Percentiles over groups
+string type is a type mismatch for a numeric function. As in native Stata,
+parsing numeric options can round very long decimal literals before they
+reach the engine. Percentiles over groups
 rank the selected nonmissing values in one window and pick the ranks the rule
 names in another; {cmd:mad} does so twice, {cmd:mdev} and {cmd:std} compute
 the
@@ -1130,19 +1132,28 @@ or sort after collecting, before anything that depends on row positions.
 {cmd:parqit xtset panelvar timevar [, delta(#)]} and
 {cmd:parqit tsset [panelvar] timevar [, delta(#)]} declare the
 view's panel and time variables (plan state: copied with the view, following a
-rename, void once a verb removes the variables; {cmd:xtset} alone shows it,
+single or simultaneous rename, cleared once a verb removes either variable;
+reusing a removed variable's name does not restore the declaration;
+{cmd:xtset} alone shows it,
 {cmd:, clear} removes it). As native, the time variable must be
 integer-valued and unique within each panel among its nonmissing values, no
 two consecutive times may be closer than {opt delta()} ("time values with
 period less than delta() found"), and {opt delta()} is a positive whole
-number; the plugin checks the plan once when the declaration is made and
+number. Unlike native Stata, the declaration does not sort the view. A note
+names {cmd:parqit sort} with the panel and time keys when that order has not
+been declared. Use it before positional expressions ({cmd:_n}, subscripts),
+{cmd:keep in}/{cmd:list in}, {cmd:egen seq()}/{cmd:tag()}, or ordered
+{cmd:first}/{cmd:last} statistics. Time-based {cmd:L.}/{cmd:F.}/{cmd:D.}/{cmd:S.}
+use the declared panel and time regardless of that positional sort. The
+plugin checks the plan once when the declaration is made and
 refuses otherwise, in native's words. A missing time is accepted, as native
 accepts it: the operators are missing on that row, which serves no other
 row's lag or lead, and {cmd:tin()}/{cmd:twithin()} are 0 there. (Native
 chains several missing-time rows of a panel positionally; parqit gives
 missing on each.) The operators {cmd:L}{it:#}{cmd:.}, {cmd:F}{it:#}{cmd:.},
 {cmd:D}{it:#}{cmd:.}, {cmd:S}{it:#}{cmd:.} and their products ({cmd:LD.},
-{cmd:L2D.}, lowercase too) are computed by time: {cmd:L2.x} is the value at
+{cmd:L2D.}, lowercase too) are computed by time. Each written operator count
+is limited to 10,000; larger counts are refused. {cmd:L2.x} is the value at
 {it:t} - 2 delta in the same panel, missing when that period is absent — a gap
 gives missing, as native, where SQL's positional lag, which {cmd:x[_n-1]}
 expresses, would return the previous row. A chain is expanded into its lag
@@ -1167,13 +1178,31 @@ int((doy-1)/7)+1 capped at
 {cmd:dofc cofd hh mm ss hms dhms mdyhms hours minutes seconds msofhours msofminutes msofseconds},
 {cmd:datediff(d1, d2, "day"|"month"|"year")} and
 {cmd:age(dob, d)} (full units by the day of the month, negative when d2
-precedes d1, {cmd:age} missing then). The text readers
+precedes d1, {cmd:age} missing then). Numeric clock constructors require hours
+in [0,24), minutes and seconds in [0,60), and a day in the calendar domain;
+they truncate hours, minutes and fractional milliseconds as native does.
+Invalid components yield missing for that row. {cmd:ss()} divides the whole-millisecond
+remainder by 1,000; native Stata may round the seconds differently in the last
+binary64 bit. The integer-remainder result is retained rather than reduced
+to match that rounding. The text readers
 {cmd:date daily clock monthly quarterly halfyearly weekly yearly} take a
 string and a literal mask
-of {cmd:Y M D h m s #} (a century before Y as {cmd:20Y}) and an optional
+of {cmd:Y M D h m s #} (spaces between fields are allowed; a century before Y
+as {cmd:20Y}) and an optional
 topyear, and follow native's rules: the string is cut into fields — runs of
-digits, month names, am/pm; other letters separate — which the mask letters
-take in order; a string with more or fewer fields is missing; digits run
+digits, month names (three letters or more), am/pm and any other word; other
+characters, dots included, separate — which the mask letters take in order. A
+{cmd:#} takes exactly one field of any kind, or, as the last letter,
+everything that remains; a word anywhere else makes the value missing
+({cmd:"15jan2020 extra"} with {cmd:DMY} is missing, with {cmd:DMY#} it is
+15jan2020). The first am/pm sets the meridian and a second is a word; am/pm
+is ignored when the mask has no hour. In {cmd:monthly()}, {cmd:quarterly()},
+{cmd:halfyearly()}, {cmd:weekly()} and {cmd:yearly()} a single letter that a
+digit follows at once, after a field, is the unit's separator
+({cmd:2020q3}, {cmd:2020 m7}), and am/pm is a word. A fraction of a second is
+the last field written after a period, taken when the other fields fit
+without it ({cmd:10:30.5} with {cmd:hms} is 10:30:05). A string with more or
+fewer fields than the mask is missing; digits run
 together are split by the letters' widths (Y 4, the others 2, the last letter
 of the run taking the rest); a one- or two-digit year needs a century or a
 topyear; year 100-9999, an impossible date, 24:00, a 60th second and more than
@@ -1829,8 +1858,8 @@ the
 first line that is not, and then decoded whole. The notes are written by the
 plugin, file by file where files differ. The engine's own CSV encodings
 (latin-1, UTF-16) are not used: they reject half of windows-1252, and its
-extension hook copies multibyte text wrongly (DuckDB 1.5.3,
-{cmd:csv_encoder}).
+extension hook copies multibyte text wrongly (DuckDB 1.5.3 and the embedded
+1.5.6, {cmd:csv_encoder}, unchanged between them).
 The engine's refusal of text that is not UTF-8 names parqit's {opt encoding()}
 in place of the engine's own advice.
 
@@ -2200,9 +2229,12 @@ leap seconds.
 {cmd:drop if}, {cmd:gen} (value and {cmd:if}), {cmd:replace} and {cmd:egen}'s
 argument; they are windows over the declared {cmd:parqit sort} order (or
 engine scan order when no sort was declared, which is not a reproducibility
-guarantee), within the groups of a {cmd:by} prefix; a position outside
+guarantee), within the groups of a {cmd:by} prefix. Without a declared sort,
+separately ordered window terms may choose different engine orders; declare
+the complete intended sort before combining positions. An explicit order
+frozen before its keys are replaced or dropped is retained. A position outside
 1..{cmd:_N} is missing, and the offset is an integer literal. The read-only
-{cmd:count if}/{cmd:list if} filters, the {cmd:if} of {cmd:use},
+{cmd:count if}/{cmd:list if} filters, the {cmd:if} of eager {cmd:use, clear},
 {cmd:duplicates drop} and {cmd:sample} do not implement them. Every refused
 form fails loudly and leaves the view unchanged.
 
@@ -3137,6 +3169,13 @@ whose
 SPSS or R labels are kept in characteristics). The no-argument view form
 returns {cmd:r(n_cols)}
 (alias {cmd:r(n_columns)}) and {cmd:r(n_steps)}.
+
+{pstd}{it:Declarations and distinct values.} {cmd:xtset} and {cmd:tsset}
+return locals {cmd:r(panelvar)} and {cmd:r(timevar)} and scalar
+{cmd:r(delta)}; a declaration also returns {cmd:r(tmin)}, {cmd:r(tmax)} (the
+time range, missing when every time is missing) and {cmd:r(gaps)} (1 when
+any panel has gaps, else 0). {cmd:unique} returns {cmd:r(N)} (records),
+{cmd:r(unique)} and {cmd:r(sum)} (both the joint count of distinct values).
 
 {pstd}{it:Statistics and previews.} {cmd:count} returns {cmd:r(N)}.
 {cmd:head}/{cmd:list} return {cmd:r(N)}, the number of rows shown.

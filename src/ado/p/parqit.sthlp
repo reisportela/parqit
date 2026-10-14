@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.0 13oct2026}{...}
+{* *! version 0.4.1 14oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -563,8 +563,12 @@ requires that order already ("not sorted" otherwise). {cmd:bys} is {cmd:bysort}.
 as their native namesakes do for the data in memory: the time variable is
 integer-valued and unique within each panel, no two consecutive times closer
 than {opt delta(#)}, a whole number of periods; a missing time is accepted, and
-the operators are missing on that row. The operators {cmd:L.}, {cmd:F.}, {cmd:D.} and {cmd:S.} and
-the functions {cmd:tin()} and {cmd:twithin()} then work in expressions, by time.
+the operators are missing on that row. The operators {cmd:L.}, {cmd:F.},
+{cmd:D.} and {cmd:S.} and the functions {cmd:tin()} and {cmd:twithin()} then
+work in expressions, by time. Unlike native, the declaration does not sort
+the view: run {cmd:parqit sort} {it:panelvar timevar} before {cmd:_n},
+subscripts or {cmd:keep in} (parqit's note names it); the operators follow
+time whatever the sort.
 
 {phang}
 {cmd:unique} takes {opt by(varlist)}, a table of the count per group, and the
@@ -665,8 +669,12 @@ Where parqit differs from native Stata:
 without weights; {cmd:egen} takes every native function except {cmd:fill()} and
 {cmd:mtr()} (see {help parqit##options:Options}). Means, sums and the like are
 kept in {cmd:double}; {cmd:collect, compress} narrows what fits.{p_end}
-{phang2}{cmd:•} A {cmd:replace} that reads the replaced variable's other rows
-({cmd:replace x = x[_n-1] if missing(x)}) is refused: native {cmd:replace} is
+{phang2}{cmd:•} {cmd:xtset} and {cmd:tsset} declare the panel and time
+without sorting the view; sort it with {cmd:parqit sort} when row positions
+matter.{p_end}
+{phang2}{cmd:•} A {cmd:replace} that reads the replaced variable's other rows,
+in its expression or in its {cmd:if}
+({cmd:replace x = x[_n-1] if missing(x)}), is refused: native {cmd:replace} is
 sequential, each new value feeding the next row, and a lazy plan computes every
 row from the values before the command. Generate a new variable instead.{p_end}
 {phang2}{cmd:•} {cmd:pivot} is a pivot table in one verb: {cmd:collapse} by rows
@@ -845,7 +853,8 @@ Dates are their Stata numbers, and the date literals ({cmd:td(01jan2015)},
 {cmd:tm(2015m1)}, {cmd:tc(01jan2015 09:30:00)}, ...) are constants. The text
 readers follow Stata's rules: the mask letters take the fields of the string in
 order, a two-digit year needs {cmd:20Y}/{cmd:19Y} or a topyear, month names and
-am/pm are read, and a string that does not fit the mask is missing.
+am/pm are read, a {cmd:#} in the mask skips a field (as the last letter, the
+rest of the string), and a string that does not fit the mask is missing.
 {cmd:_n}, {cmd:_N} and Stata's subscripts — {cmd:x[_n-1]}, {cmd:x[_n+1]},
 {cmd:x[1]}, {cmd:x[_N]}, {cmd:x[_N-1]}, positional, within the groups of a
 {cmd:by} prefix — work in {cmd:keep if}, {cmd:drop if}, {cmd:gen}, {cmd:replace}
@@ -1177,6 +1186,10 @@ tables{p_end}
 {p2col:{cmd:histogram}}{cmd:r(N)}, {cmd:r(bins)}, {cmd:r(width)},
 {cmd:r(start)}{p_end}
 {p2col:{cmd:levelsof}}{cmd:r(levels)}, {cmd:r(r)}{p_end}
+{p2col:{cmd:unique}}{cmd:r(N)}, {cmd:r(sum)}, {cmd:r(unique)}{p_end}
+{p2col:{cmd:xtset}, {cmd:tsset}}{cmd:r(panelvar)}, {cmd:r(timevar)},
+{cmd:r(delta)}; when declaring also {cmd:r(tmin)}, {cmd:r(tmax)} and
+{cmd:r(gaps)} (1 when a panel has gaps){p_end}
 {p2col:{cmd:distinct}}{cmd:r(N)}, {cmd:r(ndistinct)}{p_end}
 {p2col:{cmd:duplicates report}}{cmd:r(N)}, {cmd:r(unique_value)},
 {cmd:r(surplus)}{p_end}

@@ -1237,9 +1237,10 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     std::vector<std::string> files, varlist, owned_files;
-    std::string tmpdir;
+    std::string tmpdir, open_if;
     if (!parqit::req_text_list(req, "files", &files, &err) ||
-        !parqit::req_text(req, "tmpdir", &tmpdir, &err)) {
+        !parqit::req_text(req, "tmpdir", &tmpdir, &err) ||
+        !parqit::req_text(req, "ifexpr", &open_if, &err, false)) {
         cry(err);
         return kRcUsage;
     }
@@ -1601,6 +1602,19 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     candidate.set_source_filename_column(prov_alias);
     candidate.set_xmissing_folded(xm_folded); /* VIEW-COPY-1: a copy repeats XMISS-1 */
 
+    /* Opening, filtering and projecting are one transaction. The previous
+     * view and every bridge it owns stay live until the candidate binds. */
+    std::vector<std::string> open_cmps;
+    if (!open_if.empty()) {
+        if (!g_statamissing && !g_statamissing_chosen)
+            open_cmps = parqit::missing_rule_differences(open_if, expr_schema_of(candidate), true);
+        const std::string ferr = candidate.filter(open_if, false, g_statamissing);
+        if (!ferr.empty()) {
+            cry("parqit use: " + ferr);
+            return kRcUsage;
+        }
+    }
+
     /* optional initial projection (named columns, named order) */
     if (!varlist.empty()) {
         /* FILENAME-1: filename() asks for the provenance column explicitly, so
@@ -1618,6 +1632,15 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
             return kRcUsage;
         }
     }
+    if (!open_if.empty()) {
+        duckdb_result probe;
+        if (!s.query("SELECT * FROM (" + candidate.compile(false) + ") LIMIT 0", &probe, &err)) {
+            cry("parqit use: invalid filtered plan: " + err);
+            return kRcUsage;
+        }
+        refresh_numeric_types(candidate, probe);
+        duckdb_destroy_result(&probe);
+    }
     std::string cleanup_err;
     if (!drop_owned(target, &cleanup_err))
         cry("warning: parqit use: " + cleanup_err);
@@ -1626,6 +1649,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     g_current = target;
     for (const auto &w : warns) cry("note: " + w);
     for (const auto &d : drops) cry("warning: " + d);
+    warn_missing_rules(open_cmps);
 
     save_local("_parqit_view_k", std::to_string(g_view_ref().cols().size()));
     save_local("_parqit_view_src", parqit::hex_encode(g_view_ref().source_desc()));
@@ -2038,12 +2062,21 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             save_local("_parqit_ts_panel", parqit::hex_encode(candidate.ts_panel()));
             save_local("_parqit_ts_time", parqit::hex_encode(candidate.ts_time()));
             save_local("_parqit_ts_delta", parqit::dtoa(candidate.ts_delta()));
+            std::vector<std::string> ts_order;
+            if (!candidate.ts_panel().empty()) ts_order.push_back(candidate.ts_panel());
+            if (!candidate.ts_time().empty()) ts_order.push_back(candidate.ts_time());
+            save_local("_parqit_ts_ordered", candidate.check_by_order(ts_order, {}).empty() ? "1" : "0");
             std::string fmt;
             for (const auto &c : candidate.cols())
                 if (c.name == candidate.ts_time()) fmt = c.fmt;
             save_local("_parqit_ts_fmt", parqit::hex_encode(fmt));
         }
     } else if (op == "egen") {
+        e = candidate.check_by_order(by, by_sortvars);
+        if (!e.empty()) {
+            cry("parqit: " + e);
+            return kRcUsage;
+        }
         std::string name, fcn, ex, ty;
         if (!parqit::req_text(req, "name", &name, &err) ||
             !parqit::req_text(req, "fcn", &fcn, &err) ||

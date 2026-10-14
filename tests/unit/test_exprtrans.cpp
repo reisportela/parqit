@@ -7,6 +7,7 @@
 
 #include "duckdb.h"
 #include "engine/exprtrans.hpp"
+#include "engine/datefn.hpp"
 #include "engine/session.hpp"
 
 using namespace parqit;
@@ -752,6 +753,49 @@ TEST_CASE("ROWCTX-2: subscripts and _n/_N become window terms the compiler resol
     CHECK_FALSE(translate_expression("x[s]", test_schema(), false).ok);
     CHECK_FALSE(translate_expression("x[_n-1", test_schema(), false).ok);
     CHECK_FALSE(translate_expression("x[1.5]", test_schema(), false).ok);
+}
+
+TEST_CASE("AUDIT-157: oversized time operators and date masks are refused before overflow") {
+    ExprSchema ts = test_schema();
+    ts.kinds["t"] = 'n';
+    ts.ts_time = "t";
+    for (const std::string &op : {"L", "F", "D", "S"}) {
+        CHECK_FALSE(translate_expression(op + "18446744073709551616.x", ts, false).ok);
+        CHECK_FALSE(translate_expression(op + std::string(200, '9') + ".x", ts, false).ok);
+    }
+    CHECK(translate_expression("L00000000000000000000000001.x", ts, false).ok);
+    CHECK(translate_expression("L10000.x", ts, false).ok);
+    CHECK_FALSE(translate_expression("L10001.x", ts, false).ok);
+    CHECK_FALSE(datefn::check_mask(std::string(200, '9') + "YMD", 'd').empty());
+    CHECK_FALSE(datefn::check_mask("000YMD", 'd').empty());
+    CHECK(datefn::check_mask("20YMD", 'd').empty());
+}
+
+TEST_CASE("AUDIT-158: date domains and clock components are row-local native values") {
+    for (const std::string &fn : {"dofq", "dofh", "dofw"}) {
+        CHECK(eval_at(fn + "(1e10)", 1).empty());
+        CHECK(eval_at(fn + "(-1e100)", 1).empty());
+    }
+    CHECK(eval_at("hms(24,0,0)", 1).empty());
+    CHECK(eval_at("hms(0,60,0)", 1).empty());
+    CHECK(eval_at("hms(0,0,60)", 1).empty());
+    CHECK(eval_at("hms(1.5,0,0)", 1) == "3600000.0");
+    CHECK(eval_at("hms(0,0,59.9999)", 1) == "59999.0");
+    CHECK(eval_at("dhms(2936550,0,0,0)", 1).empty());
+    CHECK(eval_at("dhms(-679351,0,0,0)", 1).empty());
+    CHECK(eval_at("dhms(.5,1.5,2.5,3.3333)", 1) == "3723333.0");
+    CHECK(eval_at("mdyhms(1,1,2020,24,0,0)", 1).empty());
+    CHECK(eval_at("hms(x,0,0)", 3).empty());
+    CHECK(eval_at("hms(0,x,0)", 3).empty());
+    CHECK(eval_at("dhms(x,0,0,0)", 3).empty());
+    CHECK(eval_at("mdyhms(1,x,2020,0,0,0)", 3).empty());
+    CHECK(eval_at("mdyhms(2,29,2019,0,0,0)", 1).empty());
+    CHECK(eval_at("clock(\"15jan2020 10:30:00\", \"DMY hms\")", 1) == "1894703400000");
+    CHECK_FALSE(translate_expression("td(4294967297jan2020)", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("tm(2020m4294967297)", test_schema(), false).ok);
+    CHECK_FALSE(translate_expression("tc(01jan2020 4294967296:00:00)", test_schema(), false).ok);
+    ExprSchema ts = test_schema(); ts.ts_time = "d";
+    CHECK_FALSE(translate_expression("tin(1e100,1e100)", ts, false).ok);
 }
 
 TEST_CASE("TSSET-1: L. F. D. S. are RANGE windows by time, refused without a declaration") {

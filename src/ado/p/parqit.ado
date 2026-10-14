@@ -1,4 +1,4 @@
-*! version 0.4.0 13oct2026
+*! version 0.4.1 14oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -99,7 +99,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.4.0"
+    local ado_version "0.4.1"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -1276,9 +1276,9 @@ program define _parqit_use, rclass
         local _sq_file `"`using'"'
         local _sq_namelist `"`namelist'"'
         * USE-IF-1: native `use varlist if exp using` tests the condition over
-        * every variable of the file and keeps the varlist afterwards, so with
-        * an if the view opens over all columns, filters, then projects
-        if (`"`ifexp'"' != "") local _sq_namelist ""
+        * every variable of the file and keeps the varlist afterwards. The
+        * plugin filters all source columns before the requested projection.
+        local _sq_ifexpr `"`ifexp'"'
         local _sq_vname "`name'"
         * A dta/xls/xlsx bridge, or the reserved open-data path passed through
         * the internal owned option, transfers its plugin-issued token to this
@@ -1294,22 +1294,6 @@ program define _parqit_use, rclass
             exit `rc'
         }
         mata: st_local("vname", _parqit_unhex(st_local("parqit_view_name")))
-        if (`"`ifexp'"' != "") {
-            * USE-IF-1: the condition is the view's first verb; a condition the
-            * translator refuses closes the view it was meant for, so no view is
-            * left open without the filter the command asked for
-            capture noisily _parqit_op_filter keep_if `ifexp'
-            local rc = _rc
-            if (!`rc' & strtrim(`"`namelist'"') != "") {
-                capture noisily _parqit_op_names keep_vars `namelist'
-                local rc = _rc
-            }
-            if (`rc') {
-                capture _parqit_close `vname'
-                exit `rc'
-            }
-            plugin call parqit_plugin, view_alive
-        }
         di as txt "(lazy view " as res "`vname'" as txt " opened over " ///
             as res `"`_sq_shown'"' as txt ": " as res "`parqit_view_k'" ///
             as txt " columns" as txt `"`=cond(`"`ifexp'"' != "", "; keep if `ifexp'", "")'"' ///
@@ -1716,6 +1700,11 @@ program define _parqit_ts_declare, rclass
     }
     di as txt "         Delta: " as res "`delta'" as txt " unit" ///
         as txt "`=cond(`delta' != 1, "s", "")'"
+    if ("`parqit_ts_ordered'" == "0") {
+        local tsorder = strtrim("`tspanel' `tstime'")
+        di as txt "note: the declaration does not sort the view; use parqit sort " ///
+            as res "`tsorder'" as txt " before positional expressions or slices"
+    }
     return local panelvar "`tspanel'"
     return local timevar "`tstime'"
     return scalar delta = `delta'
@@ -4434,6 +4423,7 @@ void _parqit_wr_view_open_request(string scalar req)
     p = (_parqit_jtext("cmd", "view_open"),
          _parqit_jtext("name", st_local("_sq_vname")),
          _parqit_jpair("files", "[" + _parqit_jstr(st_local("_sq_file")) + "]"))
+    if (st_local("_sq_ifexpr") != "") p = (p, _parqit_jtext("ifexpr", st_local("_sq_ifexpr")))
     vl = st_local("_sq_namelist")
     if (strtrim(vl) != "") {
         p = (p, _parqit_jpair("varlist", _parqit_jlist(tokens(vl))))
@@ -4624,6 +4614,16 @@ void _parqit_wr_op_gen_request(string scalar req, string scalar op)
     _parqit_emit(req, _parqit_jobj(_parqit_by_fields(p)))
 }
 
+// JSON requires a leading digit; 17 significant digits preserve binary64.
+string scalar _parqit_jnum(real scalar value)
+{
+    if (missing(value)) {
+        errprintf("parqit: numeric options require nonmissing values\n")
+        _error(198)
+    }
+    return(strtrim(strofreal(value, "%24.16e")))
+}
+
 // EGEN-ALL-1: a numlist as a JSON array of numbers ("" -> [])
 string scalar _parqit_jnums(string scalar list)
 {
@@ -4633,7 +4633,7 @@ string scalar _parqit_jnums(string scalar list)
 
     t = tokens(list)
     out = "["
-    for (i = 1; i <= cols(t); i++) out = out + (i > 1 ? "," : "") + strofreal(strtoreal(t[i]), "%21.0g")
+    for (i = 1; i <= cols(t); i++) out = out + (i > 1 ? "," : "") + _parqit_jnum(strtoreal(t[i]))
     return(out + "]")
 }
 
@@ -4652,7 +4652,7 @@ void _parqit_wr_op_egen_request(string scalar req)
          _parqit_jpair("vars", _parqit_jlist(tokens(st_local("_sq_vars")))),
          _parqit_jpair("egen_by", _parqit_jlist(tokens(st_local("_sq_by")))))
     if (st_local("_sq_ifexpr") != "") p = (p, _parqit_jtext("ifexpr", st_local("_sq_ifexpr")))
-    if (strtoreal(st_local("_sq_p")) >= 0) p = (p, _parqit_jpair("p", st_local("_sq_p")))
+    if (strtoreal(st_local("_sq_p")) >= 0) p = (p, _parqit_jpair("p", _parqit_jnum(strtoreal(st_local("_sq_p")))))
     if (strtrim(st_local("_sq_values")) != "") p = (p, _parqit_jpair("values", _parqit_jnums(st_local("_sq_values"))))
     if (strtrim(st_local("_sq_at")) != "") p = (p, _parqit_jpair("at", _parqit_jnums(st_local("_sq_at"))))
     if (st_local("_sq_haspunct") == "1") p = (p, _parqit_jtext("punct", st_local("_sq_punct")))
@@ -4679,10 +4679,10 @@ void _parqit_wr_op_egen_request(string scalar req)
     if (st_local("_sq_block") != "1") p = (p, _parqit_jpair("block", st_local("_sq_block")))
     if (st_local("_sq_group") != "0") p = (p, _parqit_jpair("group", st_local("_sq_group")))
     if (st_local("_sq_truncate") != "0") p = (p, _parqit_jpair("truncate", st_local("_sq_truncate")))
-    if (strtoreal(st_local("_sq_from")) != -8.9e307) p = (p, _parqit_jpair("from", st_local("_sq_from")))
-    if (strtoreal(st_local("_sq_to")) != -8.9e307) p = (p, _parqit_jpair("to", st_local("_sq_to")))
-    if (st_local("_sq_mean") != "0") p = (p, _parqit_jpair("mean", st_local("_sq_mean")))
-    if (st_local("_sq_sd") != "1") p = (p, _parqit_jpair("sd", st_local("_sq_sd")))
+    if (strtoreal(st_local("_sq_from")) != -8.9e307) p = (p, _parqit_jpair("from", _parqit_jnum(strtoreal(st_local("_sq_from")))))
+    if (strtoreal(st_local("_sq_to")) != -8.9e307) p = (p, _parqit_jpair("to", _parqit_jnum(strtoreal(st_local("_sq_to")))))
+    if (st_local("_sq_mean") != "0") p = (p, _parqit_jpair("mean", _parqit_jnum(strtoreal(st_local("_sq_mean")))))
+    if (st_local("_sq_sd") != "1") p = (p, _parqit_jpair("sd", _parqit_jnum(strtoreal(st_local("_sq_sd")))))
     _parqit_emit(req, _parqit_jobj(_parqit_by_fields(p)))
 }
 

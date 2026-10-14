@@ -181,6 +181,66 @@ TEST_CASE("replace of a pending sort key bakes old order and truncates marker") 
                       nullptr) == 5.0);
 }
 
+TEST_CASE("AUDIT-157: replace rejects sequential conditions without changing the plan") {
+    View v = make_view();
+    REQUIRE(v.sort({"id", "year"}, {false, false}).empty());
+    const std::string before = v.compile();
+    CHECK_FALSE(v.replace("wage", "1", "wage[_n-1] == 1", false).empty());
+    CHECK(v.compile() == before);
+    REQUIRE(v.tsset("id", "year", 1).empty());
+    CHECK_FALSE(v.replace("wage", "1", "L.wage == 1", false).empty());
+    CHECK(v.compile() == before);
+    REQUIRE(v.replace("wage", "1", "year[_n-1] == 2019", false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE wage = 1") == "3");
+}
+
+TEST_CASE("AUDIT-157: window markers cannot rewrite literals or quoted column names") {
+    View v = make_view();
+    REQUIRE(v.sort({"id", "year"}, {false, false}).empty());
+    REQUIRE(v.gen("__PARQIT_WIN_1__", "", "777", "", false).empty());
+    REQUIRE(v.gen("marker", "strL",
+                  "cond(wage[1] > 0, \"a'__PARQIT_WIN_1__b\", \"z\")", "", false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+                     ") WHERE marker = 'a''__PARQIT_WIN_1__b'") == "6");
+    REQUIRE(v.gen("both", "double", "wage[1] + __PARQIT_WIN_1__", "", false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE \"both\" = 787") == "6");
+    REQUIRE(v.gen("__PARQIT_OVER_FULL__", "", "17", "", false).empty());
+    REQUIRE(v.gen("last", "", "__PARQIT_OVER_FULL__[_N]", "", false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) + ") WHERE last = 17") == "6");
+}
+
+TEST_CASE("AUDIT-157: simultaneous renames preserve sort and time-series identities") {
+    View v = make_view();
+    REQUIRE(v.sort({"id", "year"}, {false, false}).empty());
+    REQUIRE(v.tsset("id", "year", 1).empty());
+    REQUIRE(v.rename_many({"id", "year"}, {"year", "id"}).empty());
+    CHECK(v.sortedby_names() == std::vector<std::string>{"year", "id"});
+    CHECK(v.ts_panel() == "year");
+    CHECK(v.ts_time() == "id");
+    REQUIRE(v.gen("lag", "", "L.wage", "", false).empty());
+    CHECK(run_scalar("SELECT lag FROM (" + v.compile(false) + ") WHERE year = 1 AND id = 2020") == "10.0");
+    View descending = make_view();
+    REQUIRE(descending.sort({"id", "year"}, {true, false}).empty());
+    REQUIRE(descending.rename_many({"id", "year"}, {"year", "id"}).empty());
+    CHECK(descending.sort_keys() == std::vector<std::string>{"\"year\" DESC", "\"id\""});
+}
+
+TEST_CASE("AUDIT-157: a dropped time-series key cannot resurrect its declaration") {
+    for (const std::string &key : {"id", "year"}) {
+        View v = make_view();
+        REQUIRE(v.tsset("id", "year", 1).empty());
+        REQUIRE(v.drop_vars({key}).empty());
+        REQUIRE(v.gen(key, "", "1", "", false).empty());
+        CHECK_FALSE(v.ts_declared());
+        CHECK_FALSE(v.gen("lag", "", "L.wage", "", false).empty());
+    }
+    View v = make_view();
+    REQUIRE(v.tsset("id", "year", 1).empty());
+    REQUIRE(v.keep_vars({"id", "wage"}).empty());
+    REQUIRE(v.rename("wage", "year").empty());
+    CHECK_FALSE(v.ts_declared());
+}
+
 TEST_CASE("group rename validates then commits and supports cycles") {
     View bad = make_view();
     CHECK_FALSE(bad.rename_many({"id", "year"}, {"x", "x"}).empty());
@@ -193,6 +253,54 @@ TEST_CASE("group rename validates then commits and supports cycles") {
     CHECK(cyc.cols()[1].name == "id");
     CHECK(run_scalar("SELECT year FROM (" + cyc.compile(false) +
                      ") WHERE id = 2019 LIMIT 1") == "1");
+}
+
+TEST_CASE("AUDIT-158: FLOAT neighbours keep double evaluation against integer operands") {
+    View v = make_view();
+    REQUIRE(v.sort({"id", "year"}, {false, false}).empty());
+    REQUIRE(v.gen("fx", "float", "16777216", "", true).empty());
+    REQUIRE(v.gen("iy", "long", "16777217", "", true).empty());
+    REQUIRE(v.gen("eq", "", "fx[1] == iy", "", true).empty());
+    REQUIRE(v.gen("arith", "", "fx[1] + 1 == 16777216", "", true).empty());
+    REQUIRE(v.tsset("id", "year", 1).empty());
+    REQUIRE(v.gen("leq", "", "L.fx == 16777217", "", true).empty());
+    CHECK(run_scalar("SELECT sum(eq + arith + leq) FROM (" + v.compile(false) + ")") == "0.0");
+}
+
+TEST_CASE("AUDIT-158: nullable strings sort and group as native empty strings") {
+    View v;
+    ViewCol id, s;
+    id.name = "id"; id.kind = 'n';
+    s.name = "s"; s.kind = 's';
+    v.open("SELECT * FROM (VALUES (1,'b'),(2,'a'),(3,NULL),(4,'')) t(id,s)",
+           {id, s}, nlohmann::json::object(), nlohmann::json::object(), "", "synthetic");
+    View groups = v;
+    View::EgenSpec sp;
+    sp.name = "g"; sp.fcn = "group"; sp.vars = {"s"}; sp.missing = true;
+    REQUIRE(groups.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT string_agg(CAST(g AS VARCHAR), ',' ORDER BY id) FROM (" + groups.compile(false) + ")") == "3,2,1,1");
+    sp.name = "without_missing"; sp.missing = false;
+    REQUIRE(groups.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT min(without_missing) FROM (" + groups.compile(false) + ")") == "1");
+    REQUIRE(v.sort({"s", "id"}, {false, false}).empty());
+    REQUIRE(v.gen("position", "", "_n", "", false).empty());
+    REQUIRE(v.keep_in(1, 2).empty());
+    CHECK(run_scalar("SELECT sum(id) FROM (" + v.compile(false) + ")") == "7");
+    CHECK(run_scalar("SELECT sum(position) FROM (" + v.compile(false) + ")") == "3.0");
+}
+
+TEST_CASE("AUDIT-158: decode cannot round an integer label code onto a FLOAT") {
+    View v;
+    ViewCol x;
+    x.name = "x"; x.kind = 'n'; x.physical_type = "FLOAT"; x.vallab = "big";
+    nlohmann::json labels = {{"big", {{"entries", nlohmann::json::array({
+        nlohmann::json::array({"16777217", "wrong"})})}}}};
+    v.open("SELECT 16777216::FLOAT AS x", {x}, labels, nlohmann::json::object(), "", "synthetic");
+    View::EgenSpec sp;
+    sp.name = "decoded"; sp.fcn = "concat"; sp.vars = {"x"}; sp.decode = true;
+    REQUIRE(v.egen(sp, false).empty());
+    /* Native concat, decode falls back to string()'s default %9.0g text. */
+    CHECK(run_scalar("SELECT decoded FROM (" + v.compile(false) + ")") == "1.68e+07");
 }
 
 TEST_CASE("PERF-1: row-context windows are emitted only when referenced") {

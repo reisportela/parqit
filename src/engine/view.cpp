@@ -203,21 +203,36 @@ std::string View::stage_list() const {
     return out;
 }
 
+std::string View::sort_key_sql(const std::string &key) const {
+    for (const auto &c : cols_) {
+        if (c.kind != 's' || c.normalized) continue;
+        const std::string q = quote_ident(c.name);
+        if (key == q) return "coalesce(" + q + ", '')";
+        if (key == q + " DESC") return "coalesce(" + q + ", '') DESC";
+    }
+    return key;
+}
+
 std::string View::order_by_sql() const {
-    if (sort_.empty()) return "";
+    if (sort_.empty() && !(order_live_ && order_baked_)) return "";
     std::string o = " ORDER BY ";
     for (size_t i = 0; i < sort_.size(); i++) {
         if (i) o += ", ";
         /* explicit NULLS LAST so ordering (and every _n window, keep-in slice
          * and merge spine built on it) matches Stata's "missing sorts last in
          * every direction" regardless of DuckDB's default null order */
-        o += sort_[i] + " NULLS LAST";
+        o += sort_key_sql(sort_[i]) + " NULLS LAST";
     }
     /* ORDER-CARRIER-1: a tie in the declared keys keeps the source's physical
      * order — native Stata's order within a tie after use — and the same one
      * at every evaluation, so _n, keep in, list in and collect agree */
-    if (order_live_)
-        for (const auto &c : order_cols_) o += ", " + c;
+    if (order_live_) {
+        bool first = sort_.empty();
+        for (const auto &c : order_cols_) {
+            o += std::string(first ? "" : ", ") + c;
+            first = false;
+        }
+    }
     return o;
 }
 
@@ -272,6 +287,10 @@ void View::push_stage(const std::string &select_body, const std::string &desc,
     if (!keeps_order) order_live_ = false;
     for (const auto &c : order_cols_)
         if (select_body.find(c) == std::string::npos) order_live_ = false;
+    if (!order_live_) order_baked_ = false;
+    /* A removed key ends the declaration permanently. Reusing its name in a
+     * later stage must not attach the old declaration to a different column. */
+    if (!ts_time_.empty() && !ts_declared()) clear_tsset();
     prune_chars();
 }
 
@@ -506,10 +525,32 @@ std::string View::tsset_probe_sql(const std::string &panel, const std::string &t
 
 static void substitute(std::string *sql, const std::string &from,
                        const std::string &to) {
+    if (sql->find(from) == std::string::npos) return;
+    /* Only bare generated tokens are placeholders. SQL literals and quoted
+     * identifiers may contain the same bytes, including escaped quotes. */
     size_t p = 0;
-    while ((p = sql->find(from, p)) != std::string::npos) {
-        sql->replace(p, from.size(), to);
-        p += to.size();
+    while (p < sql->size()) {
+        const char ch = (*sql)[p];
+        if (ch == '\'' || ch == '"') {
+            const char quote = ch;
+            p++;
+            while (p < sql->size()) {
+                if ((*sql)[p++] != quote) continue;
+                if (p < sql->size() && (*sql)[p] == quote) p++;
+                else break;
+            }
+        } else if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
+            const size_t begin = p++;
+            while (p < sql->size() &&
+                   (std::isalnum(static_cast<unsigned char>((*sql)[p])) || (*sql)[p] == '_'))
+                p++;
+            if (sql->compare(begin, p - begin, from) == 0) {
+                sql->replace(begin, p - begin, to);
+                p = begin + to.size();
+            }
+        } else {
+            p++;
+        }
     }
 }
 
@@ -531,7 +572,7 @@ std::string View::order_by_sql_reversed() const {
             was_desc = true;
         }
         /* ascending NULLS LAST reversed is descending NULLS FIRST, and vice versa */
-        o += std::string(first ? "" : ", ") + k + (was_desc ? " NULLS FIRST" : " DESC NULLS FIRST");
+        o += std::string(first ? "" : ", ") + sort_key_sql(k) + (was_desc ? " NULLS FIRST" : " DESC NULLS FIRST");
         first = false;
     }
     if (order_live_)
@@ -540,6 +581,12 @@ std::string View::order_by_sql_reversed() const {
             first = false;
         }
     return o;
+}
+
+std::string View::check_by_order(const std::vector<std::string> &by,
+                                  const std::vector<std::string> &sortvars) const {
+    std::vector<std::string> part;
+    return by_partition(by, sortvars, &part);
 }
 
 std::string View::by_partition(const std::vector<std::string> &by,
@@ -564,8 +611,10 @@ std::string View::by_partition(const std::vector<std::string> &by,
     if (!sorted) {
         std::string list;
         for (size_t i = 0; i < need.size(); i++) list += (i ? " " : "") + need[i];
+        const std::string suggestion = ts_declared() && need.size() == 1 && need[0] == ts_panel_
+                                          ? list + " " + ts_time_ : list;
         return "not sorted: by " + list + ": needs the view sorted by " + list +
-               " (parqit sort " + list + " first, or use parqit bysort)";
+               " (parqit sort " + suggestion + " first, or use parqit bysort)";
     }
     for (const auto &k : keys)
         part->push_back(norm_group_key(quote_ident(k), cols_[static_cast<size_t>(col_index(k))].kind));
@@ -650,12 +699,10 @@ std::string View::projection_source(const std::vector<ViewCol> &survivors) {
 
 /* ORDER-CARRIER-1: bake the current order into the input of a stage that is
  * about to shorten or clear the declared sort (SEM-006, the projection above).
- * Without order columns the subquery's order is carried by DuckDB's
- * insertion-order preservation, as before. With them, they are replaced by one
- * column that numbers the rows in the full current order, so the dropped keys
- * keep deciding ties afterwards — the physical order native Stata keeps. */
+ * One ordinal freezes the full old order, including its ties, for this command
+ * and later windows. A bare ORDER BY subquery is not enough: another window
+ * may reorder it, particularly on CSV sources with no physical carrier. */
 std::string View::bake_order(const std::string &prev) {
-    if (!order_live_) return "(SELECT * FROM " + prev + order_by_sql() + ")";
     const std::string ord = order_by_sql();
     /* a space in the name, which no Stata variable name can have, so no later
      * gen or rename can collide with the hidden column; it still dodges the
@@ -667,8 +714,10 @@ std::string View::bake_order(const std::string &prev) {
         name += "_";
     const std::string rn = quote_ident(name);
     order_cols_ = {rn};
+    order_live_ = true;
+    order_baked_ = true;
     return "(SELECT *, row_number() OVER (" + ord.substr(1) + ") AS " + rn + " FROM " +
-           prev + ord + ")";
+           prev + ")";
 }
 
 std::string View::keep_vars(const std::vector<std::string> &patterns) {
@@ -823,12 +872,18 @@ std::string View::replace(const std::string &name, const std::string &expr,
      * the way to express it (Codex review, 2026-10-13). */
     {
         const std::string self = quote_ident(name);
-        for (const auto &win : r.windows)
-            if (win.sql.find(self) != std::string::npos)
-                return "replace " + name + " from its own earlier or later rows (" + expr +
-                       ") is sequential in native Stata — each new value feeds the next row — "
-                       "and a lazy plan computes every row from the values before the command; "
-                       "generate a new variable instead, or use parqit sql";
+        auto reads_self = [&](const ExprResult &side) {
+            return std::any_of(side.windows.begin(), side.windows.end(),
+                               [&](const WindowTerm &win) {
+                                   return win.sql.find(self) != std::string::npos;
+                               });
+        };
+        if (reads_self(r) || reads_self(c))
+            return "replace " + name + " from its own earlier or later rows (" + expr +
+                   (if_expr.empty() ? "" : " if " + if_expr) +
+                   ") is sequential in native Stata — each new value feeds the next row — "
+                   "and a lazy plan computes every row from the values before the command; "
+                   "generate a new variable instead, or use parqit sql";
     }
     /* SEM-006: sort_ describes the values at the moment sort ran.  Replacing a
      * key must first bake that old order into the input, then truncate Stata's
@@ -843,13 +898,11 @@ std::string View::replace(const std::string &name, const std::string &expr,
             break;
         }
     }
-    if (changed_sort < sort_.size()) {
-        source = bake_order(source);
-        sort_.resize(changed_sort);
-    }
-    /* ROWCTX-2: _n/_N, subscripts and time-series terms in either half are
-     * helper columns of the wrapped source (the old refusal is gone) */
+    /* Freeze once before evaluating positions: the command and every later
+     * window share the same tie resolution, even when no sort key survives. */
+    if (changed_sort < sort_.size()) source = bake_order(source);
     source = rowctx_wrap({{&assigned, &r.windows}, {&cond, &c.windows}}, source, part);
+    if (changed_sort < sort_.size()) sort_.resize(changed_sort);
     const std::string value =
         if_expr.empty() ? assigned
                         : "(CASE WHEN coalesce(" + cond + ", FALSE) THEN " + assigned +
@@ -994,15 +1047,23 @@ std::string View::rename_many(const std::vector<std::string> &old_names,
     for (auto &key : nsort) {
         for (const auto &m : mapping) {
             const std::string qold = quote_ident(m.first);
-            if (key == qold) key = quote_ident(m.second);
-            else if (key == qold + " DESC")
+            if (key == qold) {
+                key = quote_ident(m.second);
+                break;
+            } else if (key == qold + " DESC") {
                 key = quote_ident(m.second) + " DESC";
+                break;
+            }
         }
     }
 
     cols_ = std::move(ncols);
     chars_ = std::move(nchars);
     sort_ = std::move(nsort);
+    /* Map each original identity once, as for columns and sort keys. */
+    const auto panel = mapping.find(ts_panel_), time = mapping.find(ts_time_);
+    if (panel != mapping.end()) ts_panel_ = panel->second;
+    if (time != mapping.end()) ts_time_ = time->second;
     if (order_live_) /* ORDER-CARRIER-1: a row-preserving stage */
         for (const auto &c : order_cols_) sel += ", " + c;
     push_stage("SELECT " + sel + " FROM " + prev_name(stages_.size()),
@@ -1628,6 +1689,14 @@ std::string printf_of_stata_fixed(const std::string &fmt) {
     const bool zero = body[0] == '0';
     return std::string("%") + (zero ? body : body.substr(dot)) + "f";
 }
+std::string integer_label_text(std::string value) {
+    const size_t dot = value.find('.');
+    if (dot != std::string::npos && dot + 1 < value.size() &&
+        std::all_of(value.begin() + dot + 1, value.end(), [](char c) { return c == '0'; }))
+        value.resize(dot);
+    return value == "-0" ? "0" : value;
+}
+
 std::string label_text_of(const nlohmann::json &vallabs, const std::string &lab,
                           const std::string &value, bool *found) {
     *found = false;
@@ -1637,7 +1706,9 @@ std::string label_text_of(const nlohmann::json &vallabs, const std::string &lab,
     for (const auto &e : def["entries"]) {
         if (!e.is_array() || e.size() < 2) continue;
         std::string k = e[0].is_string() ? e[0].get<std::string>() : e[0].dump();
-        if (k == value) {
+        /* Compare integer spellings exactly, without rounding wide integers
+         * or decimals onto a label belonging to a different value. */
+        if (integer_label_text(k) == integer_label_text(value) || (value.empty() && k == ".")) {
             *found = true;
             return e[1].is_string() ? e[1].get<std::string>() : e[1].dump();
         }
@@ -1700,18 +1771,19 @@ std::string View::egen_probe_sql(const EgenSpec &sp, bool statamissing, std::str
             if (!c.windows.empty()) return "_n/_N are not supported in the if of egen group()";
             where = "coalesce(" + c.sql + ", FALSE)";
         }
-        std::string sel, grp, nonmiss;
+        std::string sel, grp, ord, nonmiss;
         for (size_t i = 0; i < keys.size(); i++) {
             const ViewCol &c = cols_[static_cast<size_t>(col_index(keys[i]))];
             const std::string k = norm_group_key(quote_ident(keys[i]), c.kind);
             sel += (i ? ", " : "") + (c.kind == 's' ? "coalesce(" + k + ", '')"
                                                      : "CAST(" + k + " AS VARCHAR)");
             grp += (i ? ", " : "") + k;
+            ord += (i ? ", " : "") + (c.kind == 's' ? "coalesce(" + k + ", '')" : k);
             nonmiss += (i ? " AND " : "") + k + " IS NOT NULL";
         }
         /* the groups in key order, missing groups last only with missing */
         *sql = "SELECT " + sel + " FROM (" + compile(false) + ") WHERE " + where +
-               (sp.missing ? "" : " AND " + nonmiss) + " GROUP BY " + grp + " ORDER BY " + grp +
+               (sp.missing ? "" : " AND " + nonmiss) + " GROUP BY " + grp + " ORDER BY " + ord +
                " LIMIT 65537";
         return "";
     }
@@ -2001,11 +2073,12 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
         rkind = vkind;
         normalized = false;
     } else if (fcn == "group" || fcn == "tag") {
-        std::string keys, anymiss;
+        std::string keys, rank_keys, anymiss;
         for (size_t i = 0; i < vars.size(); i++) {
             const ViewCol &col = cols_[static_cast<size_t>(col_index(vars[i]))];
             const std::string k = norm_group_key(quote_ident(vars[i]), col.kind);
             keys += (i ? ", " : "") + k;
+            rank_keys += (i ? ", " : "") + (col.kind == 's' ? "coalesce(" + k + ", '')" : k);
             anymiss += (i ? " OR " : "") + k + " IS NULL";
         }
         /* a row outside the condition, or with a missing key (unless missing
@@ -2015,7 +2088,7 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
         if (has_if) out_of = "(NOT " + c + (sp.missing ? "" : " OR " + anymiss) + ")";
         if (fcn == "group") {
             result = "CASE WHEN NOT " + out_of + " THEN dense_rank() OVER (ORDER BY " +
-                     (out_of == "FALSE" ? "" : out_of + ", ") + keys + ") END";
+                     (out_of == "FALSE" ? "" : out_of + ", ") + rank_keys + ") END";
             if (sp.label) {
                 /* the group texts, from the probe: decoded labels or values */
                 if (sp.probe_rows.size() > 65536)
@@ -2035,7 +2108,7 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
                         bool found = false;
                         std::string piece = col.kind == 'n'
                             ? label_text_of(vallabs_, col.vallab, row[i], &found) : row[i];
-                        if (!found && col.kind == 'n') piece = row[i].empty() ? "." : row[i];
+                        if (!found && col.kind == 'n') piece = row[i].empty() ? "." : integer_label_text(row[i]);
                         if (sp.truncate > 0) piece = utf8_prefix(piece, sp.truncate);
                         text += (i ? " " : "") + piece;
                     }
@@ -2085,14 +2158,26 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
             else if (sp.decode && !col.vallab.empty() && vallabs_.is_object() &&
                      vallabs_.contains(col.vallab) && vallabs_[col.vallab].contains("entries")) {
                 std::string cases;
+                const std::string compared = col.physical_type == "FLOAT" || col.meta_type == "float"
+                                                 ? "CAST(" + v + " AS DOUBLE)" : v;
                 for (const auto &en : vallabs_[col.vallab]["entries"]) {
                     if (!en.is_array() || en.size() < 2) continue;
                     const std::string k = en[0].is_string() ? en[0].get<std::string>() : en[0].dump();
                     std::string t = en[1].is_string() ? en[1].get<std::string>() : en[1].dump();
                     if (sp.maxlength > 0) t = utf8_prefix(t, sp.maxlength);
-                    cases += " WHEN " + k + " THEN " + quote_literal(t);
+                    if (k == ".") {
+                        cases += " WHEN " + v + " IS NULL THEN " + quote_literal(t);
+                    } else if (k.size() == 2 && k[0] == '.' && k[1] >= 'a' && k[1] <= 'z') {
+                        continue; /* the lazy view has folded these codes to ordinary missing */
+                    } else {
+                        double code = 0;
+                        if (!atod(k, &code) || !std::isfinite(code))
+                            return "egen concat(): invalid numeric value-label code " + k;
+                        cases += " WHEN " + compared + " = " + k + " THEN " + quote_literal(t);
+                    }
                 }
-                piece = "(CASE " + v + cases + " ELSE parqit_stata_string(__parqit_double(" + v + ")) END)";
+                const std::string fallback = "parqit_stata_string(__parqit_double(" + v + "))";
+                piece = cases.empty() ? fallback : "(CASE" + cases + " ELSE " + fallback + " END)";
             } else if (!pf.empty())
                 piece = "(CASE WHEN " + v + " IS NULL THEN '.' ELSE printf(" + quote_literal(pf) +
                         ", __parqit_double(" + v + ")) END)";

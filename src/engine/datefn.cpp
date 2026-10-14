@@ -95,19 +95,19 @@ bool read_mask(const std::string &mask, Mask *out, const std::string &allowed, s
     size_t i = 0;
     while (i < mask.size()) {
         const char c = mask[i];
+        if (c == ' ') { i++; continue; } /* native accepts e.g. DMY hms */
         if (std::isdigit(static_cast<unsigned char>(c))) {
             size_t j = i;
-            int v = 0;
-            while (j < mask.size() && std::isdigit(static_cast<unsigned char>(mask[j]))) v = v * 10 + (mask[j++] - '0');
+            while (j < mask.size() && std::isdigit(static_cast<unsigned char>(mask[j]))) j++;
             if (j >= mask.size() || mask[j] != 'Y' || j - i != 2) {
                 *err = "a number in the mask must be a two-digit century before Y, as in 20Y";
                 return false;
             }
-            out->century = v;
+            out->century = (mask[i] - '0') * 10 + (mask[i + 1] - '0');
             i = j;
             continue;
         }
-        if (allowed.find(c) == std::string::npos || c == ' ') {
+        if (allowed.find(c) == std::string::npos) {
             *err = std::string("the mask cannot contain '") + c + "' (allowed: " + allowed + ")";
             return false;
         }

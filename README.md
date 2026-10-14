@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.4.0 — the full surface below is implemented and covered by a
+> **Status:** v0.4.1 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -31,8 +31,17 @@ conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
 
+Version 0.4.1 corrects defects an adversarial review found in 0.4.0's new
+features: a failed lazy `use … if` or projection now leaves the views as they
+were, a `replace` refuses a self-reference in its `if` too, renamed sort and
+time-series keys stay consistent, string missing values from two-table verbs
+sort as native empty strings in `egen group()`, subscripts and time-series
+windows keep float comparisons exact, the clock constructors enforce native's
+limits, and oversized lag counts are refused before they can overflow.
+Commands keep their 0.4.0 behaviour otherwise.
+
 Version 0.4.0 answers the third round of BPLIM feedback: the `if` qualifier
-wherever native Stata has one, the complete native `collapse` statistics and
+wherever native Stata has one, an expanded set of native `collapse` statistics and
 `egen` functions, the `by` and `bysort` prefixes with Stata's positional
 subscripts, time-series operators by time after `parqit xtset`/`tsset`, the
 date and time functions, `parqit unique`, a lossless `compress` option and the

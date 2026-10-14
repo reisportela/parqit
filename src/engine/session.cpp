@@ -393,6 +393,58 @@ static void native_temporal_boundary_fn(duckdb::DataChunk &input,
         duckdb::FunctionErrors::CAN_THROW_RUNTIME_ERROR);
 }
 
+/* Numeric clock constructors: one vector pass validates and converts the
+ * components. Every accepted result is an exact integer below 2^53. Keeping
+ * the guards here avoids repeated SQL projections for each clock component. */
+template <int N>
+static void parqit_clock_parts_fn(duckdb_function_info, duckdb_data_chunk input,
+                                  duckdb_vector output) {
+    const double *values[N];
+    uint64_t *validity[N];
+    for (int j = 0; j < N; j++) {
+        duckdb_vector v = duckdb_data_chunk_get_vector(input, j);
+        values[j] = static_cast<const double *>(duckdb_vector_get_data(v));
+        validity[j] = duckdb_vector_get_validity(v);
+    }
+    auto *result = static_cast<double *>(duckdb_vector_get_data(output));
+    duckdb_vector_ensure_validity_writable(output);
+    uint64_t *out_validity = duckdb_vector_get_validity(output);
+    constexpr int first = N == 3 ? 0 : N == 4 ? 1 : 3;
+    const idx_t count = duckdb_data_chunk_get_size(input);
+    for (idx_t r = 0; r < count; r++) {
+        bool valid = true;
+        for (int j = 0; j < N; j++) valid = valid && valid_row(validity[j], r);
+        if (!valid) {
+            duckdb_validity_set_row_invalid(out_validity, r);
+            continue;
+        }
+        const double h = values[first][r], m = values[first + 1][r], s = values[first + 2][r];
+        valid = valid && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60;
+        long long day = 0;
+        if constexpr (N == 4) {
+            const double d = values[0][r];
+            valid = valid && d >= -679350 && d < 2936550;
+            if (valid) day = static_cast<long long>(std::floor(d));
+        } else if constexpr (N == 6) {
+            const double mo = values[0][r], d = values[1][r], y = values[2][r];
+            valid = valid && y >= 100 && y < 10000 && mo >= 1 && mo < 13 && d >= 1 && d < 32;
+            if (valid) {
+                const int yy = static_cast<int>(y), mm = static_cast<int>(mo), dd = static_cast<int>(d);
+                valid = dd <= datefn::days_in_month(yy, mm);
+                if (valid) day = datefn::days_from_civil(yy, mm, dd);
+            }
+        }
+        if (!valid) {
+            duckdb_validity_set_row_invalid(out_validity, r);
+            continue;
+        }
+        const int millis = static_cast<int>(h) * 3600000 + static_cast<int>(m) * 60000 +
+                           static_cast<int>(s * 1000.0);
+        result[r] = static_cast<double>(day * 86400000LL + millis);
+        duckdb_validity_set_row_valid(out_validity, r);
+    }
+}
+
 static bool register_scalar(duckdb_connection con, const char *name,
                             const std::vector<duckdb_type> &params,
                             duckdb_type ret_type, duckdb_scalar_function_t fn,
@@ -445,6 +497,12 @@ static bool register_internal_functions(duckdb_connection con, std::string *err)
                            DUCKDB_TYPE_VARCHAR, parqit_substr_bytes_fn, err) &&
            register_scalar(con, "parqit_finite", {DUCKDB_TYPE_DOUBLE},
                            DUCKDB_TYPE_DOUBLE, parqit_finite_fn, err) &&
+           register_scalar(con, "__parqit_hms", std::vector<duckdb_type>(3, DUCKDB_TYPE_DOUBLE),
+                           DUCKDB_TYPE_DOUBLE, parqit_clock_parts_fn<3>, err) &&
+           register_scalar(con, "__parqit_dhms", std::vector<duckdb_type>(4, DUCKDB_TYPE_DOUBLE),
+                           DUCKDB_TYPE_DOUBLE, parqit_clock_parts_fn<4>, err) &&
+           register_scalar(con, "__parqit_mdyhms", std::vector<duckdb_type>(6, DUCKDB_TYPE_DOUBLE),
+                           DUCKDB_TYPE_DOUBLE, parqit_clock_parts_fn<6>, err) &&
            register_scalar(con, "__parqit_date", {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_BIGINT},
                            DUCKDB_TYPE_BIGINT, parqit_datefn_fn<'d'>, err) &&
            register_scalar(con, "__parqit_clock", {DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_VARCHAR, DUCKDB_TYPE_BIGINT},
