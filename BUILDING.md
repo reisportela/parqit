@@ -1,7 +1,7 @@
 # Building parqit
 
 `parqit` ships as two artifacts: the platform-independent Stata files
-(`parqit.ado`, `parqit.sthlp`, `parqit.pkg`) and one compiled plugin per platform
+(`parqit.ado`, both help files, `parqit.pkg`) and one compiled plugin per platform
 (`parqit.plugin`). The plugin statically embeds DuckDB (with its parquet and
 core_functions extensions). DuckDB uses its own scheduler and worker threads;
 OpenMP is not a build dependency. No companion Windows DLL is shipped.
@@ -10,6 +10,17 @@ Compiler-runtime notices retain the filename `parqit_openmp_license.txt` for
 package compatibility. The `F` directive installs this text with the ados.
 The licensed installation test checks the actual plugin mappings, byte fidelity,
 notice delivery and absence of a separately installed DLL.
+
+`parqit version` reports a 64-digit source ID and numerical contract revision
+as well as the package and DuckDB versions. CMake derives the ID from the
+plugin/engine sources, vendored interfaces, build inputs and pinned patches,
+normalising line endings; source edits trigger its regeneration. The ID does
+not depend on a Git checkout or a machine-specific path. Use the release's
+SHA256 manifest to identify the exact platform binary as well. Contract 4
+requires the corrected volatile-window and lambda behaviour; the ado refuses
+earlier contracts even when a plugin reports the same package version.
+The packaged-plugin verifier checks the identity against its own build and
+runs the numerical selftest in the exact binary selected for distribution.
 
 ## Prerequisites
 
@@ -61,10 +72,18 @@ safe block-allocator shutdown and initialized transaction error-policy flags.
 The streaming buffer also preserves the executor's original worker error
 instead of misreporting it as user cancellation; genuine cancellation is
 unchanged and both paths have a deterministic regression test.
+The window self-join rewrite also refuses volatile inputs, volatile partition
+expressions and aggregate children. This prevents two evaluations from
+combining incompatible values or losing rows, including when `first()` or
+`any_value()` selects different source rows.
+Lambda bodies are included in expression volatility as well, using the same
+bound-body inspection that DuckDB already uses when deciding foldability.
 See [PatchDuckDBSampling.cmake](cmake/PatchDuckDBSampling.cmake),
-[PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake) and
-[PatchDuckDBLifetime.cmake](cmake/PatchDuckDBLifetime.cmake) and
-[PatchDuckDBStreaming.cmake](cmake/PatchDuckDBStreaming.cmake). Configure refuses an
+[PatchDuckDBCapi.cmake](cmake/PatchDuckDBCapi.cmake),
+[PatchDuckDBLifetime.cmake](cmake/PatchDuckDBLifetime.cmake),
+[PatchDuckDBStreaming.cmake](cmake/PatchDuckDBStreaming.cmake),
+[PatchDuckDBWindowSelfJoin.cmake](cmake/PatchDuckDBWindowSelfJoin.cmake) and
+[PatchDuckDBLambdaVolatility.cmake](cmake/PatchDuckDBLambdaVolatility.cmake). Configure refuses an
 unexpected edited dependency file instead of overwriting it.
 
 The statistics implementation requires IEEE binary64 evaluation without
@@ -86,8 +105,9 @@ regression under Memcheck. The Linux release runner installs it and requires
 zero memory errors, including errors after the assertions have passed.
 
 `PARQIT_LOCAL_ADO_DIR` can point to a separate staging directory while validating
-a change. Its default is the repo's `ado/plus/p`; restore that location after
-the staged build passes the relevant checks.
+a change. Its default is the repo's `ado/plus/p`. Keep a deliberately isolated
+staging path while testing, and point a fresh Stata process at that directory;
+do not overwrite a historical install merely to restore the default.
 
 ## Using parqit from the repo (recommended)
 
@@ -95,15 +115,17 @@ Every build maintains a repo-local installable ado tree at
 **`<repo>/ado/plus/p`** — `parqit.ado`, `parqit.sthlp`, `parqit.pkg` are re-synced
 whenever they change, and a **stripped** `parqit.plugin` is refreshed on every
 relink (also when building just `--target parqit_plugin`). Point Stata at it
-once (e.g. in your `profile.do`):
+in a fresh Stata session, from the extracted repository's root:
 
 ```stata
-adopath ++ "/home/mangelo/Documents/GitHub/parqit/ado/plus/p"
+adopath ++ "`c(pwd)'/ado/plus/p"
 parqit version
 parqit selftest
 ```
 
 Nothing else is needed: the ado finds the plugin in the same directory.
+If `PARQIT_LOCAL_ADO_DIR` was overridden, use that directory instead. Building
+or checking out `main` does not update the user's global `~/ado` installation.
 Note that a running Stata keeps the plugin it already loaded — restart the
 session after rebuilding. `discard` alone does not guarantee a plugin reload.
 
@@ -145,7 +167,11 @@ runtime coverage.
 
 Pushing a `v*` tag runs `.github/workflows/build.yml`, which builds
 binaries for four targets (Linux x86_64 in an AlmaLinux 8 container, macOS
-x86_64 and arm64 with deployment target 11.0, and Windows x86_64 with MSVC). The workflow
+x86_64 and arm64, and Windows x86_64 with MSVC). The macOS presets request
+deployment target 11.0; a toolchain's static runtime can raise the minimum
+actually recorded in the Mach-O binary. Check that recorded minimum for each
+release artifact rather than inferring compatibility from the preset alone.
+The workflow
 prepares a draft release with one net-installable zip per platform plus
 `parqit_all_platforms.zip`, and uploads the loose Stata files and per-platform
 plugins needed for direct `net install` from the GitHub release URL. The

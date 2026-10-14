@@ -1,5 +1,6 @@
 // Load the exact packaged plugin and exercise its public engine diagnostics.
 #include "stplugin.h"
+#include "parqit_build_identity.hpp"
 #include <cstdlib>
 #include <chrono>
 #include <filesystem>
@@ -75,6 +76,12 @@ int main(int argc, char **argv) {
         std::cerr << "Plugin must use DuckDB's scheduler without OpenMP\n";
         return 1;
     }
+    if (locals["_parqit_plugin_version"] != PARQIT_BUILD_VERSION ||
+        locals["_parqit_numeric_contract"] != PARQIT_NUMERIC_CONTRACT ||
+        locals["_parqit_build_id"] != PARQIT_BUILD_ID) {
+        std::cerr << "Plugin source identity or numerical contract differs from this build\n";
+        return 1;
+    }
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto temporary = std::filesystem::temp_directory_path() /
                            ("parqit-plugin-probe-" + std::to_string(nonce));
@@ -93,6 +100,8 @@ int main(int argc, char **argv) {
     std::filesystem::remove(temporary, cleanup_error);
     if (!engine_ok || cleanup_error) return 1;
     std::cout << "PLUGIN_RUNTIME_PASS version=" << locals["_parqit_plugin_version"]
+              << " build_id=" << locals["_parqit_build_id"]
+              << " numeric_contract=" << locals["_parqit_numeric_contract"]
               << " parallel_backend=duckdb openmp=0 engine=PASS\n";
     // Keep the plugin resident until process exit, as Stata normally does.
     return 0;

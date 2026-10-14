@@ -277,6 +277,8 @@ int View::count_window_terms(const std::string &sql) {
 void View::push_stage(const std::string &select_body, const std::string &desc,
                       bool keeps_order) {
     stages_.push_back(select_body);
+    superseded_at_.push_back(0);
+    egen_stages_.emplace_back();
     descs_.push_back(desc);
     /* WINDOW-NEST-1: the partitioned window terms this stage adds (a using
      * plan embedded by a two-table verb is in this text, counted here once) */
@@ -318,10 +320,29 @@ static std::string prev_name(size_t k) {
     return k == 0 ? "__parqit_s0" : ("__parqit_s" + std::to_string(k));
 }
 
+void View::append_stage_sql(std::string &sql, size_t stage) const {
+    const auto &batch = egen_stages_[stage];
+    if (!batch.first || batch.first == stage + 1) {
+        sql += stages_[stage];
+        return;
+    }
+    /* Keep each historical definition once. Retaining an expanded fused
+     * SELECT at every prefix would add quadratic expression storage. */
+    const auto &first = egen_stages_[batch.first - 1];
+    sql += "SELECT " + first.columns;
+    for (size_t k = batch.first - 1; k <= stage; ++k)
+        sql += ", " + egen_stages_[k].definition;
+    sql += " FROM " + first.from;
+}
+
 std::string View::ctes(size_t nstages) const {
     std::string sql = "WITH __parqit_s0 AS (" + scan_ + ")";
-    for (size_t k = 0; k < nstages; k++)
-        sql += ", __parqit_s" + std::to_string(k + 1) + " AS (" + stages_[k] + ")";
+    for (size_t k = 0; k < nstages; k++) {
+        if (superseded_at_[k] && superseded_at_[k] <= nstages) continue;
+        sql += ", __parqit_s" + std::to_string(k + 1) + " AS (";
+        append_stage_sql(sql, k);
+        sql += ")";
+    }
     return sql;
 }
 
@@ -349,8 +370,13 @@ std::string View::show() const {
     std::string out = "-- source: " + source_desc_ + "\n";
     out += "WITH __parqit_s0 AS (\n  " + scan_ + "\n)";
     for (size_t k = 0; k < stages_.size(); k++) {
-        out += ",\n-- " + descs_[k] + "\n__parqit_s" + std::to_string(k + 1) +
-               " AS (\n  " + stages_[k] + "\n)";
+        if (superseded_at_[k]) continue;
+        out += ",\n-- ";
+        const size_t first = egen_stages_[k].first ? egen_stages_[k].first - 1 : k;
+        for (size_t j = first; j <= k; ++j) out += (j == first ? "" : "; ") + descs_[j];
+        out += "\n__parqit_s" + std::to_string(k + 1) + " AS (\n  ";
+        append_stage_sql(out, k);
+        out += "\n)";
     }
     out += "\nSELECT " + (order_cols_.empty() ? std::string("*") : select_list()) +
            " FROM " + prev_name(stages_.size());
@@ -2324,8 +2350,53 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
     std::string desc = "egen " + name + " = " + fcn + "(...)";
     if (!sp.by.empty()) desc += ", by(...)";
     if (!sp.if_expr.empty()) desc += " if " + sp.if_expr;
-    push_stage("SELECT " + stage_list() + ", " + stored + " AS " + quote_ident(name) + " FROM " + lvl,
-               desc, true);
+    /* EGEN-FUSE-1: independent aggregates on the same partition can share
+     * one window operator. Keep the exact aggregate/storage expressions;
+     * only their SELECT level changes. A bare input column, no condition and
+     * no positional window make dependency checking explicit. Everything
+     * else keeps the general sequential plan, including a reference to an
+     * earlier output of this batch. Never inline or duplicate volatile work. */
+    static const std::set<std::string> batch_fcns = {
+        "mean", "total", "sum", "sd", "min", "max", "count"};
+    const bool batchable = batch_fcns.count(fcn) && !has_if &&
+                           arg.windows.empty() && col_index(sp.expr) >= 0 &&
+                           lvl == prev_name(stages_.size());
+    const std::string definition = stored + " AS " + quote_ident(name);
+    if (batchable) {
+        const bool extends = egen_batch_.end == stages_.size() && egen_batch_.end > 0 &&
+                             egen_batch_.by == byn && !egen_batch_.outputs.count(sp.expr) &&
+                             std::none_of(byn.begin(), byn.end(), [&](const std::string &b) {
+                                 return egen_batch_.outputs.count(b) != 0;
+                             });
+        if (!extends) {
+            egen_batch_ = EgenBatch{};
+            egen_batch_.first = stages_.size() + 1;
+            egen_batch_.by = byn;
+            egen_batch_.prior_window_terms = window_terms_;
+        }
+        const std::string columns = stage_list();
+        push_stage("SELECT " + columns + ", " + definition + " FROM " + lvl, desc, true);
+        auto &stage = egen_stages_.back();
+        stage.first = egen_batch_.first;
+        stage.definition = definition;
+        if (!extends) {
+            stage.columns = columns;
+            stage.from = lvl;
+            egen_batch_.window_terms = count_window_terms("SELECT " + columns + " FROM " + lvl);
+        }
+        egen_batch_.window_terms += count_window_terms(definition);
+        if (extends) {
+            superseded_at_[egen_batch_.end - 1] = stages_.size();
+            /* Preserve the existing optimiser policy for multiple logical
+             * windows. Fusion removes repeated window work without newly
+             * enabling a self-join that could duplicate a costly child. */
+        }
+        window_terms_ = egen_batch_.prior_window_terms + egen_batch_.window_terms;
+        egen_batch_.end = stages_.size();
+        egen_batch_.outputs.insert(name);
+    } else {
+        push_stage("SELECT " + stage_list() + ", " + definition + " FROM " + lvl, desc, true);
+    }
     ViewCol nc;
     nc.name = name;
     nc.kind = rkind;

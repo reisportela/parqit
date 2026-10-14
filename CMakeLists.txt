@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.4.1 LANGUAGES C CXX)
+project(parqit VERSION 0.4.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -99,6 +99,8 @@ include(cmake/PatchDuckDBSampling.cmake)
 include(cmake/PatchDuckDBCapi.cmake)
 include(cmake/PatchDuckDBLifetime.cmake)
 include(cmake/PatchDuckDBStreaming.cmake)
+include(cmake/PatchDuckDBWindowSelfJoin.cmake)
+include(cmake/PatchDuckDBLambdaVolatility.cmake)
 include(cmake/VerifyDuckDBScalarAPI.cmake)
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
@@ -109,6 +111,7 @@ set(PARQIT_MINIZ_INCLUDE "${duckdb_SOURCE_DIR}/third_party/miniz")
 # ... and its bundled zstd (namespace duckdb_zstd, also inside duckdb_static):
 # the R reader inflates zstd-compressed .rds/.RData files with it.
 set(PARQIT_ZSTD_INCLUDE "${duckdb_SOURCE_DIR}/third_party/zstd/include")
+include(cmake/BuildIdentity.cmake)
 
 # ---------------------------------------------------------------------------
 # Engine: DuckDB session, manifest, type map, SQL builder. No Stata API here,
@@ -194,6 +197,7 @@ if(WIN32)
 endif()
 target_include_directories(parqit_plugin PRIVATE
     src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${PARQIT_VENDOR_DIR}/stata"
     "${PARQIT_DUCKDB_INCLUDE}"
     "${PARQIT_VENDOR_DIR}/arrow"
@@ -306,7 +310,8 @@ add_custom_target(parqit_local_ado ALL
 if(PARQIT_BUILD_TESTS)
     enable_testing()
     add_executable(parqit_runtime_probe tests/plugin_runtime_probe.cpp)
-    target_include_directories(parqit_runtime_probe PRIVATE "${PARQIT_VENDOR_DIR}/stata")
+    target_include_directories(parqit_runtime_probe PRIVATE "${PARQIT_VENDOR_DIR}/stata"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_link_libraries(parqit_runtime_probe PRIVATE ${CMAKE_DL_LIBS})
     if(NOT WIN32)
         target_compile_definitions(parqit_runtime_probe PRIVATE SYSTEM=OPUNIX)
@@ -342,6 +347,11 @@ if(PARQIT_BUILD_TESTS)
     )
     target_link_libraries(parqit_tests PRIVATE parqit_engine Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME unit COMMAND parqit_tests)
+    add_test(NAME duckdb_patch_guards COMMAND "${CMAKE_COMMAND}"
+        "-DPARQIT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DDUCKDB_SOURCE_DIR=${duckdb_SOURCE_DIR}"
+        "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_duckdb_patch_guards.cmake")
     if(UNIX)
         add_test(NAME runner_no_match
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run_stata_no_match.sh")

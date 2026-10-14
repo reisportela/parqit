@@ -454,6 +454,7 @@ class View {
      * columns reach the next stage; any other stage drops them */
     void push_stage(const std::string &select_body, const std::string &desc,
                     bool keeps_order = false);
+    void append_stage_sql(std::string &sql, size_t stage) const;
     /* TWOTABLE-CHARS-1: keep only the characteristics of live columns and _dta */
     void prune_chars();
 
@@ -470,6 +471,21 @@ class View {
     int window_stages_ = 0;              /* egen stages with a window */
     int window_terms_ = 0;               /* "OVER (PARTITION BY" terms over the stages */
     std::vector<std::string> stages_; /* each a full SELECT … FROM <prev> */
+    /* A fused stage supersedes its predecessor only from this stage number
+     * onwards. Earlier prefixes remain available for range validation. */
+    std::vector<size_t> superseded_at_;
+    struct EgenStage {
+        size_t first = 0; /* one-based first stage of the batch; 0 = ordinary */
+        std::string columns, from; /* populated only at the first stage */
+        std::string definition;
+    };
+    std::vector<EgenStage> egen_stages_;
+    struct EgenBatch {
+        size_t first = 0, end = 0;
+        std::vector<std::string> by;
+        std::set<std::string> outputs;
+        int prior_window_terms = 0, window_terms = 0;
+    } egen_batch_;
     std::vector<std::string> descs_;
     std::vector<ViewCol> cols_;
     std::vector<std::string> sort_;   /* quoted "name" or "name DESC" */

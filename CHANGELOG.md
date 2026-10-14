@@ -6,6 +6,64 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-10-14
+
+### Fixed
+
+- The embedded DuckDB window self-join rewrite now refuses volatile input
+  expressions, volatile window expressions and aggregate children
+  (WINDOW-VOLATILE-1). A SQL
+  source containing `random()` followed by a grouped mean could previously
+  return means computed from a second evaluation of the source. Volatile
+  partition keys could also lose rows; `first()` and `any_value()` in a child
+  aggregation could select different rows on the two sides. The source patch
+  is hash-checked; supported deterministic scan/filter/projection plans retain
+  the optimisation.
+- Volatile expressions inside SQL lambda bodies are now classified as
+  volatile too (LAMBDA-VOLATILE-1). DuckDB kept those bodies in bind data, so
+  a `list_transform(..., x -> random())` source could escape the ordinary
+  expression check and produce inconsistent window aggregates. Pure lambda
+  expressions retain their optimisation.
+
+### Changed
+
+- Consecutive independent `egen mean/total/sum/sd/min/max/count` commands
+  over bare columns and the same groups now share a window stage
+  (EGEN-FUSE-1). Aggregate algorithms, storage conversions, metadata and
+  command order are preserved; conditions, positional expressions and
+  dependencies continue through the sequential path. Historical prefixes
+  remain available to validate `in` ranges, with a compact batch
+  representation. Fusion preserves the existing optimiser policy for
+  multiple logical windows.
+- The user and technical helps explain the separate parqit/DuckDB versions,
+  the automatic window optimisation, and controlled performance comparisons.
+- Both helps distinguish the in-memory logical plan from its disk-backed
+  source data and explain the lifetime of views and the loaded plugin identity.
+
+### Added
+
+- Numerical contract 4 and a reproducible plugin source ID (BUILD-ID-1).
+  `parqit version` returns `r(build_id)` and `r(numeric_contract)`; the ado
+  refuses an earlier numerical contract even when the release strings agree.
+  `selftest` now checks volatile window inputs, lambda bodies and partition
+  keys with deterministic sequences in a separate engine. The user's views,
+  SQL objects and engine settings are preserved.
+- Portable CTest guards for original, corrected, intermediate, unknown and
+  pre-existing-staging states of the two new dependency patches. V163 checks
+  numerical identity and refusal; V164 checks 12 native/exact-oracle storage
+  scenarios and equality of fused/sequential values, types and metadata.
+- Guided refusals for lazy `merge`, `append` and `joinby` without a current
+  view (NOVIEW-GUIDE-1), before importing a disk-side bridge. With data in
+  memory, `merge` and `append` show a copyable `mergein` or `appendin` command
+  with the typed options; every refusal also explains how to open a view.
+  A `view:` source keeps the plugin's existing refusal. The help and README
+  expose the in-memory route at a glance and map the basic `pq` commands to
+  their parqit equivalents. Published command names and semantics stay fixed.
+- Both helps document the no-view refusal and its in-memory suggestions.
+  The technical reference also lists `appendin`'s existing `nolabel` and
+  `nonotes` options and corrects the stale requirement for an explicit
+  varlist in `duplicates report`/`list` (omitting it uses all variables).
+
 ## [0.4.1] — 2026-10-14
 
 Corrections from an adversarial review of 0.4.0's new features (AUDIT-157,

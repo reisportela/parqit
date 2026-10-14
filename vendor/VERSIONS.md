@@ -18,7 +18,7 @@ Pins:
   filename `parqit_openmp_license.txt`; removing OpenMP does not relicense
   other compiler-runtime code.
 - DuckDB tarball SHA256
-  `f22a7cfb3e72be3010f4a7f2fbdd8de7d62fa036b838543acb663a722a7a71df`
+  `1fadcbe9e69e1470f9093b6bcde08daf477d729c449e59a807f45c346622099b`
   (verified by CMake on every fetch).
 - The pinned sampler also receives the local, hash-guarded correction in
   `cmake/PatchDuckDBSampling.cmake`: SQL samples use uniform reservoir selection
@@ -37,6 +37,15 @@ Pins:
   reports interruption. An acquire fence on the interrupted path pairs with
   error publication; the successful fetch path is unchanged. The original and
   corrected source hashes are checked before any write.
+- `cmake/PatchDuckDBWindowSelfJoin.cmake` prevents the window self-join
+  optimiser from duplicating volatile input/window expressions or aggregate
+  children, including order-dependent `first` and `any_value`. This preserves
+  rows and keeps aggregates consistent with the returned values.
+  Original and corrected source hashes are checked before any write.
+- `cmake/PatchDuckDBLambdaVolatility.cmake` includes a lambda's bound body in
+  `BoundFunctionExpression::IsVolatile()`, matching the engine's existing
+  `IsFoldable()` check. Volatile lambda sources cannot bypass the window
+  guard; pure lambdas retain their optimisation. Source hashes are checked.
 
 Why a source build rather than the released amalgamation: verified on
 2026-06-12 that `libduckdb-src.zip` for 1.5.x is the **bare engine** — the

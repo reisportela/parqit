@@ -1,4 +1,4 @@
-*! version 0.4.1 14oct2026
+*! version 0.4.2 14oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -46,7 +46,7 @@ program define _parqit_ensure_plugin
     version 16.0
     capture plugin call parqit_plugin, ping 03
     if (_rc == 0) {
-        _parqit_check_numeric_contract "`parqit_numeric_contract'"
+        _parqit_check_numeric_contract "`parqit_numeric_contract'" "`parqit_build_id'"
         _parqit_check_plugin_release "`parqit_plugin_version'"
         exit
     }
@@ -86,7 +86,7 @@ program define _parqit_ensure_plugin
     }
 
     plugin call parqit_plugin, ping 03
-    _parqit_check_numeric_contract "`parqit_numeric_contract'"
+    _parqit_check_numeric_contract "`parqit_numeric_contract'" "`parqit_build_id'"
     _parqit_check_plugin_release "`parqit_plugin_version'"
 end
 
@@ -99,7 +99,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.4.1"
+    local ado_version "0.4.2"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -115,9 +115,9 @@ end
 
 program define _parqit_check_numeric_contract
     version 16.0
-    args contract
-    if ("`contract'" == "3") exit
-    di as err "parqit: ado and plugin numerical revisions do not match"
+    args contract identity
+    if ("`contract'" == "4" & strlen("`identity'") == 64 & regexm("`identity'", "^[0-9a-f]+$")) exit
+    di as err "parqit: numerical contract 4 and a plugin source ID are required; the loaded plugin does not match"
     di as err "restart Stata after installing the matching files; check PARQIT_PLUGIN_PATH if set"
     exit 198
 end
@@ -139,6 +139,10 @@ program define _parqit_version, rclass
         as txt "  (engine: DuckDB " as res "`parqit_duckdb_version'" ///
         as txt ", Stata Plugin Interface " as res "`parqit_spi_version'" ///
         as txt ", parallelism: DuckDB)"
+    di as txt "Plugin source ID: " as res "`parqit_build_id'" ///
+        as txt "; numerical contract: " as res "`parqit_numeric_contract'"
+    return local build_id "`parqit_build_id'"
+    return scalar numeric_contract = real("`parqit_numeric_contract'")
     return local parqit_version `"`parqit_plugin_version'"'
     return local duckdb_version `"`parqit_duckdb_version'"'
     return local parallel_backend "duckdb"
@@ -183,7 +187,7 @@ program define _parqit_selftest, rclass
         exit 920
     }
     di as txt "parqit selftest: " as res "ok" ///
-        as txt "  (codecs, engine, Parquet write/read and metadata verified in-process)"
+        as txt "  (codecs, engine, Parquet, metadata and numerical window contract verified in-process)"
     return local selftest "ok"
     return scalar openmp_threads = real("`parqit_openmp_threads'")
 end
@@ -1074,6 +1078,37 @@ program define _parqit_no_view_using
     di as err `"parqit `who': the using side is a file on disk, not the open view `v';"' ///
         `" save it first (parqit view `v': save <file>) and `who' that file, or join"' ///
         `" out of core: parqit open _data, parqit `lazyverb' ... using view:`v', parqit collect, clear"'
+    exit 198
+end
+
+* NOVIEW-GUIDE-1: the mirror refusal, before importing a lazy using side.
+* Keep the original command tokens for a copyable in-memory alternative.
+program define _parqit_require_view_using
+    version 16.0
+    args who using typed nfiles
+    if (substr(`"`using'"', 1, 5) == "view:") exit
+    plugin call parqit_plugin, view_alive
+    if ("`parqit_view_alive'" == "1") exit
+    di as err "parqit `who': no view is open (the dataset in memory is not a view)"
+    if (c(k) > 0 & inlist("`who'", "merge", "append")) {
+        if ("`who'" == "append" & "`nfiles'" != "1") {
+            * appendin accepts one file, so show the first with the typed
+            * options rather than an invalid multiple-file appendin call.
+            gettoken usingtok rest : typed
+            local files : copy local rest
+            gettoken first rest : rest, parse(" ,")
+            mata: st_local("first", strtrim(substr(st_local("files"), 1, strlen(st_local("files"))-strlen(st_local("rest")))))
+            forvalues i = 2/`nfiles' {
+                gettoken unused rest : rest, parse(" ,")
+            }
+            local typed `"using `macval(first)'`macval(rest)'"'
+            di as err "parqit appendin reads one file at a time; start with the first file below"
+        }
+        mata: st_local("typed", _parqit_smcl_plain(st_local("typed")))
+        di as err `"to `who' the file into the data in memory: {bf:parqit `who'in `macval(typed)'}"'
+    }
+    di as err "to join out of core: {bf:parqit use using <file>} (or {bf:parqit open _data})," ///
+        " then {bf:parqit `who' ...}, {bf:parqit collect, clear}"
     exit 198
 end
 
@@ -3576,6 +3611,7 @@ end
 
 program define _parqit_merge, rclass
     version 16.0
+    local typed : copy local 0
     * lazy kinds: 1:1|m:1|1:m; recognise m:m only to refuse it precisely
     gettoken kind 0 : 0, parse(" ")
     if !inlist("`kind'", "1:1", "m:1", "1:m", "m:m") {
@@ -3623,6 +3659,7 @@ program define _parqit_merge, rclass
     }
     local mask = `m_master' + 2 * `m_using' + 4 * `m_match'
     _parqit_ensure_plugin
+    _parqit_require_view_using merge `"`using'"' `"`macval(typed)'"'
     * a dta/xls/xlsx/csv using side is imported to a small Parquet bridge;
     * encoding() names its legacy code page (BRIDGE-LOSS-1)
     global PARQIT_RS_IN `"`using'"'
@@ -3663,6 +3700,7 @@ end
 
 program define _parqit_append, rclass
     version 16.0
+    local typed : copy local 0
     * parqit append using <file> [<file> ...] [, generate(name) keep(varlist) nonotes]
     gettoken usingtok 0 : 0, parse(" ")
     if (`"`usingtok'"' != "using") {
@@ -3689,6 +3727,7 @@ program define _parqit_append, rclass
     * semantics, wildcards allowed); the plugin checks it against every source
     syntax [, GENerate(name) KEEP(string) noNOTEs ENCoding(string)]
     _parqit_ensure_plugin
+    _parqit_require_view_using append `"`_sq_file_1'"' `"`macval(typed)'"' `nf'
     * import any dta/xls/xlsx/csv source to a Parquet bridge; encoding() names
     * the legacy code page of every bridged file (BRIDGE-LOSS-1); the losses of
     * all bridges are accumulated into one r() set
@@ -3789,6 +3828,7 @@ program define _parqit_joinby, rclass
     }
     syntax using/ [, ENCoding(string)]
     _parqit_ensure_plugin
+    _parqit_require_view_using joinby `"`using'"'
     global PARQIT_RS_IN `"`using'"'
     global PARQIT_RS_ENC `"`encoding'"'
     capture noisily _parqit_resolve_source using

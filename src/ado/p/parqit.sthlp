@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.1 14oct2026}{...}
+{* *! version 0.4.2 14oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -52,7 +52,7 @@ limitations.
 
 {pstd}
 {cmd:parqit} is for data too large, or too slow, to load into Stata. It opens a
-file as a {it:view}, a plan kept on disk rather than a copy in memory. You shape
+file as a {it:view}: a plan held by the engine, with the source data on disk. You shape
 the view with the Stata commands you already know, look at it through summaries
 computed by the engine, and bring into Stata only the result you ask for, or
 write it straight to a Parquet file. An embedded DuckDB engine runs the plan out
@@ -102,6 +102,7 @@ Alongside the four moves, at any point in the session:
    {space 5}the plan{space 5}{cmd:parqit show} {cmd:parqit explain}
    {space 5}views{space 8}{cmd:parqit views} {cmd:parqit view} {cmd:parqit close}
    {space 18}a copy: {cmd:parqit use view:}{it:name}
+   {space 5}in memory{space 4}{cmd:parqit mergein} {cmd:parqit appendin} (native merge/append with a file parqit reads)
    {space 5}engine{space 7}{cmd:parqit set} {cmd:parqit path}
    {space 5}install{space 6}{cmd:parqit version} {cmd:parqit selftest} {cmd:parqit menu}
 
@@ -647,6 +648,34 @@ Two commands are deliberately {it:not} view verbs: {cmd:parqit mergein} and
 file through a {it:native} {helpb merge} / {helpb append}, reading only the
 columns of the file they need. Use them when the disk side is a small lookup;
 use {cmd:parqit use} + {cmd:parqit merge} when both sides are big.
+Think of {cmd:mergein} as merge {it:into} the data in memory.
+
+{pstd}
+{bf:Coming from pq.} These basic commands correspond as follows; options
+specific to {cmd:pq} are not implied by the correspondence.
+
+{p2colset 8 59 61 2}{...}
+{p2col:{bf:pq}}{bf:parqit}{p_end}
+{p2col:{cmd:pq use [varlist] using f.parquet, clear}}{cmd:parqit use [varlist] using f.parquet, clear}{p_end}
+{p2col:{cmd:pq merge m:1 keys using f.parquet}}{cmd:parqit mergein m:1 keys using f.parquet}{p_end}
+{p2col:{cmd:pq append using f.parquet}}{cmd:parqit appendin using f.parquet}{p_end}
+{p2col:{cmd:pq save using f.parquet, replace}}{cmd:parqit save f.parquet, replace}{p_end}
+{p2colreset}{...}
+
+{pstd}
+The last line saves memory when no view is open. When a view is open, add
+{opt data}: {cmd:parqit save f.parquet, replace data} saves memory explicitly.
+{cmd:mergein} and {cmd:appendin} each read one file at a time;
+{cmd:merge}, {cmd:append} and {cmd:joinby} continue to act on the current view.
+
+{pstd}
+Without a current view, these lazy verbs refuse with {cmd:r(198)} before
+importing a disk file. If data are already in memory, {cmd:merge} and
+{cmd:append} show a copyable {cmd:mergein} or {cmd:appendin} command with the
+options you typed. For multiple append files, the suggestion starts with the
+first file. The message also explains how to open a view for an out-of-core
+join; it never changes routes automatically. A {cmd:view:} source keeps the
+existing view diagnostic.
 
 {pstd}
 More: {help parqit_technical##views:Views} in the technical reference.
@@ -900,8 +929,24 @@ the engine's plan. {cmd:parqit query} appends a raw SQL clause to the plan, and
 like a reserved word, such as {cmd:"foreign"}. {cmd:parqit version} and
 {cmd:parqit selftest} check an installation, and {cmd:parqit path} resolves a
 path. Restart Stata after updating parqit: while Stata still holds the plugin of
-another release, parqit stops with a message that names both releases. More:
+another release or numerical revision, parqit refuses the mismatch. Version
+output also identifies the loaded plugin's sources and pinned patches; the
+64-digit source ID is returned in {cmd:r(build_id)}, and the required numerical
+revision in {cmd:r(numeric_contract)}. {cmd:selftest} checks deterministic
+window and lambda calculations in a separate engine, preserving your views.
+More:
 {help parqit_technical##settings:Settings, raw SQL and diagnostics}.
+
+{pstd}
+For performance, filter and select columns where the intended calculation
+allows it, then collect once. Consecutive independent {cmd:egen} aggregates
+over the same groups can share a window automatically; expressions that
+depend on earlier commands keep their sequential meaning.
+{cmd:parqit version} reports the package and DuckDB versions separately;
+an engine update alone does not guarantee a faster workflow. Compare repeated
+runs with the same result and thread settings, recording server load. See
+{help parqit_technical##perf:Performance tips} for the optimisation's scope
+and how to distinguish query execution from transfer into Stata.
 
 
 {marker examples}{...}
@@ -1199,7 +1244,7 @@ tables{p_end}
 {p2col:{cmd:describe} {it:file}}{cmd:r(n_rows)}, {cmd:r(n_cols)} and, per
 variable, its name, types and labels{p_end}
 {p2col:{cmd:version}}{cmd:r(parqit_version)}, {cmd:r(duckdb_version)},
-{cmd:r(cpus)}, {cmd:r(threads)}{p_end}
+{cmd:r(build_id)}, {cmd:r(numeric_contract)}, {cmd:r(cpus)}, {cmd:r(threads)}{p_end}
 {p2colreset}{...}
 
 {pstd}

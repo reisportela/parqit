@@ -12,6 +12,7 @@
  * returns 0 unless the requested operation completed.
  */
 #include "stplugin.h"
+#include "parqit_build_identity.hpp"
 
 #include <cstdio>
 #include <stdexcept>
@@ -67,7 +68,8 @@ ST_retcode cmd_ping(const std::vector<std::string> &args) {
         return kRcUsage;
     }
     save_local("_parqit_pong", "1");
-    save_local("_parqit_numeric_contract", "3");
+    save_local("_parqit_numeric_contract", PARQIT_NUMERIC_CONTRACT);
+    save_local("_parqit_build_id", PARQIT_BUILD_ID);
     /* PLUGIN-VERSION-1: the ado-files compare it with their own release */
     save_local("_parqit_plugin_version", PARQIT_VERSION);
     return 0;
@@ -87,6 +89,8 @@ ST_retcode cmd_echo(const std::vector<std::string> &args) {
 
 ST_retcode cmd_version(const std::vector<std::string> &) {
     save_local("_parqit_plugin_version", PARQIT_VERSION);
+    save_local("_parqit_numeric_contract", PARQIT_NUMERIC_CONTRACT);
+    save_local("_parqit_build_id", PARQIT_BUILD_ID);
     save_local("_parqit_duckdb_version", duckdb_library_version());
     save_local("_parqit_spi_version", "3.0");
     save_local("_parqit_parallel_backend", "duckdb");
@@ -111,6 +115,67 @@ ST_retcode cmd_version(const std::vector<std::string> &) {
     save_local("_parqit_openmp_version", "0");
     save_local("_parqit_openmp_max_threads", "0");
     return 0;
+}
+
+/* Probe the embedded optimiser in a separate in-memory database. Its sequence
+ * and settings cannot change a user's views, SQL objects or session settings. */
+bool verify_window_contract(std::string *err) {
+    struct Database {
+        duckdb_database db = nullptr;
+        duckdb_connection con = nullptr;
+        ~Database() {
+            if (con) duckdb_disconnect(&con);
+            if (db) duckdb_close(&db);
+        }
+    } probe;
+    duckdb_config config = nullptr;
+    if (duckdb_create_config(&config) != DuckDBSuccess ||
+        duckdb_set_config(config, "threads", "1") != DuckDBSuccess ||
+        duckdb_set_config(config, "memory_limit", "64MB") != DuckDBSuccess) {
+        duckdb_destroy_config(&config);
+        *err = "could not configure the numerical selftest";
+        return false;
+    }
+    char *open_error = nullptr;
+    const auto opened = duckdb_open_ext(nullptr, &probe.db, config, &open_error);
+    duckdb_destroy_config(&config);
+    if (open_error) {
+        *err = open_error;
+        duckdb_free(open_error);
+    }
+    if (opened != DuckDBSuccess || duckdb_connect(probe.db, &probe.con) != DuckDBSuccess) {
+        if (err->empty()) *err = "could not open the numerical selftest database";
+        return false;
+    }
+    auto query = [&](const std::string &sql, bool check) {
+        duckdb_result result{};
+        const auto rc = duckdb_query(probe.con, sql.c_str(), &result);
+        bool ok = rc == DuckDBSuccess;
+        if (!ok) {
+            const char *message = duckdb_result_error(&result);
+            *err = message ? message : "numerical selftest query failed";
+        } else if (check) {
+            ok = duckdb_row_count(&result) == 1 && !duckdb_value_is_null(&result, 0, 0) &&
+                 duckdb_value_boolean(&result, 0, 0);
+            if (!ok) *err = "the embedded engine duplicated a volatile window input";
+        }
+        duckdb_destroy_result(&result);
+        return ok;
+    };
+    if (!query("CREATE SEQUENCE parqit_probe", false)) return false;
+    for (const char *value : {"nextval('parqit_probe')",
+                             "list_transform([1], x -> nextval('parqit_probe'))[1]"}) {
+        const std::string sql =
+            "SELECT count(*)=2 AND bool_and(n=500 AND m=expected) FROM ("
+            "SELECT g,count(*) n,min(m) m,avg(x) expected FROM ("
+            "SELECT g,x,avg(x) OVER(PARTITION BY g) m FROM ("
+            "SELECT i%2 g,(" + std::string(value) + ")::DOUBLE x FROM range(1000) t(i)"
+            ")) GROUP BY g)";
+        if (!query(sql, true)) return false;
+    }
+    return query("SELECT count(*)=1000 AND bool_and(i=m) FROM ("
+                 "SELECT i,avg(i) OVER(PARTITION BY i*10000+nextval('parqit_probe')) m "
+                 "FROM range(1000) t(i))", true);
 }
 
 /* selftest <hex tmpdir>: end-to-end engine check inside the Stata process —
@@ -154,6 +219,10 @@ ST_retcode cmd_selftest(const std::vector<std::string> &args) {
     std::remove(file.c_str());
     if (!ok) {
         cry("parqit selftest: engine verification failed: " + (err.empty() ? got : err));
+        return kRcEngine;
+    }
+    if (!verify_window_contract(&err)) {
+        cry("parqit selftest: numerical contract failed: " + err);
         return kRcEngine;
     }
     save_local("_parqit_selftest", "ok");

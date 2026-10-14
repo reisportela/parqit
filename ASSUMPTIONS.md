@@ -4183,3 +4183,108 @@ entry notes the conservative fallback if the assumption proves wrong.
     native component and calendar rules. NULLs are checked before reading their
     payloads; accepted results are exact millisecond integers below 2^53.
     The clock callbacks additionally passed a targeted Valgrind run.
+
+195. **Fuse independent aggregate windows, preserving logical prefixes
+    (EGEN-FUSE-1, 2026-10-14).** Consecutive `egen mean/total/sum/sd/min/max/count`
+    calls with bare-column arguments, identical expanded grouping keys and
+    no qualifier can share one SELECT level. Reuse the exact generated
+    aggregate and storage-conversion expressions. An argument or grouping key
+    produced inside the batch starts a new batch; other expressions,
+    conditions and intervening data stages keep the sequential path. Retain
+    each logical stage and its prefix for pending range checks and view
+    copies, but omit superseded CTEs from the final query. Store a batch base
+    and per-member definitions, composing its SQL at compile time instead of
+    retaining an expanded copy at every prefix. Preserve the existing
+    optimiser workaround for multiple logical windows: fusion must not
+    newly enable a self-join that evaluates an expensive child twice. This changes the
+    execution plan, not the statistical algorithms or public grammar. As
+    before, an unordered view with windows has no promised physical row order;
+    declared order and its hidden tie carriers survive. The 0.3.3 public
+    baseline uses DuckDB 1.5.3, and the 0.4.1 development baseline uses 1.5.6;
+    engine-only comparisons must hold the C API driver, compiler flags and
+    optimiser settings constant. Evidence belongs to
+    `audit_repro/performance_main_20261014/`.
+
+196. **Do not duplicate volatile input in a window self-join
+    (WINDOW-VOLATILE-1, 2026-10-14).** The 1.5.6 optimiser's child-type check
+    permits projections, filters and aggregates without checking volatility;
+    its deep copy then evaluates those expressions independently on each
+    side. The initial 0.4.1 plugin reproduced an incorrect grouped mean on
+    all 1,000 rows in each of five synthetic `random()` trials. Guard every
+    child operator's expressions (including grouping expressions) using
+    DuckDB's expression visitor and `IsVolatile()`, and guard the window's
+    own arguments and partition expressions too. Deterministic inputs keep
+    their normal optimisation. The new pinned-source patch accepts only the
+    known original or corrected hash and refuses unknown local changes.
+    Sequence-based unit tests make the invariant deterministic; V161 checks
+    single and fused aggregates against native Stata and checks row retention.
+    The Opus follow-up also reproduced inconsistent results from `first()`
+    and `any_value()` aggregate children: all seven outer groups disagreed
+    in each of three four-million-row trials. Such aggregates are not marked
+    volatile, and their chosen rows can differ between evaluations. Remove
+    aggregate children from the rewrite's operator allow-list; SAMPLE, LIMIT,
+    WINDOW and joins were already excluded. The patch accepts the known first
+    correction's hash as an upgrade input and verifies the written hash too.
+    The advisor's proposed negative window counter did not reproduce: every
+    expression egen increments `window_stages_`, including unpartitioned
+    ones; its executable reproducer returned the expected fragile flag.
+    Stage-pop/epoch hazards are inapplicable to the current append-only
+    private stage vector; close/open resets the entire View value. Add an
+    explicit plain-FROM eligibility guard and retain those invariants.
+
+197. **Lambda bodies participate in volatility (LAMBDA-VOLATILE-1,
+    2026-10-14).** The advisor's lambda probe reproduced the inconsistency
+    for constant and row-varying list arguments, in both groups on all three
+    repetitions. `BoundFunctionExpression::IsFoldable()` already inspected
+    `ListLambdaBindData::lambda_expr`, but `IsVolatile()` inspected only the
+    ordinary children. Mirror that bound-body check, guarding absent bind
+    data, so volatility propagates through nested functions and window
+    partition expressions. Pure lambdas must still pass the positive
+    self-join plan control. The additional source patch is hash-checked and
+    verifies the written file; no SQL function or public option is removed.
+
+198. **Discover the in-memory route without changing published names
+    (NOVIEW-GUIDE-1, 2026-10-14).** The maintainer keeps `merge`, `append`
+    and `joinby` as lazy verbs, and `mergein`/`appendin` as native operations
+    on memory with a disk file. Swapping names would silently change the
+    SSC 0.3.3 commands, the Stata Journal paper and both shipped crash courses;
+    a synonym cannot stage a swap of identical spellings. A fallback to
+    memory when no view exists is also rejected: a forgotten view would
+    redirect a successful command, repeating the ambiguity reported for
+    `save`, and do-files would make that fallback permanent. The issue is
+    discoverability for users of `pq`, whose installed help confirms the
+    four basic command correspondences now documented. Probe `view_alive`
+    in an ado helper before resolving the using file; refuse with the existing
+    r(198), preserving the typed arguments in a memory-route suggestion when
+    data is present. `appendin` accepts one file, so a multiple-file append
+    shows the first source with the original options and says to start there.
+    `joinby` and empty memory get only the view-opening alternative. A using
+    side beginning `view:` bypasses the guidance and retains the plugin
+    backstop; without a current view that backstop reports no lazy view,
+    while a live current view permits the named-view diagnostic. No command
+    is executed by the guidance, no source is imported, and live-view
+    execution continues unchanged. V162 pins messages, refusal ordering,
+    unchanged memory/views and the executable single-file suggestions.
+
+199. **Identify the loaded numerical implementation (BUILD-ID-1,
+    2026-10-14).** Two local 0.4.1 plugins passed the release-string check
+    and selftest but differed on volatile window inputs. Contract 4 is now
+    required before data operations. CMake fingerprints the plugin/engine
+    sources, vendored interfaces, build inputs and dependency patches with
+    SHA-256, normalising line endings and excluding host paths and Git state.
+    The loaded plugin returns that source ID to `parqit version`; exact
+    platform binaries retain their separate release SHA-256. Selftest uses
+    an independent one-thread database and deterministic sequences to check
+    window inputs, lambda bodies and partition expressions without changing
+    the user's SQL objects, views or settings. Future numerical corrections
+    that invalidate an older contract must advance its revision too.
+
+200. **Complete release integration and artifact acceptance (RELEASE-042-1,
+    2026-10-14).** The user explicitly authorised the correction, bump,
+    commit, push and release. Version 0.4.2 includes the previously local
+    source patches and regression tests. Unknown-source and staging refusals
+    become portable CTest gates; native/Fraction/Decimal storage checks become
+    V164. Publication requires the four platform builds, exact packaged-plugin
+    validation, checksums and an isolated installation. The local diagnostic
+    build is not a substitute for the EL8 release binary. Existing unrelated
+    work and the global ado/Stata installation stay outside this operation.

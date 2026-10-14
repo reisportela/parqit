@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.1 14oct2026}{...}
+{* *! version 0.4.2 14oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -98,8 +98,10 @@ and {cmd:appendin}'s {opt keep()}. {cmd:sort}/{cmd:gsort} and
 
 {pstd}
 The one idea to internalise: {bf:mutation verbs build a plan rather than materialising their result}.
-A view is a plan — "the current dataset", except
-that it lives on disk and may be far larger than memory. Opening a view probes
+A view holds a plan in the engine's memory; its source data remain in files
+and may be far larger than memory. Plans last for the current Stata process;
+they are not persisted on disk. Bridges and spill files are temporary data,
+and planning and execution still require memory. Opening a view probes
 its schema. Verbs validate their names and stated contracts; commands such as
 {cmd:keep}, {cmd:gen} and {cmd:collapse} also bind-check their candidate SQL.
 Contract-sensitive verbs may run validation queries (for example merge-key uniqueness, reshape
@@ -127,7 +129,8 @@ source. This moves the memory requirement from {it:the whole input} to
 {pstd}
 {cmd:parqit use using} {it:files} opens a {it:view}: a description of the
 data plus a pipeline of verbs, like Stata's idea of "the current dataset"
-but living on disk. Opening probes source schema and metadata but does not
+over files on disk. The plan itself is held in memory for the session.
+Opening probes source schema and metadata but does not
 materialise its result into the current dataset; a delimited source may be
 sampled for type inference, and adapter inputs are bridged as described below.
 Views are
@@ -336,7 +339,9 @@ needed columns of the disk side. This is the fast route when the disk side is a
 {opt gen:erate()}, {opt nogen:erate},
 {opt update}, {opt replace}, {opt assert()}, {opt force}, {opt nol:abel},
 {opt non:otes}, {opt norep:ort}), forwarded verbatim to native {helpb merge};
-{cmd:appendin} forwards {opt keep()}, {opt generate()} and {opt force} to native {helpb append}.
+{cmd:appendin} forwards {opt keep()}, {opt generate()}, {opt nolabel},
+{opt nonotes} and {opt force} to native {helpb append}. Both commands take one
+file at a time; {opt int64()} and {opt encoding()} govern its read by parqit.
 Lazy {cmd:parqit merge} is not a wrapper around native {cmd:merge} and takes
 only the options shown in its own syntax line; any other native
 {cmd:merge} option is rejected.
@@ -1283,6 +1288,20 @@ first), generated names must be valid variable names, and more than 2,000
 distinct {opt cols()} values refuse to run. A refused pivot leaves the
 view exactly as it was.
 
+{pstd}Without a current view, a syntactically valid {cmd:merge}, {cmd:append}
+or {cmd:joinby} with a disk using side is refused with {cmd:r(198)} before
+any source adapter runs. The refusal leaves the dataset and view registry
+unchanged. With variables in memory, {cmd:merge}/{cmd:append} suggest
+{cmd:mergein}/{cmd:appendin} with the typed arguments and options; a
+multiple-file append shows the first file and explains the one-file limit.
+{cmd:joinby} has no in-memory twin. Every guided refusal names
+{cmd:parqit use using <file>} or {cmd:parqit open _data} as the way to start
+an out-of-core plan. No context-dependent fallback is performed. A using
+side beginning {cmd:view:} bypasses this guidance: the plugin still checks
+the current view first, then the named using view. With a live current view,
+source imports and their errors retain their usual behaviour. See also
+{help parqit##lazy:Coming from pq} in the user's guide.
+
 {pstd}Two-table {cmd:using} sources may be {cmd:view:}{it:name}: the other
 view's pipeline is embedded as a subquery, so filtered-view-to-
 filtered-view joins run in one out-of-core query. All contracts below
@@ -1380,7 +1399,7 @@ native commands, so the same holds there.
 needs neither ordering nor {opt force}. With a {it:varlist}, it requires both
 {opt force} and a previous {cmd:parqit sort}; it keeps the first row in that
 declared order. {cmd:duplicates report}/{cmd:list} are read-only diagnostics
-and require an explicit key varlist.
+and, without a varlist, compare all variables in the view.
 
 {pstd}{cmd:keep in} {it:f}{cmd:/}{it:l} validates its range against the
 real observation count when the pipeline runs; out-of-range is an error,
@@ -2681,6 +2700,14 @@ plan. {cmd:path} resolves a path to an absolute spelling and reports whether
 it
 exists, without creating it. {cmd:version} reports the parqit and embedded
 DuckDB versions and identifies DuckDB as the parallel execution backend.
+It also reports the loaded plugin's source ID and numerical contract revision.
+The source ID hashes the plugin/engine sources, vendored interfaces, CMake
+inputs and pinned dependency patches, normalising CRLF to LF. It is independent
+of the checkout path and Git metadata; release binary checksums remain specific
+to each platform and compilation. The ado requires numerical contract 4 and a
+source ID before operating on data. Old plugins cannot pass by reporting the
+same release number alone. Changing a plugin path after loading one does not
+replace that resident binary: restart Stata and check the reported identity.
 {cmd:selftest} checks the ado/plugin codec, opens the engine, and writes/reads
 a
 small metadata-bearing Parquet file in process. No separate OpenMP runtime or
@@ -2751,12 +2778,61 @@ same release: a running Stata can keep the plugin it loaded first, even after
 
 {pstd}
 parqit is fastest when data stays on disk and only the final result moves into
-Stata. The biggest single cost in any Stata↔columnar bridge is moving rows in
-and out of Stata's memory through the plugin interface, so the patterns below
-pay off most on large data. parqit prints a one-line {it:tip} when it detects
+Stata. Moving rows through the plugin interface can be a substantial part of
+the total time; sorting, joining or computing exact statistics can dominate
+other workflows. The patterns below reduce unnecessary work on large data.
+parqit prints a one-line {it:tip} when it detects
 one
 of these (e.g. a large {cmd:mergein}); {cmd:global PARQIT_NOTIPS 1} silences
 them.
+
+{dlgtab:Repeated aggregates and measuring changes}
+
+{pstd}
+Consecutive independent {cmd:egen mean()}, {cmd:total()}, {cmd:sum()},
+{cmd:sd()}, {cmd:min()}, {cmd:max()} and {cmd:count()} on bare columns share
+a window stage when they use the same {opt by()} groups (or all omit
+{opt by()}) and have no {cmd:if}. This lets the engine partition the rows
+once and share identical aggregate expressions. The aggregate algorithms,
+missing-value rules and requested storage types are unchanged. For example:
+
+{phang2}{cmd:. parqit egen double mean_wage = mean(wage), by(firm_id)}{p_end}
+{phang2}{cmd:. parqit egen double total_wage = total(wage), by(firm_id)}{p_end}
+{phang2}{cmd:. parqit egen double max_wage = max(wage), by(firm_id)}{p_end}
+{phang2}{cmd:. parqit explain}{p_end}
+
+{pstd}
+A command using an earlier aggregate's output, a condition, a positional
+expression or an intervening transformation retains its sequential plan.
+Do not reorder commands just to obtain the optimisation: a filter or
+replacement can change the sample or values an aggregate must see.
+
+{pstd}
+Within one execution, aggregates over a volatile or order-dependent SQL source
+(for example, {cmd:random()} or {cmd:first()}) use that execution's input
+values. A later {cmd:collect} or
+{cmd:save} executes the view again and can generate different values; save
+once and reopen the saved file when a fixed random realisation is required.
+
+{pstd}
+The package version and engine version are separate: parqit 0.3.3 embeds
+DuckDB 1.5.3; the 0.4 series embeds 1.5.6. {cmd:parqit version} reports both.
+Engine fixes do not promise a speed-up for every query. Compare identical
+inputs, values, types, metadata, order requirements and materialisers; use
+matching ado/plugin versions, fixed {cmd:threads} and {cmd:fill_threads},
+warm-up runs and interleaved repetitions of both versions. Record server
+load and distinguish the first plugin/Mata load from subsequent calls.
+Repeat the same version as a control: differences smaller than that variation
+do not establish a regression or a gain.
+
+{pstd}
+Time the whole workflow as well as the materialiser. Lazy opening probes
+schema and metadata; it does not execute all subsequent work.
+{cmd:collect} includes query execution, result sizing, allocation and transfer
+into Stata. {cmd:save} writes the view directly to Parquet and avoids that
+transfer. {cmd:explain} identifies scan filters, window operators and sorts,
+but is not itself a timing measurement. More threads are not always faster
+on a shared server; compare several counts on the actual workload.
 
 {dlgtab:Joining in-memory data with a disk file}
 
@@ -3221,10 +3297,12 @@ Native {cmd:tabstat} instead reports error 2000 for that empty-group case.
 
 {pstd}{it:Diagnostics.} {cmd:path} returns local {cmd:r(path)} and scalar
 {cmd:r(exists)}. {cmd:version} returns locals {cmd:r(parqit_version)},
-{cmd:r(duckdb_version)}, {cmd:r(parallel_backend)} equal to {cmd:duckdb} and
+{cmd:r(duckdb_version)}, {cmd:r(build_id)} (64 hexadecimal digits),
+{cmd:r(parallel_backend)} equal to {cmd:duckdb} and
 {cmd:r(fill_threads)} ({cmd:auto}, or the number chosen with
 {cmd:parqit set fill_threads}),
 and {cmd:r(stream_buffer_mb)} ({cmd:auto}, {cmd:0}, or the chosen MB cap).
+Scalar {cmd:r(numeric_contract)} reports the numerical revision (4).
 Scalars {cmd:r(cpus)} and {cmd:r(threads)} report the available CPU count and
 the active engine thread count. The two setting locals report the session
 choice; {cmd:auto} can still inherit an operating-system environment override.
@@ -3232,7 +3310,10 @@ For compatibility, scalars {cmd:r(openmp)}, {cmd:r(openmp_version)} and
 {cmd:r(openmp_max_threads)} remain available and equal zero: the plugin has no
 OpenMP dependency. These are not DuckDB worker counts. {cmd:selftest} returns
 local {cmd:r(selftest)} equal to {cmd:ok} and legacy scalar
-{cmd:r(openmp_threads)} equal to zero.
+{cmd:r(openmp_threads)} equal to zero. Its numerical checks use deterministic
+sequences to test volatile window inputs, lambda bodies and partition keys in
+a separate one-thread engine; the user's SQL objects, views and settings stay
+as they were. A failed check returns a nonzero error, never {cmd:ok}.
 Commands not listed in this section do not promise parqit-specific
 stored results; in particular the lazy mutation verbs normally change only the
 view plan, while {cmd:codebook}, {cmd:tabstat} without {opt save},

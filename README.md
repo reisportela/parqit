@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.4.1 — the full surface below is implemented and covered by a
+> **Status:** v0.4.2 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,15 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.4.2 integrates the follow-up numerical corrections and independent
+aggregate-window optimisation. It protects volatile inputs and lambda bodies
+from repeated evaluation by the embedded engine, while preserving sequential
+dependencies, storage precision and metadata. `parqit version` now reports the
+loaded plugin's source ID and numerical contract; earlier numerical builds are
+refused, even if their release number matches. `selftest` exercises the window
+corrections in a separate engine. Lazy joins without a view give copyable
+guidance for `mergein`/`appendin`, and both helps explain the two routes.
 
 Version 0.4.1 corrects defects an adversarial review found in 0.4.0's new
 features: a failed lazy `use … if` or projection now leaves the views as they
@@ -177,8 +186,8 @@ If your Stata reflex is *load → work → save*, parqit asks for exactly one ne
 idea, and everything else follows from it: **mutation verbs build a plan
 instead of materialising their result when you type them.**
 
-`parqit use using` opens a **view**: your "current dataset", except that it
-lives on disk and may be far larger than memory. Opening probes source schema
+`parqit use using` opens a **view**: a plan held by the engine for this session
+over source files that may be far larger than memory. Opening probes source schema
 and metadata; a delimited source may be sampled for type inference, and Stata
 or Excel inputs may first be copied to a package-owned Parquet bridge. No
 result observations are loaded into Stata, and whatever dataset you already
@@ -484,6 +493,19 @@ first, load last** — and it is the sense in which parqit is not another
 Parquet reader: the interesting work happens before the current dataset is
 replaced by a collected result.
 
+Consecutive independent `egen mean/total/sum/sd/min/max/count` commands on
+bare columns, with the same `by()` groups and no `if`, share a window stage.
+The aggregate algorithms and storage types are unchanged. A dependent
+expression, condition or intervening data transformation keeps its sequential
+meaning. `parqit explain` shows the resulting plan.
+
+`parqit version` reports both the package and embedded DuckDB versions:
+parqit 0.3.3 embeds DuckDB 1.5.3; the 0.4 series embeds 1.5.6. A newer engine
+does not make every pipeline faster. Compare the same result, thread settings
+and materialiser in interleaved repeated runs, and record server load. Opening
+a lazy view, executing its plan and transferring rows into Stata are separate
+costs; see **Performance tips** in `help parqit_technical`.
+
 ## The verb grammar
 
 Mutation verbs append to the **current view** (an implicit lazy table, just
@@ -556,6 +578,7 @@ re-executes each time. Alongside the four moves, at any point in the session:
 |---|---|
 | the plan | `parqit show` `parqit explain` |
 | views | `parqit views` `parqit view` `parqit use … using view:` `parqit close` |
+| in memory | `parqit mergein` `parqit appendin`: native merge/append with a file parqit reads |
 | engine | `parqit set` `parqit path` |
 | install | `parqit version` `parqit selftest` `parqit menu` |
 
@@ -574,6 +597,7 @@ Two commands are deliberately *not* view verbs: `parqit mergein` and
 through a **native** `merge`/`append`, reading only the columns of the file they
 need. Use them when the disk side is a small lookup; use `parqit use` +
 `parqit merge` when both sides are big.
+Think of `mergein` as merge *into* the data in memory.
 
 ### Open / source
 
@@ -952,6 +976,21 @@ the in-memory data put and run a *native* `merge`/`append`, reading only the
 needed columns of the disk side — no DuckDB round-trip. It avoids the temporary
 `parqit open _data` bridge and is therefore the preferred route for a small disk
 lookup. For big-on-big, prefer the out-of-core `parqit use … ; parqit merge` path.
+
+**Coming from pq.** These basic commands correspond as follows; options
+specific to `pq` are not implied by the correspondence.
+
+| pq | parqit |
+|---|---|
+| `pq use [varlist] using f.parquet, clear` | `parqit use [varlist] using f.parquet, clear` |
+| `pq merge m:1 keys using f.parquet` | `parqit mergein m:1 keys using f.parquet` |
+| `pq append using f.parquet` | `parqit appendin using f.parquet` |
+| `pq save using f.parquet, replace` | `parqit save f.parquet, replace` |
+
+The last line saves memory when no view is open. When a view is open, add
+`data`: `parqit save f.parquet, replace data` saves memory explicitly.
+`mergein` and `appendin` each read one file at a time; `merge`, `append`
+and `joinby` continue to act on the current view.
 
 | Command | Effect |
 |---|---|

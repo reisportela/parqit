@@ -50,6 +50,221 @@ static long long run_count(const View &v) {
         nullptr, 10);
 }
 
+struct ResetWindowSelfJoin {
+    ~ResetWindowSelfJoin() {
+        std::string ignored;
+        (void)Session::instance().set_window_self_join(true, &ignored);
+    }
+};
+
+TEST_CASE("EGEN-FUSE-1 independent aggregates share a window without changing prefixes") {
+    ResetWindowSelfJoin reset;
+    View v = make_view();
+    View::EgenSpec sp;
+    sp.by = {"firm"};
+    sp.expr = "wage";
+    sp.type_req = "double";
+    sp.name = "m"; sp.fcn = "mean";
+    REQUIRE(v.egen(sp, false).empty());
+    const std::string prefix = v.compile_prefix(v.n_stages());
+    sp.name = "s"; sp.fcn = "total";
+    REQUIRE(v.egen(sp, false).empty());
+    sp.name = "hi"; sp.fcn = "max";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(v.n_stages() == 3);
+    CHECK(v.compile_prefix(1) == prefix);
+    CHECK(v.compile(false).find("__parqit_s1 AS") == std::string::npos);
+    CHECK(v.compile(false).find("__parqit_s2 AS") == std::string::npos);
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+        ") WHERE m = CASE WHEN firm='a' THEN 21.25 ELSE 20 END AND "
+        "s = CASE WHEN firm='a' THEN 85 ELSE 20 END AND "
+        "hi = CASE WHEN firm='a' THEN 33 ELSE 20 END") == "6");
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile_prefix(2) + ") WHERE s IN (85,20)") == "6");
+    duckdb_result plan;
+    std::string err;
+    REQUIRE(Session::instance().set_window_self_join(false, &err));
+    REQUIRE(Session::instance().query("EXPLAIN " + v.compile(false), &plan, &err));
+    char *raw = duckdb_value_varchar(&plan, 1, 0);
+    const std::string text = raw ? raw : "";
+    duckdb_free(raw);
+    duckdb_destroy_result(&plan);
+    REQUIRE(Session::instance().set_window_self_join(true, &err));
+    const auto window = text.find("WINDOW");
+    REQUIRE(window != std::string::npos);
+    CHECK(text.find("WINDOW", window + 6) == std::string::npos);
+
+    /* A later aggregate of an earlier output must run after that output. */
+    sp.expr = "s"; sp.name = "dependent"; sp.fcn = "total";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+        ") WHERE dependent = CASE WHEN firm='a' THEN 340 ELSE 40 END") == "6");
+    CHECK(v.compile(false).find("__parqit_s3 AS") != std::string::npos);
+
+    /* Copies own their batch state; mutations cannot reach the original. */
+    View copy = v;
+    REQUIRE(copy.filter("year == 2019", false, false).empty());
+    sp.expr = "wage"; sp.name = "after_filter"; sp.fcn = "total";
+    REQUIRE(copy.egen(sp, false).empty());
+    CHECK(run_count(v) == 6);
+    CHECK(run_scalar("SELECT count(*) FROM (" + copy.compile(false) +
+        ") WHERE after_filter = CASE WHEN firm='a' THEN 40 ELSE 20 END") == "3");
+}
+
+TEST_CASE("EGEN-FUSE-1 grouping dependencies and positional conditions remain sequential") {
+    View v = make_view();
+    View::EgenSpec sp;
+    sp.expr = "wage"; sp.name = "group_total"; sp.fcn = "total";
+    sp.by = {"firm"};
+    REQUIRE(v.egen(sp, false).empty());
+    sp.by = {"group_total"}; sp.name = "group_count"; sp.fcn = "count";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+        ") WHERE group_count = CASE WHEN firm='a' THEN 4 ELSE 1 END") == "6");
+    REQUIRE(v.sort({"id", "year"}, {false, false}).empty());
+    sp.by = {"id"}; sp.if_expr = "_n == 1";
+    sp.name = "first"; sp.fcn = "total";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+        ") WHERE first = id*10 AND year = 2019") == "3");
+    sp.if_expr.clear(); sp.name = "after_if";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+        ") WHERE after_if = CASE id WHEN 1 THEN 22 WHEN 2 THEN 20 ELSE 63 END") == "6");
+}
+
+TEST_CASE("EGEN-FUSE-1 all simple aggregates preserve missing keys with either optimiser setting") {
+    ResetWindowSelfJoin reset;
+    View v;
+    ViewCol g,x;
+    g.name="g"; x.name="x"; g.kind=x.kind='n';
+    v.open("SELECT * FROM (VALUES (0.0::DOUBLE,1.0::DOUBLE),(-0.0,3.0),"
+           "(NULL,5.0),(NULL,7.0),(1.0,NULL),(1.0,NULL)) t(g,x)",
+           {g,x},nlohmann::json::object(),nlohmann::json::object(),"","synthetic");
+    for (const char *f : {"mean","sd","min","max","sum","count"}) {
+        View::EgenSpec sp; sp.name=std::string("a_")+f; sp.fcn=f;
+        sp.expr="x"; sp.by={"g"}; sp.type_req="double";
+        REQUIRE(v.egen(sp,false).empty());
+    }
+    for (bool enabled : {false,true}) {
+        std::string err;
+        REQUIRE(Session::instance().set_window_self_join(enabled,&err));
+        CHECK(run_scalar("SELECT count(*) FROM ("+v.compile(false)+") WHERE "
+            "(g=0 AND a_mean=2 AND a_min=1 AND a_max=3 AND a_sum=4 AND a_count=2 "
+            " AND abs(a_sd-sqrt(2))<1e-15) OR "
+            "(g IS NULL AND a_mean=6 AND a_min=5 AND a_max=7 AND a_sum=12 AND a_count=2 "
+            " AND abs(a_sd-sqrt(2))<1e-15) OR "
+            "(g=1 AND a_mean IS NULL AND a_sd IS NULL AND a_min IS NULL AND "
+            " a_max IS NULL AND a_sum=0 AND a_count=0)") == "6");
+    }
+}
+
+TEST_CASE("EGEN-FUSE-1 wide integer totals retain their exact engine storage") {
+    View v;
+    ViewCol x;
+    x.name = "x"; x.kind = 'n'; x.physical_type = "BIGINT";
+    v.open("SELECT * FROM (VALUES (9007199254740993::BIGINT), "
+           "(-9007199254740992::BIGINT), (NULL::BIGINT)) t(x)",
+           {x}, nlohmann::json::object(), nlohmann::json::object(), "", "synthetic");
+    View::EgenSpec sp;
+    sp.name = "total"; sp.fcn = "total"; sp.expr = "x";
+    REQUIRE(v.egen(sp, false, "BIGINT").empty());
+    sp.name = "hi"; sp.fcn = "max";
+    REQUIRE(v.egen(sp, false).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + v.compile(false) +
+                     ") WHERE total = 1 AND hi = 9007199254740993::BIGINT") == "3");
+    CHECK(run_scalar("SELECT typeof(total)||'/'||typeof(hi) FROM (" +
+                     v.compile(false) + ") LIMIT 1") == "HUGEINT/BIGINT");
+    CHECK(run_scalar("SELECT CAST(hi AS VARCHAR) FROM (" + v.compile(false) +
+                     ") LIMIT 1") == "9007199254740993");
+}
+
+TEST_CASE("EGEN-FUSE-1 a volatile source is evaluated once for the shared aggregates") {
+    ResetWindowSelfJoin reset;
+    View v;
+    ViewCol g, x;
+    g.name = "g"; g.kind = 'n';
+    x.name = "x"; x.kind = 'n';
+    v.open("SELECT i%2 AS g, random() AS x FROM range(1000) t(i)",
+           {g,x}, nlohmann::json::object(),nlohmann::json::object(),"","synthetic");
+    View::EgenSpec sp;
+    sp.expr = "x"; sp.by = {"g"}; sp.type_req = "double";
+    sp.name = "m"; sp.fcn = "mean";
+    REQUIRE(v.egen(sp, false).empty());
+    sp.name = "s"; sp.fcn = "total";
+    REQUIRE(v.egen(sp, false).empty());
+    std::string err;
+    REQUIRE(Session::instance().set_window_self_join(true, &err));
+    CHECK(run_scalar("SELECT count(*) FROM (SELECT g,max(m) AS m,max(s) AS s,"
+        "sum(x) AS sx,count(*) AS n FROM (" + v.compile(false) + ") GROUP BY g) "
+        "WHERE abs(m-sx/n)>1e-12 OR abs(s-sx)>1e-10") == "0");
+}
+
+TEST_CASE("WINDOW-VOLATILE-1 self-join refuses volatile inputs and partition expressions") {
+    ResetWindowSelfJoin reset;
+    Session &s = Session::instance();
+    std::string err;
+    REQUIRE(s.set_window_self_join(true, &err));
+    REQUIRE(s.exec("CREATE SEQUENCE parqit_window_volatile_seq START 1", &err));
+    for (const char *source : {
+        "SELECT i%2 AS g,nextval('parqit_window_volatile_seq') AS x FROM range(1000) t(i)",
+        "SELECT i%2 AS g,i AS x FROM range(1000) t(i) WHERE nextval('parqit_window_volatile_seq')%3=0",
+        "SELECT nextval('parqit_window_volatile_seq') AS g,sum(i) AS x FROM range(1000) t(i) GROUP BY g"}) {
+        const std::string expected = std::string(source).find(" WHERE ") == std::string::npos ? "1000" : "333";
+        CHECK(run_scalar("SELECT coalesce(sum(CASE WHEN m=actual THEN n ELSE 0 END),0) "
+            "FROM (SELECT g,max(m) m,avg(x) actual,count(*) n FROM "
+            "(SELECT *,avg(x) OVER (PARTITION BY g) AS m FROM (" + std::string(source) +
+            ")) GROUP BY g)") == expected);
+    }
+    /* A volatile partition expression is part of the window, not its child. */
+    CHECK(run_scalar("SELECT count(*) FROM (SELECT i,avg(i) OVER "
+        "(PARTITION BY nextval('parqit_window_volatile_seq')) AS m FROM range(1000) t(i)) "
+        "WHERE m = i") == "1000");
+    REQUIRE(s.exec("DROP SEQUENCE parqit_window_volatile_seq", &err));
+}
+
+TEST_CASE("WINDOW-VOLATILE-1 plan controls keep safe rewrites and reject duplicated inputs") {
+    ResetWindowSelfJoin reset;
+    Session &s=Session::instance();
+    std::string err;
+    REQUIRE(s.set_window_self_join(false,&err));
+    REQUIRE(s.set_window_self_join(true,&err));
+    auto explain = [&](const std::string &sql) {
+        duckdb_result result{};
+        const bool ok=s.query("EXPLAIN "+sql,&result,&err);
+        CHECK_MESSAGE(ok,err);
+        if (!ok) {duckdb_destroy_result(&result);return std::string();}
+        char *raw=duckdb_value_varchar(&result,1,0);
+        const std::string plan=raw?raw:"";
+        duckdb_free(raw);duckdb_destroy_result(&result);
+        return plan;
+    };
+    const std::string plain=explain("SELECT g,x,sum(x) OVER (PARTITION BY g) AS m "
+        "FROM (SELECT i%2 AS g,i AS x FROM range(1000) t(i))");
+    CHECK(plain.find("JOIN") != std::string::npos);
+    CHECK(plain.find("GROUP_BY") != std::string::npos);
+    CHECK(plain.find("WINDOW") == std::string::npos);
+    const std::string pure_lambda=explain("SELECT g,x,sum(x) OVER (PARTITION BY g) AS m "
+        "FROM (SELECT i%2 AS g,list_transform([i],y -> y+1)[1] AS x FROM range(1000) t(i))");
+    CHECK(pure_lambda.find("JOIN") != std::string::npos);
+    CHECK(pure_lambda.find("WINDOW") == std::string::npos);
+    for (const char *aggregate : {"first(i)","sum(i::DOUBLE)"}) {
+        const std::string plan=explain("SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM "
+            "(SELECT k%2 AS g,"+std::string(aggregate)+" AS x FROM "
+            "(SELECT i%10 AS k,i FROM range(1000) t(i)) GROUP BY k)");
+        CHECK(plan.find("WINDOW") != std::string::npos);
+        CHECK(plan.find("JOIN") == std::string::npos);
+    }
+    for (const char *sql : {
+        "SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM (SELECT i%2 AS g,random() AS x FROM range(1000) t(i))",
+        "SELECT i,sum(i) OVER (PARTITION BY i*2+random()) AS m FROM range(1000) t(i)",
+        "SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM (SELECT i%2 AS g,list_transform([i],y -> random())[1] AS x FROM range(1000) t(i))",
+        "SELECT i,sum(i) OVER (PARTITION BY i*2+list_transform([i],y -> random())[1]) AS m FROM range(1000) t(i)"}) {
+        const std::string plan=explain(sql);
+        CHECK(plan.find("WINDOW") != std::string::npos);
+        CHECK(plan.find("JOIN") == std::string::npos);
+    }
+}
+
 TEST_CASE("integer percentile ranks avoid count multiplication and double rounding") {
     const std::string statistic = pct_window_sql("x", "rank", "n", 99);
     CHECK(run_scalar("SELECT " + statistic + " FROM (VALUES "
@@ -1257,13 +1472,16 @@ TEST_CASE("WINDOW-NEST-1: stacked egen mode() plans run once window_self_join is
           "3/3/7");
     CHECK(run_scalar("SELECT string_agg(CAST(m2 AS VARCHAR), ',' ORDER BY g, r NULLS LAST) FROM (" +
                      v.compile(false) + ")") == "3,3,3,3,5,5,5");
-    /* one single-level window keeps the optimizer; a second window stage
-     * turns it off (12 stacked means planned in 2.5 s with it, 0.016 s without) */
+    /* Fusion shares a SELECT level but preserves the conservative optimiser
+     * policy for multiple logical windows, including dependent windows. */
     View w = make_view();
     REQUIRE(w.egen("m", "mean", "wage", {"id"}, false).empty());
     CHECK_FALSE(w.fragile_windows());
     REQUIRE(w.egen("m2", "max", "wage", {"id"}, false).empty());
     CHECK(w.fragile_windows());
+    View dependent = w;
+    REQUIRE(dependent.egen("next", "mean", "m", {"id"}, false).empty());
+    CHECK(dependent.fragile_windows());
     CHECK_FALSE(w.heavy_filter_pushdown());
     /* filter pushdown doubles the planning work under every partitioned
      * window (16 means 0.05 s, 20 means 0.6 s, 30 never finish): the view
