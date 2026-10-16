@@ -38,6 +38,15 @@ std::vector<std::string> engine_unique_ci(const std::vector<std::string> &names,
  * and ? exactly one character. Invalid UTF-8 never matches. */
 bool glob_match(const std::string &pattern, const std::string &name);
 
+/* VARABBREV-1: exact names take precedence over unique, case-sensitive
+ * prefixes. Aliases identify the same column, never a second match. Wildcards
+ * keep their selection semantics even with abbreviation disabled. The output
+ * is replaced only on success, in pattern order with duplicates removed. */
+std::string resolve_varlist(const std::vector<std::string> &patterns,
+                            const std::vector<std::string> &names,
+                            const std::vector<std::string> &aliases,
+                            bool abbreviate, std::vector<size_t> *out);
+
 /* Sanitise one candidate (steps 1–3 + 5); no uniqueness handling. */
 std::string sanitize_stata_name(const std::string &source, size_t position_1based);
 

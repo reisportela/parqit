@@ -94,8 +94,8 @@ if (_rc == 0) {
     assert r(unique) == `n5'
 }
 * refusals
-capture noisily parqit unique
-assert _rc == 198
+parqit unique
+assert r(unique) == 74 & r(N_used) == 74
 capture noisily parqit unique rep78, generate(u)
 assert _rc == 198
 capture noisily parqit unique rep78, detail

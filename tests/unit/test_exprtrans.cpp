@@ -19,6 +19,31 @@ static ExprSchema test_schema() {
     return s;
 }
 
+TEST_CASE("VARABBREV-1 expression references preserve types, literals and function names") {
+    ExprSchema s;
+    s.kinds = {{"income", 'n'}, {"interest", 'n'}, {"inc", 'n'},
+               {"stringvalue", 's'}, {"Date_1", 'n'}, {"panel_id", 'n'}, {"timevar", 'n'}};
+    s.aliases["Date"] = "Date_1";
+    s.float_columns.insert("income");
+    auto a = translate_expression("inco == 0.1", s, false);
+    auto b = translate_expression("income == 0.1", s, false);
+    REQUIRE(a.ok);
+    CHECK(a.sql == b.sql);
+    CHECK(translate_expression("in + 1", s, false).error.find("ambiguous") != std::string::npos);
+    CHECK(translate_expression("inc + 1", s, false).sql == translate_expression("inc + 1", s, true).sql);
+    REQUIRE(translate_expression("substr(stringv, 1, 2) == \"inco\"", s, false).ok);
+    CHECK(translate_expression("Dat", s, false).sql == "\"Date_1\"");
+    s.ts_panel = "panel_id";
+    s.ts_time = "timevar";
+    REQUIRE(translate_expression("L.inco", s, false).ok);
+    REQUIRE(translate_expression("L.timev + L.pan", s, false).ok);
+    s.varabbrev = false;
+    CHECK_FALSE(translate_expression("inco", s, false).ok);
+    CHECK_FALSE(translate_expression("L.inco", s, false).ok);
+    REQUIRE(translate_expression("Date", s, false).ok);
+    REQUIRE(translate_expression("income", s, false).ok);
+}
+
 /* fixture rows (id, x, y, s, d, f):
  *   1: 1,   10,  "a",   21915 (=td(01jan2020)), 0.1f
  *   2: 2,   20,  "bb",  21916,                  0.3f
@@ -832,9 +857,9 @@ TEST_CASE("TSSET-1: L. F. D. S. are RANGE windows by time, refused without a dec
     ExprResult s3 = translate_expression("S3.x", ts, false);
     REQUIRE(s3.ok);
     CHECK(s3.windows[0].sql.find("12 PRECEDING AND 12 PRECEDING") != std::string::npos);
-    /* refused: the time and panel variables, a string, a missing count */
-    CHECK_FALSE(translate_expression("L.t", ts, false).ok);
-    CHECK_FALSE(translate_expression("L.id", ts, false).ok);
+    /* Native Stata permits the time and panel variables too (TS-KEY-LAG-1). */
+    CHECK(translate_expression("L.t", ts, false).ok);
+    CHECK(translate_expression("L.id", ts, false).ok);
     CHECK_FALSE(translate_expression("L.s", ts, false).ok);
     /* a variable that merely looks like an operator is still a variable */
     ExprSchema odd = test_schema();

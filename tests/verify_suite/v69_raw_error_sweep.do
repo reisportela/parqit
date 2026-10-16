@@ -121,7 +121,7 @@ foreach spec in ///
     `"levelsof          parqit levelsof nosuchvar"' ///
     `"misstable         parqit misstable nosuchvar"' ///
     `"codebook          parqit codebook nosuchvar"' ///
-    `"distinct          parqit distinct nosuchvar"' ///
+    `"unique            parqit unique nosuchvar"' ///
     `"correlate         parqit correlate id nosuchvar"' ///
     `"pwcorr            parqit pwcorr id nosuchvar"' ///
     `"histogram         parqit histogram nosuchvar, nodraw"' ///

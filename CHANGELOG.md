@@ -6,6 +6,51 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-16
+
+### Changed
+
+- **Compatibility:** `statamissing` defaults to `on`. Stata-style comparisons
+  now apply from the first command; `set statamissing off` explicitly restores
+  the previous SQL comparisons. Do-files relying on the previous default must
+  select `off`, because comparisons such as `x > 0` now include numeric
+  missing values. This does not change the separate `.a`–`.z` storage contract.
+- `unique` becomes the single command for unique-value counts. It reports
+  individual and joint counts without `joint`, accepts all variables when
+  the varlist is omitted, and adds `nomissing`. Under `nomissing`, each
+  individual count excludes that variable's missing values; the joint count
+  excludes any row missing a selected value. `r(N)` remains the selected row
+  count, and `r(N_used)` gives the joint count's usable observations.
+
+### Removed
+
+- `distinct`, `head` and `glimpse` no longer execute. They return an explicit
+  migration message naming `unique`, `list` and `describe`, respectively.
+  These names are removed from dialogs and current examples. `unique` includes
+  missing values by default; use `nomissing` for the old `distinct` exclusion
+  rule. Plain `list` previews up to 20 rows; explicit `in f/l` ranges must be
+  within the view, as before.
+
+### Added
+
+- `parqit format varlist %fmt` (also `%fmt varlist`, abbreviated `form`)
+  changes display formats on a view without scanning observations or changing
+  values. Native Stata validates the formats on an empty frame; changes are
+  atomic and survive previews, view copies, collection and Parquet saves.
+  `format [varlist]` displays formats as native does (FORMAT-1).
+- Unambiguous, case-sensitive variable-name abbreviations in view expressions,
+  varlists, variable-valued options and eager reads. Exact names take precedence,
+  ambiguous prefixes fail, and each command follows `set varabbrev on|off`.
+  Newly created names, reshape-long stubs and raw SQL remain literal
+  (VARABBREV-1).
+
+### Fixed
+
+- Time-series operators accept the declared time and panel variables, as
+  native Stata does. The earlier refusal, "time and panel variables cannot be
+  lagged", was unnecessarily restrictive. Time gaps, `delta()` and missing
+  times keep their existing semantics (TS-KEY-LAG-1).
+
 ## [0.4.3] — 2026-10-14
 
 ### Fixed

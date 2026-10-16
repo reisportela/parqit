@@ -22,6 +22,12 @@ earlier contracts even when a plugin reports the same package version.
 The packaged-plugin verifier checks the identity against its own build and
 runs the numerical selftest in the exact binary selected for distribution.
 
+Version 0.5.0 changes the default missing-value comparisons and retires three
+command names; see the migration notes in `help parqit`. Package ado/help files
+and the plugin together, and restart Stata after updating: an old plugin must
+not be paired with the new command surface. Before publication, run the full
+licensed suite against the staged package and verify the exact CI binaries.
+
 ## Prerequisites
 
 - CMake ≥ 3.21 for the supplied version-3 presets and a C++17 compiler

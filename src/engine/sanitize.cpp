@@ -67,6 +67,40 @@ bool glob_match(const std::string &pattern, const std::string &name) {
     return p == pat.size();
 }
 
+std::string resolve_varlist(const std::vector<std::string> &patterns,
+                            const std::vector<std::string> &names,
+                            const std::vector<std::string> &aliases,
+                            bool abbreviate, std::vector<size_t> *out) {
+    std::vector<size_t> picked;
+    std::set<size_t> seen;
+    for (const auto &pat : patterns) {
+        const bool wild = pat.find_first_of("*?") != std::string::npos || pat == "_all";
+        std::vector<size_t> hits;
+        for (size_t i = 0; i < names.size(); ++i) {
+            const std::string &alias = i < aliases.size() ? aliases[i] : names[i];
+            const bool hit = wild
+                ? (pat == "_all" || glob_match(pat, names[i]) ||
+                   (!alias.empty() && glob_match(pat, alias)))
+                : (pat == names[i] || (!alias.empty() && pat == alias));
+            if (hit) hits.push_back(i);
+        }
+        if (!wild && hits.empty() && abbreviate && !pat.empty()) {
+            for (size_t i = 0; i < names.size(); ++i) {
+                const std::string &alias = i < aliases.size() ? aliases[i] : names[i];
+                if (names[i].compare(0, pat.size(), pat) == 0 ||
+                    (!alias.empty() && alias.compare(0, pat.size(), pat) == 0))
+                    hits.push_back(i);
+            }
+        }
+        if (hits.empty()) return "variable " + pat + " not found";
+        if (!wild && hits.size() != 1) return pat + " ambiguous abbreviation";
+        for (size_t i : hits)
+            if (seen.insert(i).second) picked.push_back(i);
+    }
+    *out = std::move(picked);
+    return "";
+}
+
 static bool unicode_letter(utf8proc_int32_t cp) {
     const auto cat = duckdb::utf8proc_category(cp);
     return cat >= duckdb::UTF8PROC_CATEGORY_LU &&

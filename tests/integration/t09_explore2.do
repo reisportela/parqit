@@ -76,10 +76,10 @@ assert "`r(varlist)'" == "id year g wage age"
 parqit lookfor wage salary
 assert "`r(varlist)'" == "wage"
 parqit codebook
-parqit distinct id
-assert r(ndistinct) == 200
-parqit distinct id year, joint
-assert r(ndistinct) == 600
+parqit unique id, nomissing
+assert r(unique) == 200
+parqit unique id year, nomissing
+assert r(unique) == 600
 
 * ---------- duplicates ----------
 parqit duplicates report id

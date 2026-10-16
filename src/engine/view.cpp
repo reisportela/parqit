@@ -388,30 +388,51 @@ std::string View::show() const {
 
 std::string View::expand_patterns(const std::vector<std::string> &patterns,
                                   std::vector<std::string> *out) const {
-    std::set<std::string> seen;
-    for (const auto &pat : patterns) {
-        bool has_wild = pat.find('*') != std::string::npos ||
-                        pat.find('?') != std::string::npos;
-        bool hit = false;
-        for (const auto &c : cols_) {
-            /* NAME-CASE-1 / R3 (audit 2026-08-22): a selection varlist accepts
-             * the engine alias (`NUEMP_1`) OR the exact Stata name (`NUEMP`) of
-             * a case-aliased column, like the eager `use <varlist>` does; the
-             * result always carries the ENGINE name, so every caller keeps
-             * building SQL from engine identifiers. An exact match on an alias
-             * of another column cannot be ambiguous: aliases are case-unique
-             * against every exposed name (engine_unique_ci). */
-            const bool m = has_wild
-                               ? (glob_match(pat, c.name) ||
-                                  (!c.stata.empty() && glob_match(pat, c.stata)))
-                               : (pat == c.name || (!c.stata.empty() && pat == c.stata));
-            if (m) {
-                hit = true;
-                if (seen.insert(c.name).second) out->push_back(c.name);
-            }
+    std::vector<std::string> names, aliases;
+    for (const auto &c : cols_) { names.push_back(c.name); aliases.push_back(c.stata); }
+    std::vector<size_t> picked;
+    const std::string error = resolve_varlist(patterns, names, aliases, varabbrev_, &picked);
+    if (!error.empty()) return error + " in the view";
+    for (size_t i : picked) out->push_back(names[i]);
+    return "";
+}
+
+std::string View::resolve_name(const std::string &input, std::string *name) const {
+    /* Individual variable positions never expand a wildcard to many columns. */
+    for (const auto &c : cols_)
+        if (input == c.name || (!c.stata.empty() && input == c.stata)) {
+            *name = c.name;
+            return "";
         }
-        if (!hit) return "variable " + pat + " not found in the view";
+    const ViewCol *match = nullptr;
+    if (varabbrev_ && !input.empty())
+        for (const auto &c : cols_)
+            if (c.name.compare(0, input.size(), input) == 0 ||
+                (!c.stata.empty() && c.stata.compare(0, input.size(), input) == 0)) {
+                if (match) return input + " ambiguous abbreviation";
+                match = &c;
+            }
+    if (!match) return "variable " + input + " not found in the view";
+    *name = match->name;
+    return "";
+}
+
+std::string View::set_formats(const std::vector<std::string> &names,
+                              const std::vector<std::string> &formats) {
+    if (names.empty() || names.size() != formats.size()) return "format: invalid format list";
+    std::vector<int> indices;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const int k = col_index(names[i]);
+        if (k < 0) return "variable " + names[i] + " not found in the view";
+        const auto &fmt = formats[i];
+        const bool string_fmt = fmt.size() > 2 && fmt.back() == 's' &&
+            fmt.find_first_not_of("0123456789-~", 1) == fmt.size() - 1;
+        if (fmt.size() < 2 || fmt.front() != '%' ||
+            string_fmt != (cols_[k].kind == 's'))
+            return "format: incompatible display format for " + names[i];
+        indices.push_back(k);
     }
+    for (size_t i = 0; i < indices.size(); ++i) cols_[indices[i]].fmt = formats[i];
     return "";
 }
 
@@ -460,6 +481,7 @@ static ExprSchema schema_of(const std::vector<ViewCol> &cols) {
     ExprSchema s;
     for (const auto &c : cols) {
         s.kinds[c.name] = c.kind;
+        if (!c.stata.empty()) s.aliases[c.stata] = c.name;
         s.numeric_types[c.name] = c.physical_type;
         if (c.is_float()) s.float_columns.insert(c.name);
         if (c.normalized) s.normalized.insert(c.name); /* MISS-1 */
@@ -474,6 +496,7 @@ bool View::ts_declared() const {
 
 ExprSchema View::expr_schema() const {
     ExprSchema s = schema_of(cols_);
+    s.varabbrev = varabbrev_;
     if (ts_declared()) { /* TSSET-1 */
         s.ts_panel = ts_panel_;
         s.ts_time = ts_time_;
@@ -861,10 +884,13 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     return "";
 }
 
-std::string View::replace(const std::string &name, const std::string &expr,
+std::string View::replace(const std::string &input_name, const std::string &expr,
                           const std::string &if_expr, bool statamissing,
                           const std::vector<std::string> &by,
                           const std::vector<std::string> &sortvars) {
+    std::string name;
+    const std::string nerr = resolve_name(input_name, &name);
+    if (!nerr.empty()) return nerr;
     int idx = col_index(name);
     if (idx < 0) return "variable " + name + " not found in the view";
     std::vector<std::string> part;
@@ -962,7 +988,10 @@ std::string View::replace(const std::string &name, const std::string &expr,
     return "";
 }
 
-std::string View::rename(const std::string &oldn, const std::string &newn) {
+std::string View::rename(const std::string &input_name, const std::string &newn) {
+    std::string oldn;
+    const std::string nerr = resolve_name(input_name, &oldn);
+    if (!nerr.empty()) return nerr;
     int idx = col_index(oldn);
     if (idx < 0) return "variable " + oldn + " not found in the view";
     if (col_index(newn) >= 0) return "variable " + newn + " already defined";
@@ -1000,8 +1029,15 @@ std::string View::rename(const std::string &oldn, const std::string &newn) {
     return "";
 }
 
-std::string View::rename_many(const std::vector<std::string> &old_names,
+std::string View::rename_many(const std::vector<std::string> &input_names,
                               const std::vector<std::string> &new_names) {
+    std::vector<std::string> old_names;
+    for (const auto &input : input_names) {
+        std::string name;
+        const std::string err = resolve_name(input, &name);
+        if (!err.empty()) return err;
+        old_names.push_back(name);
+    }
     if (old_names.empty() || old_names.size() != new_names.size())
         return "rename: old and new lists must have the same nonzero length";
     std::set<std::string> oldset, newset;
@@ -1166,8 +1202,13 @@ std::string pct_window_sql(const std::string &ref, const std::string &prn,
            " END)" + w + ", max(CASE WHEN " + rn + " = greatest(1, " + k2 + ") THEN " + ref + " END)" + w + ")";
 }
 
-std::string View::collapse(const std::vector<CollapseSpec> &specs,
+std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
                            const std::vector<std::string> &by) {
+    std::vector<CollapseSpec> specs = input_specs;
+    for (auto &sp : specs) {
+        const std::string err = resolve_name(sp.source, &sp.source);
+        if (!err.empty()) return err;
+    }
     if (specs.empty()) return "collapse: nothing to compute";
     std::vector<std::string> byn;
     if (!by.empty()) {
@@ -2358,13 +2399,16 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
      * earlier output of this batch. Never inline or duplicate volatile work. */
     static const std::set<std::string> batch_fcns = {
         "mean", "total", "sum", "sd", "min", "max", "count"};
-    const bool batchable = batch_fcns.count(fcn) && !has_if &&
-                           arg.windows.empty() && col_index(sp.expr) >= 0 &&
-                           lvl == prev_name(stages_.size());
+    std::string batch_source = sp.expr;
+    bool batchable = batch_fcns.count(fcn) && !has_if && arg.windows.empty() &&
+                     lvl == prev_name(stages_.size());
+    if (batchable)
+        batchable = col_index(batch_source) >= 0 ||
+                    resolve_name(sp.expr, &batch_source).empty();
     const std::string definition = stored + " AS " + quote_ident(name);
     if (batchable) {
         const bool extends = egen_batch_.end == stages_.size() && egen_batch_.end > 0 &&
-                             egen_batch_.by == byn && !egen_batch_.outputs.count(sp.expr) &&
+                             egen_batch_.by == byn && !egen_batch_.outputs.count(batch_source) &&
                              std::none_of(byn.begin(), byn.end(), [&](const std::string &b) {
                                  return egen_batch_.outputs.count(b) != 0;
                              });
@@ -2889,18 +2933,12 @@ std::string View::merge_with(const std::string &kind,
     /* which using columns come across: keepusing ∩ (not in master unless key) */
     std::set<std::string> wanted;
     if (!keepusing.empty()) {
-        for (const auto &w : keepusing) {
-            bool hit = false;
-            for (const auto &c : u.cols) {
-                bool has_wild = w.find('*') != std::string::npos ||
-                                w.find('?') != std::string::npos;
-                if (has_wild ? glob_match(w, c.name) : (w == c.name)) {
-                    wanted.insert(c.name);
-                    hit = true;
-                }
-            }
-            if (!hit) return "merge: keepusing variable " + w + " not found in the using data";
-        }
+        std::vector<std::string> names, aliases;
+        for (const auto &c : u.cols) { names.push_back(c.name); aliases.push_back(c.stata); }
+        std::vector<size_t> indices;
+        const std::string err = resolve_varlist(keepusing, names, aliases, varabbrev_, &indices);
+        if (!err.empty()) return "merge: keepusing " + err + " in the using data";
+        for (size_t i : indices) wanted.insert(names[i]);
     }
     std::vector<const ViewCol *> brought;
     /* MERGE-COMMON-1 (audit 2026-08-22, A3-1): a non-key column present on

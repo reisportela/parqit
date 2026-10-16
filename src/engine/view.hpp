@@ -98,6 +98,12 @@ class View {
               std::vector<std::string> order_cols = {});
 
     const std::vector<ViewCol> &cols() const { return cols_; }
+    void set_varabbrev(bool enabled) { varabbrev_ = enabled; }
+    std::string resolve_name(const std::string &input, std::string *name) const;
+    /* FORMAT-1: formats already validated by native Stata on an empty frame.
+     * No stage, scan or value conversion is needed to change view metadata. */
+    std::string set_formats(const std::vector<std::string> &names,
+                            const std::vector<std::string> &formats);
     void set_numeric_types(const std::vector<std::string> &types);
     std::string coerce_numeric_column(const std::string &name,
                                       const std::string &type);
@@ -459,6 +465,7 @@ class View {
     void prune_chars();
 
     bool live_ = false;
+    bool varabbrev_ = true;
     std::string scan_;
     std::string source_desc_;
     std::string src_paths_sql_; /* Parquet footer paths, "" unless file-backed */

@@ -6,11 +6,10 @@
  * arithmetic on dates translate verbatim.
  *
  * Missing-value semantics:
- *   default (SQL) mode — missing is NULL: comparisons with NULL are
+ *   SQL mode (explicit statamissing off) — missing is NULL: comparisons with NULL are
  *     unknown, so `keep if x > 5` drops missings (NULL ⇒ not kept). Note
  *     native Stata KEEPS a missing x there (missing sorts above every
- *     number) — the SQL default is a deliberate, documented divergence;
- *     `parqit set statamissing on` restores Stata's ordering. Explicit
+ *     number). Since v0.5.0, statamissing on is the command default. Explicit
  *     `x == .`, `x != .`, `x < .`, `x >= .` are rewritten to IS NULL tests,
  *     and missing(x)/mi(x) understands strings ("" or NULL).
  *   statamissing mode — emulates "missing is larger than every number":
@@ -33,6 +32,9 @@ struct ExprSchema {
     /* column name → kind: 'n' numeric (includes all date/period counts),
      * 's' string */
     std::map<std::string, char> kinds;
+    bool varabbrev = true;
+    std::map<std::string, std::string> aliases; /* exposed name -> engine name */
+    std::string resolve_name(std::string *name) const;
     std::set<std::string> float_columns;
     std::map<std::string, std::string> numeric_types;
     /* MISS-1: columns already guaranteed free of IEEE specials (NaN/±Inf/

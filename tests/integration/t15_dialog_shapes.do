@@ -147,10 +147,10 @@ capture noisily parqit describe `"`auto'"'
 _shape `=_rc' "parqit describe file"
 capture noisily parqit describe `"`auto'"', labels notes
 _shape `=_rc' "parqit describe file, labels notes"
-capture noisily parqit glimpse
-_shape `=_rc' "parqit glimpse"
-capture noisily parqit glimpse `"`auto'"'
-_shape `=_rc' "parqit glimpse file"
+capture noisily parqit format price %12.2f
+_shape `=_rc' "parqit format varlist %fmt"
+capture noisily parqit format price
+_shape `=_rc' "parqit format varlist"
 capture noisily parqit ds
 _shape `=_rc' "parqit ds"
 capture noisily parqit lookfor make price
@@ -159,8 +159,8 @@ capture noisily parqit codebook
 _shape `=_rc' "parqit codebook"
 capture noisily parqit codebook price mpg
 _shape `=_rc' "parqit codebook varlist"
-capture noisily parqit head 5
-_shape `=_rc' "parqit head 5"
+capture noisily parqit list in 1/5
+_shape `=_rc' "parqit list in 1/5"
 capture noisily parqit list
 _shape `=_rc' "parqit list"
 capture noisily parqit list make price if price > 5000 in 1/5
@@ -181,18 +181,18 @@ capture noisily parqit levelsof rep78
 _shape `=_rc' "parqit levelsof var"
 capture noisily parqit levelsof rep78, limit(100)
 _shape `=_rc' "parqit levelsof var, limit()"
-capture noisily parqit distinct
-_shape `=_rc' "parqit distinct"
-capture noisily parqit distinct foreign rep78, joint
-_shape `=_rc' "parqit distinct varlist, joint"
+capture noisily parqit unique
+_shape `=_rc' "parqit unique"
+capture noisily parqit unique foreign rep78, nomissing
+_shape `=_rc' "parqit unique varlist, nomissing"
 capture noisily parqit duplicates report foreign
 _shape `=_rc' "parqit duplicates report keys"
 capture noisily parqit duplicates report foreign, limit(20)
 _shape `=_rc' "parqit duplicates report keys, limit()"
 capture noisily parqit duplicates list foreign, limit(20)
 _shape `=_rc' "parqit duplicates list keys, limit()"
-capture noisily parqit distinct foreign rep78, joint missing
-_shape `=_rc' "parqit distinct varlist, joint missing"
+capture noisily parqit unique foreign rep78
+_shape `=_rc' "parqit unique varlist"
 capture noisily parqit duplicates report
 _shape `=_rc' "parqit duplicates report (all variables)"
 capture noisily parqit duplicates list, limit(20)
@@ -205,8 +205,8 @@ capture noisily parqit misstable patterns rep78 mpg if price > 5000
 _shape `=_rc' "parqit misstable patterns varlist if exp"
 capture noisily parqit levelsof rep78 if price > 5000, limit(100)
 _shape `=_rc' "parqit levelsof var if exp, limit()"
-capture noisily parqit distinct foreign rep78 if price > 5000, joint missing
-_shape `=_rc' "parqit distinct varlist if exp, joint missing"
+capture noisily parqit unique foreign rep78 if price > 5000, by(foreign)
+_shape `=_rc' "parqit unique varlist if exp, by()"
 capture noisily parqit duplicates report foreign if price > 5000, limit(20)
 _shape `=_rc' "parqit duplicates report keys if exp, limit()"
 capture noisily parqit duplicates list foreign if price > 5000, limit(20)

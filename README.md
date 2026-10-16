@@ -20,7 +20,7 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.4.3 — the full surface below is implemented and covered by a
+> **Status:** v0.5.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
@@ -30,6 +30,15 @@ The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
 [v0.1.22 technical GO-GO reliability report](docs/audits/CERTIFICACAO_GO_GO_FIABILIDADE_DADOS_PARQIT_2026-07-14.md);
 the full audit evidence chain is indexed in [docs/audits/](docs/audits/README.md).
+
+Version 0.5.0 follows Stata's missing-value comparisons by default. Existing
+do-files that deliberately relied on SQL comparisons must begin with
+`parqit set statamissing off`. It consolidates unique-value counts under
+`parqit unique`: individual and joint counts, with `nomissing` to exclude
+missing values. `distinct`, `head` and `glimpse` are retired and return a
+migration message; use `unique`, `list` and `describe`. These are explicit
+compatibility changes. The release also adds view `format`, unambiguous
+variable-name abbreviations, and permits lags of the time and panel keys.
 
 Version 0.4.3 makes the pinned source corrections portable across LF and CRLF
 build environments, retaining the same content hashes and refusal of unknown
@@ -242,8 +251,8 @@ reader**. Its identity is the layer above I/O:
 - **Manipulation, not just transfer.** A full set of single-table and two-table
   verbs that compile to one DuckDB query and run before the full result is
   collected.
-- **Explore before you load.** `describe`, `head`, `summarize`, `tabulate`,
-  `codebook`, `misstable`, `distinct`, `duplicates report`, `count if`,
+- **Explore before you load.** `describe`, `list`, `summarize`, `tabulate`,
+  `codebook`, `misstable`, `unique`, `duplicates report`, `count if`,
   `histogram`, … are computed by the engine as push-down queries over the lazy
   view; only bounded summary output (or a few preview rows) reaches Stata and
   the current dataset stays unchanged. `describe` reads only Parquet footer
@@ -435,7 +444,7 @@ To make that permanent, add the `adopath` line to your `profile.do`
 parqit use using /data/qp_*.parquet
 
 * Look around first — bounded outputs only; the current dataset stays unchanged
-parqit head
+parqit list
 parqit summarize wage
 
 * Build a pipeline with ordinary Stata verbs — still lazy
@@ -468,8 +477,8 @@ parqit use  prices.csv, clear encoding(windows-1251)   // text in another code p
 ## First contact with a large file
 
 parqit is built for the first hour with unfamiliar — possibly enormous — data.
-The whole exploration family (`describe`, `head`, `list`, `summarize`,
-`tabulate`, `codebook`, `misstable`, `levelsof`, `distinct`,
+The whole exploration family (`describe`, `list`, `summarize`,
+`tabulate`, `codebook`, `misstable`, `levelsof`, `unique`,
 `duplicates report`, `tabstat`, `correlate`, `histogram`, `count if`) runs as
 push-down queries over the view: the engine computes, only the summary numbers
 (or a few preview rows) reach Stata, and the current dataset stays unchanged
@@ -480,7 +489,7 @@ anything — to load:
 ```stata
 parqit describe /data/deals_*.parquet   // rows, columns, types, labels: footer only, no data scan
 parqit use using /data/deals_*.parquet  // lazy view after a schema/metadata probe
-parqit head 10                          // first rows, nothing else materialised
+parqit list                             // first rows, nothing else materialised
 parqit codebook                         // per variable: type, obs, missing, distinct, min/max
 parqit misstable patterns amount client_id region // selected variables (at most 14)
 parqit summarize amount, detail         // moments and percentiles using Stata's definitions
@@ -557,8 +566,8 @@ scratch data; lazy verbs build the plan while the current dataset stays in place
 │
 ├─ 3  LOOK ─ runs the plan, shows a summary
 │
-│    shape        describe  glimpse  ds  lookfor  codebook
-│    rows         count  head  list  levelsof  distinct  unique
+│    shape        describe  ds  lookfor  codebook
+│    rows         count  list  levelsof  unique
 │    statistics   summarize  tabstat  tabulate  histogram
 │                 correlate  pwcorr
 │    quality      misstable  duplicates report  duplicates list
@@ -653,6 +662,14 @@ Column subsets in eager or lazy reads accept Stata wildcards, for example
 `parqit use id wage* using panel.parquet, clear`. `*` matches any run and `?`
 matches one Unicode character; the same expansion is used by lazy projections,
 `mergein, keepusing()` and `appendin, keep()`.
+
+Existing variable names also accept unambiguous, case-sensitive prefixes, as
+in Stata: `parqit summarize wag` selects `wage` if no other name starts with
+`wag`. An exact name always wins; an ambiguous prefix is refused before the
+view or dataset changes. This applies to expressions (`log(wag)`, `L.wag`),
+varlists and variable-valued options, against the view or input file's schema.
+`set varabbrev off` requires complete names; wildcards remain available.
+Names being created, reshape-long stubs and raw SQL are not abbreviated.
 
 ### SPSS files (`.sav`, `.zsav`)
 
@@ -893,6 +910,7 @@ says what was decoded, from what, and how much (ENC-3, CSV-ENC-1).
 | `parqit by varlist [(sortvars)]: <verb>` / `parqit bysort ...: <verb>` | `PARTITION BY` for `gen`, `replace`, `egen`, `keep if`, `drop if`; `bysort` sorts first and leaves the view sorted, `by` needs that order |
 | `parqit xtset panelvar timevar [, delta()]` / `parqit tsset` | declares the panel and time variables; `L.` `F.` `D.` `S.` then compile to `RANGE` windows by time (a gap gives missing, as native), `tin()`/`twithin()` to time filters |
 | `parqit rename (old) (new)` | column alias |
+| `parqit format varlist %fmt` / `parqit format %fmt varlist` | display metadata only; native Stata validates numeric, date/time and string formats on an empty frame. `format [varlist]` displays formats. No observations are read or changed; `collect` and `save` retain the formats. |
 | `parqit order <varlist>` | column order |
 | `parqit sort <varlist>` / `parqit gsort [-]<varlist>` | `ORDER BY` |
 | `parqit collapse (stat) v ... [if] , by()` | `GROUP BY` + aggregates: every native statistic (mean sum rawsum sd semean sebinomial sepoisson median pXX iqr count percent min max first last firstnm lastnm) |
@@ -903,6 +921,20 @@ says what was decoded, from what, and how much (ENC-3, CSV-ENC-1).
 | `parqit sample # [if] [, count seed() by() cluster() any all generate()]` | sampling designs after `sample2` (see [Sampling designs](#sampling-designs)): `if` frame, strata, whole clusters, and an indicator instead of dropping |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... [if], rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
+
+For example, a generated date is still a Stata day count; give it its display
+format before collecting or saving:
+
+```stata
+parqit gen long event_date = daily(date_text, "YMD")
+parqit format event_date %tdCCYY-NN-DD
+```
+
+`format` changes presentation, not units: applying `%tc` to day counts does not
+turn them into milliseconds. A later Parquet save uses the existing type
+contract (`%td` as DATE, `%tc` as TIMESTAMP, `%tm`/`%tq`/other periods as integer
+counts with format metadata), including its reported rounding of fractional
+date/period counts.
 
 ### Sampling designs
 
@@ -928,9 +960,9 @@ parqit collect, clear                       // pick = 0: not drawn
 ```
 
 - **Frame.** `if <exp>` chooses the rows that can be drawn; every other row is
-  kept. Under the default SQL missing semantics a missing condition leaves the
-  row outside; with `parqit set statamissing on`, `x > 60` holds for a missing
-  `x`, as in `sample2`.
+  kept. By default `x > 60` holds for a numeric missing `x`, as in Stata and
+  `sample2`. With `parqit set statamissing off`, an unknown comparison leaves
+  the row outside the frame.
 - **Strata.** `by()` draws # percent (or, with `count`, # units) in each
   stratum; a missing value is its own stratum.
 - **Clusters.** `cluster()` draws whole clusters: every row of a drawn cluster
@@ -1016,13 +1048,13 @@ the view without replacing the current dataset.
 | `parqit save <dest> using <file.rds\|file.RData> [, replace compression() compression_level() encoding() object()]` | Convert the data frame of an R data file to Parquet with its factors, dates, haven labels, missing-value codes and attributes, out of core and without R (see [R data files](#r-data-files-rds-rda-rdata)); `object()` names the data frame when the file holds several; returns `r(N)`, `r(k)`, `r(k_dropped)`, `r(filename)`, `r(source)`, `r(xmissing_vars)`, `r(r_object)`, `r(r_format)`, `r(r_version)`, `r(r_encoding)`, `r(r_compression)`. |
 | `parqit spssencode <strvar>, generate(<newvar>) [label(<name>) sequential]` | Labelled numeric version of a string variable read from an SPSS file (or an R file with haven labels, `char var[r_value_labels]`), from its `char var[spss_value_labels]`: the SPSS codes when they are distinct integers, otherwise 1, 2, … in code order; user-missing codes → `.a`–`.z` (see [SPSS files](#spss-files-sav-zsav)); returns `r(mode)`, `r(label)`, `r(N_labels)`, `r(N_unlabeled)` and `r(missing_map)`. |
 | `parqit count` | Row count → `r(N)` (only the scalar result is returned). |
-| `parqit head [n]` / `parqit list [varlist] [if] [in]` | Preview a small slice. |
-| `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). Every statistics command (`summarize`, `tabulate`, `tabstat`, `distinct`, `duplicates`, `correlate`, `pwcorr`, `codebook`, `misstable`, `levelsof`, `histogram`) takes `[if exp]`, which restricts the rows it reads and leaves the view unchanged. |
-| `parqit describe [file] [, labels notes]` / `parqit glimpse [file]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. The file form reads Parquet footers only (a `.csv`, `.dta`, Excel, SPSS or R file is refused with the alternative). For each variable it shows the value label and variable label, as Stata's `describe using` does. `*` marks variables with notes, `(spss)` marks string variables whose SPSS labels are kept in `char var[spss_value_labels]`, and `(r)` those whose R labels are in `char var[r_value_labels]`. `labels` lists the value-label sets and those SPSS labels; `notes` lists the notes. |
+| `parqit list [varlist] [if] [in]` | Preview up to 20 rows (200 with a bare `if`), or an explicit valid row range. |
+| `parqit summarize` / `parqit tabulate` | Pushed-down summaries → `r()`; `tabulate` shows value labels (`nolabel` for codes). Every statistics command (`summarize`, `tabulate`, `tabstat`, `unique`, `duplicates`, `correlate`, `pwcorr`, `codebook`, `misstable`, `levelsof`, `histogram`) takes `[if exp]`, which restricts the rows it reads and leaves the view unchanged. |
+| `parqit describe [file] [, labels notes]` | File metadata (including rows and row groups), or the open view's schema; relevant results are returned in `r()`. The file form reads Parquet footers only (a `.csv`, `.dta`, Excel, SPSS or R file is refused with the alternative). For each variable it shows the value label and variable label, as Stata's `describe using` does. `*` marks variables with notes, `(spss)` marks string variables whose SPSS labels are kept in `char var[spss_value_labels]`, and `(r)` those whose R labels are in `char var[r_value_labels]`. `labels` lists the value-label sets and those SPSS labels; `notes` lists the notes. |
 
 ### Explore the view (engine-side, current dataset unchanged)
 
-`count`, `head`, `list`, `summarize`, `tabulate` and `describe` above are
+`count`, `list`, `summarize`, `tabulate` and `describe` above are
 push-down queries too; these complete the exploration family — every one
 computed by the engine, with only bounded summary output or preview rows
 reaching Stata:
@@ -1032,8 +1064,7 @@ reaching Stata:
 | `parqit codebook [varlist]` | Per variable: type, obs, missing, distinct, min/max, label — in one scan |
 | `parqit misstable [summarize\|patterns]` | Missing counts and shares; pattern frequencies and percentages of the full view (≤14 vars, top 100 patterns) |
 | `parqit levelsof var [, limit()]` | Sorted distinct values → `r(levels)` (refuses beyond the cap, default 5,000) |
-| `parqit distinct [varlist] [, joint missing]` | Distinct values per variable (and of the variables jointly), as the community-contributed `distinct` (SSC) reports them: `Obs` counts the nonmissing observations; `missing` counts missing as one more value |
-| `parqit unique varlist [if] [, by(varlist)]` | The number of unique values of the varlist taken jointly, missing counting as a value, as the community-contributed `unique` (SSC) reports it (`r(unique)`, `r(sum)`, `r(N)`); with several variables a table per variable as well, with `by()` a table per group |
+| `parqit unique [varlist] [if] [, by(varlist) nomissing]` | Individual and joint unique-value counts; no varlist selects all variables. Missing values count as values by default. `nomissing` excludes each variable's missings from its individual count and any incomplete row from the joint count. `r(unique)`/`r(sum)` hold the joint count, `r(N)` all selected observations, `r(N_used)` those used jointly; `by()` adds a table per group. |
 | `parqit duplicates report\|list [varlist]` | Copies/observations/surplus table; the duplicated observations listed as native `duplicates list` does (Group, Obs, variables); all variables without a varlist |
 | `parqit tabstat varlist, s() [by() save]` | Statistics × variables table (`n mean sd var sum min max range median p##`); `save` returns the computed tables in `r()` |
 | `parqit correlate [varlist]` / `parqit pwcorr [varlist] [, obs sig]` | Listwise / pairwise correlations, with full returned matrices; every numeric variable without a varlist |
@@ -1286,15 +1317,14 @@ These conversions are reported; see Limitations and `help parqit_technical`.
 - **Sampling designs** draw with parqit's own random numbers, so they never
   reproduce `sample2`'s draw, only its rules. See [Sampling designs](#sampling-designs)
   for the other differences: fractional-percentage ties, missing clusters and `count`.
-- **Stata `if` vs SQL semantics.** By default, expressions follow SQL semantics
-  (missing is `NULL`, not "larger than everything"); `x < .`-style idioms are
-  translated faithfully either way. `parqit set statamissing on` emulates Stata's
-  ordering in every comparison where it matters. Until a mode is chosen
-  (`parqit set statamissing on|off`), parqit warns, in red, at each comparison
-  whose result can differ from native Stata because a value is missing
-  (in `keep`/`drop if`, `gen`, `replace`, `egen`, `sample if`, `count if`,
-  `list if` and the `if` of the statistics commands); like any output, the
-  warning is silenced by `quietly` and `capture`.
+- **Stata `if` vs SQL semantics.** Expressions default to `statamissing on`:
+  ordinary numeric missing compares above every nonmissing number, so `x > 0`
+  includes missing values as native Stata does. `parqit set statamissing off`
+  explicitly selects SQL comparisons, where that comparison is unknown and
+  a filter excludes the row. `x < .`-style idioms work in either mode. Older
+  do-files that relied on the SQL default must select `off` explicitly.
+  Changing the mode affects newly translated expressions, not stages already
+  in a view. Raw SQL and the extended-missing storage contract are unchanged.
 - **Extended missings** `.a`–`.z` collapse to a single null in Parquet (the
   format has one missing concept); `parqit save`, `parqit open _data` and any
   command that bridges a `.dta`/Excel source warn when this loses information.
@@ -1341,7 +1371,7 @@ These conversions are reported; see Limitations and `help parqit_technical`.
   empty string, and corrupt codes still refuse the load. `int64(round)` accepts the nearest `double` with
   the note `values beyond 2^53 rounded to nearest double` — after which two
   distinct keys can be one observation. `parqit set int64 refuse|round|string`
-  moves the session default; `parqit head`/`parqit list` always preview the
+  moves the session default; `parqit list` always previews the
   exact digits. A **lazy** `merge` or `joinby` over such a key is exact
   whatever you choose, because the join runs in the engine before any Stata
   `double` exists; only what is then collected is affected. The manual recipe

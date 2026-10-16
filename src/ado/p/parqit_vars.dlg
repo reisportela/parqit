@@ -1,12 +1,12 @@
 /*
   parqit keep - Keep, drop, order, sort, or rename variables; drop duplicates
 
-*!  VERSION 0.4.3  14oct2026
+*!  VERSION 0.5.0  16oct2026
 
   User > parqit > Keep, drop, order, sort, or rename variables...
   Launch directly with:  db parqit_vars      (menu installed by: parqit menu)
 
-  Builds parqit keep / drop / order / sort / gsort / rename / duplicates drop.
+  Builds parqit keep / drop / order / sort / gsort / format / rename / duplicates drop.
   Populate fills the variable pickers from the current view (parqit ds).
   These verbs are lazy: they change the view's plan, not the data in memory.
 */
@@ -14,7 +14,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 385
+DEFINE _dlght 455
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -55,6 +55,9 @@ BEGIN
   RADIO rb_gsort		@	_ss	@	.,		///
 	onclickon(program main_mode)					///
 	label("Sort with a + or - prefix per variable, for example -wage id (gsort)")
+  RADIO rb_format @ _ss @ ., ///
+    onclickon(program main_mode) ///
+    label("Set display formats, including dates (format)")
   TEXT tx_vars			_ilft	_ms	_ibwd	.,		///
 	label("Variables:")
   COMBOBOX cb_vars		@	_ss	@	.,		///
@@ -63,6 +66,9 @@ BEGIN
 	contents(vv_list)						///
 	error("Variables")						///
 	label("Variables")
+
+  TEXT tx_fmt _ilft _ms _ibwd ., label("Display format (for example %td, %tc, %tm or %12.2f):")
+  EDIT ed_fmt @ _ss @ ., error("Display format") label("Display format")
 
   RADIO rb_rename		_lft	_ls	_iwd	.,		///
 	onclickon(program main_mode)					///
@@ -95,7 +101,7 @@ BEGIN
   CHECKBOX ck_force		@	_ms	@	.,		///
 	option(force)							///
 	label("Force the drop, even though information may be lost (required with key variables; sort the view first)")
-  TEXT tx_context _lft 345 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 415 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -115,6 +121,8 @@ PROGRAM main_mode
 BEGIN
 	call main.tx_vars.disable
 	call main.cb_vars.disable
+	call main.tx_fmt.disable
+	call main.ed_fmt.disable
 	call main.tx_old.disable
 	call main.cb_old.disable
 	call main.tx_new.disable
@@ -122,9 +130,13 @@ BEGIN
 	call main.tx_keys.disable
 	call main.cb_keys.disable
 	call main.ck_force.disable
-	if main.rb_keep | main.rb_drop | main.rb_order | main.rb_sort | main.rb_gsort {
+	if main.rb_keep | main.rb_drop | main.rb_order | main.rb_sort | main.rb_gsort | main.rb_format {
 		call main.tx_vars.enable
 		call main.cb_vars.enable
+	}
+	if main.rb_format {
+		call main.tx_fmt.enable
+		call main.ed_fmt.enable
 	}
 	if main.rb_rename {
 		call main.tx_old.enable
@@ -182,6 +194,11 @@ BEGIN
 		require main.cb_old
 		require main.ed_new
 		put "parqit rename (" main.cb_old ") (" main.ed_new ")"
+	}
+	if main.rb_format {
+		require main.cb_vars
+		require main.ed_fmt
+		put "parqit format " main.cb_vars " " main.ed_fmt
 	}
 	if main.rb_dupdrop {
 		put "parqit duplicates drop"

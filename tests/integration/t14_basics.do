@@ -128,7 +128,7 @@ clear
 parqit use using `"`W'"'
 assert _N == 0                        // nothing was loaded...
 parqit describe                       // ...yet we can see the schema,
-parqit head 5                         // preview rows,
+parqit list in 1/5                    // preview rows,
 parqit count                          // count,
 assert r(N) == 120
 parqit summarize wage                 // and summarise — all computed by the

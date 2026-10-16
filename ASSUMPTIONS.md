@@ -3846,8 +3846,8 @@ entry notes the conservative fallback if the assumption proves wrong.
     the Codex review notes that algebraic equivalence is not rounding
     equivalence (`D2.x` is `x - 2 L.x + L2.x` here and `(x - L.x) - (L.x -
     L2.x)` natively): equal on the oracle's values, documented as a
-    last-ulp caveat for extreme magnitudes. The operators cannot be applied
-    to the time or panel variable, nor to a string. `tin(a, b)` (inclusive)
+    last-ulp caveat for extreme magnitudes. The original refusal of the time
+    and panel variables is lifted by #203; strings remain refused. `tin(a, b)` (inclusive)
     and `twithin(a, b)` (exclusive) take numbers or the time variable's
     display format (`td` ddmonyyyy, `tm` yyyymN, …). Invalidation (the Codex
     review): the declaration is plan state checked once; a later verb that
@@ -4298,3 +4298,47 @@ entry notes the conservative fallback if the assumption proves wrong.
     preserve existing staging in every patch. The failed v0.4.2 tag remains
     immutable; v0.4.3 carries this build correction and requires all platform
     gates again before publication.
+
+202. **View formats and Stata variable-name abbreviations (FORMAT-1,
+    VARABBREV-1, 2026-10-15).** The maintainer requested both additions.
+    `format varlist %fmt` and `%fmt varlist` use native Stata to validate the
+    selected schema on an empty frame, then commit display metadata together.
+    The logical plan, values and storage types do not change; collection and
+    saving reuse the existing format overlay and temporal type contract.
+    Formats do not convert units. With no format, native format displays the
+    selected formats (only long ones with no arguments). Variable references
+    resolve exact names first, otherwise a unique case-sensitive prefix,
+    honouring the calling command's `c(varabbrev)` against the view/file schema.
+    Ambiguity never selects the first match. Aliases identify one column, and
+    output names, reshape-long stubs and raw SQL remain literal. The existing
+    defaults of `save` and `statamissing`, and `distinct`, `head` and `glimpse`,
+    are retained while the maintainer evaluates those separate suggestions.
+
+203. **Permit time/panel key lags (TS-KEY-LAG-1, 2026-10-15).** A fresh native
+    Stata reproduction accepts `generate ... = L.timevar` and `L.panelvar`;
+    parqit's explicit refusal was an incorrect restriction. Remove it and
+    test native parity for lags, leads and differences on those keys, with
+    panels, gaps and `delta(2)`. Missing times retain the documented parqit
+    rule: a nonzero shift is missing. Native can differ there (for example,
+    `F.panel_id` at a single missing time returns the panel itself); V165
+    checks the two contracts separately. The existing RANGE windows still
+    select the requested time rather than a positional neighbour.
+
+204. **Native comparisons and a smaller public vocabulary (STATA-DEFAULT-1,
+    UNIQUE-2, RETIRED-VERBS-1, 2026-10-16).** The maintainer explicitly
+    authorised implementation, help updates, version bump, commit, push and
+    public release, then requested the current result on local and online
+    main. This supersedes the earlier default/surface preservation decisions
+    for these named changes: `statamissing on` from startup; `unique` replaces
+    `distinct`; `list` and `describe` replace `head` and `glimpse`. Version
+    0.5.0 is a documented compatibility boundary in the pre-1.0 series.
+    Retired names refuse with migration guidance before loading the plugin.
+    `unique` counts each variable and their combination, without `joint`, and
+    an omitted varlist selects all columns. `nomissing` preserves individual
+    missing-excluding counts independently, and requires complete selected
+    values for the joint count. `r(N)` counts the selected observations;
+    `r(N_used)` counts the usable joint observations. Missing grouping keys
+    remain groups, including groups with zero usable selected values. The
+    existing extended-missing storage contract is unchanged. Exact native
+    oracles, the full staged suite, comparable-mode performance and verified
+    GitHub-built assets gate publication; no private data are needed.

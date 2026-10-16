@@ -112,7 +112,11 @@ Fixed decisions:
 
 The command is `parqit`, dispatched on the first token (`gettoken todo 0 : 0`, like
 `pq`). Implement these verbs with the semantics shown. Keep this surface **stable**
-once published; additive changes only.
+once published; additive changes only unless the maintainer explicitly
+authorises a documented compatibility change. On 16 October 2026 the
+maintainer authorised v0.5.0 to default to Stata missing comparisons and to
+retire `distinct`, `head` and `glimpse` in favour of `unique`, `list` and
+`describe`; the capabilities remain available through those commands.
 
 **Source / open**
 - `parqit use [varlist] using <files>` — open a lazy view over a Parquet file, glob,
@@ -149,8 +153,10 @@ once published; additive changes only.
   never `clear` before the load is known good — charter §6.9)
 - `parqit save <dest> [, replace partition_by() compression() compression_level()
   chunk()]` — execute; write Parquet, Stata memory untouched
-- `parqit count` → `r(N)` ; `parqit head [n]` / `parqit list [n]`
-- `parqit summarize` / `parqit tabulate` → `r()` ; `parqit describe` / `parqit glimpse` →
+- `parqit count` → `r(N)` ; `parqit list [varlist] [if] [in]`
+- `parqit unique [varlist] [if] [, by() nomissing]` → individual and joint counts
+- `parqit format varlist %fmt` → validated view display metadata, no data scan
+- `parqit summarize` / `parqit tabulate` → `r()` ; `parqit describe` →
   schema/types/rows/row-groups returned as **scalars** in `r()` (charter S4-12)
 
 **Escape / introspection**
@@ -255,9 +261,10 @@ frames).
 
 ## 7. Engineering invariants (general)
 
-- **Stata expression → SQL** translation is a focused, unit-tested module. Default to
-  SQL missing semantics; implement a `statamissing` mode that emulates Stata's
-  "missing is larger than any value" ordering. Document the difference.
+- **Stata expression → SQL** translation is a focused, unit-tested module.
+  Default to `statamissing on`, emulating Stata's "missing is larger than any
+  value" comparisons. `parqit set statamissing off` explicitly selects SQL
+  missing semantics. Document the difference and the v0.5.0 migration.
 - **Resource hygiene:** open/close the DuckDB connection cleanly; set spill
   `temp_directory`; return memory aggressively on Linux (HPC/cgroup friendliness).
 - **Determinism:** seeded sampling is reproducible; no nondeterministic column order.

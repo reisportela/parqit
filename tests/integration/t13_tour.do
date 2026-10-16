@@ -67,7 +67,7 @@ di as txt "{hline 78}"
 
 parqit describe workers.parquet
 assert r(n_rows) == 600 & r(n_cols) == 13
-parqit glimpse workers.parquet
+parqit describe workers.parquet
 assert r(n_rows) == 600 & r(n_cols) == 13
 parqit path workers.parquet
 assert r(exists) == 1 & `"`r(path)'"' != ""
@@ -180,9 +180,9 @@ parqit pwcorr wage age tenure, obs sig
 qui parqit correlate wage tenure
 assert reldif(r(rho), `o_rho') < 1e-12
 
-parqit distinct id firm_id region
-parqit distinct id year, joint
-assert r(ndistinct) == 600
+parqit unique id firm_id region, nomissing
+parqit unique id year, nomissing
+assert r(unique) == 600
 
 parqit levelsof region
 assert `"`r(levels)'"' == `"`o_regions'"'
@@ -449,7 +449,7 @@ parqit sql "SELECT region, sector, avg(wage) AS aw, count(*) AS n FROM read_parq
 parqit count
 assert r(N) > 0 & r(N) <= 20
 parqit sort region sector
-parqit head 6
+parqit list in 1/6
 parqit close
 
 clear

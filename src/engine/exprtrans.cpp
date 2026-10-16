@@ -18,6 +18,25 @@
 
 namespace parqit {
 
+std::string ExprSchema::resolve_name(std::string *name) const {
+    if (kinds.count(*name)) return "";
+    const auto alias = aliases.find(*name);
+    if (alias != aliases.end()) { *name = alias->second; return ""; }
+    std::set<std::string> matches;
+    if (varabbrev && !name->empty()) {
+        for (auto it = kinds.lower_bound(*name); it != kinds.end() &&
+             it->first.compare(0, name->size(), *name) == 0; ++it)
+            matches.insert(it->first);
+        for (auto it = aliases.lower_bound(*name); it != aliases.end() &&
+             it->first.compare(0, name->size(), *name) == 0; ++it)
+            matches.insert(it->second);
+    }
+    if (matches.empty()) return "variable " + *name + " not found in the view";
+    if (matches.size() != 1) return *name + " ambiguous abbreviation";
+    *name = *matches.begin();
+    return "";
+}
+
 namespace {
 
 /* ------------------------------------------------------------- lexer --- */
@@ -777,16 +796,15 @@ struct Parser {
      * which is missing whenever a term is missing. */
     bool ts_operator(const std::string &text, Val *out) {
         const size_t dot = text.find('.');
-        const std::string ops = text.substr(0, dot), name = text.substr(dot + 1);
+        const std::string ops = text.substr(0, dot);
+        std::string name = text.substr(dot + 1);
         if (schema.ts_time.empty())
             return fail(ops + "." + name + ": the time-series operators need the panel "
                         "and time variables; declare them with parqit xtset or parqit tsset");
+        const std::string error = schema.resolve_name(&name);
+        if (!error.empty()) return fail(error);
         auto it = schema.kinds.find(name);
-        if (it == schema.kinds.end())
-            return fail("variable " + name + " not found in the view");
         if (it->second == 's') return fail(ops + "." + name + " needs a numeric variable");
-        if (name == schema.ts_time || name == schema.ts_panel)
-            return fail(ops + "." + name + ": the time and panel variables cannot be lagged");
         std::map<long long, double> poly{{0, 1.0}};
         size_t i = 0;
         while (i < ops.size()) {
@@ -952,9 +970,9 @@ struct Parser {
                 advance();
                 return call(name, out);
             }
+            const std::string error = schema.resolve_name(&name);
+            if (!error.empty()) return fail(error);
             auto it = schema.kinds.find(name);
-            if (it == schema.kinds.end())
-                return fail("variable " + name + " not found in the view");
             const auto ov = schema.column_sql.find(name); /* USE-IF-1 */
             out->sql = ov == schema.column_sql.end() ? quote_ident(name) : ov->second;
             out->kind = it->second == 's' ? 's' : 'n';

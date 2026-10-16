@@ -1084,6 +1084,7 @@ bool rewrite_decode_failure(std::string *err) {
 }
 
 bool read_type_options(const json &req, PlanContext *ctx, std::string *err) {
+    ctx->varabbrev = req.value("varabbrev", true);
     ctx->int64_mode = int64_session_default();
     std::string v;
     if (!parqit::req_text(req, "int64", &v, err, /*required=*/false)) return false;
@@ -1791,23 +1792,12 @@ ST_retcode plan_columns(Session &s, const Source &src,
     /* varlist selection: named columns, named order (charter §6.1) */
     if (!varlist.empty()) {
         std::vector<ColumnPlan> picked;
-        std::set<size_t> seen;
-        for (const auto &want : varlist) {
-            const bool has_wild = want.find('*') != std::string::npos ||
-                                  want.find('?') != std::string::npos;
-            bool hit = false;
-            for (size_t i = 0; i < plans.size(); i++) {
-                if (has_wild ? parqit::glob_match(want, plans[i].stata_name)
-                             : want == plans[i].stata_name) {
-                    hit = true;
-                    if (seen.insert(i).second) picked.push_back(plans[i]);
-                }
-            }
-            if (!hit) {
-                *err = "variable " + want + " not found in the file(s)";
-                return kRcVarNotFound;
-            }
-        }
+        std::vector<std::string> names;
+        for (const auto &p : plans) names.push_back(p.stata_name);
+        std::vector<size_t> selected;
+        *err = parqit::resolve_varlist(varlist, names, {}, ctx->varabbrev, &selected);
+        if (!err->empty()) { *err += " in the file(s)"; return kRcVarNotFound; }
+        for (size_t i : selected) picked.push_back(plans[i]);
         /* FILENAME-1: filename() asks for the provenance column explicitly, so
          * a varlist that selects columns of the FILE still gets it (appended
          * last). Naming it in the varlist instead places it where the user
@@ -3351,7 +3341,8 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
     }
     if (!ifexpr.empty()) {
         std::string where;
-        if (!eager_filter_sql(src.scan_sql, ifexpr, &where, &err)) {
+        if (!eager_filter_sql(src.scan_sql, ifexpr, &where, &err,
+                              req.value("varabbrev", true))) {
             cry("parqit use: " + err);
             return kRcUsage;
         }

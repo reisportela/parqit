@@ -279,7 +279,7 @@ di as txt _n(2) "===== Section 2 - use, input formats and metadata ====="
 * -- File-level introspection: schema, row groups, existence and absolute path.
 parqit describe "$PANEL_PQ"
 assert r(n_rows) == $N_PANEL & r(n_cols) == 12 & r(has_parqit_meta) == 1
-parqit glimpse "$PANEL_PQ"
+parqit describe "$PANEL_PQ"
 assert r(n_rows) == $N_PANEL
 parqit path "$PANEL_PQ"
 assert r(exists) == 1 & `"`r(path)'"' != ""
@@ -376,9 +376,9 @@ parqit list id year wage in 1/5
 assert r(N) == 5
 parqit list id year wage if id <= 2 in 1/40
 assert r(N) > 0
-parqit head
+parqit list
 assert r(N) == 5
-parqit head 4
+parqit list in 1/4
 assert r(N) == 4
 
 * -- Descriptive summaries, tabulations, missingness and codebook-style checks.
@@ -401,10 +401,10 @@ assert r(r) == 4
 parqit codebook wage region education
 
 * -- Distinct values and duplicate-key diagnostics.
-parqit distinct id year firm_id
-assert r(N) == $N_PANEL & r(ndistinct) > 0
-parqit distinct id year, joint
-assert r(ndistinct) == $N_PANEL
+parqit unique id year firm_id, nomissing
+assert r(N) == $N_PANEL & r(unique) > 0
+parqit unique id year, nomissing
+assert r(unique) == $N_PANEL
 parqit duplicates report id
 assert r(N) == $N_PANEL & r(surplus) == $N_ID_SURPLUS
 parqit duplicates list id, limit(4)
@@ -619,7 +619,7 @@ di as txt _n(2) "===== Section 6 - save, partition and open _data ====="
 * -- View save: Parquet-to-Parquet output without loading the source into Stata.
 clear
 parqit use using "$PANEL_PQ"
-parqit keep if year == 2021 & wage > 0
+parqit keep if year == 2021 & wage > 0 & !missing(wage)
 parqit keep id year firm_id wage region
 parqit save "$VIEW_SAVE_PQ", replace compression(zstd) compression_level(3) chunk(2048)
 parqit close _all
@@ -806,7 +806,7 @@ parqit sql `"SELECT region, sector, avg(wage) AS mean_wage, count(*) AS n FROM r
 parqit count
 assert r(N) > 0
 parqit sort region sector
-parqit head 3
+parqit list in 1/3
 parqit save "$SQL_PQ", replace
 parqit close _all
 

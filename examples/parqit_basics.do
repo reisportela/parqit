@@ -84,7 +84,7 @@ parqit save "$PARQIT_WORKERS", replace data compression(zstd)
 * The Describe button runs -parqit describe- on the file named in the dialog.
 parqit path "$PARQIT_WORKERS"
 parqit describe "$PARQIT_WORKERS"
-parqit glimpse "$PARQIT_WORKERS"
+parqit describe "$PARQIT_WORKERS"
 clear
 parqit use "$PARQIT_WORKERS", clear
 describe
@@ -106,7 +106,7 @@ parqit use using "$PARQIT_WORKERS"
 
 * Menu: User > parqit > Describe and explore data...
 parqit describe
-parqit head 5
+parqit list in 1/5
 parqit count
 
 * Menu: User > parqit > Summary statistics, tables, and correlations...
@@ -119,13 +119,12 @@ assert memory_note[1] == "This dataset remains until collect"
 * Build a plan using Stata-flavoured verbs. Nothing runs yet: each verb adds
 * one stage to a single query, so the same script scales to files far larger
 * than memory.
-* Missing values follow SQL by default: for a missing year, year >= 1983 is
-* unknown and the row is dropped, while native Stata (missing is larger than any
-* number) keeps it. Until a rule is chosen, parqit names in red each comparison
-* whose result could differ. This course keeps the SQL rule for the rest of the
-* session; parqit_tour.do compares the two rules.
+* Comparisons follow Stata by default: a missing year satisfies year >= 1983.
+* This course explicitly selects the default so it also works after a previous
+* do-file changed the mode; parqit_tour.do compares the two rules. Add year < .
+* when only observed years should pass under Stata's rule.
 * Menu: User > parqit > Views, SQL, and engine settings...
-parqit set statamissing off
+parqit set statamissing on
 
 * Menu: User > parqit > Keep or drop observations, or draw a sample...
 parqit keep if year >= 1983 & !missing(ln_wage)

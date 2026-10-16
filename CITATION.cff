@@ -19,8 +19,8 @@ authors:
     given-names: "Marta"
     affiliation: "BPLIM / Banco de Portugal"
     email: "msilva@bportugal.pt"
-version: "0.4.3"
-date-released: 2026-10-14
+version: "0.5.0"
+date-released: 2026-10-16
 url: "https://github.com/reisportela/parqit"
 license: MIT
 # Built with the assistance of two AI coding agents used in tandem — Anthropic's

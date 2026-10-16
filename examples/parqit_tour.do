@@ -80,7 +80,7 @@ parqit use using "$PARQIT_TOUR_WORKERS", name(workers)
 parqit describe
 parqit ds
 parqit lookfor wage experience
-parqit head 6
+parqit list in 1/6
 parqit count
 parqit count if missing(ln_wage)
 parqit list idcode year age ln_wage union in 1/8
@@ -88,7 +88,7 @@ parqit codebook ln_wage hours union race
 parqit misstable ln_wage hours union
 parqit misstable patterns ln_wage hours union
 parqit levelsof industry
-parqit distinct idcode year, joint
+parqit unique idcode year, nomissing
 parqit duplicates report idcode year
 
 * Menu: User > parqit > Summary statistics, tables, and correlations...
@@ -106,16 +106,13 @@ parqit pwcorr ln_wage age tenure ttl_exp, obs sig
 parqit histogram ln_wage, bins(20) nodraw
 return list
 
-* Comparisons with missing values follow SQL by default, so a missing hours
-* value is excluded by hours > 40. Stata treats missing as larger than any
-* number; switch to that rule when a do-file written for Stata relies on it.
-* Until a rule is chosen, parqit names such a comparison in red; choosing
-* either rule silences that warning for the rest of the session.
+* Comparisons follow Stata by default: missing is larger than any number.
+* SQL mode is an explicit choice; a missing hours value then fails hours > 40.
 * Menu: User > parqit > Views, SQL, and engine settings...
 parqit count if hours > 40
-parqit set statamissing on
-parqit count if hours > 40
 parqit set statamissing off
+parqit count if hours > 40
+parqit set statamissing on
 
 * Every command above returned bounded output. No panel was loaded into Stata.
 display as text "Observations in memory: " _N
@@ -270,7 +267,7 @@ parqit close
 
 * sql opens a lazy view over any DuckDB query; a Parquet file is a table.
 parqit sql "select industry, avg(ln_wage) as mean_lnwage, count(*) as n from read_parquet('$PARQIT_TOUR_WORKERS') group by industry order by industry"
-parqit head 10
+parqit list in 1/10
 parqit collect, clear
 parqit close
 

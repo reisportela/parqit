@@ -13,7 +13,7 @@
 *   int64(string)  the affected columns arrive as EXACT decimal text; columns
 *                  of the same family whose values all fit stay numeric
 *
-* Previews (parqit head/list) always show the exact digits — never a refusal,
+* Previews (parqit list) always show the exact digits — never a refusal,
 * never a rounded number. `parqit set int64` moves the session default.
 *
 * The sources cannot be produced by Stata (its widest exact integer IS 2^53),
@@ -285,7 +285,7 @@ else di as txt "VERDICT(v104_lazy_string_on_collect_and_open): PASS"
 capture quietly parqit close _all
 quietly parqit use using `"`t'_b.parquet"'
 log using `"`t'_H.log"', replace text name(v104H)
-capture noisily parqit head 2
+capture noisily parqit list in 1/2
 local H_rc = _rc
 capture noisily parqit list
 local L_rc = _rc

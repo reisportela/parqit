@@ -4,6 +4,23 @@
 
 using namespace parqit;
 
+TEST_CASE("VARABBREV-1 exact names, unique prefixes, aliases and refusal atomicity") {
+    const std::vector<std::string> names{"income", "interest", "inc", "Income_1", "café_value"};
+    const std::vector<std::string> aliases{"", "", "", "Income", ""};
+    std::vector<size_t> selected;
+    REQUIRE(resolve_varlist({"inc", "inte", "caf", "Income"}, names, aliases, true, &selected).empty());
+    CHECK(selected == std::vector<size_t>{2, 1, 4, 3});
+    const auto before = selected;
+    CHECK(resolve_varlist({"income", "in"}, names, aliases, true, &selected).find("ambiguous") != std::string::npos);
+    CHECK(selected == before);
+    CHECK_FALSE(resolve_varlist({"inco"}, names, aliases, false, &selected).empty());
+    REQUIRE(resolve_varlist({"inc*", "income"}, names, aliases, false, &selected).empty());
+    CHECK(selected == std::vector<size_t>{0, 2});
+    REQUIRE(resolve_varlist({"Inco"}, names, aliases, true, &selected).empty());
+    CHECK(selected == std::vector<size_t>{3});
+    CHECK_FALSE(resolve_varlist({"INCO"}, names, aliases, true, &selected).empty());
+}
+
 TEST_CASE("clean names pass through untouched") {
     CHECK(sanitize_stata_name("wage", 1) == "wage");
     CHECK(sanitize_stata_name("_merge_key", 1) == "_merge_key");

@@ -4,7 +4,7 @@
 *       never a pattern (`data[1].parquet` used to silently read data1.parquet);
 *   (b) `_se` sanitises to `__se` (summarize _se on a loaded `_se` is a silent
 *       no-op against the system variable);
-*   (c) `parqit head -3` is r(198), not a full-view materialisation;
+*   (c) retired `parqit head -3` is r(198), never a materialisation;
 *   (d) `reshape wide` with missing j errors like native r(498), never silently
 *       destroying the missing-j rows;
 *   (e) `parqit list ... in f/l` beyond the row count errors like native;

@@ -1,15 +1,15 @@
 /*
   parqit describe - Describe and explore a view or a Parquet file
 
-*!  VERSION 0.4.3  14oct2026
+*!  VERSION 0.5.0  16oct2026
 
   User > parqit > Describe and explore data...
   Launch directly with:  db parqit_explore      (menu installed by: parqit menu)
 
   One list box of operations (Stata's interface guideline for more than
   about twelve choices), each an engine-side query that leaves the data in
-  memory unchanged: describe/glimpse, ds, lookfor, codebook, head, list,
-  count, misstable [patterns], levelsof, distinct, duplicates report/list.
+  memory unchanged: describe, ds, lookfor, codebook, list,
+  count, misstable [patterns], levelsof, unique, duplicates report/list.
   Summary statistics live in the companion dialog:  db parqit_stats
 */
 
@@ -70,15 +70,9 @@ BEGIN
   EXP ex_if			275	_ss	315	.,		///
 	label("Create...")
 
-  TEXT tx_rows			275	_ls	60	.,		///
-	label("Rows:") right
-  EDIT ed_rows			340	@	60	.,		///
-	numonly								///
-	default(5)							///
-	label("Rows")
-  TEXT tx_limit			405	@	60	.,		///
+  TEXT tx_limit			275	_ls	60	.,		///
 	label("Limit:") right
-  EDIT ed_limit			470	@	60	.,		///
+  EDIT ed_limit			340	@	60	.,		///
 	numonly								///
 	option(limit)							///
 	label("Limit")
@@ -94,12 +88,9 @@ BEGIN
 	numonly								///
 	label("to")
 
-  CHECKBOX ck_joint		275	_ls	160	.,		///
-	option(joint)							///
-	label("Joint values (joint)")
-  CHECKBOX ck_dmiss		440	@	150	.,		///
-	option(missing)							///
-	label("Count missing (missing)")
+  CHECKBOX ck_dmiss		275	_ls	315	.,		///
+	option(nomissing)						///
+	label("Exclude missing values (nomissing)")
   CHECKBOX ck_dlab		275	_ls	160	.,		///
 	option(labels)							///
 	label("Value labels (labels)")
@@ -121,17 +112,14 @@ LIST op_words
 BEGIN
 	Describe the current view
 	Describe a Parquet file (footer only)
-	Glimpse the view or a Parquet file
 	List variable names (ds)
 	Search names and labels (lookfor)
 	Codebook
-	Preview the first rows (head)
 	List observations (list)
 	Count observations (count)
 	Missing values by variable (misstable)
 	Missing patterns (misstable patterns)
 	Levels of one variable (levelsof)
-	Distinct values (distinct)
 	Unique values, jointly and per variable (unique)
 	Report duplicates (duplicates report)
 	List duplicates (duplicates list)
@@ -141,17 +129,14 @@ LIST op_vals
 BEGIN
 	descview
 	descfile
-	glimpse
 	ds
 	lookfor
 	codebook
-	head
 	list
 	count
 	misstable
 	misspatterns
 	levelsof
-	distinct
 	unique
 	dupreport
 	duplist
@@ -161,17 +146,14 @@ LIST op_change
 BEGIN
 	script op_descview
 	script op_descfile
-	script op_glimpse
 	script op_descview
 	script op_lookfor
 	script op_vars
-	script op_head
 	script op_list
 	script op_count
 	script op_vars
 	script op_patterns
 	script op_levelsof
-	script op_distinct
 	script op_unique
 	script op_keys
 	script op_keys
@@ -186,15 +168,12 @@ BEGIN
 	main.cb_vars.disable
 	main.tx_if.disable
 	main.ex_if.disable
-	main.tx_rows.disable
-	main.ed_rows.disable
 	main.tx_limit.disable
 	main.ed_limit.disable
 	main.tx_from.disable
 	main.ed_from.disable
 	main.tx_to.disable
 	main.ed_to.disable
-	main.ck_joint.disable
 	main.ck_dmiss.disable
 	main.ck_dlab.disable
 	main.ck_dnotes.disable
@@ -223,14 +202,6 @@ BEGIN
 	main.ck_dnotes.enable
 END
 
-SCRIPT op_glimpse
-BEGIN
-	script all_off
-	main.tx_file.enable
-	main.fi_file.enable
-	main.tx_file.setlabel "Parquet file, glob, or Hive directory (leave empty for the current view):"
-END
-
 SCRIPT op_lookfor
 BEGIN
 	script all_off
@@ -253,13 +224,6 @@ BEGIN
 	main.tx_vars.setlabel "Variables (maximum 14; empty selects all):"
 	main.tx_if.enable
 	main.ex_if.enable
-END
-
-SCRIPT op_head
-BEGIN
-	script all_off
-	main.tx_rows.enable
-	main.ed_rows.enable
 END
 
 SCRIPT op_list
@@ -292,21 +256,11 @@ BEGIN
 	main.ex_if.enable
 END
 
-SCRIPT op_distinct
-BEGIN
-	script all_off
-	script vars_on
-	main.ck_joint.enable
-	main.ck_dmiss.enable
-	main.tx_if.enable
-	main.ex_if.enable
-END
-
 SCRIPT op_unique
 BEGIN
 	script all_off
 	script vars_on
-	main.tx_vars.setlabel "Variables (counted jointly; missing is a value):"
+	main.ck_dmiss.enable
 	main.tx_if.enable
 	main.ex_if.enable
 END
@@ -359,13 +313,6 @@ BEGIN
 			option main.ck_dnotes
 		endoptions
 	}
-	if main.lb_op.equals("glimpse") {
-		put "parqit glimpse"
-		if main.fi_file {
-			put " "
-			put /smartquote main.fi_file
-		}
-	}
 	if main.lb_op.equals("ds") {
 		put "parqit ds"
 	}
@@ -381,10 +328,6 @@ BEGIN
 		if main.ex_if {
 			put " if " main.ex_if
 		}
-	}
-	if main.lb_op.equals("head") {
-		require main.ed_rows
-		put "parqit head " main.ed_rows
 	}
 	if main.lb_op.equals("list") {
 		put "parqit list"
@@ -434,8 +377,8 @@ BEGIN
 			optionarg main.ed_limit
 		endoptions
 	}
-	if main.lb_op.equals("distinct") {
-		put "parqit distinct"
+	if main.lb_op.equals("unique") {
+		put "parqit unique"
 		if main.cb_vars {
 			put " " main.cb_vars
 		}
@@ -443,16 +386,8 @@ BEGIN
 			put " if " main.ex_if
 		}
 		beginoptions
-			option main.ck_joint
 			option main.ck_dmiss
 		endoptions
-	}
-	if main.lb_op.equals("unique") {
-		require main.cb_vars
-		put "parqit unique " main.cb_vars
-		if main.ex_if {
-			put " if " main.ex_if
-		}
 	}
 	if main.lb_op.equals("dupreport") {
 		put "parqit duplicates report"

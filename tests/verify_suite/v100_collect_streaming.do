@@ -207,6 +207,7 @@ for k in ("n", "id_first", "id_last", "id_sum", "y_small_sum", "n_big"):
 end
 
 parqit use using `"`f'"'
+parqit set statamissing off
 parqit keep if x > 0
 parqit gen double y = x * 2
 parqit gsort -id

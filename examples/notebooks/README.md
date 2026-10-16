@@ -13,9 +13,19 @@ Women (2,246 women) that ships with Stata, so there is nothing to download. They
 the do-file courses `parqit_basics.do` and `parqit_tour.do` that ship with the package.
 The stored outputs were produced with parqit 0.2.1.
 
+These are historical executed notebooks. The current, runnable courses are
+[`parqit_basics.do`](../parqit_basics.do) and
+[`parqit_tour.do`](../parqit_tour.do). Before rerunning these older notebooks
+with 0.5.0, replace `head` with `list`, `glimpse` with `describe`, and
+`distinct` with `unique, nomissing` (or plain `unique` when including missing
+values), removing `joint`. Select `parqit set statamissing off` explicitly
+where the old examples demonstrate SQL comparisons. The stored historical
+outputs have not been regenerated.
+
 ## Running the notebooks
 
-1. Stata 16 or newer, with parqit 0.2.1 or later from the GitHub releases:
+1. Stata 16 or newer, with parqit from the GitHub releases; apply the migration
+   above when using 0.5.0 or later:
 
        net install parqit, from("https://github.com/reisportela/parqit/releases/latest/download") replace
 

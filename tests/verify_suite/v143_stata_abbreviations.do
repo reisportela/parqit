@@ -202,8 +202,8 @@ parqit set statamissing off
 * each exact parqit verb still reaches its own program
 parqit ds
 assert `"`r(varlist)'"' != ""
-parqit distinct rep78
-assert r(ndistinct) == 5
+parqit unique rep78, nomissing
+assert r(unique) == 5
 parqit tabstat price
 parqit sample 10, count seed(1)
 parqit count

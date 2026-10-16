@@ -145,6 +145,7 @@ struct ParqitMeta {
 };
 
 struct PlanContext {
+    bool varabbrev = true;
     std::vector<parqit::ColumnPlan> active;
     std::vector<std::string> warnings;
     std::vector<std::pair<std::string, std::string>> drops;

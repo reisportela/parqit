@@ -242,7 +242,7 @@ parqit close _all
 quietly log using `"`lg'"', text name(v67) replace
 capture noisily parqit describe `"`csv'"'
 local rc_dcsv = _rc
-capture noisily parqit glimpse `"`csv'"'
+capture noisily parqit describe `"`csv'"'
 local rc_gcsv = _rc
 quietly log close v67
 assert `rc_dcsv' == 198

@@ -139,8 +139,8 @@ parqit correlate price mpg weight if price > 5000 & !missing(rep78)
 assert mreldif(r(C), Ci) < 1e-12
 parqit pwcorr price mpg if foreign
 assert mreldif(r(C), Pi) < 1e-12
-parqit distinct rep78 if price > 5000
-assert r(N) == `dn'
+parqit unique rep78 if price > 5000, nomissing
+assert r(N_used) == `dn'
 parqit codebook rep78 if price > 5000
 parqit misstable summarize if price > 5000
 parqit histogram price if price > 5000, nodraw
@@ -242,14 +242,14 @@ egen g2 = group(rep78 foreign), missing
 summarize g2, meanonly
 local j2 = r(max)
 parqit use using `"`stem'_auto.parquet"', name(s)
-parqit distinct rep78
-assert r(N) == `nm' & r(ndistinct) == 5
-parqit distinct rep78, missing
-assert r(N) == 74 & r(ndistinct) == 6
-parqit distinct rep78 foreign, joint
-assert r(N) == `jn1' & r(ndistinct) == `j1'
-parqit distinct rep78 foreign, joint missing
-assert r(N) == 74 & r(ndistinct) == `j2'
+parqit unique rep78, nomissing
+assert r(N_used) == `nm' & r(unique) == 5
+parqit unique rep78
+assert r(N) == 74 & r(unique) == 6
+parqit unique rep78 foreign, nomissing
+assert r(N_used) == `jn1' & r(unique) == `j1'
+parqit unique rep78 foreign
+assert r(N) == 74 & r(unique) == `j2'
 parqit close _all
 
 * ---------- sql: a reserved word used as a name ------------------------------
@@ -295,8 +295,7 @@ assert r(found) == 1
 _v141_grep `"`plog2'"' "(0 partitions replaced, 0 added, 1 extended with a new file under"
 assert r(found) == 1
 
-* ---------- the missing-value warning ----------------------------------------
-* (last: parqit set statamissing silences it for the rest of the session)
+* ---------- Stata default and explicit SQL mode ------------------------------
 use `"`stem'_auto.dta"', clear
 count if rep78 > 3
 local stata_n = r(N)
@@ -304,15 +303,16 @@ tempfile wlog
 parqit use using `"`stem'_auto.parquet"', name(w)
 log using `"`wlog'"', text replace name(v141w)
 parqit count if rep78 > 3
-local sql_n = r(N)
+local default_n = r(N)
+local sql_n = `stata_n' - 5
 log close v141w
-assert `sql_n' == `stata_n' - 5
+assert `default_n' == `stata_n'
 _v141_grep `"`wlog'"' "warning: rep78 > 3:"
-assert r(found) == 1
+assert r(found) == 0
 * like any output it is silenced by quietly and capture, and never carried over
 log using `"`wlog'"', text replace name(v141wq)
 quietly parqit count if rep78 > 3
-assert r(N) == `sql_n'
+assert r(N) == `stata_n'
 capture parqit count if rep78 > 3
 assert _rc == 0
 log close v141wq
@@ -334,11 +334,11 @@ parqit gen byte good = rep78 > 3
 parqit keep if rep78 != 3
 log close v141y
 _v141_grep `"`wlog'"' "warning: rep78 > 3:"
-assert r(found) == 1
+assert r(found) == 0
 _v141_grep `"`wlog'"' "warning: rep78 != 3:"
-assert r(found) == 1
+assert r(found) == 0
 parqit close _all
-* choosing a mode silences it; on follows Stata
+* Explicit SQL mode remains available; neither chosen mode emits the old warning.
 parqit use using `"`stem'_auto.parquet"', name(w2)
 log using `"`wlog'"', text replace name(v141z)
 parqit set statamissing on
@@ -352,4 +352,4 @@ _v141_grep `"`wlog'"' "warning:"
 assert r(found) == 0
 parqit close _all
 
-di "VERDICT(V141_RUTE_ROUND2): PASS - appendin generate() and append keep() equal native append (keep() refused loudly before mutation); tabulate if equals native; duplicates report/correlate/pwcorr use every variable without a varlist; duplicates list prints native duplicates list's table; distinct Obs/missing/joint equal the SSC distinct; the missing-value warning names the differing comparisons, is silenced by quietly and capture, stays silent on the settling idioms and after parqit set statamissing; sql names a reserved word"
+di "VERDICT(V141_RUTE_ROUND2): PASS - append metadata, statistics and duplicates agree with native; unique retains missing-excluding and inclusive counts; comparisons default to Stata and explicit SQL mode remains available; sql names reserved words"

@@ -1,4 +1,4 @@
-*! version 0.4.3 14oct2026
+*! version 0.5.0 16oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -13,13 +13,25 @@ program define parqit, rclass
         exit 198
     }
 
-    local cmds version selftest use save describe glimpse open close       ///
+    * Explicit migration refusals: retired names never execute another verb.
+    if inlist("`todo'", "distinct", "head", "glimpse") {
+        local replacement = cond("`todo'" == "distinct", "unique", cond("`todo'" == "head", "list", "describe"))
+        di as err "parqit `todo': removed in 0.5.0; use parqit `replacement'"
+        if ("`todo'" == "distinct") {
+            di as err "unique counts each variable and the combination; nomissing excludes missing values; joint is unnecessary"
+        }
+        if ("`todo'" == "head") {
+            di as err "list previews up to 20 rows; use list in f/l for an explicit valid range"
+        }
+        exit 198
+    }
+    local cmds version selftest use save describe open close               ///
         keep drop gen egen replace rename order sort gsort collapse        ///
-        contract duplicates sample collect count head list show explain    ///
+        contract duplicates sample collect count list show explain         ///
         set merge append joinby reshape pivot sql query summarize tabulate ///
-        path view views misstable levelsof ds lookfor codebook distinct    ///
+        path view views misstable levelsof ds lookfor codebook             ///
         tabstat correlate pwcorr histogram mergein appendin menu           ///
-        spssencode by bysort tsset xtset unique _dlgvars _dlgcontext _dlgsource
+        spssencode by bysort tsset xtset unique format _dlgvars _dlgcontext _dlgsource
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -99,7 +111,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.4.3"
+    local ado_version "0.5.0"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -2131,6 +2143,41 @@ program define _parqit_order
     _parqit_op_names order `0'
 end
 
+program define _parqit_format
+    version 16.0
+    * Validate with native format on selected columns of a zero-observation
+    * frame. The view and the user's data change only after that succeeds.
+    _parqit_ensure_plugin
+    mata: _parqit_format_parse()
+    if (`_sq_format_bad') {
+        di as err "parqit format: expected varlist %fmt or %fmt varlist"
+        exit 198
+    }
+    tempfile req resp update
+    mata: _parqit_wr_format_prepare("`req'", "`resp'")
+    capture noisily plugin call parqit_plugin, view_op `reqhex'
+    if (_rc) exit _rc
+    tempname stage
+    frame create `stage'
+    frame `stage' {
+        capture noisily {
+            mata: _parqit_format_schema("`resp'")
+            if (`"`_sq_fmt'"' != "") {
+                format * `_sq_fmt'
+                mata: _parqit_wr_formats("`update'")
+            }
+            else if (`_sq_format_all') format *
+            else format
+        }
+        local rc = _rc
+    }
+    frame drop `stage'
+    if (`rc') exit `rc'
+    if (`"`_sq_fmt'"' != "") {
+        plugin call parqit_plugin, view_op `reqhex'
+    }
+end
+
 program define _parqit_sort
     version 16.0
     if (strtrim(`"`0'"') == "") {
@@ -2515,45 +2562,6 @@ program define _parqit_count, rclass
     return scalar N = `parqit_n'
 end
 
-program define _parqit_head, rclass
-    version 16.0
-    syntax [anything(name=nrows)]
-    if (`"`nrows'"' == "") local nrows 5
-    confirm integer number `nrows'
-    * a negative/zero count would reach the plugin as "no limit" and
-    * materialise the entire view — refuse it here, loudly
-    if (`nrows' < 1 | `nrows' >= .) {
-        di as err "parqit head: # must be a positive integer"
-        exit 198
-    }
-    _parqit_ensure_plugin
-    tempfile req resp strl
-    local _sq_limit `nrows'
-    local _sq_cmdlabel "head"
-    mata: _parqit_wr_collect_request("`req'", "`resp'", "`strl'")
-    capture noisily plugin call parqit_plugin, view_collect_prepare `reqhex'
-    if (_rc) exit _rc
-
-    tempname stage
-    local rc = 0
-    frame create `stage'
-    frame `stage' {
-        capture noisily {
-            mata: _parqit_resp_create("`resp'", `parqit_n')
-            if (`parqit_n' > 0) {
-                plugin call parqit_plugin `parqit_names' in 1/`parqit_n', use_fetch `parqit_tag'
-            }
-            mata: _parqit_apply_strl("`strl'")
-            mata: _parqit_resp_decorate("`resp'")
-            list, abbreviate(12)
-        }
-        local rc = _rc
-    }
-    frame drop `stage'
-    if (`rc') exit `rc'
-    return scalar N = `parqit_n'
-end
-
 program define _parqit_list, rclass
     version 16.0
     * parqit list [varlist] [if exp] [in f/l]   (non-mutating preview)
@@ -2681,28 +2689,6 @@ program define _parqit_codebook, rclass
     mata: _parqit_print_codebook("`resp'")
 end
 
-program define _parqit_distinct, rclass
-    version 16.0
-    * DISTINCT-OBS-1: as the community-contributed distinct (Cox & Longton,
-    * SSC): Obs counts the observations used; missing counts missing as a value
-    * STATS-IF-1: [if exp] travels as text, never evaluated in memory
-    mata: _parqit_stats_split()
-    if (`_sq_if_noexp') _parqit_if_noexp "parqit distinct"
-    syntax [, Joint Missing]
-    _parqit_ensure_plugin
-    tempfile req resp
-    local _sq_what "distinct"
-    local _sq_vars `"`vars'"'
-    local _sq_joint = ("`joint'" != "")
-    local _sq_missing = ("`missing'" != "")
-    mata: _parqit_wr_stats_request("`req'", "`resp'")
-    capture noisily plugin call parqit_plugin, view_stats `reqhex'
-    if (_rc) exit _rc
-    mata: _parqit_print_distinct("`resp'")
-    return scalar N = `parqit_n'
-    return scalar ndistinct = `parqit_ndistinct'
-end
-
 program define _parqit_unique, rclass
     version 16.0
     * UNIQUE-1: parqit unique varlist [if exp] [, by(varlist)] — as the SSC
@@ -2713,11 +2699,8 @@ program define _parqit_unique, rclass
     * refused with that note). STATS-IF-1: the if travels as text.
     mata: _parqit_stats_split()
     if (`_sq_if_noexp') _parqit_if_noexp "parqit unique"
-    syntax [, BY(string) GENerate(string) Detail]
-    if (strtrim(`"`vars'"') == "") {
-        di as err "parqit unique: variable list required"
-        exit 198
-    }
+    syntax [, BY(string) NOMISSing GENerate(string) Detail]
+    if (strtrim(`"`vars'"') == "") local vars "*"
     if (`"`generate'"' != "" | "`detail'" != "") {
         di as err "parqit unique: generate() and detail belong to the SSC unique, which" ///
             " creates a variable in memory; on a view, parqit unique prints the counts" ///
@@ -2729,11 +2712,13 @@ program define _parqit_unique, rclass
     local _sq_what "unique"
     local _sq_vars `"`vars'"'
     local _sq_by `"`by'"'
+    local _sq_nomissing = ("`nomissing'" != "")
     mata: _parqit_wr_stats_request("`req'", "`resp'")
     capture noisily plugin call parqit_plugin, view_stats `reqhex'
     if (_rc) exit _rc
     mata: _parqit_print_unique("`resp'")
     return scalar N = `parqit_n'
+    return scalar N_used = `parqit_n_used'
     return scalar sum = `parqit_unique'
     return scalar unique = `parqit_unique'
 end
@@ -2903,11 +2888,6 @@ program define _parqit_explain
     capture noisily plugin call parqit_plugin, view_info `whathex' `resphex'
     if (_rc) exit _rc
     mata: _parqit_print_resp("`resp'", "plan")
-end
-
-program define _parqit_glimpse
-    version 16.0
-    _parqit_describe `0'
 end
 
 program define _parqit_describe, rclass
@@ -3263,6 +3243,7 @@ program define _parqit_save, rclass
     qui ds
     local allvars `r(varlist)'
 
+    if (`"`partition_by'"' != "") unab partition_by : `partition_by'
     tempfile req
     local _sq_dest `"`dest'"'
     local _sq_replace = ("`replace'" != "")
@@ -3895,6 +3876,7 @@ program define _parqit_mergein, rclass
         NOGENerate ASSERT(string) UPDATE replace noLabels NONotes FORCE      ///
         NOREPort INT64(string) ENCoding(string)]
     _parqit_no_view_using mergein `"`using'"' merge
+    unab keys : `keys'
     * INT64-PROTECT-1: the disk side is read by parqit use, so the protective
     * default (and the remedy) apply here too — forward the option
     _parqit_typeopts, who("parqit mergein") int64(`"`int64'"')
@@ -4377,6 +4359,11 @@ void _parqit_write_file(string scalar path, string scalar content)
 
 void _parqit_emit(string scalar req, string scalar payload)
 {
+    // VARABBREV-1: read the live Stata setting for every command, including
+    // eager reads and named-view operations; existing views follow changes
+    // of the setting instead of retaining the value from when they opened.
+    payload = substr(payload, 1, strlen(payload) - 1) + "," +
+              _parqit_jpair("varabbrev", st_global("c(varabbrev)") == "on" ? "true" : "false") + "}"
     _parqit_write_file(req, payload)
     st_local("reqhex", _parqit_hex(req))
 }
@@ -4592,6 +4579,81 @@ void _parqit_wr_op_names_request(string scalar req)
         _parqit_jtext("cmd", "view_op"),
         _parqit_jtext("op", st_local("_sq_op")),
         _parqit_jpair("names", _parqit_jlist(tokens(st_local("_sq_names")))))))
+}
+
+void _parqit_format_parse()
+{
+    string rowvector words
+    string scalar fmt
+    real scalar n, all
+
+    words = tokens(st_local("0"))
+    n = cols(words)
+    all = n > 0
+    fmt = ""
+    if (n > 0) {
+        if (substr(words[1], 1, 1) == "%") {
+            fmt = words[1]
+            words = n == 1 ? J(1, 0, "") : words[|2 \ n|]
+        }
+        else if (substr(words[n], 1, 1) == "%") {
+            fmt = words[n]
+            words = n == 1 ? J(1, 0, "") : words[|1 \ n-1|]
+        }
+    }
+    st_local("_sq_format_bad", fmt != "" & cols(words) == 0 ? "1" : "0")
+    st_local("_sq_fmt", fmt)
+    st_local("_sq_names", cols(words) ? invtokens(words) : "*")
+    st_local("_sq_format_all", all ? "1" : "0")
+}
+
+void _parqit_wr_format_prepare(string scalar req, string scalar resp)
+{
+    _parqit_emit(req, _parqit_jobj((
+        _parqit_jtext("cmd", "view_op"),
+        _parqit_jtext("op", "format_prepare"),
+        _parqit_jpair("names", _parqit_jlist(tokens(st_local("_sq_names")))),
+        _parqit_jtext("respfile", resp))))
+}
+
+void _parqit_format_schema(string scalar resp)
+{
+    string colvector lines
+    string rowvector f, names
+    string scalar name, fmt
+    real scalar i, k
+
+    lines = _parqit_resp_lines(resp)
+    names = J(1, 0, "")
+    for (i = 1; i <= rows(lines); i++) {
+        f = _parqit_fields(lines[i], 5)
+        if (f[1] != "vcol") continue
+        name = _parqit_unhex(f[2])
+        // A case alias may exceed 32 characters. Validate and display under
+        // the original Stata name; carry the engine identity separately.
+        names = (names, name)
+        k = st_addvar(_parqit_unhex(f[3]) == "s" ? "str1" : "double", _parqit_unhex(f[5]))
+        fmt = _parqit_unhex(f[4])
+        if (fmt != "" & st_local("_sq_fmt") == "") st_varformat(k, fmt)
+    }
+    st_local("_sq_format_names", invtokens(names))
+}
+
+void _parqit_wr_formats(string scalar req)
+{
+    string rowvector names, formats
+    real scalar k
+
+    names = tokens(st_local("_sq_format_names"))
+    formats = J(1, 0, "")
+    for (k = 1; k <= st_nvar(); k++) {
+        formats = (formats, st_varformat(k))
+    }
+    _parqit_emit(req, _parqit_jobj((
+        _parqit_jtext("cmd", "view_op"),
+        _parqit_jtext("op", "format"),
+        _parqit_jpair("names", _parqit_jlist(names)),
+        _parqit_jpair("formats", _parqit_jlist(formats)))))
 }
 
 void _parqit_wr_op_keepin_request(string scalar req)
@@ -5303,11 +5365,11 @@ string scalar _parqit_cmd_name(string scalar todo)
     // BY-PREFIX-1: bys, byso, bysor are bysort, as in Stata
     full  = ("use", "save", "describe", "generate", "rename", "sort", "count",
              "list", "merge", "append", "summarize", "tabulate", "correlate", "set",
-             "bysort")
+             "bysort", "format")
     verb  = ("use", "save", "describe", "gen", "rename", "sort", "count",
              "list", "merge", "append", "summarize", "tabulate", "correlate", "set",
-             "bysort")
-    least = (1, 2, 1, 1, 3, 2, 3, 1, 3, 2, 2, 2, 3, 2, 3)
+             "bysort", "format")
+    least = (1, 2, 1, 1, 3, 2, 3, 1, 3, 2, 2, 2, 3, 2, 3, 4)
     n = strlen(todo)
     for (i = 1; i <= cols(full); i++) {
         if (n >= least[i] & substr(full[i], 1, n) == todo) return(verb[i])
@@ -6191,8 +6253,8 @@ void _parqit_wr_stats_request(string scalar req, string scalar resp)
     if (st_local("_sq_ifexpr") != "") {
         p = (p, _parqit_jtext("ifexpr", st_local("_sq_ifexpr")))
     }
-    if (st_local("_sq_joint") == "1") {
-        p = (p, _parqit_jpair("joint", "true"))
+    if (st_local("_sq_nomissing") == "1") {
+        p = (p, _parqit_jpair("nomissing", "true"))
     }
     if (st_local("_sq_pairwise") != "") {
         p = (p, _parqit_jpair("pairwise", st_local("_sq_pairwise")))
@@ -6205,6 +6267,8 @@ void _parqit_wr_stats_request(string scalar req, string scalar resp)
     }
     if (st_local("_sq_by") != "") {
         p = (p, _parqit_jtext("by", st_local("_sq_by")))
+        if (st_local("_sq_what") == "unique")
+            p = (p, _parqit_jpair("by_vars", _parqit_jlist(tokens(st_local("_sq_by")))))
     }
     if (st_local("_sq_bins") != "" & st_local("_sq_bins") != "0") {
         p = (p, _parqit_jpair("bins", st_local("_sq_bins")))
@@ -6986,58 +7050,11 @@ void _parqit_print_codebook(string scalar resp)
     printf("\n")
 }
 
-void _parqit_print_distinct(string scalar resp)
-{
-    real scalar      fh, lastd, total, withmiss, excluded
-    real rowvector   obs
-    string scalar    line
-    string rowvector f
-
-    obs = J(1, 0, .)
-    fh = fopen(resp, "r")
-    displayas("text")
-    printf("\n    Variable {c |}    Distinct           Obs\n")
-    printf("{hline 13}{c +}{hline 28}\n")
-    lastd = .
-    total = .
-    withmiss = 0
-    excluded = 0
-    while ((line = fget(fh)) != J(0, 0, "")) {
-        f = _parqit_fields(line, 4)
-        if (f[1] == "dst") {
-            printf("{txt}%s {c |}{res}%12s%14s\n",
-                   _parqit_rtext(abbrev(_parqit_unhex(f[4]),12),12),
-                   _parqit_num(f[2],"%12.0gc"),_parqit_num(f[3],"%14.0gc"))
-            lastd = strtoreal(f[2])
-            obs = obs, strtoreal(f[3])
-        }
-        else if (f[1] == "dstj") {
-            printf("{txt}%s {c |}{res}%12s%14s\n",_parqit_rtext("(joint)",12),
-                   _parqit_num(f[2],"%12.0gc"),_parqit_num(f[3],"%14.0gc"))
-            lastd = strtoreal(f[2])
-            obs = obs, strtoreal(f[3])
-        }
-        else if (f[1] == "dstn") {
-            total = strtoreal(f[2])
-            withmiss = (f[3] == "1")
-        }
-    }
-    fclose(fh)
-    /* DISTINCT-OBS-1: say when missing values were left out of the counts */
-    if (!withmiss & cols(obs) > 0 & total < .) excluded = any(obs :< total)
-    if (excluded) {
-        printf("{txt}(missing values excluded: Obs counts the nonmissing observations, out of %s; option {bf:missing} counts missing as one more value)\n",
-               strtrim(_parqit_num(strofreal(total, "%21.0g"), "%21.0gc")))
-    }
-    printf("\n")
-    st_local("parqit_ndistinct", strofreal(lastd, "%21.0g"))
-}
-
 // UNIQUE-1: the SSC unique's two lines, the per-variable table (2+ variables)
 // and the per-group table of by()
 void _parqit_print_unique(string scalar resp)
 {
-    real scalar      fh, nvars, nby, total, joint, i
+    real scalar      fh, nvars, nby, total, joint, used, nomissing, i
     string scalar    line, vars, byv
     string rowvector f, bynames
     string matrix    rows
@@ -7049,15 +7066,19 @@ void _parqit_print_unique(string scalar resp)
     bynames = J(1, 0, "")
     total = .
     joint = .
+    used = .
+    nomissing = 0
     while ((line = fget(fh)) != J(0, 0, "")) {
         f = _parqit_fields(line, 6)
         if (f[1] == "unq") {
             nvars++
-            rows = rows \ (_parqit_unhex(f[3]), f[2], "")
+            rows = rows \ (_parqit_unhex(f[4]), f[2], f[3])
         }
         else if (f[1] == "unqn") {
             total = strtoreal(f[2])
             joint = strtoreal(f[3])
+            used = strtoreal(f[4])
+            nomissing = (f[5] == "1")
         }
         else if (f[1] == "unqby") {
             bynames = _parqit_unhex_list(f)
@@ -7073,15 +7094,19 @@ void _parqit_print_unique(string scalar resp)
            strtrim(_parqit_num(strofreal(joint, "%21.0g"), "%21.0gc")))
     printf("Number of records is  {res}%s{txt}\n",
            strtrim(_parqit_num(strofreal(total, "%21.0g"), "%21.0gc")))
+    if (nomissing)
+        printf("Number of complete records is  {res}%s{txt} (nomissing)\n",
+               strtrim(_parqit_num(strofreal(used, "%21.0g"), "%21.0gc")))
     if (nvars > 1) {
-        printf("\n    Variable {c |}      Unique\n")
-        printf("{hline 13}{c +}{hline 13}\n")
+        printf("\n    Variable {c |}      Unique           Obs\n")
+        printf("{hline 13}{c +}{hline 27}\n")
         for (i = 1; i <= rows(rows); i++) {
-            printf("{txt}%s {c |}{res}%12s\n", _parqit_rtext(abbrev(rows[i, 1], 12), 12),
-                   _parqit_num(rows[i, 2], "%12.0gc"))
+            printf("{txt}%s {c |}{res}%12s%14s\n", _parqit_rtext(abbrev(rows[i, 1], 12), 12),
+                   _parqit_num(rows[i, 2], "%12.0gc"), _parqit_num(rows[i, 3], "%14.0gc"))
         }
-        printf("{txt}%s {c |}{res}%12s\n", _parqit_rtext("(jointly)", 12),
-               _parqit_num(strofreal(joint, "%21.0g"), "%12.0gc"))
+        printf("{txt}%s {c |}{res}%12s%14s\n", _parqit_rtext("(jointly)", 12),
+               _parqit_num(strofreal(joint, "%21.0g"), "%12.0gc"),
+               _parqit_num(strofreal(used, "%21.0g"), "%14.0gc"))
     }
     if (nby > 0) {
         byv = invtokens(bynames)
@@ -7100,6 +7125,7 @@ void _parqit_print_unique(string scalar resp)
     }
     st_local("parqit_n", strofreal(total, "%21.0g"))
     st_local("parqit_unique", strofreal(joint, "%21.0g"))
+    st_local("parqit_n_used", strofreal(used, "%21.0g"))
 }
 
 // the by-group key of a unqb record as text: values decoded, a missing one as .

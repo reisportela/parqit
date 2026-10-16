@@ -57,6 +57,53 @@ struct ResetWindowSelfJoin {
     }
 };
 
+TEST_CASE("FORMAT-1 changes only formats and validates the whole update first") {
+    View v = make_view();
+    const std::string sql = v.compile(true);
+    REQUIRE(v.set_formats({"year", "wage", "firm"}, {"%ty", "%12.3f", "%-12s"}).empty());
+    CHECK(v.n_stages() == 0);
+    CHECK(v.compile(true) == sql);
+    CHECK(v.cols()[1].fmt == "%ty");
+    CHECK(v.cols()[2].fmt == "%12.3f");
+    CHECK(v.cols()[3].fmt == "%-12s");
+    CHECK_FALSE(v.set_formats({"wage", "firm"}, {"%td", "%td"}).empty());
+    CHECK(v.cols()[2].fmt == "%12.3f");
+    REQUIRE(v.set_formats({"wage"}, {"%tcHH:MM:SS.ss"}).empty());
+    CHECK(v.compile(true) == sql);
+}
+
+TEST_CASE("VARABBREV-1 view mutation resolves inputs but retains literal output names") {
+    View v = make_view();
+    REQUIRE(v.gen("w", "double", "wa + 1", "", false).empty());
+    CHECK(run_scalar("SELECT sum(w - wage) FROM (" + v.compile(false) + ")") == "5.0");
+    CHECK_FALSE(v.gen("bad", "double", "wxxx", "", false).empty());
+    REQUIRE(v.replace("wa", "wa + 2", "", false).empty());
+    REQUIRE(v.rename("ye", "yr").empty());
+    REQUIRE(v.collapse({{"sum", "", "wa"}}, {"fi"}).empty());
+    CHECK(v.cols()[0].name == "firm");
+    CHECK(v.cols()[1].name == "wage");
+    v.set_varabbrev(false);
+    CHECK_FALSE(v.keep_vars({"wa"}).empty());
+    REQUIRE(v.keep_vars({"wa*"}).empty());
+}
+
+TEST_CASE("VARABBREV-1 abbreviated aggregates retain window fusion") {
+    View abbreviated = make_view(), complete = make_view();
+    for (const auto &fcn : {"mean", "total", "sd"}) {
+        View::EgenSpec sp;
+        sp.name = std::string("out_") + fcn;
+        sp.fcn = fcn;
+        sp.expr = "wa";
+        sp.by = {"fi"};
+        sp.type_req = "double";
+        REQUIRE(abbreviated.egen(sp, false).empty());
+        sp.expr = "wage";
+        sp.by = {"firm"};
+        REQUIRE(complete.egen(sp, false).empty());
+    }
+    CHECK(abbreviated.compile(true) == complete.compile(true));
+}
+
 TEST_CASE("EGEN-FUSE-1 independent aggregates share a window without changing prefixes") {
     ResetWindowSelfJoin reset;
     View v = make_view();

@@ -156,15 +156,20 @@ parqit collect, clear
 * the windows; native xtset sorted by (id, year)
 sort id year
 cf _all using `"`nat'"', verbose
-* the declaration is shown and survives a rename, and L. of the time variable
-* itself is refused
+* The declaration survives a rename; time-key lags agree with native Stata.
 parqit tsset
 assert "`r(timevar)'" == "year"
 parqit rename year yr
 parqit tsset
 assert "`r(timevar)'" == "yr"
-capture noisily parqit gen bad = L.yr
-assert _rc == 198
+rename year yr
+xtset id yr
+gen double lag_year = L.yr
+save `"`nat'"', replace
+parqit gen double lag_year = L.yr
+parqit collect, clear
+sort id yr
+cf _all using `"`nat'"', verbose
 parqit close _all
 * delta: every second period. Native refuses a period below delta (r(451)
 * "time values with period less than delta() found"): the yearly panel has

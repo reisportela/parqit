@@ -186,7 +186,7 @@ parqit codebook v n cnt value total freq pat b g
 parqit histogram v, nodraw
 parqit misstable patterns v n
 parqit tabstat v n, statistics(mean sd) by(g)
-parqit distinct v n
+parqit unique v n, nomissing
 parqit duplicates report v
 parqit close _all
 * tabulate renders numeric levels with the variable's format, like native

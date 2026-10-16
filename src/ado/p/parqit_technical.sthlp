@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.4.3 14oct2026}{...}
+{* *! version 0.5.0 16oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -83,6 +83,14 @@ variable named like one of them goes after the subcommand
 ({cmd:parqit misstable summarize sum}). The syntax below defines the supported
 surface.
 
+{pstd}Existing variable names accept unique, case-sensitive prefixes in
+varlists, expressions (including subscripts and time-series operators) and
+variable-valued options. Exact names, including exposed names of case-aliased
+columns, take precedence over prefixes. Ambiguity is an error before any
+mutation. Each command follows the current {cmd:set varabbrev on|off} setting;
+resolution uses the view/file schema, not Stata's current data. Output names,
+reshape-long stubs and raw SQL remain literal.
+
 {pstd}Varlists expand Stata wildcards ({cmd:*} any run of characters,
 {cmd:?} one Unicode character) against the exposed Stata column names, in
 pattern order without duplicates. This applies to the namelist in eager or
@@ -110,7 +118,7 @@ into Stata. {cmd:parqit collect} and {cmd:parqit save} execute the full result
 plan. Projection pushdown can avoid reading unused columns; filter pushdown
 can skip Parquet row groups whose statistics rule out a match. Execution may
 also need validation, sizing and output-verification queries. The whole
-{help parqit_technical##explore:exploration family} ({cmd:describe}, {cmd:head},
+{help parqit_technical##explore:exploration family} ({cmd:describe}, {cmd:list},
 {cmd:summarize}, {cmd:tabulate}, {cmd:codebook}, {cmd:misstable}, …) is
 computed by separate engine-side queries too, so a file can be profiled without
 replacing or modifying the current dataset — explore first, load last. See
@@ -171,7 +179,7 @@ source, and a copy of a view that reads extended missing values as {cmd:.} repea
 
 {pstd}
 A typical first session: open the view, explore it engine-side
-({help parqit_technical##explore:describe, head, summarize, tabulate, …} — bounded output
+({help parqit_technical##explore:describe, list, summarize, tabulate, …} — bounded output
 may be staged or displayed, but the current dataset is unchanged), then filter
 and derive lazily, and {cmd:collect} only the result — explore first, load last.
 
@@ -184,7 +192,7 @@ for further exploration (collecting again re-executes). {cmd:parqit save}
 executes the pipeline and writes Parquet directly, naming the view it
 materialised; the current dataset is never touched. To export the {it:in-memory}
 dataset while views are open, use {cmd:parqit save} {it:…}{cmd:, data}.
-{cmd:parqit head} requests a small preview; a declared or restored sort order
+{cmd:parqit list} requests a small preview; a declared or restored sort order
 may still require a scan to find its first rows. {cmd:parqit show} prints the generated SQL
 (a readable CTE pipeline, one stage per verb); {cmd:parqit explain} prints
 the engine's plan.
@@ -526,7 +534,7 @@ whose files have different schemas. (SAS files are out of scope — parqit reads
 Parquet, delimited text, Stata, Excel, SPSS and R data files.)
 
 {pstd}
-{cmd:parqit describe} {it:source} / {cmd:glimpse} {it:source} is deliberately a
+{cmd:parqit describe} {it:source} is deliberately a
 {bf:Parquet-only} footer inspection (file, glob or Hive directory): it does not
 invoke the CSV, Stata, Excel, SPSS or R adapters. From the parqit metadata in that
 footer it also shows each variable's value label and variable label, marks the
@@ -1013,6 +1021,18 @@ the renamed column. {cmd:sort} is ascending, while {cmd:gsort} accepts a
 {cmd:+}/{cmd:-} prefix per key. Sorting records plan order and is applied when
 the plan runs; it does not scan the source when typed.
 
+{pstd}{cmd:parqit format} {it:varlist} {cmd:%}{it:fmt} (also
+{cmd:parqit format} {cmd:%}{it:fmt} {it:varlist}; abbreviated {cmd:form}) changes
+display metadata only. The selected columns' schema is copied into a frame
+with zero observations, native {cmd:format} validates the request, and all
+formats are committed together. Neither rows nor storage types are changed;
+the logical SQL and stage count stay unchanged. With only a varlist the command
+displays its formats; without arguments it displays long formats, as native.
+The view carries the formats through previews, copies, {cmd:collect} and
+{cmd:save}. A format is not a unit conversion: {cmd:%td} interprets numbers as
+days and {cmd:%tc} as milliseconds. Saving follows the existing temporal
+contract, including reported rounding of fractional date/period counts.
+
 {pstd}{cmd:gen} accepts {cmd:byte int long float double str# strL};
 {cmd:egen} accepts numeric storage types. The declared type is value semantics:
 numeric narrowing truncates toward zero and makes out-of-range values missing,
@@ -1476,13 +1496,11 @@ to materialization, like every other verb.
 
 {pstd}{bf:Sampling designs}, after Weesie's {cmd:sample2} (STB-37 dm46).
 {cmd:if} {it:exp}
-defines the sampling frame: rows outside it are kept and never drawn. Under
-the default
-SQL missing semantics a row whose {it:exp} is missing is outside the frame;
-with
-{cmd:parqit set statamissing on} comparisons follow Stata, so {cmd:x > 60}
-holds for a
-missing {cmd:x}, as in {cmd:sample2}. {opt by()} draws # percent (or, with
+defines the sampling frame: rows outside it are kept and never drawn.
+By default comparisons follow Stata, so {cmd:x > 60} holds for a numeric
+missing {cmd:x}, as in {cmd:sample2}. With {cmd:parqit set statamissing off},
+an unknown comparison leaves the row outside the frame.
+{opt by()} draws # percent (or, with
 {opt count}, # units)
 within each stratum; missing values form their own stratum. {opt cluster()}
 draws
@@ -1977,18 +1995,21 @@ count {cmd:""}){p_end}
 {cmd:r(levels)}
 (strings compound-quoted, like {helpb levelsof}); refuses beyond
 {opt limit(#)} (default 5,000){p_end}
-{p 8 12 2}{cmd:parqit unique} {it:varlist} [{cmd:if}] [{cmd:,} {opt by(groupvars)}]{space 1}the
+{p 8 12 2}{cmd:parqit unique} [{it:varlist}] [{cmd:if}] [{cmd:,} {opt by(groupvars)} {opt nomissing}]{space 1}the
 number of distinct values of {it:varlist} taken jointly, a missing value
 counting as a value, and the number of records, printed as the
 community-contributed {cmd:unique} prints them (→ {cmd:r(unique)},
 {cmd:r(sum)}, {cmd:r(N)}); with several variables also a table of each
 variable alone, and with {opt by()} a table per group (at most 10,000
-groups); {opt generate()} and {opt detail} are refused (UNIQUE-1){p_end}
-{p 8 12 2}{cmd:parqit head} [{it:#}]{space 13}materialises only {it:#} rows
-(default 5) into a
-scratch frame, lists them, discards them; {it:#} must be positive{p_end}
+groups). No varlist selects all variables. {opt nomissing} excludes missing
+values separately for each individual count and excludes any incomplete row
+from the joint count. {bf:Obs} reports the usable rows for each count;
+{cmd:r(N)} remains the total selected by {cmd:if}, and {cmd:r(N_used)} is the
+joint count's usable rows. With {opt by()}, every group remains visible even
+if it has zero usable rows. {opt joint}, {opt generate()} and {opt detail}
+are refused (UNIQUE-2){p_end}
 {p 8 12 2}{cmd:parqit describe}{space 14}the view's schema and pipeline depth
-({cmd:parqit glimpse} is a synonym).
+without reading observation values.
 The Stata types shown are the honest display of the file's declared/saved
 types {it:without} a data scan; {cmd:collect} additionally sizes integers and
 strings from the observed range, so a foreign file's column can arrive
@@ -2024,20 +2045,6 @@ labels{p_end}
 {p 8 12 2}{cmd:parqit codebook} [{it:vars}]{space 6}per variable: kind, obs,
 missing,
 distinct, min/max, label (one scan){p_end}
-{p 8 12 2}{cmd:parqit distinct} [{it:vars}]{space 6}the number of distinct
-values of each
-variable, as the community-contributed {cmd:distinct} (Cox and Longton, SSC)
-reports
-it: {bf:Obs} counts the observations used, the nonmissing ones, and missing
-values
-are not a distinct value; {opt missing} counts every observation and missing
-as
-one more value. {opt joint} adds one line, {bf:(joint)}: the number of
-distinct
-combinations of the variables, the groups they define together, counted over
-the
-observations with no missing value among them (all observations with
-{opt missing}). {cmd:r(N)} and {cmd:r(ndistinct)} hold the last line{p_end}
 {p 8 12 2}{cmd:parqit duplicates report}
 [{it:vars}]{space 1}copies/observations/surplus
 table; {cmd:duplicates list} lists the observations of every duplicated group
@@ -2087,7 +2094,7 @@ excludes missing values unless {opt missing} is given, like native
 {helpb tabulate}; {opt row}/{opt col} add percentage panels to the two-way
 form; a labelled numeric variable is displayed through its value labels, as
 native does, and {opt nolabel} shows the codes instead. {cmd:codebook}'s
-unique count and {cmd:distinct} exclude missing values;
+unique count and {cmd:unique, nomissing} exclude missing values;
 {cmd:tabstat, by()} omits a missing by-group, matching native Stata. SQL NULL,
 empty-string and NaN encodings of the same Stata missing value are folded
 before
@@ -2097,7 +2104,7 @@ grouping. Stata transforms that have no special command translate directly:
 {cmd:parqit gen n = strlen(s)}, {cmd:bysort g: gen n = _N} ≡
 {cmd:parqit egen n = count(1), by(g)}, and a duplicates tag ≡ that count
 minus one. There is no {cmd:browse} over a view — preview with
-{cmd:parqit list}/{cmd:head} or materialise a slice with {cmd:parqit list}'s
+{cmd:parqit list} or materialise a slice with {cmd:parqit list}'s
 {cmd:in}
 ranges; {cmd:kdensity} and {cmd:graph box} need the data and are best run
 after a {cmd:collect} of the variables involved.
@@ -2135,7 +2142,7 @@ as the existing scalar results, subject to Stata's matrix dimension limit.
 {pstd}An invalid deferred {cmd:keep in}/{cmd:drop in} is refused by these
 execution commands just as by {cmd:collect}/{cmd:save}. Explicit names in
 {cmd:codebook} and both {cmd:misstable} forms must all exist. Preview defaults
-are small, but an explicit large {cmd:head} or {cmd:list in} request must fit
+are small, but an explicit large {cmd:list in} request must fit
 in a scratch Stata frame; a row limit does not bound the work of an upstream
 join, aggregation or sort.
 
@@ -2258,7 +2265,11 @@ frozen before its keys are replaced or dropped is retained. A position outside
 form fails loudly and leaves the view unchanged.
 
 {pstd}
-{it:Missing-value semantics.} By default expressions use SQL semantics:
+{it:Missing-value semantics.} Since 0.5.0, expressions default to
+{cmd:statamissing on}: ordinary numeric missing compares above every
+nonmissing value, as in native Stata. This applies to filters and assigned
+comparisons. The following describes the explicitly selected SQL mode,
+{cmd:parqit set statamissing off}:
 numeric missing is NULL and comparisons with nonmissing constants are unknown
 (NULL) when the variable is missing. For {cmd:keep if} this matches native
 Stata for the
@@ -2270,14 +2281,14 @@ rows whose condition is true; an unknown comparison leaves the row in place.
 Likewise
 {cmd:gen y = x > c} yields system missing (not 0/1) for rows where {cmd:x}
 is missing. The {cmd:if} qualifier of {cmd:gen} and {cmd:replace} is a filter
-and follows the same missing-value mode: under the default SQL semantics a
+and follows the same missing-value mode: under explicit SQL semantics a
 missing comparison excludes the row; under {cmd:statamissing on} it reproduces
 native Stata. A bare numeric condition still uses Stata truth in either mode:
 zero is false and every nonzero value, including missing, is true. Numeric
 operands of {cmd:&}/{cmd:|}/{cmd:!} use the same coercion; a comparison
 operand
 retains the result implied by the selected missing-value mode. Run
-{cmd:parqit set statamissing on} to emulate Stata's ordinary numeric missing
+{cmd:parqit set statamissing on} to restore the default ordinary numeric missing
 ordering ("missing is greater than every number") in filters and assignments;
 the documented precision and expression-dialect limits still apply. The
 literal
@@ -2285,27 +2296,21 @@ idioms {cmd:x == .}, {cmd:x != .}, {cmd:x < .}, {cmd:x >= .} are translated
 to IS NULL tests in either mode. Stata represents string missing by
 {cmd:""}; SQL NULL and {cmd:""} compare alike in lazy string expressions.
 
-{pstd}{bf:The missing-value warning.} Until you choose a mode, parqit names,
-in
-red, each comparison whose result can differ from native Stata's because a
-compared value is missing: {cmd:parqit keep if x > 5} prints
-{cmd:warning: x > 5: ...}. In a condition a comparison is named only where
-native Stata would make it true for a missing value ({cmd:>}, {cmd:>=} and
-{cmd:!=}, or {cmd:<} and {cmd:<=} with the variable on the right; the reverse
-under {cmd:!}). An assigned value such as {cmd:gen y = x > 5} is named
-whenever
-a compared value can be missing, since SQL then gives {cmd:.} where Stata
-gives
-0 or 1. The idioms that settle the missing rows stay silent:
-{cmd:x > 5 & x < .}, {cmd:x > 5 & !missing(x)}, {cmd:missing(x) | x > 5} and
-{cmd:gen y = x > 5 if !missing(x)}. The check reads no data, so it can name a
-comparison on a variable that happens to have no missing values.
-{cmd:parqit set statamissing on} (Stata's rule) or
-{cmd:parqit set statamissing off} (SQL's rule, knowingly) silences it for the
-session. It is shown after the command's output and, like any output, is
-silenced by {cmd:quietly} and {cmd:capture}. It covers {cmd:keep if},
-{cmd:drop if}, {cmd:gen}, {cmd:replace}, {cmd:egen}, {cmd:sample if},
-{cmd:count if}, {cmd:list if} and the {cmd:if} of every statistics command.
+{pstd}{bf:Migration from releases before 0.5.0.} Set
+{cmd:parqit set statamissing off} explicitly when an older do-file relies on
+SQL comparisons. The old missing-comparison warning is no longer emitted:
+the default follows Stata, and selecting SQL is an explicit choice.
+Extended missing categories {cmd:.a}-{cmd:.z} still follow the separate
+storage/normalisation contract; changing this setting does not preserve them.
+
+{pstd}{cmd:distinct}, {cmd:head} and {cmd:glimpse} are retired. Their public
+names fail with {cmd:r(198)} and name {cmd:unique}, {cmd:list} and
+{cmd:describe}, respectively, without executing or changing a view.
+{cmd:unique, nomissing} replaces the old missing-excluding counts, while
+plain {cmd:unique} counts missing values too. No {cmd:joint} option is needed.
+Plain {cmd:list} shows up to 20 rows; an explicit {cmd:in f/l} must name a
+valid range within the view. Previous {cmd:r(ndistinct)} consumers should use
+{cmd:r(unique)}; {cmd:r(N_used)} gives the joint count's usable rows.
 
 {pstd}
 An unsupported function is a loud, position-anchored error that names the
@@ -2320,7 +2325,7 @@ hatches.
 {pstd}
 {cmd:parqit set statamissing} affects expressions translated {it:after} the
 setting changes, including read-only {cmd:count if}/{cmd:list if} calls. Lazy
-stages already appended retain the SQL semantics under which they were built;
+stages already appended retain the missing-value semantics under which they were built;
 change the setting before adding the relevant filter or assignment if the
 pipeline must use Stata missing ordering throughout.
 
@@ -2476,7 +2481,7 @@ using the engine's DECIMAL-to-HUGEINT cast. Thus a magnitude of 2^53+0.4 does
 not trigger this guard, while 2^53+0.5 does. Decimal-to-double conversion
 can still round fractional values below the threshold and carries its own
 conversion note. A
-preview ({cmd:parqit head}, {cmd:parqit list}) always shows the exact digits.
+preview ({cmd:parqit list}) always shows the exact digits.
 A lazy plan keeps these source numerics in DuckDB until a Stata boundary is
 actually crossed, so join keys, {cmd:parqit save} and engine-side statistics
 are exact whatever the option says.
@@ -2637,7 +2642,7 @@ out-of-core
 execution (warns if the directory does not exist yet){p_end}
 
 {pstd}
-{cmd:statamissing} defaults to {cmd:off}. {cmd:threads} controls DuckDB query
+{cmd:statamissing} defaults to {cmd:on}. {cmd:threads} controls DuckDB query
 execution, not the separate fill pool: it defaults to the CPUs available to
 this process (on Linux the affinity mask, so a cluster job's allocation is
 honoured — the engine's own default would ignore it) and accepts any whole
@@ -3018,12 +3023,12 @@ the common code pages of every script and takes any other name typed in,
 {it:name}{cmd:, all} included.{p_end}
 
 {phang2}{bf:User > parqit > Describe and explore data...}{p_end}
-{p 12 12 2}({cmd:db parqit_explore}) {cmd:describe}/{cmd:glimpse} of the view
-or of a file, {cmd:ds}, {cmd:lookfor}, {cmd:codebook}, {cmd:head}, {cmd:list},
-{cmd:count}, {cmd:misstable} [{cmd:patterns}], {cmd:levelsof}, {cmd:distinct}
+{p 12 12 2}({cmd:db parqit_explore}) {cmd:describe} of the view
+or of a file, {cmd:ds}, {cmd:lookfor}, {cmd:codebook}, {cmd:list},
+{cmd:count}, {cmd:misstable} [{cmd:patterns}], {cmd:levelsof}, {cmd:unique}
 and {cmd:duplicates report}/{cmd:list} (both with every variable when the
 variables are left empty): one list of operations, every one an
-engine-side query; {cmd:distinct} offers {opt joint} and {opt missing},
+engine-side query; {cmd:unique} offers {opt nomissing},
 {cmd:describe} of a file offers {opt labels} and {opt notes}, and the
 {cmd:if} expression field serves every operation that takes one.{p_end}
 
@@ -3232,7 +3237,7 @@ returns {cmd:r(n_bridges)} and, for each adapter-created bridge,
 returns the wrapped command's stored results after restoring the previous
 current view.
 
-{pstd}{it:Description.} {cmd:describe}/{cmd:glimpse} {it:parquet_source}
+{pstd}{it:Description.} {cmd:describe} {it:parquet_source}
 return scalars {cmd:r(n_rows)}, {cmd:r(n_cols)} (alias
 {cmd:r(n_columns)}), {cmd:r(n_row_groups)}, {cmd:r(n_files)} and
 {cmd:r(has_parqit_meta)}, plus locals {cmd:r(name_}{it:i}{cmd:)},
@@ -3251,10 +3256,11 @@ return locals {cmd:r(panelvar)} and {cmd:r(timevar)} and scalar
 {cmd:r(delta)}; a declaration also returns {cmd:r(tmin)}, {cmd:r(tmax)} (the
 time range, missing when every time is missing) and {cmd:r(gaps)} (1 when
 any panel has gaps, else 0). {cmd:unique} returns {cmd:r(N)} (records),
-{cmd:r(unique)} and {cmd:r(sum)} (both the joint count of distinct values).
+{cmd:r(unique)} and {cmd:r(sum)} (both the joint count of distinct values),
+and {cmd:r(N_used)} (the rows used by that joint count).
 
 {pstd}{it:Statistics and previews.} {cmd:count} returns {cmd:r(N)}.
-{cmd:head}/{cmd:list} return {cmd:r(N)}, the number of rows shown.
+{cmd:list} returns {cmd:r(N)}, the number of rows shown.
 {cmd:summarize} returns {cmd:r(N)}, {cmd:r(sum_w)} (equal to {cmd:r(N)} for
 these unweighted summaries), {cmd:r(sum)}, {cmd:r(mean)}, {cmd:r(sd)},
 {cmd:r(Var)}, {cmd:r(min)} and {cmd:r(max)} for the last displayed variable;
@@ -3267,9 +3273,7 @@ number of displayed patterns. {cmd:levelsof} returns local {cmd:r(levels)} and
 scalar {cmd:r(r)}.
 
 {pstd}{it:Other exploration.} {cmd:ds}/{cmd:lookfor} return local
-{cmd:r(varlist)}. {cmd:distinct} returns {cmd:r(N)} and
-{cmd:r(ndistinct)} for the last row of its displayed table (the joint tuple
-when {opt joint} was requested). {cmd:duplicates report} returns
+{cmd:r(varlist)}. {cmd:duplicates report} returns
 {cmd:r(N)}, {cmd:r(unique_value)} and {cmd:r(surplus)}.
 {cmd:correlate}/{cmd:pwcorr} return {cmd:r(rho)}, the last off-diagonal
 coefficient, and {cmd:r(N)}, the minimum diagonal nonmissing count.
@@ -3495,8 +3499,8 @@ representable ({cmd:r(198)}, naming
 every such column; nothing is staged). {opt int64(string)} loads them as exact
 text and {opt int64(round)} accepts the nearest {cmd:double} with a
 {cmd:note:} — after which two distinct keys can collide.
-{cmd:parqit set int64} moves the session default; {cmd:parqit head} and
-{cmd:parqit list} always preview the exact digits. A {it:lazy} join over such a
+{cmd:parqit set int64} moves the session default;
+{cmd:parqit list} always previews the exact digits. A {it:lazy} join over such a
 key is exact regardless: it runs in the engine before any Stata {cmd:double}
 exists.{p_end}
 {pstd}{cmd:•} {cmd:BINARY}/{cmd:BLOB} columns are dropped with a message;

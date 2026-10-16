@@ -51,7 +51,7 @@ ST_retcode cmd_text_prepare(const std::vector<std::string> &args);
  * missing-value rule like a view verb (STATAMISS-WARN-1). Returns false and
  * *err on a translation error; _n/_N are refused (no row order to count). */
 bool eager_filter_sql(const std::string &scan_sql, const std::string &expr,
-                      std::string *where_sql, std::string *err);
+                      std::string *where_sql, std::string *err, bool varabbrev = true);
 /* name of the current view ("" when none is live) */
 std::string view_current_name();
 ST_retcode cmd_set(const std::vector<std::string> &args);

@@ -40,14 +40,14 @@ assert r(N) == 2 & r(r) == 1
 quietly parqit tabulate key col, missing
 assert r(N) == 2 & r(r) == 1 & r(c) == 1
 
-* distinct/codebook exclude Stata missing values, regardless of whether the
+* unique, nomissing and codebook exclude Stata missing values, regardless of whether the
 * lazy plan currently spells that missing as '' or SQL NULL.
-* (DISTINCT-OBS-1: r(N) counts the observations used, the nonmissing ones, as
-* the SSC distinct; with missing, both rows are one missing value)
-quietly parqit distinct key
-assert r(N) == 0 & r(ndistinct) == 0
-quietly parqit distinct key, missing
-assert r(N) == 2 & r(ndistinct) == 1
+* r(N_used) counts the observations used; inclusive unique counts both rows
+* as one missing value.
+quietly parqit unique key, nomissing
+assert r(N_used) == 0 & r(unique) == 0
+quietly parqit unique key
+assert r(N) == 2 & r(unique) == 1
 
 tempfile req_cb resp_cb
 local _sq_what "codebook"
