@@ -58,16 +58,18 @@ d = pa.table({'d': pa.array([0, 2147479968], pa.date32()),
 pq.write_table(d, Macro.getLocal("fardate"))
 end
 
-* the forge really lies: duckdb sees data max 150 under footer stat max 5
+* the forge really lies: the data page holds 150 under a footer stat max of 5.
+* Read both with pyarrow, not with the duckdb CLI: a DuckDB 2.0.0 development
+* CLI answers max() from the (forged) column statistics without reading the
+* page, so a CLI oracle would report 5|5 and stop the test before parqit runs.
 python:
-import subprocess
+import pyarrow.parquet as pq
 from sfi import Macro, SFIToolkit
-q = ("select max(v)::VARCHAR || '|' || "
-     "(select max(stats_max_value) from parquet_metadata('{f}')) "
-     "from read_parquet('{f}')").format(f=Macro.getLocal("forged"))
-out = subprocess.run(['duckdb', '-noheader', '-list', '-c', q],
-                     capture_output=True, text=True).stdout.strip()
-SFIToolkit.stata("local forge_oracle " + ("1" if out == "150|5" else "0"))
+fn = Macro.getLocal("forged")
+data_max = max(pq.read_table(fn).column('v').to_pylist())
+stat_max = max(pq.ParquetFile(fn).metadata.row_group(g).column(0).statistics.max
+               for g in range(pq.ParquetFile(fn).metadata.num_row_groups))
+SFIToolkit.stata("local forge_oracle " + ("1" if (data_max, stat_max) == (150, 5) else "0"))
 end
 assert `forge_oracle' == 1
 

@@ -6,6 +6,14 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Tests: the forged-footer oracle of `v49` reads the data page and the footer
+  statistic with pyarrow instead of the `duckdb` CLI; a DuckDB 2.0.0
+  development CLI answers `max()` from the forged statistics, which stopped
+  the test before parqit ran. The plugin embeds DuckDB 1.5.6 regardless of
+  any CLI installed on the host.
+
 ## [0.5.1] — 2026-10-21
 
 ### Added
