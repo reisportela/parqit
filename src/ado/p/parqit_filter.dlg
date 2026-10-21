@@ -1,12 +1,13 @@
 /*
   parqit keep - Keep or drop observations, or draw a random sample
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)
 
-  Builds parqit keep if / drop if / keep in / drop in / sample. For sample, the
+  Builds parqit keep if / drop if (with an optional by/bysort prefix) /
+  keep in / drop in / sample. For sample, the
   if expression is the sampling frame, and strata, whole clusters and an
   indicator follow sample2. The Create... button
   opens Stata's expression builder (date functions td(), tm(), year(), ...
@@ -17,7 +18,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 435
+DEFINE _dlght 485
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -53,6 +54,12 @@ BEGIN
   EXP ex_if			@	_ss	@	.,		///
 	error("If (expression)")					///
 	label("Create...")
+  TEXT tx_bys			@	_ls	@	.,		///
+	label("by/bysort prefix: group variables [(sort variables)] (optional):")
+  EDIT ed_bys			@	_ss	300	.,		///
+	label("bysort prefix")
+  CHECKBOX ck_nosort		330	@	160	.,		///
+	label("Already sorted (by, not bysort)")
 
   RADIO rb_keepin		_lft	_ls	_iwd	.,		///
 	onclickon(program main_mode)					///
@@ -114,7 +121,7 @@ BEGIN
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("These verbs change the view's plan only; materialise the result with parqit collect or parqit save.")
-  TEXT tx_context _lft 390 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 440 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
 
@@ -144,6 +151,9 @@ PROGRAM main_mode
 BEGIN
 	call main.tx_if.disable
 	call main.ex_if.disable
+	call main.tx_bys.disable
+	call main.ed_bys.disable
+	call main.ck_nosort.disable
 	call main.tx_from.disable
 	call main.ed_from.disable
 	call main.tx_to.disable
@@ -164,6 +174,9 @@ BEGIN
 	if main.rb_keepif | main.rb_dropif {
 		call main.tx_if.enable
 		call main.ex_if.enable
+		call main.tx_bys.enable
+		call main.ed_bys.enable
+		call main.ck_nosort.enable
 	}
 	if main.rb_keepin | main.rb_dropin {
 		call main.tx_from.enable
@@ -200,11 +213,31 @@ PROGRAM command
 BEGIN
 	if main.rb_keepif {
 		require main.ex_if
-		put "parqit keep if " main.ex_if
+		if main.ed_bys {
+			if main.ck_nosort {
+				put "parqit by " main.ed_bys ": keep if " main.ex_if
+			}
+			else {
+				put "parqit bysort " main.ed_bys ": keep if " main.ex_if
+			}
+		}
+		else {
+			put "parqit keep if " main.ex_if
+		}
 	}
 	if main.rb_dropif {
 		require main.ex_if
-		put "parqit drop if " main.ex_if
+		if main.ed_bys {
+			if main.ck_nosort {
+				put "parqit by " main.ed_bys ": drop if " main.ex_if
+			}
+			else {
+				put "parqit bysort " main.ed_bys ": drop if " main.ex_if
+			}
+		}
+		else {
+			put "parqit drop if " main.ex_if
+		}
 	}
 	if main.rb_keepin {
 		require main.ed_from

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.5.0 16oct2026}{...}
+{* *! version 0.5.1 21oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -2038,7 +2038,7 @@ lists the notes as {cmd:notes list} does{p_end}
 {p 8 12 2}{cmd:parqit list} [{it:vars}] [{cmd:if}]
 [{cmd:in}]{space 2}non-mutating preview
 with projection, filter and row-range (bare {cmd:parqit list} shows rows
-1-20; a bare {cmd:if} caps at 200 rows){p_end}
+1-20; a bare {cmd:if} caps at 200 rows; {cmd:in} takes numeric bounds){p_end}
 {p 8 12 2}{cmd:parqit ds}{space 20}variable names → {cmd:r(varlist)}{p_end}
 {p 8 12 2}{cmd:parqit lookfor} {it:words}{space 8}match names and
 labels{p_end}
@@ -3004,7 +3004,9 @@ lists the variables recorded in the Parquet footer of the source, and
 are disabled for recognized delimited-text, Stata, Excel, SPSS and R inputs;
 those
 sources can still be opened, and variable names can be typed. {bf:Browse}
-lists every supported input type together, or one type at a time. The
+lists every supported input type together, or one type at a time. An
+{cmd:if} field selects the rows ({cmd:use} [{it:varlist}] {cmd:if} {it:exp}
+{cmd:using}), and {opt compress} is offered with {opt clear}. The
 {opt int64()}, {opt binary()}, {opt filename()}, {opt csv()} and
 {opt object()}
 options have their own fields ({opt csv()} a free-text field for the
@@ -3024,11 +3026,13 @@ the common code pages of every script and takes any other name typed in,
 
 {phang2}{bf:User > parqit > Describe and explore data...}{p_end}
 {p 12 12 2}({cmd:db parqit_explore}) {cmd:describe} of the view
-or of a file, {cmd:ds}, {cmd:lookfor}, {cmd:codebook}, {cmd:list},
+or of a file, {cmd:ds}, {cmd:lookfor}, {cmd:format} (display formats),
+{cmd:codebook}, {cmd:list},
 {cmd:count}, {cmd:misstable} [{cmd:patterns}], {cmd:levelsof}, {cmd:unique}
 and {cmd:duplicates report}/{cmd:list} (both with every variable when the
 variables are left empty): one list of operations, every one an
-engine-side query; {cmd:unique} offers {opt nomissing},
+engine-side query; {cmd:unique} offers {opt by()} and {opt nomissing},
+{cmd:levelsof} takes one variable,
 {cmd:describe} of a file offers {opt labels} and {opt notes}, and the
 {cmd:if} expression field serves every operation that takes one.{p_end}
 
@@ -3047,8 +3051,8 @@ the tabulation and {opt by()} pickers also show strings. Tooltips explain
 the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
 
 {phang2}{bf:User > parqit > Keep or drop observations, or draw a sample...}{p_end}
-{p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if},
-{cmd:keep in}, {cmd:drop in}
+{p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if} (both
+with an optional {cmd:by}/{cmd:bysort} prefix), {cmd:keep in}, {cmd:drop in}
 ({cmd:f}, {cmd:l} and negative bounds accepted) and {cmd:sample}, with its
 {cmd:if} frame, strata, whole clusters and indicator; the
 {bf:Create...} button opens Stata's expression builder.{p_end}
@@ -3056,7 +3060,7 @@ the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
 {phang2}{bf:User > parqit > Keep, drop, order, sort, or rename variables...}{p_end}
 {p 12 12 2}({cmd:db parqit_vars}) {cmd:keep}, {cmd:drop}, {cmd:order},
 {cmd:sort}, {cmd:gsort}, {cmd:rename (oldlist) (newlist)} and
-{cmd:duplicates drop}.{p_end}
+{cmd:duplicates drop} (with an {cmd:if} expression).{p_end}
 
 {phang2}{bf:User > parqit > Create or change variables...}{p_end}
 {p 12 12 2}({cmd:db parqit_gen}) {cmd:gen} (with a storage type and an
@@ -3068,7 +3072,8 @@ an R file with haven labels).{p_end}
 {phang2}{bf:User > parqit > Collapse, contract, pivot table, or reshape...}{p_end}
 {p 12 12 2}({cmd:db parqit_pivot}) {cmd:collapse} and {cmd:pivot} share two
 statistic rows plus free additional specifications; {cmd:contract};
-{cmd:reshape long}|{cmd:wide}.{p_end}
+{cmd:reshape long}|{cmd:wide}. One {cmd:if} expression serves
+{cmd:collapse}, {cmd:pivot} and {cmd:contract}.{p_end}
 
 {phang2}{bf:User > parqit > Combine datasets (merge, append, joinby)...}{p_end}
 {p 12 12 2}({cmd:db parqit_combine}) lazy {cmd:merge}, {cmd:append} (several
@@ -3107,7 +3112,8 @@ views to select a different target. Saving offers
 {opt compression()}, {opt compression_level()}, {opt partition_by()},
 {opt partitions()}, {opt chunk()}, {opt encoding()}, {opt data},
 {opt copysource}
-and {opt xmissing};
+and {opt xmissing}; {opt partitions()} updates an existing tree in place, so
+it disables {opt replace};
 {bf:Populate} lists variables from the view, or from the dataset in memory
 when {opt data} is selected.{p_end}
 
@@ -3116,7 +3122,8 @@ when {opt data} is selected.{p_end}
 once ({cmd:views}, {cmd:show}, {cmd:explain}, {cmd:describe}, {cmd:ds},
 {cmd:version}, {cmd:selftest}); the actions {cmd:view}, {cmd:close},
 {cmd:view} {it:name}{cmd::} {it:command}, a copy of a view ({cmd:use} ...
-{cmd:using view:}{it:name}), {cmd:sql}, {cmd:query} and all eight
+{cmd:using view:}{it:name}), {cmd:sql}, {cmd:query}, {cmd:xtset} and
+{cmd:tsset} (or their {opt clear}) and all eight
 {cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:encoding},
 {cmd:threads},
 {cmd:fill_threads}, {cmd:stream_buffer_mb}, {cmd:memory_limit},

@@ -39,13 +39,29 @@ local out2   `"`stem'_out2.parquet"'
 local part   `"`stem'_part"'
 local copy   `"`stem'_copy.parquet"'
 local spssout `"`stem'_spss.parquet"'
+local panel  `"`stem'_panel.parquet"'
+local ts     `"`stem'_ts.parquet"'
 
 sysuse auto, clear
 gen long id = _n
 gen byte yr = 1 + (_n > 37)
 gen str1 grp = cond(mod(_n, 2), "A", "B")
+* native oracle for the read dialog's if field (menu audit M02)
+quietly count if price > 5000
+local n_gt5000 = r(N)
 save `"`autodta'"', replace
 parqit save `"`auto'"', replace
+
+* panel and time-series fixtures for the xtset/tsset forms of the views dialog
+clear
+set obs 60
+gen long id = ceil(_n / 10)
+bysort id: gen int t = _n
+parqit save `"`panel'"', replace
+clear
+set obs 20
+gen int t = _n
+parqit save `"`ts'"', replace
 
 clear
 set obs 2
@@ -68,6 +84,18 @@ capture noisily parqit use make price using `"`auto'"', name(sub) relaxed
 _shape `=_rc' "parqit use varlist using file, name() relaxed"
 capture noisily parqit use using `"`auto'"', clear
 _shape `=_rc' "parqit use using file, clear"
+* menu audit M02/M03: the if field must reach the view (rows checked against
+* the native count), and compress must narrow the load
+capture noisily parqit use make price if price > 5000 using `"`auto'"'
+_shape `=_rc' "parqit use varlist if exp using file"
+capture noisily parqit count
+_shape `=cond(_rc, _rc, r(N) != `n_gt5000')' "parqit count after use ... if: `n_gt5000' rows, as native"
+capture noisily parqit use make price if price > 5000 using `"`auto'"', clear
+_shape `=cond(_rc, _rc, _N != `n_gt5000')' "parqit use varlist if exp using file, clear: `n_gt5000' rows"
+capture noisily parqit use using `"`auto'"', clear compress
+local rc = _rc
+capture confirm byte variable id
+_shape `=cond(`rc', `rc', _rc)' "parqit use using file, clear compress (long id narrowed to byte)"
 capture noisily parqit use using `"`autodta'"', encoding(latin1)
 _shape `=_rc' "parqit use using file.dta, encoding()"
 capture noisily parqit use using `"`autodta'"', clear encoding(latin1)
@@ -151,6 +179,8 @@ capture noisily parqit format price %12.2f
 _shape `=_rc' "parqit format varlist %fmt"
 capture noisily parqit format price
 _shape `=_rc' "parqit format varlist"
+capture noisily parqit format
+_shape `=_rc' "parqit format (display formats, no varlist)"
 capture noisily parqit ds
 _shape `=_rc' "parqit ds"
 capture noisily parqit lookfor make price
@@ -207,6 +237,8 @@ capture noisily parqit levelsof rep78 if price > 5000, limit(100)
 _shape `=_rc' "parqit levelsof var if exp, limit()"
 capture noisily parqit unique foreign rep78 if price > 5000, by(foreign)
 _shape `=_rc' "parqit unique varlist if exp, by()"
+capture noisily parqit unique foreign rep78 if price > 5000, by(yr) nomissing
+_shape `=_rc' "parqit unique varlist if exp, by() nomissing"
 capture noisily parqit duplicates report foreign if price > 5000, limit(20)
 _shape `=_rc' "parqit duplicates report keys if exp, limit()"
 capture noisily parqit duplicates list foreign if price > 5000, limit(20)
@@ -272,6 +304,10 @@ capture noisily parqit keep if price > 4000
 _shape `=_rc' "parqit keep if exp"
 capture noisily parqit drop if mpg < 15
 _shape `=_rc' "parqit drop if exp"
+capture noisily parqit bysort foreign (price): keep if price > 4000
+_shape `=_rc' "parqit bysort varlist (sortvars): keep if exp"
+capture noisily parqit by foreign: drop if mpg < 15
+_shape `=_rc' "parqit by varlist: drop if exp"
 capture noisily parqit keep in 1/l
 _shape `=_rc' "parqit keep in 1/l"
 capture noisily parqit keep in 2/-1
@@ -308,6 +344,10 @@ _shape `=_rc' "parqit duplicates drop keys, force"
 capture noisily parqit duplicates drop
 _shape `=_rc' "parqit duplicates drop (entire observations)"
 parqit close _all
+parqit use using `"`auto'"'
+capture noisily parqit duplicates drop foreign if price > 5000, force
+_shape `=_rc' "parqit duplicates drop keys if exp, force"
+parqit close _all
 
 * --- Create or change variables (db parqit_gen) -------------------------------
 di as txt _n "db parqit_gen"
@@ -330,6 +370,12 @@ foreach fcn in total mean sd min max count {
     capture noisily parqit egen e_`fcn' = `fcn'(price), by(foreign)
     _shape `=_rc' "parqit egen function `fcn'()"
 }
+capture noisily parqit bysort foreign (price): gen r = price * 2
+_shape `=_rc' "parqit bysort varlist (sortvars): gen name = exp"
+capture noisily parqit by foreign: egen m = mean(price)
+_shape `=_rc' "parqit by varlist: egen name = fcn(exp)"
+capture noisily parqit bysort foreign: replace price = price * 2
+_shape `=_rc' "parqit bysort varlist: replace name = exp"
 capture noisily parqit replace price = . if price <= 0
 _shape `=_rc' "parqit replace name = exp if exp"
 * the spssencode choice works on the data in memory, here an SPSS fixture
@@ -364,6 +410,19 @@ if (_rc == 0) _shape 1 "parqit collapse without a statistic must be refused"
 else _shape 0 "parqit collapse without a statistic refused (rc `=_rc')"
 capture noisily parqit contract foreign yr, freq(n)
 _shape `=_rc' "parqit contract varlist, freq()"
+parqit close _all
+* menu audit M04: the shared if field of collapse, pivot table and contract
+parqit use using `"`auto'"'
+capture noisily parqit collapse (mean) price if foreign == 1, by(yr)
+_shape `=_rc' "parqit collapse (stat) var if exp, by()"
+parqit close _all
+parqit use using `"`auto'"'
+capture noisily parqit pivot (mean) price if price > 3000, rows(foreign) cols(yr)
+_shape `=_rc' "parqit pivot (stat) var if exp, rows() cols()"
+parqit close _all
+parqit use using `"`auto'"'
+capture noisily parqit contract foreign if price > 5000, freq(n)
+_shape `=_rc' "parqit contract varlist if exp, freq()"
 parqit close _all
 parqit use using `"`long'"'
 capture noisily parqit reshape wide inc, i(id) j(yr)
@@ -502,6 +561,8 @@ capture noisily parqit selftest
 _shape `=_rc' "parqit selftest"
 capture noisily parqit view v1
 _shape `=_rc' "parqit view name"
+capture noisily parqit use make price using view:v1, name(v3)
+_shape `=_rc' "parqit use varlist using view:name, name() (copy of a view)"
 capture noisily parqit view v2: count
 _shape `=_rc' "parqit view name: command"
 capture noisily parqit view v1: count if strpos(make, ":") >= 0
@@ -524,6 +585,23 @@ capture noisily parqit sql ";;"
 if (_rc == 0) _shape 1 "parqit sql containing only terminators must be refused"
 else _shape 0 "parqit sql containing only terminators refused (rc `=_rc')"
 parqit close _all
+* menu audit M08: xtset/tsset declare, show and clear
+parqit use using `"`panel'"'
+capture noisily parqit xtset id t
+_shape `=_rc' "parqit xtset panelvar timevar"
+capture noisily parqit xtset
+_shape `=cond(_rc, _rc, "`r(timevar)'" != "t")' "parqit xtset (shows the declaration)"
+capture noisily parqit xtset, clear
+_shape `=_rc' "parqit xtset, clear"
+capture noisily parqit xtset
+_shape `=cond(_rc, _rc, "`r(timevar)'" != "")' "parqit xtset after clear (no declaration left)"
+parqit close _all
+parqit use using `"`ts'"'
+capture noisily parqit tsset t
+_shape `=_rc' "parqit tsset timevar"
+capture noisily parqit tsset, clear
+_shape `=_rc' "parqit tsset, clear"
+parqit close _all
 parqit use using `"`auto'"'
 parqit sort yr price
 * (raw SQL: a Stata name that is an SQL keyword, such as foreign, must be quoted by the user)
@@ -539,6 +617,12 @@ capture noisily parqit set statamissing off
 _shape `=_rc' "parqit set statamissing off"
 capture noisily parqit set threads 2
 _shape `=_rc' "parqit set threads #"
+capture noisily parqit set int64 refuse
+_shape `=_rc' "parqit set int64 refuse"
+capture noisily parqit set fill_threads auto
+_shape `=_rc' "parqit set fill_threads auto"
+capture noisily parqit set stream_buffer_mb auto
+_shape `=_rc' "parqit set stream_buffer_mb auto"
 capture noisily parqit set memory_limit 1GB
 _shape `=_rc' "parqit set memory_limit value"
 capture noisily parqit set tempdir `"`c(tmpdir)'"'

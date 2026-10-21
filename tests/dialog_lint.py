@@ -135,6 +135,47 @@ def current_option_contracts(repo: Path, ado: str) -> list[str]:
     return errors
 
 
+def put_program_spacing(raw: str) -> list[str]:
+    # [P] dialog programming 5.1.4: the output of put /program reaches the
+    # command trimmed at both ends, so the literal put before it must end in
+    # a blank and the next put must begin with one; otherwise the pieces are
+    # glued ("parqit collapse(mean) price", GitHub #2; "keep(match)keepusing(x)").
+    # Comments are blanked line for line so that the reported lines are the
+    # file's; if/else lines and braces are walked through, and any other
+    # statement (beginoptions, option, optionarg, require, ...) ends the walk.
+    text = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), raw, flags=re.S)
+    text = re.sub(r"(?m)^\s*//.*$", "", text)
+    structural = re.compile(r"^(?:\{|\}|if\b|else\b)")
+    plain_put = re.compile(r"^put\s+(?!/program\b)\S")
+    errors = []
+    for body in named_blocks(text.splitlines(), "PROGRAM").values():
+        stmts: list[tuple[int, str]] = []
+        for lineno, line in body:
+            part = line.strip()
+            if stmts and stmts[-1][1].endswith("///"):
+                stmts[-1] = (stmts[-1][0], stmts[-1][1][:-3].rstrip() + " " + part)
+            elif part:
+                stmts.append((lineno, part))
+        for index, (lineno, stmt) in enumerate(stmts):
+            if not re.match(r"^put\s+/program\b", stmt):
+                continue
+            for before, prev in reversed(stmts[:index]):
+                if structural.match(prev):
+                    continue
+                if plain_put.match(prev):
+                    last = re.search(r'"([^"]*)"$', prev)
+                    if not last or not last.group(1).endswith(" "):
+                        errors.append(f"line {before}: {prev} is followed by put /program but has no trailing blank")
+                break
+            for after, nxt in stmts[index + 1:]:
+                if structural.match(nxt):
+                    continue
+                if plain_put.match(nxt) and not re.match(r'^put\s+" ', nxt):
+                    errors.append(f"line {after}: {nxt} follows put /program (line {lineno}) but has no leading blank")
+                break
+    return errors
+
+
 def audit_dialog(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     text = uncomment(raw)
@@ -248,6 +289,8 @@ def audit_dialog(path: Path) -> list[str]:
     if "formatfilter" in text:
         errors.append("uses the undocumented .formatfilter; give the FILE control a documented filter()")
 
+    errors.extend(put_program_spacing(raw))
+
     return sorted(set(errors))
 
 
@@ -305,7 +348,7 @@ def main() -> int:
         for failure in failures:
             print(f"dialog-lint FAIL: {failure}", file=sys.stderr)
         return 1
-    print("dialog-lint OK: 10 dialogs; controls/lists/options/help/quoting/populate/file-filter contracts")
+    print("dialog-lint OK: 10 dialogs; controls/lists/options/help/quoting/populate/file-filter/put-program-blank contracts")
     return 0
 
 

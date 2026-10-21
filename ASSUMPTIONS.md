@@ -4342,3 +4342,35 @@ entry notes the conservative fallback if the assumption proves wrong.
     existing extended-missing storage contract is unchanged. Exact native
     oracles, the full staged suite, comparable-mode performance and verified
     GitHub-built assets gate publication; no private data are needed.
+
+205. **Blanks around a dialog sub-program, and dialog parity with the command
+    line (DLG-PUT-BLANK-1, MENU-AUDIT-1, 2026-10-20).** GitHub issue #2: the
+    Collapse/Pivot dialog emitted `parqit collapse(mean) price, by(foreign)`,
+    refused as an unknown subcommand, in every statistic shape since 0.1.29.
+    The joining rules of `[P] dialog programming` (5.1.4) are `"A"+"B"` →
+    `AB`, `"A "+"B"` → `A B` and `"A"+" B"` → `A B`; but `put /program`
+    builds its output from an empty string, so its leading blank is lost, and
+    it reaches the command trimmed at the right as well. Decision: the literal
+    before a `put /program` ends in a blank (`put "parqit collapse "`, as in
+    StataCorp's `collapse.dlg`) and the `put` after it begins with one (the
+    Combine dialog had glued `keep(master match)keepusing(rate)`; Stata
+    applied both options, but the echo was malformed). `tests/dialog_lint.py`
+    enforces both sides in every PROGRAM block, walking through `if`/`else`
+    lines and braces; any other statement (`beginoptions`, `option`,
+    `optionarg`, ...) ends the walk. A dialog is validated only by a real
+    click on Submit: `.parqit_<dlg>_dlg.command` called from a do-file neither
+    submits nor echoes (rc 0 even for a glued command), which is why the August
+    GUI pass missed the defect; the click harness is kept in
+    `audit_repro/menu_audit_20261020/`. The same audit exposed in the dialogs
+    documented forms that already ran: `use [varlist] if exp using` and
+    `use, clear compress`; `if` in collapse, pivot, contract and duplicates
+    drop; `unique, by()`; the `by`/`bysort` prefix of `keep if`/`drop if`;
+    `xtset, clear` and `tsset, clear`; `format [varlist]` (its operation has
+    no `if` field, because the command takes none). A path holding a comma
+    is documented rather than always quoted: `/smartquote` quotes only blanks
+    and quotes, as StataCorp's own dialogs do. Not taken: `in f/l`, `l` and
+    negative bounds for `list`, because `parqit list` accepts numeric bounds
+    only (r(198) "invalid in range"), unlike `keep in` (KEEPIN-FL-1); the
+    dialog keeps digits-only fields until the maintainer extends `list`.
+    Item (4) of #168 is out of date: the read dialog offers `utf-8`, and the
+    `.dta` bridge accepts it.

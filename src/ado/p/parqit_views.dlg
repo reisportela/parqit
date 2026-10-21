@@ -1,7 +1,7 @@
 /*
   parqit view - Manage views, run DuckDB SQL, and set engine options
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Views, SQL, and engine settings...
   Launch directly with:  db parqit_views      (menu installed by: parqit menu)
@@ -11,14 +11,14 @@
   command. The list box chooses the action that OK or Submit runs: switch,
   close, or close every view; run a parqit command on another view; copy a
   view's plan into a new view; open a view from a DuckDB SQL query or add a
-  raw SQL fragment to the current pipeline; or change any of the seven parqit
+  raw SQL fragment to the current pipeline; or change any of the eight parqit
   session settings.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 370
+DEFINE _dlght 390
 INCLUDE header
 HELP hlp1, view("help parqit##settings")
 RESET res1
@@ -114,7 +114,12 @@ BEGIN
   EDIT ed_newname		315	@	_vnwd	.,		///
 	max(32)								///
 	label("Name of the new view")
-  TEXT tx_context _lft 325 470 ., label("Current view: refresh to check")
+  CHECKBOX ck_tsclear		315	_ls	275	.,		///
+	option(clear)							///
+	onclickon(program ts_clear_state)				///
+	onclickoff(program ts_clear_state)				///
+	label("Remove the declaration instead (clear)")
+  TEXT tx_context _lft 345 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
 
@@ -246,7 +251,9 @@ BEGIN
 	main.cb_int64.hide
 	main.cb_encset.hide
 	main.ed_value.hide
+	main.ed_value.enable
 	main.ed_newname.hide
+	main.ck_tsclear.hide
 	main.tx_name.setlabel "View name:"
 	main.tx_cmd.setlabel "Command to run on it (e.g., count):"
 	main.tx_sql.setlabel "DuckDB SQL:"
@@ -308,6 +315,8 @@ BEGIN
 	main.tx_value.enable
 	main.tx_value.setlabel "Delta, periods between observations (optional):"
 	main.ed_value.show
+	main.ck_tsclear.show
+	program ts_clear_state
 END
 
 SCRIPT op_tsset
@@ -319,6 +328,30 @@ BEGIN
 	main.tx_value.enable
 	main.tx_value.setlabel "Delta, periods between observations (optional):"
 	main.ed_value.show
+	main.ck_tsclear.show
+	program ts_clear_state
+END
+
+PROGRAM ts_clear_state
+BEGIN
+	if main.ck_tsclear {
+		call main.tx_name.disable
+		call main.ed_name.disable
+		call main.tx_cmd.disable
+		call main.ed_cmd.disable
+		call main.tx_value.disable
+		call main.ed_value.disable
+	}
+	else {
+		if main.lb_op.equals("xtset") {
+			call main.tx_name.enable
+			call main.ed_name.enable
+		}
+		call main.tx_cmd.enable
+		call main.ed_cmd.enable
+		call main.tx_value.enable
+		call main.ed_value.enable
+	}
 END
 
 SCRIPT op_sql
@@ -506,23 +539,39 @@ BEGIN
 		put /smartquote main.ed_sql
 	}
 	if main.lb_op.equals("xtset") {
-		require main.ed_name
-		require main.ed_cmd
-		put "parqit xtset " main.ed_name " " main.ed_cmd
-		beginoptions
-			if main.ed_value {
-				put "delta(" main.ed_value ")"
-			}
-		endoptions
+		if main.ck_tsclear {
+			put "parqit xtset"
+			beginoptions
+				option main.ck_tsclear
+			endoptions
+		}
+		else {
+			require main.ed_name
+			require main.ed_cmd
+			put "parqit xtset " main.ed_name " " main.ed_cmd
+			beginoptions
+				if main.ed_value {
+					put "delta(" main.ed_value ")"
+				}
+			endoptions
+		}
 	}
 	if main.lb_op.equals("tsset") {
-		require main.ed_cmd
-		put "parqit tsset " main.ed_cmd
-		beginoptions
-			if main.ed_value {
-				put "delta(" main.ed_value ")"
-			}
-		endoptions
+		if main.ck_tsclear {
+			put "parqit tsset"
+			beginoptions
+				option main.ck_tsclear
+			endoptions
+		}
+		else {
+			require main.ed_cmd
+			put "parqit tsset " main.ed_cmd
+			beginoptions
+				if main.ed_value {
+					put "delta(" main.ed_value ")"
+				}
+			endoptions
+		}
 	}
 	if main.lb_op.equals("statamissing") {
 		put "parqit set statamissing " main.cb_sm

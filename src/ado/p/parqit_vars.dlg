@@ -1,7 +1,7 @@
 /*
   parqit keep - Keep, drop, order, sort, or rename variables; drop duplicates
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Keep, drop, order, sort, or rename variables...
   Launch directly with:  db parqit_vars      (menu installed by: parqit menu)
@@ -14,7 +14,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 455
+DEFINE _dlght 505
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -98,10 +98,14 @@ BEGIN
 	dropdown							///
 	contents(vv_list)						///
 	label("Key variables")
+  TEXT tx_if			@	_ls	@	.,		///
+	label("If (expression) (optional):")
+  EXP ex_if			@	_ss	@	.,		///
+	label("Create...")
   CHECKBOX ck_force		@	_ms	@	.,		///
 	option(force)							///
 	label("Force the drop, even though information may be lost (required with key variables; sort the view first)")
-  TEXT tx_context _lft 415 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 465 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
@@ -129,6 +133,8 @@ BEGIN
 	call main.ed_new.disable
 	call main.tx_keys.disable
 	call main.cb_keys.disable
+	call main.tx_if.disable
+	call main.ex_if.disable
 	call main.ck_force.disable
 	if main.rb_keep | main.rb_drop | main.rb_order | main.rb_sort | main.rb_gsort | main.rb_format {
 		call main.tx_vars.enable
@@ -147,6 +153,8 @@ BEGIN
 	if main.rb_dupdrop {
 		call main.tx_keys.enable
 		call main.cb_keys.enable
+		call main.tx_if.enable
+		call main.ex_if.enable
 		call main.ck_force.enable
 	}
 END
@@ -204,6 +212,9 @@ BEGIN
 		put "parqit duplicates drop"
 		if main.cb_keys {
 			put " " main.cb_keys
+		}
+		if main.ex_if {
+			put " if " main.ex_if
 		}
 		beginoptions
 			option main.ck_force

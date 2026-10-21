@@ -2,7 +2,7 @@
   parqit merge - Combine the view with a file or another view, or join the
   data in memory with a file
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Combine datasets (merge, append, joinby)...
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
@@ -419,7 +419,7 @@ BEGIN
 		beginoptions
 			put /program main_keep_output
 			if main.cb_keepus {
-				put "keepusing(" main.cb_keepus ") "
+				put " keepusing(" main.cb_keepus ") "
 			}
 			option main.ck_nogen
 			if !main.ck_nogen {
@@ -462,7 +462,7 @@ BEGIN
 		beginoptions
 			put /program main_keep_output
 			if main.cb_keepus {
-				put "keepusing(" main.cb_keepus ") "
+				put " keepusing(" main.cb_keepus ") "
 			}
 			option main.ck_nogen
 			if !main.ck_nogen {

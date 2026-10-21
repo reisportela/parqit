@@ -6,6 +6,43 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-21
+
+### Added
+
+- Dialog parity with the command line (menu audit of 2026-10-20). The Read
+  data dialog takes an `if` expression (`parqit use [varlist] if exp using`)
+  and, with `clear`, `compress`; Collapse, Pivot table and Contract take an
+  `if` expression; Drop duplicate observations takes one too. Describe and
+  explore adds `by()` to `unique` and a Display formats operation
+  (`format [varlist]`); Keep or drop observations adds the `by`/`bysort`
+  prefix to `keep if` and `drop if`; Views, SQL, and engine settings removes
+  a panel or time declaration (`xtset, clear`, `tsset, clear`). Each new
+  field is enabled only where its command takes it.
+
+### Fixed
+
+- The Collapse/Pivot dialog emitted `parqit collapse(stat) …` without the
+  blank after the verb (GitHub #2); every statistic shape of both modes;
+  since 0.1.29. `tests/dialog_lint.py` now requires a blank on both sides of
+  every `put /program`.
+- The Combine dialog glued `keep(…)` to `keepusing(…)` in the echoed merge
+  and mergein commands (`keep(master match)keepusing(rate)`); Stata applied
+  both options, but the command copied into a do-file was malformed.
+- The Save or collect dialog no longer combines `replace` with
+  `partitions(replace|append)`, which the ado refuses: with `partitions()`
+  the tree is updated in place, so `replace` is disabled and no
+  replace-file question is asked.
+- The levelsof operation of the Describe and explore dialog refuses several
+  variables before submitting, as the command does.
+- Layout: the view-context line no longer overlaps the note of the Create or
+  change variables dialog or the code-page selector of the Save or collect
+  dialog.
+- Help: the `use` options table lists `compress`; the `describe` syntax
+  shows that `labels` and `notes` need a file; the `list` syntax says that
+  its `in` range takes numeric bounds; the Menu section says that a path
+  containing a comma must be quoted by hand.
+
 ## [0.5.0] — 2026-10-16
 
 ### Changed

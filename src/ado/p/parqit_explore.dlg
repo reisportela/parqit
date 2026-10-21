@@ -1,14 +1,14 @@
 /*
   parqit describe - Describe and explore a view or a Parquet file
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Describe and explore data...
   Launch directly with:  db parqit_explore      (menu installed by: parqit menu)
 
   One list box of operations (Stata's interface guideline for more than
   about twelve choices), each an engine-side query that leaves the data in
-  memory unchanged: describe, ds, lookfor, codebook, list,
+  memory unchanged: describe, ds, lookfor, format, codebook, list,
   count, misstable [patterns], levelsof, unique, duplicates report/list.
   Summary statistics live in the companion dialog:  db parqit_stats
 */
@@ -91,6 +91,14 @@ BEGIN
   CHECKBOX ck_dmiss		275	_ls	315	.,		///
 	option(nomissing)						///
 	label("Exclude missing values (nomissing)")
+  TEXT tx_by			275	_ls	315	.,		///
+	label("Groups, option by() (unique; optional):")
+  COMBOBOX cb_by		275	_ss	315	.,		///
+	append								///
+	dropdown							///
+	contents(vv_list)						///
+	option(by)							///
+	label("Groups")
   CHECKBOX ck_dlab		275	_ls	160	.,		///
 	option(labels)							///
 	label("Value labels (labels)")
@@ -114,6 +122,7 @@ BEGIN
 	Describe a Parquet file (footer only)
 	List variable names (ds)
 	Search names and labels (lookfor)
+	Display formats (format)
 	Codebook
 	List observations (list)
 	Count observations (count)
@@ -131,6 +140,7 @@ BEGIN
 	descfile
 	ds
 	lookfor
+	formats
 	codebook
 	list
 	count
@@ -148,6 +158,7 @@ BEGIN
 	script op_descfile
 	script op_descview
 	script op_lookfor
+	script op_format
 	script op_vars
 	script op_list
 	script op_count
@@ -175,6 +186,8 @@ BEGIN
 	main.tx_to.disable
 	main.ed_to.disable
 	main.ck_dmiss.disable
+	main.tx_by.disable
+	main.cb_by.disable
 	main.ck_dlab.disable
 	main.ck_dnotes.disable
 	main.tx_vars.setlabel "Variables (leave empty for all):"
@@ -207,6 +220,12 @@ BEGIN
 	script all_off
 	script vars_on
 	main.tx_vars.setlabel "Words to search for in variable names and labels:"
+END
+
+SCRIPT op_format
+BEGIN
+	script all_off
+	script vars_on
 END
 
 SCRIPT op_vars
@@ -261,6 +280,8 @@ BEGIN
 	script all_off
 	script vars_on
 	main.ck_dmiss.enable
+	main.tx_by.enable
+	main.cb_by.enable
 	main.tx_if.enable
 	main.ex_if.enable
 END
@@ -289,6 +310,7 @@ BEGIN
 			"Open a view first (User > parqit > Read data...)."
 	}
 	call main.cb_vars.repopulate
+	call main.cb_by.repopulate
 END
 
 PROGRAM main_context
@@ -319,6 +341,12 @@ BEGIN
 	if main.lb_op.equals("lookfor") {
 		require main.cb_vars
 		put "parqit lookfor " main.cb_vars
+	}
+	if main.lb_op.equals("formats") {
+		put "parqit format"
+		if main.cb_vars {
+			put " " main.cb_vars
+		}
 	}
 	if main.lb_op.equals("codebook") {
 		put "parqit codebook"
@@ -369,6 +397,9 @@ BEGIN
 	}
 	if main.lb_op.equals("levelsof") {
 		require main.cb_vars
+		if main.cb_vars.isWordCountGT(1) {
+			stopbox stop "Enter one variable for levelsof."
+		}
 		put "parqit levelsof " main.cb_vars
 		if main.ex_if {
 			put " if " main.ex_if
@@ -386,6 +417,7 @@ BEGIN
 			put " if " main.ex_if
 		}
 		beginoptions
+			optionarg main.cb_by
 			option main.ck_dmiss
 		endoptions
 	}

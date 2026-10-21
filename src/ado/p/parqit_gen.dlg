@@ -1,7 +1,7 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.5.0  16oct2026
+*!  VERSION 0.5.1  21oct2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)
@@ -17,7 +17,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 530
+DEFINE _dlght 545
 INCLUDE header
 HELP hlp1, view("help parqit##expressions")
 RESET res1
@@ -126,7 +126,7 @@ BEGIN
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
-  TEXT tx_context _lft 485 470 ., label("Current view: refresh to check")
+  TEXT tx_context _lft 500 470 ., label("Current view: refresh to check")
   BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 

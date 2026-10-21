@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.5.0 16oct2026}{...}
+{* *! version 0.5.1 21oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -172,8 +172,9 @@ Shape the view (lazy: each verb extends the plan)
 {pstd}
 Look at the view (engine-side; the dataset in memory is unchanged)
 
-{p 8 16 2}{cmd:parqit} {cmdab:d:escribe} [{it:parquet_source}] [{cmd:,} {opt lab:els} {opt not:es}]{p_end}
-{p 8 16 2}{cmd:parqit} {cmdab:l:ist} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:in} {it:f}[{cmd:/}{it:l}]]{p_end}
+{p 8 16 2}{cmd:parqit} {cmdab:d:escribe} [{it:parquet_source} [{cmd:,} {opt lab:els} {opt not:es}]]{space 4}(the options need a file){p_end}
+{p 8 16 2}{cmd:parqit} {cmdab:l:ist} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:in} {it:f}[{cmd:/}{it:l}]]
+{space 2}({it:f} and {it:l} are observation numbers; the letters and negative bounds of {cmd:keep in} are not taken){p_end}
 {p 8 16 2}{cmd:parqit ds} | {cmd:parqit lookfor} {it:word} [{it:word} ...]{p_end}
 {p 8 16 2}{cmd:parqit codebook} [{it:varlist}] [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:su:mmarize} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:,} {opt d:etail}]{p_end}
@@ -266,6 +267,7 @@ raw SQL are literal.
 {synopthdr:use_options}
 {synoptline}
 {synopt:{opt clear}}read the result into memory instead of opening a view{p_end}
+{synopt:{opt comp:ress}}with {opt clear}, narrow storage types losslessly, as {helpb compress}{p_end}
 {synopt:{opt n:ame(viewname)}}name the view; default {cmd:default}{p_end}
 {synopt:{opt relax:ed}}combine files whose columns differ, by name{p_end}
 {synopt:{opt enc:oding(name[, all])}}code page of text that is not UTF-8{p_end}
@@ -319,6 +321,8 @@ repeated in a do-file:
 The same menu runs {cmd:parqit version}, {cmd:parqit selftest} and opens both
 help files. The dialogs are also listed in this Viewer's {bf:Dialog} menu; see
 {help parqit_technical##dialogs:Menus and dialogs} for what each one offers.
+The dialogs quote a path that contains spaces or quotes; a path containing a
+comma must be quoted by hand.
 
 
 {marker description}{...}
