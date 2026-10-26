@@ -96,7 +96,11 @@ TEST_CASE("partitioned COPY keeps every row in its own partition under many flus
     const std::string tfiles = tree_scan(text_dir, ", hive_partitioning = false, filename = true");
     CHECK(scalar("SELECT count(*) FROM (SELECT filename FROM " + tfiles +
                  " GROUP BY filename HAVING count(DISTINCT s) <> 1)") == "0");
-    CHECK(scalar("SELECT count(DISTINCT regexp_replace(filename, '/[^/]*$', '')) FROM " + tfiles) ==
+    const std::string parent = "regexp_replace(replace(filename, chr(92), '/'), '/[^/]*$', '')";
+    CHECK(scalar("SELECT " + parent + " FROM (SELECT 'C:' || chr(92) || 'tree' || chr(92) || "
+                 "'s=x' || chr(92) || 'part.parquet' AS filename)") == "C:/tree/s=x");
+    CHECK(scalar("SELECT " + parent + " FROM (SELECT '/tree/s=x/part.parquet' AS filename)") == "/tree/s=x");
+    CHECK(scalar("SELECT count(DISTINCT " + parent + ") FROM " + tfiles) ==
           scalar("SELECT count(DISTINCT s) FROM " + tfiles));
 }
 

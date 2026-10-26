@@ -1352,6 +1352,7 @@ TEST_CASE("Codex finding 2: a failing query worker is reported in its place, nev
     /* std::bad_alloc thrown before query k (PARQIT_TEST_FAULT=text_many:<k>) on a worker or on the calling
      * thread: query k reports it, the others run, on 1 and 8 connections */
     parqit::Session &s = parqit::Session::instance();
+    const std::string bad_alloc_message = std::bad_alloc().what();
     std::vector<std::string> sqls;
     for (int i = 0; i < 12; i++) sqls.push_back("SELECT " + std::to_string(i) + " AS v");
     for (int threads : {1, 8})
@@ -1362,7 +1363,7 @@ TEST_CASE("Codex finding 2: a failing query worker is reported in its place, nev
             REQUIRE(r.size() == sqls.size());
             for (size_t i = 0; i < r.size(); i++) {
                 if (static_cast<int>(i) == k) {
-                    CHECK(r[i].err.find("bad_alloc") != std::string::npos);
+                    CHECK(r[i].err == bad_alloc_message);
                     CHECK(r[i].rows.empty());
                 } else {
                     CHECK(r[i].err.empty());
@@ -1381,7 +1382,7 @@ TEST_CASE("Codex finding 2: a failing query worker is reported in its place, nev
             parqit::test_text_copy_armed().store(true);
             const auto r = s.query_text_many(meta, threads);
             REQUIRE(r.size() == 1);
-            CHECK(r[0].err.find("bad_alloc") != std::string::npos);
+            CHECK(r[0].err == bad_alloc_message);
             CHECK(r[0].rows.empty());
         }
         const auto clean = s.query_text_many(meta, 1);

@@ -1236,19 +1236,20 @@ namespace {
 struct Drained {
     int64_t rows = 0, peak = 0, max = 0;
     int workers = 0;
-    bool failed = false;
+    bool failed = false, held_after_error = false;
     std::string message, finish;
 };
 
-/* sync forces an interleaving (PARQIT_TEST_SYNC); delay_ms is a slow engine */
+/* sync forces an interleaving. pause_error holds the consumer once the named
+ * error is observed with its queue full, without accumulating timer ticks. */
 Drained drain(const std::shared_ptr<const Plan> &plan, int threads, int64_t batch_rows,
               const std::string &fault, int64_t stop_after = -1, const std::string &sync = "",
-              int delay_ms = 0) {
+              int64_t pause_error = -1) {
     parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", fault);
     parqit_test::ScopedEnv order("PARQIT_TEST_SYNC", sync);
     parqit::test_sync_reset();
     auto src = std::make_shared<RdataArrowSource>(plan, threads, batch_rows);
-    std::packaged_task<Drained()> task([src, stop_after, delay_ms] {
+    std::packaged_task<Drained()> task([src, stop_after, pause_error] {
         Drained d;
         src->start();
         ArrowArrayStream *st = src->stream();
@@ -1262,7 +1263,16 @@ Drained drain(const std::shared_ptr<const Plan> &plan, int threads, int64_t batc
             if (!a.release) break;
             d.rows += a.length;
             a.release(&a);
-            if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            if (pause_error >= 0 && !d.held_after_error && k + 1 + src->max_batches() > pause_error) {
+                auto &sync = parqit::test_sync_state();
+                const std::string site = "rdata_failed:" + std::to_string(pause_error);
+                std::unique_lock<std::mutex> lock(sync.m);
+                if (!sync.cv.wait_for(lock, std::chrono::seconds(2), [&] { return sync.reached.count(site) > 0; }))
+                    throw std::runtime_error("consumer gate did not observe the conversion error");
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                d.held_after_error = true;
+            }
         }
         d.finish = src->finish();
         d.peak = src->peak_batches();
@@ -1473,7 +1483,8 @@ TEST_CASE("G8: after an error the R conversion keeps no more batches than before
     auto plan = changed_dates("rdata_g8.rds", {{1, 2000}});
     for (int rep = 0; rep < 3; rep++) {
         INFO("rep " << rep);
-        const Drained d = drain(plan, 2, 3, "", -1, "", 1);
+        const Drained d = drain(plan, 2, 3, "", -1, "rdata_failed:666>rdata_failed:666", 666);
+        CHECK(d.held_after_error);
         CHECK(d.failed);
         CHECK(contains(d.message, "column b, row 2001"));
         CHECK(d.rows == 1998);

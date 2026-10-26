@@ -420,14 +420,14 @@ TEST_CASE("Codex finding 2: a worker of the parallel UTF-8 scan that fails ends 
     std::string text;
     for (int i = 0; i < 400; i++) text += "line " + std::to_string(i) + ",caf\xC3\xA9\n";
     const std::string path = write_file("parqit_tf_fault", text);
+    const std::string bad_alloc_message = std::bad_alloc().what();
     for (int range : {0, 1, 3}) {
         INFO("range " << range);
         parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", "csv_scan:" + std::to_string(range));
         bool v = true, a = false;
         std::string err;
         CHECK_FALSE(parqit::text_file_utf8_scan(path, 0, &v, &a, &err, 64, 256, 4));
-        CHECK(err.find("cannot read " + path) == 0);
-        CHECK(err.find("bad_alloc") != std::string::npos);
+        CHECK(err == "cannot read " + path + ": " + bad_alloc_message);
     }
     /* round 2: the wording fails too, after the worker's failure; it throws on
      * the calling thread once every worker has stopped (the old handler
