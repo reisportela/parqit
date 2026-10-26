@@ -1,4 +1,4 @@
-*! version 0.5.1 21oct2026
+*! version 0.6.0 26oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -111,7 +111,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.5.1"
+    local ado_version "0.6.0"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -572,8 +572,8 @@ program define _parqit_import_to_bridge, rclass
     local encarg `"`encname'"'
     if (`encall') local encarg `"`encname', all"'
     * CSV-ENC-1: a lookup file of delimited text is read into Stata as UTF-8,
-    * decoded first when it is not (never Stata's guess of its encoding: for
-    * Cyrillic, Chinese or Japanese text import delimited guesses wrong)
+    * decoded first when it is not (never a guess of its encoding: for
+    * Cyrillic, Chinese or Japanese text a guess goes wrong)
     local csvsrc `"`src'"'
     local tbridge ""
     local t_enc ""
@@ -627,11 +627,14 @@ program define _parqit_import_to_bridge, rclass
     local b_rvars ""
     local b_undec 0
     local b_deflt 0
+    * CSV-USING-1: delimited text is read as parqit use reads it (the engine's
+    * reader: names as written, decimals in double, dates as dates), never
+    * by import delimited (lowercased names, decimals in float, dates as text)
     if (!`rc') capture noisily frame `fr' {
         quietly {
             if ("`kind'" == "dta")        use `"`src'"', clear
             else if ("`kind'" == "excel") import excel `"`src'"', firstrow clear
-            else                          import delimited `"`csvsrc'"', clear encoding("utf-8")
+            else                          parqit use using `"`csvsrc'"', clear
             if (c(k) == 0 | _N == 0) {
                 * still snapshot an empty schema so downstream errors are about
                 * the data, not a missing file
@@ -1466,19 +1469,22 @@ program define _parqit_load_core
     frame create `stage'
     frame `stage' {
         capture noisily {
+            local _parqit_compress_proved 0
+            local _parqit_compress_pending
             mata: _parqit_resp_create(`"`resp'"', `n')
             if (`n' > 0) {
                 plugin call parqit_plugin `names' in 1/`n', use_fetch `tag'
             }
             mata: _parqit_apply_strl(`"`strl'"')
             mata: _parqit_resp_decorate(`"`resp'"')
-            * COMPRESS-1 (BPLIM feedback, 2026-10-13): native compress on the
-            * staged result — lossless by construction (a storage type is
-            * narrowed only when every value fits it exactly), so a double
-            * mean stays double unless each value is a float, and a count or
-            * an integral total becomes long/int/byte; one pass over memory,
-            * before the swap, so a failure leaves the dataset untouched
-            if ("`compress'" != "") compress
+            * COMPRESS-2: the plugin may prove Double -> integer demotions
+            * before allocation. Native compress handles every other column,
+            * including strL coalescing, before the atomic frame swap. An older
+            * plugin emits no proof record and retains the full native path.
+            if ("`compress'" != "") {
+                if (!`_parqit_compress_proved') compress
+                else if ("`_parqit_compress_pending'" != "") compress `_parqit_compress_pending'
+            }
             if (`"`parqit_dtalabel'"' != "") {
                 mata: st_local("dl", _parqit_unhex(st_local("parqit_dtalabel")))
                 * DTALABEL-LEN-1: a foreign >80-char dataset label must never
@@ -4413,6 +4419,7 @@ void _parqit_wr_use_request(string scalar req, string scalar resp,
 
     p = (_parqit_jtext("cmd", "use_prepare"),
          _parqit_jpair("files", "[" + _parqit_jstr(st_local("_sq_file")) + "]"))
+    if (st_local("compress") != "") p = (p, _parqit_jpair("compress", "true"))
     vl = st_local("_sq_namelist")
     if (strtrim(vl) != "") {
         p = (p, _parqit_jpair("varlist", _parqit_jlist(tokens(vl))))
@@ -4518,6 +4525,7 @@ void _parqit_wr_collect_request(string scalar req, string scalar resp,
          _parqit_jtext("label",
              (st_local("_sq_cmdlabel") != "" ? st_local("_sq_cmdlabel") : "collect")),
          _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
+    if (st_local("compress") != "") p = (p, _parqit_jpair("compress", "true"))
     if (st_local("_sq_pvars") != "") {
         p = (p, _parqit_jpair("vars", _parqit_jlist(tokens(st_local("_sq_pvars")))))
     }
@@ -5587,6 +5595,11 @@ void _parqit_resp_create(string scalar resp, real scalar n)
     for (_li = 1; _li <= _nl; _li++) {
         line = _lines[_li]
         f = _parqit_fields(line, 8)
+        if (f[1] == "compress") {
+            st_local("_parqit_compress_proved", "1")
+            st_local("_parqit_compress_pending", _parqit_unhex(f[2]))
+            continue
+        }
         if (f[1] != "var") continue
         name = _parqit_unhex(f[3])
         code = _parqit_unhex(f[5])

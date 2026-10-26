@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -77,7 +78,9 @@ public:
     const std::string &data_path() const { return data_path_; }
     Compression compression() const { return compression_; }
     uint64_t size() const { return size_; }
-    /* up to n bytes at `offset`; fewer only at the end of the stream */
+    /* up to n bytes at `offset`; fewer only at the end of the stream. Safe
+     * from several threads: cursors of different columns read at once
+     * (RDATA-PARALLEL-1); each read is a cursor's whole buffer refill. */
     size_t read(uint64_t offset, char *dst, size_t n);
 
 private:
@@ -86,6 +89,7 @@ private:
     Compression compression_ = Compression::None;
     uint64_t size_ = 0;
     std::ifstream in_;
+    std::mutex mu_; /* in_ has one position */
 };
 
 /* How the bytes of a string become UTF-8: by the CHARSXP's own encoding flag
@@ -193,6 +197,16 @@ struct ReadOptions {
     std::string encoding; /* replaces the native encoding of unflagged strings */
     std::string default_encoding; /* the session's code page for undeclared text */
     std::string tmpdir;   /* where a compressed file is inflated */
+    int threads = 1;      /* threads of the profile pass (RDATA-PARALLEL-1); 1 = serial */
+    /* A3: the route, chosen once the file is parsed and before the profile
+     * (Plan::parallel): the parallel passes for a frame of at least
+     * parallel_min_rows rows (0 = any size, -1 = the measured rule for the
+     * file's compression, parallel_min_rows()), else one thread and the table
+     * function's conversion. route -1 = by size, 0 = serial, 1 = parallel;
+     * profile -1 = as the route, 0 = serial, 1 = parallel (the tests' and the
+     * calibration's switches). Either needs threads > 1 to be parallel. */
+    int64_t parallel_min_rows = 0;
+    int route = -1, profile = -1;
 };
 
 struct Parsed {
@@ -215,6 +229,10 @@ std::string r_version_string(int packed);
 
 /* NA_real_ (haven's tagged NA included) versus a plain NaN: R's R_IsNA */
 bool is_na_real(double x);
+/* the gzip CRC-32 of n more bytes (zlib's crc32: start from 0), eight bytes
+ * at a time (RDATA-PARALLEL-1) */
+uint32_t gzip_crc32(uint32_t crc, const unsigned char *p, size_t n);
+
 /* haven's tag of a tagged NA (the byte it stores in the high word), 0 for a
  * plain NA or any other value */
 char na_tag(double x);

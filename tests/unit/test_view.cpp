@@ -3,6 +3,8 @@
 #include "doctest.h"
 
 #include <cmath>
+#include <clocale>
+#include <iostream>
 #include <vector>
 
 #include "duckdb.h"
@@ -10,6 +12,40 @@
 #include "engine/view.hpp"
 
 using namespace parqit;
+
+TEST_CASE("Codex final: egen cut group cutpoints ignore a comma-decimal locale") {
+    const std::string old = std::setlocale(LC_NUMERIC, nullptr);
+    struct Restore {
+        std::string old;
+        ~Restore() { std::setlocale(LC_NUMERIC, old.c_str()); }
+    } restore{old};
+    const char *locale = nullptr;
+    for (const char *candidate : {"pt_PT.UTF-8", "pt_PT.utf8", "de_DE.UTF-8", "de_DE.utf8"}) {
+        locale = std::setlocale(LC_NUMERIC, candidate);
+        if (locale && std::string(std::localeconv()->decimal_point) == ",") break;
+        locale = nullptr;
+    }
+    if (!locale) {
+        std::cout << "SKIP Codex cut locale: no installed comma-decimal LC_NUMERIC\n";
+        return;
+    }
+    std::cout << "Codex cut LC_NUMERIC=" << locale << '\n';
+    View v;
+    ViewCol c;
+    c.name = "x"; c.kind = 'n';
+    v.open("SELECT * FROM (VALUES (-1.25::DOUBLE), (1.5), (1.75), (4.5)) t(x)",
+           {c}, nlohmann::json::object(), nlohmann::json::object(), "", "cut locale fixture");
+    View::EgenSpec sp;
+    sp.name = "band"; sp.fcn = "cut"; sp.vars = {"x"}; sp.group = 2;
+    sp.probe_rows = {{"-1.25", "4.5", "1.75"}};
+    REQUIRE(v.egen(sp, true).empty());
+    duckdb_result res;
+    std::string err;
+    REQUIRE_MESSAGE(Session::instance().query(v.compile(false) + " ORDER BY x", &res, &err), err);
+    const ResultGuard guard{&res};
+    REQUIRE(duckdb_row_count(&res) == 4);
+    for (idx_t r = 0; r < 4; ++r) CHECK(duckdb_value_int32(&res, 1, r) == (r < 2 ? 0 : 1));
+}
 
 /* worker panel fixture: id, year, wage (NULLs), firm (string) */
 static const char *kFixture =
@@ -44,10 +80,131 @@ static std::string run_scalar(const std::string &sql) {
     return v;
 }
 
+/* Inspect operator identities, not the human renderer's spelling or labels
+ * that might themselves contain words such as WINDOW or JOIN. */
+static std::string explain_operator_names(const std::string &sql) {
+    duckdb_result result{};
+    std::string error, raw_plan;
+    REQUIRE_MESSAGE(Session::instance().query("EXPLAIN (FORMAT JSON) " + sql,
+                                              &result, &error), error);
+    for (idx_t row = 0; row < duckdb_row_count(&result); ++row) {
+        char *key = duckdb_value_varchar(&result, 0, row);
+        if (key && std::string(key) == "physical_plan") {
+            char *value = duckdb_value_varchar(&result, 1, row);
+            if (value) raw_plan = value;
+            duckdb_free(value);
+        }
+        duckdb_free(key);
+    }
+    duckdb_destroy_result(&result);
+    REQUIRE_FALSE(raw_plan.empty());
+    const auto plan = nlohmann::json::parse(raw_plan);
+    std::string names;
+    auto visit = [&](auto &&self, const nlohmann::json &nodes) -> void {
+        REQUIRE(nodes.is_array());
+        for (const auto &node : nodes) {
+            REQUIRE(node.at("name").is_string());
+            names += node.at("name").get<std::string>() + "\n";
+            self(self, node.at("children"));
+        }
+    };
+    visit(visit, plan);
+    return names;
+}
+
 static long long run_count(const View &v) {
     return std::strtoll(
         run_scalar("SELECT count(*) FROM (" + v.compile(false) + ")").c_str(),
         nullptr, 10);
+}
+
+TEST_CASE("compact sort restores logical types above ordering and keeps physical ties") {
+    View v;
+    std::vector<ViewCol> cols(3);
+    cols[0].name = "k"; cols[1].name = "x"; cols[2].name = "tag";
+    v.open("SELECT * FROM (VALUES (2.0::DOUBLE, '-0.0'::DOUBLE, 1, 2::BIGINT), "
+           "(1.0, 3.5, 2, 1), (2.0, 4.5, 3, 0), (NULL, 5.5, 4, 3)) "
+           "t(k,x,tag,\"physical row\")", cols, {}, {}, "", "fixture", {"\"physical row\""});
+    REQUIRE(v.sort({"k"}, {false}).empty());
+    CHECK(v.compact_sort_keys() == std::vector<std::string>{"\"k\"", "\"physical row\""});
+    const std::map<std::string, View::SortCast> casts{
+        {"\"k\"", {"__parqit_sort_i8", "DOUBLE"}},
+        {"\"physical row\"", {"__parqit_sort_i8", "BIGINT"}}};
+    for (bool descending : {false, true}) {
+        REQUIRE(v.sort({"k"}, {descending}).empty());
+        const auto sql = v.compile_compact_sort(casts);
+        CHECK(run_scalar("SELECT string_agg(tag::VARCHAR, ',') FROM (" + sql + ")") ==
+              (descending ? "3,1,2,4" : "2,3,1,4"));
+        CHECK(run_scalar("SELECT typeof(k) FROM (" + sql + ") LIMIT 1") == "DOUBLE");
+        CHECK(run_scalar("SELECT count(*) FROM (" + sql + ") WHERE tag=1 AND signbit(x)") == "1");
+        CHECK(sql.find("SELECT CAST(\"k\" AS DOUBLE)") != std::string::npos);
+    }
+    REQUIRE(v.gen("changed", "double", "k+1", "", false).empty());
+    CHECK(v.compact_sort_keys().empty());
+    CHECK(v.compile_compact_sort(casts) == v.compile(true));
+}
+
+TEST_CASE("reversible floating keys keep fractional ordering, NULLs, ties and public Double type") {
+    View v;
+    std::vector<ViewCol> cols(2);
+    cols[0].name="x"; cols[1].name="tag";
+    v.open("SELECT *,tag::BIGINT AS phys FROM (VALUES (-1e200::DOUBLE,0),(-1.25,1),"
+           "(0.,2),(.5,3),(1e200,4),(NULL,5),(.5,6)) t(x,tag)",cols,{}, {},"","fixture",{"\"phys\""});
+    const std::map<std::string,View::SortCast> casts{
+        {"\"x\"",{"__parqit_sort_bits","DOUBLE","__parqit_sort_restore"}}};
+    for (bool descending : {false,true}) {
+        REQUIRE(v.sort({"x"},{descending}).empty());
+        const auto sql=v.compile_compact_sort(casts);
+        CHECK(run_scalar("SELECT string_agg(tag::VARCHAR,',') FROM ("+sql+")") ==
+              (descending ? "4,3,6,2,1,0,5" : "0,1,2,3,6,4,5"));
+        CHECK(run_scalar("SELECT typeof(x) FROM ("+sql+") LIMIT 1")=="DOUBLE");
+        CHECK(run_scalar("SELECT count(*) FROM (SELECT * FROM ("+sql+") EXCEPT ALL SELECT * FROM ("+v.compile(true)+"))")=="0");
+    }
+}
+
+TEST_CASE("DEDUP-SORT-1 compact keys order a whole-row dedup exactly like the general plan") {
+    auto make = [] {
+        View v;
+        std::vector<ViewCol> cols(3);
+        cols[0].name = "k"; cols[1].name = "x"; cols[2].name = "tag";
+        v.open("SELECT * FROM (VALUES (2.0::DOUBLE, 1.5::DOUBLE, 1), (1.0, -2.5, 2), (2.0, 1.5, 1), "
+               "(NULL, 0.25, 3), (1.0, -2.5, 2), (2.0, -1e200, 4), (NULL, 0.25, 3)) t(k,x,tag)",
+               cols, {}, {}, "", "fixture");
+        return v;
+    };
+    const std::map<std::string, View::SortCast> casts{
+        {"\"k\"", {"__parqit_sort_i8", "DOUBLE"}},
+        {"\"x\"", {"__parqit_sort_bits", "DOUBLE", "__parqit_sort_restore"}}};
+    for (bool descending : {false, true}) {
+        auto v = make();
+        REQUIRE(v.duplicates_drop({}, false).empty());
+        REQUIRE(v.sort({"k", "x"}, {descending, false}).empty());
+        CHECK(v.compact_sort_keys() == std::vector<std::string>{"\"k\"", "\"x\""});
+        const auto general = v.compile(true), compact = v.compile_compact_sort(casts);
+        CHECK(compact.find("__parqit_sort_bits") != std::string::npos);
+        auto ordered = [](const std::string &sql) {
+            return run_scalar("SELECT string_agg(coalesce(k::VARCHAR,'.') || ':' || x::VARCHAR || ':' || tag, ',') FROM (" +
+                              sql + ")");
+        };
+        CHECK(ordered(compact) == ordered(general));
+        CHECK(ordered(compact) == (descending ? "2.0:-1e+200:4,2.0:1.5:1,1.0:-2.5:2,.:0.25:3"
+                                              : "1.0:-2.5:2,2.0:-1e+200:4,2.0:1.5:1,.:0.25:3"));
+        CHECK(run_scalar("SELECT typeof(k) || typeof(x) FROM (" + compact + ") LIMIT 1") == "DOUBLEDOUBLE");
+    }
+    auto by_varlist = make();
+    REQUIRE(by_varlist.sort({"k"}, {false}).empty());
+    REQUIRE(by_varlist.duplicates_drop({"k"}, true).empty());
+    CHECK(by_varlist.compact_sort_keys().empty());
+    auto conditional = make();
+    REQUIRE(conditional.duplicates_drop({}, false, "tag > 1", false).empty());
+    REQUIRE(conditional.sort({"k"}, {false}).empty());
+    CHECK(conditional.compact_sort_keys().empty());
+    auto filtered = make();
+    REQUIRE(filtered.filter("tag > 1", false, false).empty());
+    REQUIRE(filtered.duplicates_drop({}, false).empty());
+    REQUIRE(filtered.sort({"k"}, {false}).empty());
+    CHECK(filtered.compact_sort_keys().empty());
+    CHECK(filtered.compile_compact_sort(casts) == filtered.compile(true));
 }
 
 struct ResetWindowSelfJoin {
@@ -56,6 +213,92 @@ struct ResetWindowSelfJoin {
         (void)Session::instance().set_window_self_join(true, &ignored);
     }
 };
+
+TEST_CASE("file collapse promotions preserve values, types, metadata and later declarations") {
+    auto make = [] {
+        View v;
+        std::vector<ViewCol> columns(4);
+        columns[0].name = "g"; columns[0].physical_type = "INTEGER";
+        columns[1].name = "x"; columns[1].physical_type = "DOUBLE"; columns[1].fmt = "%15.0g";
+        columns[2].name = "y"; columns[2].physical_type = "DOUBLE";
+        columns[3].name = "text"; columns[3].kind = 's';
+        v.open("SELECT * FROM (VALUES (1,0.5::DOUBLE,1e16::DOUBLE,'a'),"
+               "(1,1.25,1.,NULL),(1,NULL,-1e16,''),(2,NULL,0.,'b')) t(g,x,y,text)",
+               columns, {}, {}, "", "fixture");
+        v.set_source_paths("['fixture']", true);
+        return v;
+    };
+    auto v = make();
+    REQUIRE(v.collapse({{"mean","mx","x"},{"sum","sx","x"},{"sum","sy","y"},
+                        {"count","nt","text"}}, {"g"}).empty());
+    CHECK(v.compact_collapse_columns() == std::vector<std::string>{"x","y"});
+    const std::map<std::string, View::ExactSum> promotions{{"x",{-2,false}},{"y",{0,false}}};
+    const auto original = v.compile(true), promoted = v.compile_compact_collapse(promotions);
+    CHECK(promoted.find("__parqit_scaled_mean") != std::string::npos);
+    CHECK(run_scalar("SELECT count(*) FROM ((SELECT * FROM (" + original +
+                     ") EXCEPT ALL SELECT * FROM (" + promoted +
+                     ")) UNION ALL (SELECT * FROM (" + promoted +
+                     ") EXCEPT ALL SELECT * FROM (" + original + ")))") == "0");
+    CHECK(run_scalar("SELECT mx FROM (" + promoted + ") WHERE g=1") == "0.875");
+    CHECK(run_scalar("SELECT sx FROM (" + promoted + ") WHERE g=2") == "0.0");
+    CHECK(run_scalar("SELECT typeof(sx) FROM (" + promoted + ") LIMIT 1") == "DOUBLE");
+    CHECK(v.cols()[1].fmt == "%15.0g");
+    REQUIRE(v.sort({"g"}, {true}).empty());
+    CHECK(run_scalar("SELECT string_agg(g::VARCHAR, ',') FROM (" + v.compile_compact_collapse(promotions) + ")") == "2,1");
+    REQUIRE(v.gen("extra", "double", "mx+1", "", false).empty());
+    CHECK(v.compact_collapse_columns().empty());
+    CHECK(v.compile_compact_collapse(promotions) == v.compile(true));
+    auto raw = make(); raw.set_source_paths("");
+    REQUIRE(raw.collapse({{"mean","mx","x"}}, {"g"}).empty());
+    CHECK(raw.compact_collapse_columns().empty());
+    /* DERIVED-COLLAPSE-1: certified row-local gens keep the plan; the proof
+     * source and the compact aggregate evaluate the same compiled prefix */
+    auto dependent = make();
+    REQUIRE(dependent.gen("another", "double", "x*4", "y >= 0", false).empty());
+    REQUIRE(dependent.collapse({{"mean","m","another"},{"sum","s","another"},
+                                {"count","n","another"},{"sum","sy","y"}}, {"g"}).empty());
+    CHECK(dependent.compact_collapse_columns() == std::vector<std::string>{"another","y"});
+    CHECK(dependent.compact_collapse_source() == dependent.compile_prefix(1));
+    for (const bool integer32 : {false, true}) {
+        const std::map<std::string, View::ExactSum> derived{{"another",{0,integer32}},{"y",{0,false}}};
+        const auto general = dependent.compile(true), compact = dependent.compile_compact_collapse(derived);
+        CHECK(compact.find(dependent.compile_prefix(1)) != std::string::npos);
+        CHECK(compact.find(integer32 ? "__parqit_integer_mean" : "__parqit_scaled_mean") != std::string::npos);
+        CHECK(run_scalar("SELECT count(*) FROM ((SELECT * FROM (" + general + ") EXCEPT ALL SELECT * FROM (" +
+                         compact + ")) UNION ALL (SELECT * FROM (" + compact + ") EXCEPT ALL SELECT * FROM (" +
+                         general + ")))") == "0");
+        CHECK(run_scalar("SELECT m || '/' || s || '/' || n FROM (" + compact + ") WHERE g=1") == "3.5/7.0/2");
+        CHECK(run_scalar("SELECT coalesce(m::VARCHAR,'.') || '/' || s || '/' || n FROM (" + compact +
+                         ") WHERE g=2") == "./0.0/0");
+    }
+    /* row context, a function outside the reviewed numeric list, by(), and any
+     * other stage before the collapse keep the original accumulator */
+    auto ineligible = [&](auto &&prepare) {
+        auto v = make();
+        prepare(v);
+        REQUIRE(v.collapse({{"mean","m","x"}}, {"g"}).empty());
+        return v.compact_collapse_columns().empty();
+    };
+    CHECK(ineligible([](View &v) { REQUIRE(v.gen("r", "double", "x+_n", "", false).empty()); }));
+    CHECK(ineligible([](View &v) { REQUIRE(v.gen("l", "double", "strlen(text)", "", false).empty()); }));
+    CHECK(ineligible([](View &v) { REQUIRE(v.gen("c", "double", "x", "strlen(text) > 0", false).empty()); }));
+    CHECK(ineligible([](View &v) {
+        REQUIRE(v.sort({"g"}, {false}).empty());
+        REQUIRE(v.gen("b", "double", "x+1", "", false, {"g"}).empty());
+    }));
+    CHECK(ineligible([](View &v) {
+        REQUIRE(v.filter("x < 2", false, false).empty());
+        REQUIRE(v.gen("k", "double", "x+1", "", false).empty());
+    }));
+    CHECK(ineligible([](View &v) {
+        REQUIRE(v.gen("t", "double", "x+1", "", false).empty());
+        REQUIRE(v.rename("t", "u").empty());
+    }));
+    CHECK(!ineligible([](View &v) {
+        REQUIRE(v.gen("p", "double", "round(abs(x), 0.25) + cond(y > 0, 1, 2)", "", false).empty());
+        REQUIRE(v.gen("q", "float", "p / 3", "!missing(p)", false).empty());
+    }));
+}
 
 TEST_CASE("FORMAT-1 changes only formats and validates the whole update first") {
     View v = make_view();
@@ -127,14 +370,9 @@ TEST_CASE("EGEN-FUSE-1 independent aggregates share a window without changing pr
         "s = CASE WHEN firm='a' THEN 85 ELSE 20 END AND "
         "hi = CASE WHEN firm='a' THEN 33 ELSE 20 END") == "6");
     CHECK(run_scalar("SELECT count(*) FROM (" + v.compile_prefix(2) + ") WHERE s IN (85,20)") == "6");
-    duckdb_result plan;
     std::string err;
     REQUIRE(Session::instance().set_window_self_join(false, &err));
-    REQUIRE(Session::instance().query("EXPLAIN " + v.compile(false), &plan, &err));
-    char *raw = duckdb_value_varchar(&plan, 1, 0);
-    const std::string text = raw ? raw : "";
-    duckdb_free(raw);
-    duckdb_destroy_result(&plan);
+    const std::string text = explain_operator_names(v.compile(false));
     REQUIRE(Session::instance().set_window_self_join(true, &err));
     const auto window = text.find("WINDOW");
     REQUIRE(window != std::string::npos);
@@ -275,23 +513,14 @@ TEST_CASE("WINDOW-VOLATILE-1 plan controls keep safe rewrites and reject duplica
     std::string err;
     REQUIRE(s.set_window_self_join(false,&err));
     REQUIRE(s.set_window_self_join(true,&err));
-    auto explain = [&](const std::string &sql) {
-        duckdb_result result{};
-        const bool ok=s.query("EXPLAIN "+sql,&result,&err);
-        CHECK_MESSAGE(ok,err);
-        if (!ok) {duckdb_destroy_result(&result);return std::string();}
-        char *raw=duckdb_value_varchar(&result,1,0);
-        const std::string plan=raw?raw:"";
-        duckdb_free(raw);duckdb_destroy_result(&result);
-        return plan;
-    };
+    auto explain = explain_operator_names;
     const std::string plain=explain("SELECT g,x,sum(x) OVER (PARTITION BY g) AS m "
         "FROM (SELECT i%2 AS g,i AS x FROM range(1000) t(i))");
     CHECK(plain.find("JOIN") != std::string::npos);
     CHECK(plain.find("GROUP_BY") != std::string::npos);
     CHECK(plain.find("WINDOW") == std::string::npos);
     const std::string pure_lambda=explain("SELECT g,x,sum(x) OVER (PARTITION BY g) AS m "
-        "FROM (SELECT i%2 AS g,list_transform([i],y -> y+1)[1] AS x FROM range(1000) t(i))");
+        "FROM (SELECT i%2 AS g,list_transform([i],lambda y : y+1)[1] AS x FROM range(1000) t(i))");
     CHECK(pure_lambda.find("JOIN") != std::string::npos);
     CHECK(pure_lambda.find("WINDOW") == std::string::npos);
     for (const char *aggregate : {"first(i)","sum(i::DOUBLE)"}) {
@@ -304,8 +533,8 @@ TEST_CASE("WINDOW-VOLATILE-1 plan controls keep safe rewrites and reject duplica
     for (const char *sql : {
         "SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM (SELECT i%2 AS g,random() AS x FROM range(1000) t(i))",
         "SELECT i,sum(i) OVER (PARTITION BY i*2+random()) AS m FROM range(1000) t(i)",
-        "SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM (SELECT i%2 AS g,list_transform([i],y -> random())[1] AS x FROM range(1000) t(i))",
-        "SELECT i,sum(i) OVER (PARTITION BY i*2+list_transform([i],y -> random())[1]) AS m FROM range(1000) t(i)"}) {
+        "SELECT g,x,sum(x) OVER (PARTITION BY g) AS m FROM (SELECT i%2 AS g,list_transform([i],lambda y : random())[1] AS x FROM range(1000) t(i))",
+        "SELECT i,sum(i) OVER (PARTITION BY i*2+list_transform([i],lambda y : random())[1]) AS m FROM range(1000) t(i)"}) {
         const std::string plan=explain(sql);
         CHECK(plan.find("WINDOW") != std::string::npos);
         CHECK(plan.find("JOIN") == std::string::npos);

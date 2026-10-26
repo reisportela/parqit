@@ -2,13 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <locale>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
+#include <thread>
 
 #include "miniz.hpp" /* DuckDB's bundled zlib subset (duckdb_miniz), for .zsav */
 
@@ -1325,92 +1330,310 @@ Dictionary read_dictionary(const std::string &path, const ReadOptions &opt) {
 
 struct CaseReader::Stream {
     virtual ~Stream() = default;
-    /* up to n bytes; fewer only at the end of the data */
-    virtual size_t read(unsigned char *dst, size_t n) = 0;
-    /* where the next byte comes from, for messages */
-    virtual std::string where() const = 0;
+    /* the next bytes, in place: a span valid until the next call; false at
+     * the end of the data. A failure is thrown here, when the bytes after the
+     * last span are needed, never before (SPSS-BUFFER-1) */
+    virtual bool span(const unsigned char **p, size_t *n) = 0;
+    /* where the byte `back` bytes before the end of the last span comes from,
+     * for messages */
+    virtual std::string where(size_t back) const = 0;
+    /* that byte's position in the stream of case data (B1) */
+    virtual uint64_t offset(size_t back) const = 0;
+    /* the threads inflating ahead (B2), for the tests */
+    virtual size_t ahead_threads() const { return 0; }
 };
+
+size_t CaseReader::ahead_threads() const { return in_ ? in_->ahead_threads() : 0; }
 
 namespace {
 
 class PlainStream : public CaseReader::Stream {
   public:
-    PlainStream(const std::string &path, uint64_t start) : in_(path) { in_.seek(start); }
-    size_t read(unsigned char *dst, size_t n) override { return in_.read(dst, n); }
-    std::string where() const override { return offset_text(in_.offset()); }
+    PlainStream(const std::string &path, uint64_t data, uint64_t at = 0) : in_(path), data_(data) {
+        in_.seek(data + at);
+    }
+    bool span(const unsigned char **p, size_t *n) override {
+        if (err_) std::rethrow_exception(err_);
+        buf_.resize(kSpan);
+        const uint64_t from = in_.offset();
+        size_t got = 0;
+        try {
+            got = in_.read(buf_.data(), buf_.size());
+        } catch (...) {
+            /* the bytes read before a read error are the reader's; the error
+             * is thrown when it needs the bytes after them */
+            got = static_cast<size_t>(in_.offset() - from);
+            if (got == 0) throw;
+            err_ = std::current_exception();
+        }
+        *p = buf_.data();
+        *n = got;
+        return got > 0;
+    }
+    std::string where(size_t back) const override { return offset_text(in_.offset() - back); }
+    uint64_t offset(size_t back) const override { return in_.offset() - back - data_; }
 
   private:
+    static constexpr size_t kSpan = size_t(1) << 20;
     FileIn in_;
+    uint64_t data_;
+    std::vector<unsigned char> buf_;
+    std::exception_ptr err_;
 };
 
-/* the bytecode stream of a .zsav: its ZLIB blocks inflated one at a time */
+/* the bytecode stream of a .zsav: its ZLIB blocks inflated in order. With
+ * `ahead` threads (B2: the parallel profile and conversion), the blocks that
+ * come next are inflated on them, within a window of 64 MB of inflated data,
+ * while the reader expands the current one; a block's failure is thrown when
+ * the reader reaches it, worded as the one-thread inflate words it, and never
+ * if the reader stops before. The bytes are those of the one-thread inflate. */
+} // namespace
+
+/* B2: inflated data held ahead by the threads is bounded by bytes: 64 MiB, at
+ * least two blocks of it, else nothing is read ahead
+ * (PARQIT_TEST_ZLIB_AHEAD_BYTES sets the bound for the tests) */
+size_t zlib_ahead_window(size_t threads, uint64_t biggest) {
+    uint64_t budget = uint64_t(64) << 20;
+    if (const char *e = std::getenv("PARQIT_TEST_ZLIB_AHEAD_BYTES")) {
+        const long long v = std::atoll(e);
+        if (v > 0) budget = static_cast<uint64_t>(v);
+    }
+    const uint64_t fit = budget / std::max<uint64_t>(biggest, 1);
+    if (threads == 0 || fit < 2) return 0;
+    return static_cast<size_t>(std::min<uint64_t>(uint64_t(4) * threads, fit));
+}
+
+namespace {
+
 class ZlibStream : public CaseReader::Stream {
   public:
-    ZlibStream(const std::string &path, const Dictionary &d) : in_(path), blocks_(d.zblocks) {}
-    size_t read(unsigned char *dst, size_t n) override {
-        size_t done = 0;
-        while (done < n) {
-            if (pos_ == out_.size()) {
-                if (next_ == blocks_.size()) break;
-                inflate_block();
-            }
-            const size_t take = std::min(n - done, out_.size() - pos_);
-            std::memcpy(dst + done, out_.data() + pos_, take);
-            pos_ += take;
-            done += take;
+    ZlibStream(const std::string &path, const Dictionary &d, int ahead) : in_(path), blocks_(d.zblocks) {
+        if (ahead > 0 && blocks_.size() > 1) start(ahead);
+    }
+    /* from byte `at` of the inflated stream on, one block at a time (B1), in
+     * the state of the reader that took `at` bytes: the block holding byte
+     * at - 1 is the current one; when all of it was taken, the next block is
+     * not inflated until its bytes are needed, as the one-thread reader does
+     * (a damaged block it never reaches is never an error) */
+    ZlibStream(const std::string &path, const Dictionary &d, uint64_t at) : in_(path), blocks_(d.zblocks) {
+        if (at == 0 || blocks_.empty()) return;
+        const uint64_t base = blocks_[0].uncompressed_ofs;
+        size_t k = 0;
+        while (k + 1 < blocks_.size() && blocks_[k + 1].uncompressed_ofs - base < at) k++;
+        const uint64_t start = blocks_[k].uncompressed_ofs - base;
+        if (at >= start + blocks_[k].uncompressed_size) {
+            next_ = k + 1;
+            boundary_ = true;
+            return;
         }
-        return done;
+        next_ = k;
+        next_block();
+        pos_ = static_cast<size_t>(at - start);
     }
-    std::string where() const override {
+    uint64_t offset(size_t back) const override {
+        if (next_ == 0) return 0;
+        const uint64_t base = blocks_[0].uncompressed_ofs;
+        const Dictionary::ZBlock &b = blocks_[next_ - 1];
+        return b.uncompressed_ofs - base + (boundary_ ? b.uncompressed_size : pos_) - back;
+    }
+    ~ZlibStream() override { stop(); }
+    /* the rest of the current inflated block; the next block is inflated (or
+     * taken from the threads) only when the reader needs its bytes */
+    bool span(const unsigned char **p, size_t *n) override {
+        while (pos_ == out_.size()) {
+            if (next_ == blocks_.size()) return false;
+            next_block();
+            boundary_ = false;
+        }
+        *p = out_.data() + pos_;
+        *n = out_.size() - pos_;
+        pos_ = out_.size();
+        return true;
+    }
+    std::string where(size_t back) const override {
+        const size_t at = boundary_ ? static_cast<size_t>(blocks_[next_ - 1].uncompressed_size) : pos_;
         return "ZLIB block " + std::to_string(next_) + " of " + std::to_string(blocks_.size()) +
-               ", byte " + std::to_string(pos_) + " of its data";
+               ", byte " + std::to_string(at - back) + " of its data";
     }
+    size_t ahead_threads() const override { return pool_.size(); }
 
   private:
-    void inflate_block() {
-        const Dictionary::ZBlock &b = blocks_[next_];
-        in_.seek(b.compressed_ofs);
-        in_buf_.resize(b.compressed_size);
-        if (in_.read(in_buf_.data(), b.compressed_size) != b.compressed_size)
-            throw SavError("malformed SPSS file " + in_.path() + ": ZLIB block " +
-                           std::to_string(next_ + 1) + " runs past the end of the file (truncated)");
-        out_.resize(b.uncompressed_size);
+    /* block k of blocks inflated into out, read through `in` */
+    static void inflate(FileIn &in, const std::vector<Dictionary::ZBlock> &blocks, size_t k,
+                        std::vector<unsigned char> *cbuf, std::vector<unsigned char> *out) {
+        const Dictionary::ZBlock &b = blocks[k];
+        in.seek(b.compressed_ofs);
+        cbuf->resize(b.compressed_size);
+        if (in.read(cbuf->data(), b.compressed_size) != b.compressed_size)
+            throw SavError("malformed SPSS file " + in.path() + ": ZLIB block " +
+                           std::to_string(k + 1) + " runs past the end of the file (truncated)");
+        out->resize(b.uncompressed_size);
         duckdb_miniz::mz_ulong got = b.uncompressed_size;
-        const int st = duckdb_miniz::mz_uncompress(out_.data(), &got, in_buf_.data(),
+        const int st = duckdb_miniz::mz_uncompress(out->data(), &got, cbuf->data(),
                                                    static_cast<duckdb_miniz::mz_ulong>(b.compressed_size));
         if (st != duckdb_miniz::MZ_OK || got != b.uncompressed_size)
-            throw SavError("malformed SPSS file " + in_.path() + ": ZLIB block " +
-                           std::to_string(next_ + 1) + " of " +
-                           std::to_string(blocks_.size()) + " at " + offset_text(b.compressed_ofs) +
+            throw SavError("malformed SPSS file " + in.path() + ": ZLIB block " +
+                           std::to_string(k + 1) + " of " +
+                           std::to_string(blocks.size()) + " at " + offset_text(b.compressed_ofs) +
                            " does not inflate to its declared " +
                            std::to_string(b.uncompressed_size) + " bytes (corrupt data)");
-        pos_ = 0;
-        next_++;
+    }
+    void next_block() {
+        if (pool_.empty()) {
+            inflate(in_, blocks_, next_, &in_buf_, &out_);
+            pos_ = 0;
+            next_++;
+            return;
+        }
+        /* a block that failed stays the current one and is not inflated again
+         * by the threads: asked for again, it fails again (Fable final audit,
+         * A4: it waited for ever) */
+        if (failed_) std::rethrow_exception(failed_);
+        std::exception_ptr err;
+        {
+            /* the threads read next_ under the lock: it moves under it; a
+             * failed block stays the current one, as the one-thread inflate
+             * throws before moving on */
+            std::unique_lock<std::mutex> lk(mu_);
+            Slot &s = ring_[next_ % ring_.size()];
+            cv_.wait(lk, [&] { return s.ready && s.block == next_; });
+            s.ready = false;
+            if (s.err) {
+                err = s.err;
+                failed_ = s.err;
+                s.err = nullptr;
+            } else {
+                out_.swap(s.out); /* the consumed buffer goes back for reuse */
+                pos_ = 0;
+                next_++;
+            }
+        }
+        cv_.notify_all();
+        if (err) std::rethrow_exception(err);
+    }
+    struct Slot {
+        size_t block = 0;
+        bool ready = false;
+        std::exception_ptr err;
+        std::vector<unsigned char> out;
+    };
+    void start(int ahead) {
+        size_t biggest = 1;
+        for (const auto &b : blocks_) biggest = std::max<size_t>(biggest, b.uncompressed_size);
+        const size_t wanted = std::min<size_t>(static_cast<size_t>(ahead), std::min<size_t>(8, blocks_.size() - 1));
+        const size_t window = zlib_ahead_window(wanted, biggest);
+        if (window == 0) return; /* blocks too large to hold two ahead: one at a time, as without threads */
+        const size_t threads = std::min(window, wanted);
+        try {
+            ring_.resize(window);
+            for (size_t t = 0; t < threads; t++) handles_.push_back(std::make_unique<FileIn>(in_.path()));
+            for (size_t t = 0; t < threads; t++) pool_.emplace_back([this, t] { work(t); });
+        } catch (...) {
+            stop(); /* the blocks are then inflated one at a time, as without threads */
+            pool_.clear();
+            ring_.clear();
+        }
+    }
+    /* a thread claims the next block inside the window, inflates it outside
+     * the lock and hands it over in its ring slot; any failure is the block's.
+     * The slot is the thread's from the claim to the hand-over (block k + the
+     * window is claimed only once k is consumed), so the block is inflated in
+     * the slot itself: the threads hold no inflated block of their own, and
+     * the read-ahead is the ring's slots (Codex audit, round 2, finding 4) */
+    void work(size_t t) {
+        FileIn &in = *handles_[t];
+        std::vector<unsigned char> cbuf;
+        for (;;) {
+            size_t k;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&] {
+                    return stop_ || claim_ >= blocks_.size() ||
+                           (claim_ < next_ + ring_.size() && !ring_[claim_ % ring_.size()].ready);
+                });
+                if (stop_ || claim_ >= blocks_.size()) return;
+                k = claim_++;
+            }
+            Slot &s = ring_[k % ring_.size()];
+            std::exception_ptr err;
+            try {
+                inflate(in, blocks_, k, &cbuf, &s.out);
+            } catch (...) {
+                err = std::current_exception();
+            }
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                s.block = k;
+                s.err = err;
+                s.ready = true;
+            }
+            cv_.notify_all();
+        }
+    }
+    void stop() noexcept {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (std::thread &t : pool_)
+            if (t.joinable()) t.join();
     }
     FileIn in_;
     std::vector<Dictionary::ZBlock> blocks_;
     std::vector<unsigned char> in_buf_, out_;
     size_t pos_ = 0, next_ = 0;
+    bool boundary_ = false; /* B1: restarted with the current block all taken, not inflated */
+    std::exception_ptr failed_; /* B2: the error of the block the reader could not take */
+    /* B2 */
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<Slot> ring_;
+    std::vector<std::unique_ptr<FileIn>> handles_;
+    std::vector<std::thread> pool_;
+    size_t claim_ = 0;
+    bool stop_ = false;
 };
 
 } // namespace
 
-CaseReader::CaseReader(const std::string &path, const Dictionary &dict) : d_(dict), path_(path) {
-    if (d_.compression == Compression::Zlib) in_ = std::make_unique<ZlibStream>(path, d_);
+CaseReader::CaseReader(const std::string &path, const Dictionary &dict, int ahead) : d_(dict), path_(path) {
+    if (d_.compression == Compression::Zlib) in_ = std::make_unique<ZlibStream>(path, d_, ahead);
     else in_ = std::make_unique<PlainStream>(path, d_.data_offset);
     slots_.assign(d_.nslots, 0);
 }
 
+CaseReader::CaseReader(const std::string &path, const Dictionary &dict, const Restart &at)
+    : d_(dict), path_(path), cases_(at.cases), cmd_pos_(at.cmd_pos) {
+    if (d_.compression == Compression::Zlib) in_ = std::make_unique<ZlibStream>(path, d_, at.offset);
+    else in_ = std::make_unique<PlainStream>(path, d_.data_offset, at.offset);
+    std::memcpy(cmd_, at.cmd, 8);
+    slots_.assign(d_.nslots, 0);
+}
+
+CaseReader::Restart CaseReader::restart() const {
+    Restart r;
+    r.offset = in_->offset(sn_);
+    std::memcpy(r.cmd, cmd_, 8);
+    r.cmd_pos = cmd_pos_;
+    r.cases = cases_;
+    return r;
+}
+
 CaseReader::~CaseReader() = default;
 
-bool CaseReader::next() {
+bool CaseReader::next() { return advance(true); }
+
+bool CaseReader::skip() { return advance(false); }
+
+bool CaseReader::advance(bool decode) {
     if (done_) return false;
     if (d_.ncases >= 0 && cases_ >= d_.ncases) {
         done_ = true;
         return false;
     }
     const bool got = d_.compression == Compression::None ? read_case_uncompressed()
-                                                          : read_case_bytecode();
+                                                          : read_case_bytecode(decode);
     if (!got) {
         done_ = true;
         if (d_.ncases >= 0 && cases_ < d_.ncases)
@@ -1423,11 +1646,24 @@ bool CaseReader::next() {
     return true;
 }
 
+size_t CaseReader::take_spans(unsigned char *dst, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+        if (sn_ == 0 && !in_->span(&sp_, &sn_)) break;
+        const size_t k = std::min(n - done, sn_);
+        std::memcpy(dst + done, sp_, k);
+        sp_ += k;
+        sn_ -= k;
+        done += k;
+    }
+    return done;
+}
+
 bool CaseReader::read_case_uncompressed() {
     const size_t bytes = d_.nslots * 8;
     std::vector<unsigned char> &buf = buf_;
     buf.resize(bytes);
-    const size_t got = in_->read(buf.data(), bytes);
+    const size_t got = take(buf.data(), bytes);
     if (got == 0) return false;
     if (got < bytes)
         throw SavError("malformed SPSS file " + path_ + ": case " + std::to_string(cases_ + 1) +
@@ -1441,12 +1677,14 @@ bool CaseReader::read_case_uncompressed() {
     return true;
 }
 
-bool CaseReader::read_case_bytecode() {
+/* decode false walks the case (B1): every code read and checked, every
+ * literal read past, no slot written */
+bool CaseReader::read_case_bytecode(bool decode) {
     const bool swap = d_.big_endian != host_big_endian();
     for (size_t i = 0; i < d_.nslots; i++) {
         for (;;) {
             if (cmd_pos_ == 8) {
-                const size_t got = in_->read(cmd_, 8);
+                const size_t got = take(cmd_, 8);
                 if (got == 0 && i == 0) return false;
                 if (got < 8)
                     throw SavError("malformed SPSS file " + path_ +
@@ -1459,7 +1697,7 @@ bool CaseReader::read_case_bytecode() {
             const bool str = d_.slot_is_string[i];
             auto corrupt = [&](const std::string &what) {
                 return SavError("malformed SPSS file " + path_ + ": " + what + " in case " +
-                                std::to_string(cases_ + 1) + " (" + in_->where() +
+                                std::to_string(cases_ + 1) + " (" + in_->where(sn_) +
                                 "; corrupt compressed data)");
             };
             if (c == 252) {
@@ -1468,53 +1706,65 @@ bool CaseReader::read_case_bytecode() {
             }
             if (c == 253) {
                 unsigned char b[8];
-                if (in_->read(b, 8) != 8)
+                if (take(b, 8) != 8)
                     throw SavError("malformed SPSS file " + path_ +
                                    ": the compressed data ends inside case " +
                                    std::to_string(cases_ + 1) + " (truncated file)");
-                uint64_t v;
-                std::memcpy(&v, b, 8);
-                slots_[i] = (!str && swap) ? bswap64(v) : v;
+                if (decode) {
+                    uint64_t v;
+                    std::memcpy(&v, b, 8);
+                    slots_[i] = (!str && swap) ? bswap64(v) : v;
+                }
                 break;
             }
             if (c == 254) {
                 if (!str) throw corrupt("code 254 (eight blanks) stands for a numeric value");
-                std::memset(&slots_[i], ' ', 8);
+                if (decode) std::memset(&slots_[i], ' ', 8);
                 break;
             }
             if (c == 255) {
                 if (str) throw corrupt("code 255 (system-missing) stands for a string value");
-                slots_[i] = d_.sysmis_bits;
+                if (decode) slots_[i] = d_.sysmis_bits;
                 break;
             }
             if (str)
                 throw corrupt("code " + std::to_string(int(c)) +
                               " (a compressed number) stands for a string value");
-            const double v = double(c) - d_.bias;
-            std::memcpy(&slots_[i], &v, 8);
+            if (decode) {
+                const double v = double(c) - d_.bias;
+                std::memcpy(&slots_[i], &v, 8);
+            }
             break;
         }
     }
     return true;
 }
 
-double CaseReader::number(const Variable &v) const {
+double slot_number(const Variable &v, const uint64_t *slots) {
     double out;
-    std::memcpy(&out, &slots_[v.segments[0].slot], 8);
+    std::memcpy(&out, &slots[v.segments[0].slot], 8);
     return out;
 }
 
-bool CaseReader::is_sysmis(const Variable &v) const {
-    return slots_[v.segments[0].slot] == d_.sysmis_bits;
+bool slot_is_sysmis(const Dictionary &d, const Variable &v, const uint64_t *slots) {
+    return slots[v.segments[0].slot] == d.sysmis_bits;
 }
 
-void CaseReader::raw_string(const Variable &v, std::string *out) const {
+void slot_raw_string(const Variable &v, const uint64_t *slots, std::string *out) {
     out->clear();
     for (const auto &s : v.segments) {
-        const char *base = reinterpret_cast<const char *>(&slots_[s.slot]);
+        const char *base = reinterpret_cast<const char *>(&slots[s.slot]);
         out->append(base, std::min(s.used, s.nslots * 8));
     }
     while (!out->empty() && (out->back() == ' ' || out->back() == '\0')) out->pop_back();
+}
+
+double CaseReader::number(const Variable &v) const { return slot_number(v, slots_.data()); }
+
+bool CaseReader::is_sysmis(const Variable &v) const { return slot_is_sysmis(d_, v, slots_.data()); }
+
+void CaseReader::raw_string(const Variable &v, std::string *out) const {
+    slot_raw_string(v, slots_.data(), out);
 }
 
 } // namespace spss

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.5.1 21oct2026}{...}
+{* *! version 0.6.0 26oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -29,6 +29,7 @@
 {viewerjumpto "Exploring a view" "parqit##explore"}{...}
 {viewerjumpto "Other file formats and encodings" "parqit##formats"}{...}
 {viewerjumpto "Expressions and missing values" "parqit##expressions"}{...}
+{viewerjumpto "egen functions" "parqit##egen"}{...}
 {viewerjumpto "Settings and diagnostics" "parqit##settings"}{...}
 {viewerjumpto "Examples" "parqit##examples"}{...}
 {viewerjumpto "Limitations" "parqit##limitations"}{...}
@@ -138,9 +139,9 @@ Shape the view (lazy: each verb extends the plan)
 
 {p 8 16 2}{cmd:parqit keep} {it:varlist} | {cmd:parqit keep if} {it:exp} | {cmd:parqit keep in} {it:f}[{cmd:/}{it:l}]{p_end}
 {p 8 16 2}{cmd:parqit drop} {it:varlist} | {cmd:parqit drop if} {it:exp} | {cmd:parqit drop in} {it:f}[{cmd:/}{it:l}]{p_end}
-{p 8 16 2}{cmd:parqit} {cmdab:g:enerate} [{it:type}] {it:newvar} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
+{p 8 16 2}{cmd:parqit} {cmdab:g:enerate} [{it:type}] {it:newvar} {cmd:=} {it:{help parqit##expressions:exp}} [{cmd:if} {it:exp}]{p_end}
 {p 8 16 2}{cmd:parqit replace} {it:var} {cmd:=} {it:exp} [{cmd:if} {it:exp}]{p_end}
-{p 8 16 2}{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:fcn}{cmd:(}{it:arguments}{cmd:)} [{cmd:if} {it:exp}]
+{p 8 16 2}{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:{help parqit##egen:fcn}}{cmd:(}{it:arguments}{cmd:)} [{cmd:if} {it:exp}]
 [{cmd:,} {opt by(varlist)} {it:fcn_options}]{p_end}
 {p 8 16 2}{cmd:parqit by} {it:varlist} [{cmd:(}{it:sortvars}{cmd:)}]{cmd::} {it:parqit_command}{space 4}(gen, replace, egen, keep if, drop if){p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:bys:ort} {it:varlist} [{cmd:(}{it:sortvars}{cmd:)}]{cmd::} {it:parqit_command}{p_end}
@@ -431,10 +432,11 @@ also one outside {it:varlist}; with {opt clear} it runs in the engine while the
 file is read, and on a view it is the view's first verb.
 
 {phang}
-{opt compress}, with {opt clear}, runs native {helpb compress} on the data
-once loaded and before they replace the dataset in memory: a storage type is
-narrowed only when every value fits it exactly, so an integral total becomes
-{cmd:long}, {cmd:int} or {cmd:byte} and a double mean stays {cmd:double}.
+{opt compress}, with {opt clear}, narrows storage types with the same rules as
+native {helpb compress}, before replacing the dataset in memory. A type is
+narrowed only when every value fits it exactly: integral doubles can become
+{cmd:long}, {cmd:int} or {cmd:byte}; fractional doubles stay {cmd:double}.
+String shortening and {cmd:strL} coalescing follow native {cmd:compress}.
 
 {phang}
 {opt name(viewname)} opens the view under {it:viewname}, replacing an open view
@@ -544,24 +546,8 @@ where the {cmd:double} results of {cmd:collapse} and {cmd:egen} become
 {cmd:lastnm}, without weights.
 
 {phang}
-{cmd:egen} takes the native functions and their options. With an expression:
-{cmd:total} ({opt missing}), {cmd:mean}, {cmd:sd}, {cmd:min}, {cmd:max}
-({opt missing}), {cmd:count}, {cmd:median}, {cmd:pctile} ({opt p(#)}),
-{cmd:iqr}, {cmd:kurt}, {cmd:skew}, {cmd:mad}, {cmd:mdev}, {cmd:std}
-({opt mean(#)} {opt sd(#)}), {cmd:pc} ({opt prop}), {cmd:rank} ({opt field}
-{opt track} {opt unique}). With a varlist: {cmd:group} ({opt missing}
-{opt label} {opt lname(name)} {opt truncate(#)}), {cmd:tag} ({opt missing}),
-{cmd:anycount}, {cmd:anymatch}, {cmd:anyvalue} ({opt values(numlist)}),
-{cmd:concat} ({opt punct(chars)} {opt format(%fmt)} {opt decode}
-{opt maxlength(#)}), {cmd:diff}, {cmd:rowtotal} ({opt missing}), {cmd:rowmean},
-{cmd:rowmin}, {cmd:rowmax}, {cmd:rowmiss}, {cmd:rownonmiss} ({opt strok}),
-{cmd:rowsd}, {cmd:rowfirst}, {cmd:rowlast}, {cmd:rowmedian}, {cmd:rowpctile}
-({opt p(#)}). With one variable: {cmd:mode} ({opt minmode} {opt maxmode}
-{opt nummode(#)} {opt missing}), {cmd:cut} ({opt at(numlist)} or
-{opt group(#)}, {opt icodes}, {opt label}), {cmd:ends} ({opt punct(chars)}
-{opt head} {opt last} {opt tail} {opt trim}). With no argument: {cmd:seq}
-({opt from(#)} {opt to(#)} {opt block(#)}). {opt by()} is allowed where native
-allows it. {cmd:fill()} and {cmd:mtr()} are not available.
+{cmd:egen} takes the functions, arguments and options listed under
+{help parqit##egen:egen functions}.
 
 {phang}
 {cmd:by} and {cmd:bysort} prefix {cmd:gen}, {cmd:replace}, {cmd:egen},
@@ -720,8 +706,8 @@ accept the wildcards {cmd:*} and {cmd:?}.
 Where parqit differs from native Stata:
 
 {phang2}{cmd:•} {cmd:collapse} and {cmd:pivot} take every native statistic,
-without weights; {cmd:egen} takes every native function except {cmd:fill()} and
-{cmd:mtr()} (see {help parqit##options:Options}). Means, sums and the like are
+without weights; {cmd:egen} takes the functions listed under
+{help parqit##egen:egen functions}. Means, sums and the like are
 kept in {cmd:double}; {cmd:collect, compress} narrows what fits.{p_end}
 {phang2}{cmd:•} {cmd:xtset} and {cmd:tsset} declare the panel and time
 without sorting the view; sort it with {cmd:parqit sort} when row positions
@@ -873,27 +859,148 @@ and a note says what was decoded; SPSS and R files declare their own. More:
 {marker expressions}{...}
 {title:Expressions and missing values}
 
+{pstd}The SQL escape hatches use the selected DuckDB engine's native dialect.
+The embedded DuckDB 2.0 has documented differences from 1.5.6, including
+factorial precedence, regex matching, literals, lambdas and division by zero.
+See {help parqit_technical##settings:Raw SQL}. The Stata expression rules
+below remain separate.{p_end}
+
 {pstd}
 {cmd:keep if}, {cmd:drop if}, {cmd:gen}, {cmd:replace}, {cmd:egen} and the
 {cmd:if} of every command take Stata expressions, translated for the engine: the
 arithmetic, relational and logical operators with Stata's precedence, {cmd:+} for
-string concatenation, and these functions:
+string concatenation, and the functions below. In their arguments, {it:x},
+{it:y}, {it:a} and {it:b} are numbers; {it:s} is a string; {it:e_d} is a date (a
+day count), {it:e_tc} a date-time (milliseconds), and {it:e_m}, {it:e_q},
+{it:e_h}, {it:e_w} and {it:e_y} are monthly, quarterly, half-yearly, weekly and
+yearly dates; {it:mask} is a string literal such as {cmd:"DMY"}.
 
 {* parqit-lint: expression-function-list begin. Every name in this block must}{...}
 {* be implemented by src/engine/exprtrans.cpp, and every implemented function}{...}
-{* keep this list synchronized with exprtrans.cpp.}{...}
-{p 8 8 2}{cmd:abs exp ln log log10 sqrt floor ceil int trunc round mod min max}
-{cmd:float cond inrange inlist missing mi}{p_end}
-{p 8 8 2}{cmd:strlen length ustrlen upper strupper ustrupper lower strlower}
-{cmd:ustrlower trim strtrim ltrim rtrim substr strpos subinstr string strofreal}
-{cmd:real regexm}{p_end}
-{p 8 8 2}{cmd:year month day quarter dow doy week halfyear mdy dofm mofd yofd ym yq yh yw}
-{cmd:dofq dofh dofy dofw qofd hofd wofd dofc dofC cofd hh mm ss hms dhms mdyhms}
-{cmd:hours minutes seconds msofhours msofminutes msofseconds datediff age}{p_end}
-{p 8 8 2}{cmd:date daily clock monthly quarterly halfyearly weekly yearly}
-(a string and a literal mask){p_end}
-{p 8 8 2}{cmd:tin twithin} (after a panel and time declaration) and the
-date literals {cmd:td tc tC tm tq th tw ty}{p_end}
+{* keep this list synchronized with exprtrans.cpp. Inside this block, write}{...}
+{* only function names in cmd directives; arguments go in it directives.}{...}
+{p2colset 9 40 42 2}{...}
+{pstd}{bf:Mathematical}{p_end}
+{p2col:{cmd:abs(}{it:x}{cmd:)}}the absolute value of {it:x}{p_end}
+{p2col:{cmd:ceil(}{it:x}{cmd:)}}the smallest integer greater than or equal to {it:x}{p_end}
+{p2col:{cmd:exp(}{it:x}{cmd:)}}the exponential of {it:x}; missing if it overflows{p_end}
+{p2col:{cmd:float(}{it:x}{cmd:)}}{it:x} rounded to float precision{p_end}
+{p2col:{cmd:floor(}{it:x}{cmd:)}}the largest integer less than or equal to {it:x}{p_end}
+{p2col:{cmd:int(}{it:x}{cmd:)}, {cmd:trunc(}{it:x}{cmd:)}}the integer part of {it:x}, toward zero{p_end}
+{p2col:{cmd:ln(}{it:x}{cmd:)}, {cmd:log(}{it:x}{cmd:)}}the natural logarithm of {it:x}; missing if {it:x} <= 0{p_end}
+{p2col:{cmd:log10(}{it:x}{cmd:)}}the base-10 logarithm of {it:x}; missing if {it:x} <= 0{p_end}
+{p2col:{cmd:max(}{it:x1}{cmd:,} {it:x2}[{cmd:,} ...]{cmd:)}}the largest nonmissing argument; 2 to 64 numbers{p_end}
+{p2col:{cmd:min(}{it:x1}{cmd:,} {it:x2}[{cmd:,} ...]{cmd:)}}the smallest nonmissing argument; 2 to 64 numbers{p_end}
+{p2col:{cmd:mod(}{it:x}{cmd:,} {it:y}{cmd:)}}the modulus of {it:x} with respect to {it:y}{p_end}
+{p2col:{cmd:round(}{it:x}[{cmd:,} {it:y}]{cmd:)}}{it:x} rounded to units of {it:y}; default 1{p_end}
+{p2col:{cmd:sqrt(}{it:x}{cmd:)}}the square root of {it:x}; missing if {it:x} < 0{p_end}
+
+{pstd}{bf:Logical}{p_end}
+{p2col:{cmd:cond(}{it:c}{cmd:,} {it:a}{cmd:,} {it:b}[{cmd:,} {it:d}]{cmd:)}}{it:a} if
+{it:c} is not zero, {it:b} if it is zero; a missing {it:c} gives {it:d} when
+given, else {it:a}; the branches are all numbers or all strings{p_end}
+{p2col:{cmd:inlist(}{it:z}{cmd:,} {it:a}[{cmd:,} {it:b}{cmd:,} ...]{cmd:)}}1 if {it:z}
+equals any other argument, otherwise 0; all numbers or all strings, up to 254
+values{p_end}
+{p2col:{cmd:inrange(}{it:z}{cmd:,} {it:a}{cmd:,} {it:b}{cmd:)}}1 if {it:a} <= {it:z}
+<= {it:b}, otherwise 0; numbers or strings; a missing {it:a} or {it:b} sets no
+bound, and a missing number {it:z} gives 0{p_end}
+{p2col:{cmd:missing(}{it:x1}[{cmd:,} {it:x2}{cmd:,} ...]{cmd:)}}1 if any argument is
+missing ({it:.} or ""), otherwise 0; {cmd:mi()} is a synonym{p_end}
+
+{pstd}{bf:Strings} (lengths and positions are in bytes, as in Stata){p_end}
+{p2col:{cmd:length(}{it:s}{cmd:)}, {cmd:strlen(}{it:s}{cmd:)}}the length of {it:s} in bytes{p_end}
+{p2col:{cmd:ustrlen(}{it:s}{cmd:)}}the length of {it:s} in characters{p_end}
+{p2col:{cmd:lower(}{it:s}{cmd:)}, {cmd:strlower(}{it:s}{cmd:)}}{it:s} with the ASCII letters in lowercase{p_end}
+{p2col:{cmd:upper(}{it:s}{cmd:)}, {cmd:strupper(}{it:s}{cmd:)}}{it:s} with the ASCII letters in uppercase{p_end}
+{p2col:{cmd:ustrlower(}{it:s}{cmd:)}}{it:s} with every letter in lowercase (Unicode){p_end}
+{p2col:{cmd:ustrupper(}{it:s}{cmd:)}}{it:s} with every letter in uppercase (Unicode){p_end}
+{p2col:{cmd:ltrim(}{it:s}{cmd:)}, {cmd:rtrim(}{it:s}{cmd:)}}{it:s} without leading, or trailing, blanks{p_end}
+{p2col:{cmd:trim(}{it:s}{cmd:)}, {cmd:strtrim(}{it:s}{cmd:)}}{it:s} without leading and trailing blanks{p_end}
+{p2col:{cmd:real(}{it:s}{cmd:)}}{it:s} as a number; missing if {it:s} is not a number{p_end}
+{p2col:{cmd:regexm(}{it:s}{cmd:,} {it:re}{cmd:)}}1 if {it:s} matches the regular expression {it:re}, otherwise 0{p_end}
+{p2col:{cmd:string(}{it:x}{cmd:)}, {cmd:strofreal(}{it:x}{cmd:)}}{it:x} as a string, in
+format %9.0g ("." if missing){p_end}
+{p2col:{cmd:strpos(}{it:s1}{cmd:,} {it:s2}{cmd:)}}the position of {it:s2} in {it:s1}; 0 if not found{p_end}
+{p2col:{cmd:subinstr(}{it:s1}{cmd:,} {it:s2}{cmd:,} {it:s3}{cmd:, .)}}{it:s1} with every {it:s2} replaced by {it:s3}{p_end}
+{p2col:{cmd:substr(}{it:s}{cmd:,} {it:n1}{cmd:,} {it:n2}{cmd:)}}the {it:n2} bytes of {it:s}
+from byte {it:n1}; a negative {it:n1} counts from the end, and {it:n2} = . takes
+the rest{p_end}
+
+{pstd}{bf:Dates and times}{p_end}
+{p2col:{cmd:mdy(}{it:M}{cmd:,} {it:D}{cmd:,} {it:Y}{cmd:)}}the date of month {it:M}, day {it:D}, year {it:Y}{p_end}
+{p2col:{cmd:year(}{it:e_d}{cmd:)}}the year of date {it:e_d}{p_end}
+{p2col:{cmd:month(}{it:e_d}{cmd:)}}the month, 1 to 12{p_end}
+{p2col:{cmd:day(}{it:e_d}{cmd:)}}the day of the month, 1 to 31{p_end}
+{p2col:{cmd:quarter(}{it:e_d}{cmd:)}}the quarter, 1 to 4{p_end}
+{p2col:{cmd:halfyear(}{it:e_d}{cmd:)}}the half-year, 1 or 2{p_end}
+{p2col:{cmd:week(}{it:e_d}{cmd:)}}the week of the year, 1 to 52{p_end}
+{p2col:{cmd:dow(}{it:e_d}{cmd:)}}the day of the week, 0 (Sunday) to 6{p_end}
+{p2col:{cmd:doy(}{it:e_d}{cmd:)}}the day of the year, 1 to 366{p_end}
+{p2col:{cmd:ym(}{it:Y}{cmd:,} {it:M}{cmd:)}}the monthly date of year {it:Y}, month {it:M}{p_end}
+{p2col:{cmd:yq(}{it:Y}{cmd:,} {it:Q}{cmd:)}}the quarterly date of year {it:Y}, quarter {it:Q}{p_end}
+{p2col:{cmd:yh(}{it:Y}{cmd:,} {it:H}{cmd:)}}the half-yearly date of year {it:Y}, half {it:H}{p_end}
+{p2col:{cmd:yw(}{it:Y}{cmd:,} {it:W}{cmd:)}}the weekly date of year {it:Y}, week {it:W}{p_end}
+{p2col:{cmd:mofd(}{it:e_d}{cmd:)}}the monthly date of the month holding {it:e_d}{p_end}
+{p2col:{cmd:qofd(}{it:e_d}{cmd:)}}the quarterly date of the quarter holding {it:e_d}{p_end}
+{p2col:{cmd:hofd(}{it:e_d}{cmd:)}}the half-yearly date of the half holding {it:e_d}{p_end}
+{p2col:{cmd:wofd(}{it:e_d}{cmd:)}}the weekly date of the week holding {it:e_d}{p_end}
+{p2col:{cmd:yofd(}{it:e_d}{cmd:)}}the year holding {it:e_d}{p_end}
+{p2col:{cmd:dofm(}{it:e_m}{cmd:)}}the date of the first day of month {it:e_m}{p_end}
+{p2col:{cmd:dofq(}{it:e_q}{cmd:)}}the date of the first day of quarter {it:e_q}{p_end}
+{p2col:{cmd:dofh(}{it:e_h}{cmd:)}}the date of the first day of half-year {it:e_h}{p_end}
+{p2col:{cmd:dofw(}{it:e_w}{cmd:)}}the date of the first day of week {it:e_w}{p_end}
+{p2col:{cmd:dofy(}{it:e_y}{cmd:)}}the date of 1 January of year {it:e_y}{p_end}
+{p2col:{cmd:cofd(}{it:e_d}{cmd:)}}the date-time of the start of day {it:e_d}{p_end}
+{p2col:{cmd:dofc(}{it:e_tc}{cmd:)}}the date of date-time {it:e_tc}{p_end}
+{p2col:{cmd:dofC(}{it:e_tC}{cmd:)}}the date of date-time {it:e_tC}{p_end}
+{p2col:{cmd:hms(}{it:h}{cmd:,} {it:m}{cmd:,} {it:s}{cmd:)}}the time of day {it:h}:{it:m}:{it:s}, in milliseconds{p_end}
+{p2col:{cmd:dhms(}{it:e_d}{cmd:,} {it:h}{cmd:,} {it:m}{cmd:,} {it:s}{cmd:)}}the date-time of day {it:e_d} at {it:h}:{it:m}:{it:s}{p_end}
+{p2col:{cmd:mdyhms(}{it:M}{cmd:,} {it:D}{cmd:,} {it:Y}{cmd:,} {it:h}{cmd:,} {it:m}{cmd:,} {it:s}{cmd:)}}the
+date-time of month {it:M}, day {it:D}, year {it:Y} at {it:h}:{it:m}:{it:s}{p_end}
+{p2col:{cmd:hh(}{it:e_tc}{cmd:)}}the hour, 0 to 23{p_end}
+{p2col:{cmd:mm(}{it:e_tc}{cmd:)}}the minute, 0 to 59{p_end}
+{p2col:{cmd:ss(}{it:e_tc}{cmd:)}}the second, 0 to 59.999{p_end}
+{p2col:{cmd:hours(}{it:ms}{cmd:)}}{it:ms} milliseconds in hours{p_end}
+{p2col:{cmd:minutes(}{it:ms}{cmd:)}}{it:ms} milliseconds in minutes{p_end}
+{p2col:{cmd:seconds(}{it:ms}{cmd:)}}{it:ms} milliseconds in seconds{p_end}
+{p2col:{cmd:msofhours(}{it:h}{cmd:)}}{it:h} hours in milliseconds{p_end}
+{p2col:{cmd:msofminutes(}{it:m}{cmd:)}}{it:m} minutes in milliseconds{p_end}
+{p2col:{cmd:msofseconds(}{it:s}{cmd:)}}{it:s} seconds in milliseconds{p_end}
+{p2col:{cmd:datediff(}{it:e_d1}{cmd:,} {it:e_d2}{cmd:,} {cmd:"}{it:unit}{cmd:")}}the
+whole days, months or years ({it:unit} "day", "month" or "year") from
+{it:e_d1} to {it:e_d2}; negative if {it:e_d2} is earlier{p_end}
+{p2col:{cmd:age(}{it:e_dob}{cmd:,} {it:e_d}{cmd:)}}the age in whole years on
+{it:e_d} of someone born on {it:e_dob}; missing if {it:e_d} is earlier{p_end}
+
+{pstd}{bf:Dates from text}{p_end}
+{p2col:{cmd:date(}{it:s}{cmd:,} {it:mask}[{cmd:,} {it:topyear}]{cmd:)}}the date written in {it:s}{p_end}
+{p2col:{cmd:daily(}{it:s}{cmd:,} {it:mask}[{cmd:,} {it:topyear}]{cmd:)}}a synonym for {cmd:date()}{p_end}
+{p2col:{cmd:clock(}{it:s}{cmd:,} {it:mask}[{cmd:,} {it:topyear}]{cmd:)}}the date-time written in {it:s}{p_end}
+{p2col:{cmd:monthly(}{it:s}{cmd:,} {it:mask}{cmd:)}}the monthly date written in {it:s}{p_end}
+{p2col:{cmd:quarterly(}{it:s}{cmd:,} {it:mask}{cmd:)}}the quarterly date written in {it:s}{p_end}
+{p2col:{cmd:halfyearly(}{it:s}{cmd:,} {it:mask}{cmd:)}}the half-yearly date written in {it:s}{p_end}
+{p2col:{cmd:weekly(}{it:s}{cmd:,} {it:mask}{cmd:)}}the weekly date written in {it:s}{p_end}
+{p2col:{cmd:yearly(}{it:s}{cmd:,} {it:mask}{cmd:)}}the year written in {it:s}{p_end}
+
+{pstd}{bf:Time series}, after {bf:parqit xtset} or {bf:parqit tsset}; {it:d1}
+and {it:d2} are numbers, or dates written as the time variable's format
+displays them{p_end}
+{p2col:{cmd:tin(}{it:d1}{cmd:,} {it:d2}{cmd:)}}1 if the time variable is between
+{it:d1} and {it:d2}, inclusive; otherwise 0{p_end}
+{p2col:{cmd:twithin(}{it:d1}{cmd:,} {it:d2}{cmd:)}}1 if the time variable is
+strictly between {it:d1} and {it:d2}; otherwise 0{p_end}
+
+{pstd}{bf:Date literals} (constants){p_end}
+{p2col:{cmd:td(}{it:ddmonyyyy}{cmd:)}}a date{p_end}
+{p2col:{cmd:tc(}{it:ddmonyyyy hh}:{it:mm}[:{it:ss}[.{it:fff}]]{cmd:)}}a date-time, in milliseconds{p_end}
+{p2col:{cmd:tC(}{it:ddmonyyyy hh}:{it:mm}[:{it:ss}[.{it:fff}]]{cmd:)}}the same count as {cmd:tc()}{p_end}
+{p2col:{cmd:tm(}{it:yyyy}m{it:#}{cmd:)}}a monthly date{p_end}
+{p2col:{cmd:tq(}{it:yyyy}q{it:#}{cmd:)}}a quarterly date{p_end}
+{p2col:{cmd:th(}{it:yyyy}h{it:#}{cmd:)}}a half-yearly date{p_end}
+{p2col:{cmd:tw(}{it:yyyy}w{it:#}{cmd:)}}a weekly date{p_end}
+{p2col:{cmd:ty(}{it:yyyy}{cmd:)}}a year{p_end}
+{p2colreset}{...}
 {* parqit-lint: expression-function-list end}{...}
 
 {pstd}
@@ -936,6 +1043,204 @@ messages. Use {cmd:unique} (with {opt nomissing} for the old exclusion rule),
 {cmd:list in f/l} requires a valid range within the view.
 
 
+{marker egen}{...}
+{title:egen functions}
+
+{p 8 16 2}
+{cmd:parqit egen} [{it:type}] {it:newvar} {cmd:=} {it:fcn}{cmd:(}{it:arguments}{cmd:)}
+[{cmd:if} {it:exp}] [{cmd:,} {opt by(varlist)} {it:options}]
+
+{pstd}
+{it:fcn}{cmd:(}{it:arguments}{cmd:)} and its {it:options} are one of the
+forms below, where {it:exp} is an expression
+({help parqit##expressions:Expressions}). {opt by(varlist)}, or the
+{cmd:by} prefix, groups the functions of an expression, {cmd:mode()} and
+{cmd:seq()}; the other functions may not be combined with by. Under {cmd:if},
+only the selected observations enter the result and receive a value; the others
+get missing, or 0 from {cmd:tag()}, {cmd:anycount()} and {cmd:anymatch()}, and
+"" from {cmd:concat()} and {cmd:ends()}.
+
+{pstd}{bf:Of an expression}{p_end}
+
+{phang2}{cmd:count(}{it:exp}{cmd:)}{p_end}
+{pmore2}the number of nonmissing values of {it:exp}.{p_end}
+
+{phang2}{cmd:iqr(}{it:exp}{cmd:)}{p_end}
+{pmore2}the interquartile range of {it:exp}: the 75th percentile minus the
+25th.{p_end}
+
+{phang2}{cmd:kurt(}{it:exp}{cmd:)}{p_end}
+{pmore2}the kurtosis of {it:exp}.{p_end}
+
+{phang2}{cmd:mad(}{it:exp}{cmd:)}{p_end}
+{pmore2}the median absolute deviation from the median of {it:exp}.{p_end}
+
+{phang2}{cmd:max(}{it:exp}{cmd:)} [{cmd:,} {opt missing}]{p_end}
+{pmore2}the maximum of {it:exp}; with {opt missing}, a missing value counts as
+a value, so the result is missing if any value is.{p_end}
+
+{phang2}{cmd:mdev(}{it:exp}{cmd:)}{p_end}
+{pmore2}the mean absolute deviation from the mean of {it:exp}.{p_end}
+
+{phang2}{cmd:mean(}{it:exp}{cmd:)}{p_end}
+{pmore2}the mean of {it:exp}.{p_end}
+
+{phang2}{cmd:median(}{it:exp}{cmd:)}{p_end}
+{pmore2}the median of {it:exp}.{p_end}
+
+{phang2}{cmd:min(}{it:exp}{cmd:)}{p_end}
+{pmore2}the minimum of {it:exp}.{p_end}
+
+{phang2}{cmd:pc(}{it:exp}{cmd:)} [{cmd:,} {opt prop}]{p_end}
+{pmore2}{it:exp} as a percentage of its total; {opt prop} gives the proportion
+instead.{p_end}
+
+{phang2}{cmd:pctile(}{it:exp}{cmd:)} [{cmd:,} {opt p(#)}]{p_end}
+{pmore2}the {it:#}th percentile of {it:exp}, with 0 < {it:#} < 100; the default,
+{cmd:p(50)}, is the median.{p_end}
+
+{phang2}{cmd:rank(}{it:exp}{cmd:)} [{cmd:,} {opt field}|{opt track}|{opt unique}]{p_end}
+{pmore2}the rank of {it:exp}, from 1 for the lowest value, ties getting their
+average rank. {opt field} ranks the highest value 1 and {opt track} the lowest,
+ties sharing the same rank; {opt unique} gives each observation its own rank,
+ties following the view's order.{p_end}
+
+{phang2}{cmd:sd(}{it:exp}{cmd:)}{p_end}
+{pmore2}the standard deviation of {it:exp}.{p_end}
+
+{phang2}{cmd:skew(}{it:exp}{cmd:)}{p_end}
+{pmore2}the skewness of {it:exp}.{p_end}
+
+{phang2}{cmd:std(}{it:exp}{cmd:)} [{cmd:,} {opt mean(#)} {opt sd(#)}]{p_end}
+{pmore2}{it:exp} standardised to mean {it:#} (default 0) and standard deviation
+{it:#} (default 1).{p_end}
+
+{phang2}{cmd:total(}{it:exp}{cmd:)} [{cmd:,} {opt missing}]{p_end}
+{pmore2}the sum of {it:exp}, a missing value counting as 0; with
+{opt missing}, the result is missing if every value is. {cmd:sum()} is a
+synonym.{p_end}
+
+{pstd}{bf:Of a varlist}{p_end}
+
+{phang2}{cmd:anycount(}{it:varlist}{cmd:),} {opt values(numlist)}{p_end}
+{pmore2}the number of the numeric variables in {it:varlist} equal to any value
+in {it:numlist}.{p_end}
+
+{phang2}{cmd:anymatch(}{it:varlist}{cmd:),} {opt values(numlist)}{p_end}
+{pmore2}1 if any of the numeric variables in {it:varlist} equals any value in
+{it:numlist}; otherwise 0.{p_end}
+
+{phang2}{cmd:concat(}{it:varlist}{cmd:)} [{cmd:,} {opt punct(pchars)}
+{opt format(%fmt)} {opt decode} {opt maxlength(#)}]{p_end}
+{pmore2}the variables joined into one string, separated by {it:pchars} (by
+default nothing). Numbers are written as {cmd:string()} writes them or, with
+{opt format()}, in a fixed format {cmd:%}{it:w}{cmd:.}{it:d}{cmd:f} or
+{cmd:%0}{it:w}{cmd:.}{it:d}{cmd:f}; {opt decode} writes their value labels
+instead, and {opt maxlength(#)} keeps the first {it:#} characters of each
+label.{p_end}
+
+{phang2}{cmd:diff(}{it:varlist}{cmd:)}{p_end}
+{pmore2}1 if the variables in {it:varlist} are not all equal; otherwise 0.{p_end}
+
+{phang2}{cmd:group(}{it:varlist}{cmd:)} [{cmd:,} {opt missing} {opt label}
+{opt lname(name)} {opt truncate(#)}]{p_end}
+{pmore2}1, 2, ... for the groups of {it:varlist}, numbered in its sort order; an
+observation with a missing value in {it:varlist} gets missing unless
+{opt missing} counts missing as a value. {opt label} attaches a value label
+made of the values of {it:varlist}, or of their value labels, named {it:newvar}
+or {opt lname()}; {opt truncate(#)} keeps, as native {cmd:egen} does, the
+first {it:#} display columns of a string's or a value label's part of the label
+(a Chinese, Japanese or Korean character takes two), without its leading or
+trailing spaces; a number without a value label stays whole.{p_end}
+
+{phang2}{cmd:tag(}{it:varlist}{cmd:)} [{cmd:,} {opt missing}]{p_end}
+{pmore2}1 for one observation of each group of {it:varlist} and 0 for the
+others; an observation with a missing value in {it:varlist} gets 0 unless
+{opt missing}.{p_end}
+
+{phang2}{cmd:rowfirst(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the first nonmissing value of {it:varlist} in each observation.{p_end}
+
+{phang2}{cmd:rowlast(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the last nonmissing value of {it:varlist} in each observation.{p_end}
+
+{phang2}{cmd:rowmax(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the largest nonmissing value of {it:varlist} in each observation.{p_end}
+
+{phang2}{cmd:rowmean(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the mean of the nonmissing values of {it:varlist} in each
+observation.{p_end}
+
+{phang2}{cmd:rowmedian(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the median of the nonmissing values of {it:varlist} in each
+observation.{p_end}
+
+{phang2}{cmd:rowmin(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the smallest nonmissing value of {it:varlist} in each observation.{p_end}
+
+{phang2}{cmd:rowmiss(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the number of missing values of {it:varlist} in each observation.{p_end}
+
+{phang2}{cmd:rownonmiss(}{it:varlist}{cmd:)} [{cmd:,} {opt strok}]{p_end}
+{pmore2}the number of nonmissing values of {it:varlist} in each observation;
+{opt strok} allows string variables, "" counting as missing.{p_end}
+
+{phang2}{cmd:rowpctile(}{it:varlist}{cmd:)} [{cmd:,} {opt p(#)}]{p_end}
+{pmore2}the {it:#}th percentile of the nonmissing values of {it:varlist} in
+each observation, with 0 < {it:#} < 100; default {cmd:p(50)}.{p_end}
+
+{phang2}{cmd:rowsd(}{it:varlist}{cmd:)}{p_end}
+{pmore2}the standard deviation of the nonmissing values of {it:varlist} in
+each observation.{p_end}
+
+{phang2}{cmd:rowtotal(}{it:varlist}{cmd:)} [{cmd:,} {opt missing}]{p_end}
+{pmore2}the sum of {it:varlist} in each observation, a missing value counting
+as 0; with {opt missing}, the result is missing if every value is.{p_end}
+
+{pstd}
+The row functions other than {cmd:rownonmiss()} with {opt strok} take numeric
+variables.
+
+{pstd}{bf:Of one variable}{p_end}
+
+{phang2}{cmd:anyvalue(}{it:varname}{cmd:),} {opt values(numlist)}{p_end}
+{pmore2}the value of the numeric {it:varname} where it equals a value in
+{it:numlist}; otherwise missing.{p_end}
+
+{phang2}{cmd:cut(}{it:varname}{cmd:),} {c -(}{opt at(numlist)}|{opt group(#)}{c )-}
+[{opt icodes} {opt label} {opt lname(name)}]{p_end}
+{pmore2}the numeric {it:varname} grouped into intervals. {opt at()} gives the
+cut points in ascending order, and each value becomes the left-hand end of its
+interval, missing below the first point or at or above the last;
+{opt group(#)} forms {it:#} groups of about equal frequency. {opt icodes}
+numbers the intervals 0, 1, 2, ... instead, as {opt group()} always does;
+{opt label} labels those numbers with the left-hand ends, in a value label
+named {it:newvar} or {opt lname()}.{p_end}
+
+{phang2}{cmd:ends(}{it:strvar}{cmd:)} [{cmd:,} {opt punct(pchars)} {opt trim}
+{opt head}|{opt last}|{opt tail}]{p_end}
+{pmore2}the first word of {it:strvar} ({opt head}, the default), its last word
+({opt last}), or what follows its first word ({opt tail}), the words being
+separated by {it:pchars} (by default a space); {opt trim} removes leading and
+trailing blanks from the result.{p_end}
+
+{phang2}{cmd:mode(}{it:varname}{cmd:)} [{cmd:,} {opt minmode} {opt maxmode}
+{opt nummode(#)} {opt missing}]{p_end}
+{pmore2}the most frequent value of {it:varname}, numeric or string; missing when
+there are several, unless {opt minmode} picks the lowest, {opt maxmode} the
+highest, or {opt nummode(#)} the {it:#}th from the lowest. {opt missing} counts
+missing as a value.{p_end}
+
+{pstd}{bf:Without argument}{p_end}
+
+{phang2}{cmd:seq()} [{cmd:,} {opt from(#)} {opt to(#)} {opt block(#)}]{p_end}
+{pmore2}integers in the view's order, from {opt from()} (default 1) to
+{opt to()}, each repeated {opt block()} times (default 1); after {opt to()}
+the sequence starts again, and it decreases when {opt to()} is less than
+{opt from()}. Without {opt to()}, {opt to()} is {cmd:_N}, the number of
+observations, as in Stata.{p_end}
+
+
 {marker settings}{...}
 {title:Settings and diagnostics}
 
@@ -948,12 +1253,27 @@ messages. Use {cmd:unique} (with {opt nomissing} for the old exclusion rule),
 integers beyond 2^53{p_end}
 {p2col:{cmd:encoding} {it:name}}the default code page of legacy text{p_end}
 {p2col:{cmd:threads} {it:#}}engine threads; default, the CPUs available{p_end}
-{p2col:{cmd:fill_threads} {cmd:auto}|{it:#}}threads that fill Stata's memory{p_end}
+{p2col:{cmd:fill_threads} {cmd:auto}|{it:#}}threads that fill Stata's memory, and read it
+on {cmd:save ..., data}{p_end}
 {p2col:{cmd:stream_buffer_mb} {cmd:auto}|{it:#}}result buffered ahead of that
 fill{p_end}
 {p2col:{cmd:memory_limit} {it:size}}the engine's memory budget, e.g. {cmd:8GB}{p_end}
 {p2col:{cmd:tempdir} {it:path}}where the engine spills to disk{p_end}
 {p2colreset}{...}
+
+{pstd}
+With DuckDB 2.0, automatic sizing uses a soft result-buffer budget of at most
+1024 MB unless a session or environment override applies; {cmd:0} restores the
+engine default. Small results use their estimated transfer size, subject
+to the existing minimum budget. The optional 1.5.6 build keeps its own
+automatic policy.
+
+{pstd}
+Materialisation may choose lossless physical sort keys or exact integer sums
+after checking the actual values. The variables' public types, formats and
+numerical results are preserved; values that cannot use these paths retain the
+general implementation. {cmd:show} and {cmd:explain} describe the logical SQL
+before these value-dependent materialisation choices.
 
 {pstd}
 {cmd:parqit show} prints the SQL the plan compiles to, and {cmd:parqit explain}
@@ -1215,6 +1535,10 @@ dialogs; neither file is exhaustive.{p_end}
 
 {p 4 6 2}{cmd:•} A view is a plan over live files, not a snapshot: collecting again
 runs it again, so keep the source files unchanged while you work.{p_end}
+{pmore}If a file is replaced during a direct read, parqit can refuse the
+command with {cmd:r(920)} and keep your dataset intact. Wait until the writer
+has finished before retrying. See
+{help parqit_technical##limitations:source stability and caching}.{p_end}
 {p 4 6 2}{cmd:•} Expressions use Stata's missing comparisons by default;
 {cmd:parqit set statamissing off} selects SQL comparisons. {cmd:_n} and {cmd:_N} work in
 {cmd:keep if}, {cmd:drop if} and {cmd:gen}.{p_end}

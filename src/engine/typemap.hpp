@@ -75,6 +75,10 @@ enum class Int64Mode {
     Round,  /* the historical behaviour: nearest double + the loud note     */
     String  /* the affected columns load as exact decimal text             */
 };
+/* Compare fetched extrema without conversion to double or optimiser-derived
+ * range predicates. Both signs of the conservative +/-2^53 bound are exact. */
+bool beyond_stata_integer_guard(duckdb_hugeint value);
+bool beyond_stata_integer_guard(duckdb_uhugeint value);
 enum class BinaryMode {
     Drop, /* default: dropped-with-message, as before */
     Text, /* decode(blob): UTF-8 text, loud on invalid UTF-8 */
@@ -148,6 +152,9 @@ struct ColumnPlan {
     bool needs_float_exact = false;
     bool float_exact_checked = false; /* the scan ran (with_stats planning) */
     bool float_exact = false;         /* … and every non-null value fits float */
+    /* Requested compress: an actual-value aggregate proved integer storage.
+     * The fill must still reject a fractional value before any staged swap. */
+    bool compression_integer = false;
 };
 
 /* Decide the plan for one column given its DuckDB logical type (no data

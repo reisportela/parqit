@@ -49,5 +49,34 @@ parqit set stream_buffer_mb auto
 parqit use `"`source'.parquet"', clear
 buffer_value
 if (`"`r(value)'"' != `"`initial'"') local ++fails
+
+* 2.0 auto bounds its total-budget replenishment; an explicit larger cap wins.
+parqit version
+if regexm(`"`r(duckdb_version)'"', "^v?2[.]") {
+    tempfile large
+    python:
+import os
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from sfi import Macro
+os.environ.pop("PARQIT_STREAM_BUFFER_MB", None)
+values=pa.array(np.ones(10000000,dtype=np.float64))
+pq.write_table(pa.table({"x"+str(i):values for i in range(16)}),Macro.getLocal("large")+".parquet")
+end
+    parqit set stream_buffer_mb auto
+    parqit use "`large'.parquet", clear
+    assert _N==10000000 & c(k)==16 & x0==1 & x15==1
+    buffer_value
+    local automatic `"`r(value)'"'
+    parqit set stream_buffer_mb 1024
+    parqit use "`large'.parquet", clear
+    buffer_value
+    if (`"`r(value)'"' != `"`automatic'"') local ++fails
+    parqit set stream_buffer_mb 2048
+    parqit use "`large'.parquet", clear
+    buffer_value
+    if (`"`r(value)'"' == `"`automatic'"') local ++fails
+}
 if (`fails') di "VERDICT(V110_STREAM_BUFFER_RESET): FAIL - `fails' transitions"
 else di "VERDICT(V110_STREAM_BUFFER_RESET): PASS"

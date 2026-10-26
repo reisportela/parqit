@@ -16,6 +16,39 @@ static ColumnPlan plan_for(duckdb_type t, const char *name = "c") {
     return p;
 }
 
+TEST_CASE("integer guard compares exact signed and unsigned 128-bit extrema") {
+    constexpr uint64_t limit = uint64_t(1) << 53;
+    for (int64_t value : {int64_t(0), int64_t(limit - 1), int64_t(limit),
+                          -int64_t(limit - 1), -int64_t(limit)}) {
+        duckdb_hugeint exact{};
+        exact.lower = static_cast<uint64_t>(value);
+        exact.upper = value < 0 ? -1 : 0;
+        CHECK_FALSE(beyond_stata_integer_guard(exact));
+    }
+    for (int64_t value : {int64_t(limit + 1), -int64_t(limit + 1)}) {
+        duckdb_hugeint exact{};
+        exact.lower = static_cast<uint64_t>(value);
+        exact.upper = value < 0 ? -1 : 0;
+        CHECK(beyond_stata_integer_guard(exact));
+    }
+    duckdb_hugeint signed_wide{};
+    signed_wide.upper = std::numeric_limits<int64_t>::min();
+    CHECK(beyond_stata_integer_guard(signed_wide));
+    signed_wide.upper = std::numeric_limits<int64_t>::max();
+    signed_wide.lower = std::numeric_limits<uint64_t>::max();
+    CHECK(beyond_stata_integer_guard(signed_wide));
+    duckdb_uhugeint unsigned_wide{};
+    unsigned_wide.lower = limit;
+    CHECK_FALSE(beyond_stata_integer_guard(unsigned_wide));
+    unsigned_wide.lower = limit + 1;
+    CHECK(beyond_stata_integer_guard(unsigned_wide));
+    unsigned_wide.lower = 0;
+    unsigned_wide.upper = 1;
+    CHECK(beyond_stata_integer_guard(unsigned_wide));
+    unsigned_wide.upper = unsigned_wide.lower = std::numeric_limits<uint64_t>::max();
+    CHECK(beyond_stata_integer_guard(unsigned_wide));
+}
+
 TEST_CASE("format classification is by prefix, display tokens never matter") {
     /* charter §6.5: %tcHH:MM:SS is a datetime, not a 'time' */
     CHECK(classify_format("%tcHH:MM:SS") == FmtClass::Tc);

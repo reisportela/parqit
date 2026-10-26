@@ -94,6 +94,19 @@ struct ExprResult {
     /* ROWCTX-2: the window terms behind the placeholders, in first-use order;
      * uses_rowctx is true exactly when this is nonempty */
     std::vector<WindowTerm> windows;
+    /* DERIVED-COLLAPSE-1: true only when the SQL is a pure function of the
+     * current row built from operators, literals, columns and the closed list
+     * of numeric functions certified in exprtrans.cpp, so evaluating it twice
+     * (a proof scan, then the aggregate) gives identical values. False for any
+     * other function, any row context and any expression not yet reviewed. */
+    bool repeatable = false;
+    /* STATAMISS-PUSHDOWN-1 (translate_filter only): the condition for a WHERE
+     * that keeps the rows where it is TRUE and nothing else uses — there a NULL
+     * drops the row exactly as FALSE does, so a comparison with a value that
+     * cannot be missing needs no missing-value branch and reaches the Parquet
+     * scan as a filter. Never for drop if (IS DISTINCT FROM TRUE), a negation,
+     * an ordering or a value; `sql` is the form for those. */
+    std::string sql_where;
 };
 
 /* Translate a Stata expression. */

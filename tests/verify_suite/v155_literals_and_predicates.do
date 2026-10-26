@@ -48,9 +48,12 @@ parqit close _all
 * through parqit sql, the engine's own literal: a 40-digit integer does not
 * fit HUGEINT; the engine must either refuse it or carry the exact double
 * (1.5.6 fixed a silent truncation), never a truncated integer
-parqit sql "SELECT 1234567890123456789012345678901234567890 AS h"
-capture noisily parqit collect, clear
+capture noisily parqit sql "SELECT 1234567890123456789012345678901234567890 AS h"
 local sqlrc = _rc
+if `sqlrc' == 0 {
+    capture noisily parqit collect, clear
+    local sqlrc = _rc
+}
 parqit close _all
 if (`sqlrc' == 0) {
     assert _N == 1

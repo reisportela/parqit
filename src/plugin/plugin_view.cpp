@@ -93,23 +93,7 @@ std::string stat_cell(duckdb_result &res, idx_t col, idx_t row = 0) {
     return stat_number(parqit::statistics::result_number(res, col, row).as_double());
 }
 
-std::string text_cell(duckdb_result &res, idx_t col, idx_t row = 0,
-                      const std::string &missing = ".") {
-    if (duckdb_value_is_null(&res, col, row)) return missing;
-    /* The legacy C result stores VARCHAR as C strings. ENCODE at the SQL
-     * result boundary retains embedded NUL through its length-bearing BLOB. */
-    if (duckdb_column_type(&res, col) == DUCKDB_TYPE_BLOB) {
-        duckdb_blob value = duckdb_value_blob(&res, col, row);
-        std::string out = value.data
-                              ? std::string(static_cast<char *>(value.data), value.size) : "";
-        if (value.data) duckdb_free(value.data);
-        return out;
-    }
-    duckdb_string value = duckdb_value_string(&res, col, row);
-    std::string out = value.data ? std::string(value.data, value.size) : missing;
-    if (value.data) duckdb_free(value.data);
-    return out;
-}
+using parqit::text_cell; /* Codex final audit, finding 3: shared, tested RAII */
 
 std::map<std::string, View> g_views;
 std::string g_current = "default";
@@ -541,7 +525,7 @@ std::vector<std::string> req_list_or_empty(const json &j, const char *key) {
 }
 
 /* compiled SQL with the parquet-boundary back-casts for saving */
-std::string compile_for_save(const View &v) {
+std::string compile_for_save(const View &v, const std::string *compiled = nullptr) {
     std::string sel;
     const auto &cols = v.cols();
     for (size_t i = 0; i < cols.size(); i++) {
@@ -620,7 +604,7 @@ std::string compile_for_save(const View &v) {
         if (i) sel += ", ";
         sel += expr + " AS " + ref;
     }
-    return "SELECT " + sel + " FROM (" + v.compile(true) + ")";
+    return "SELECT " + sel + " FROM (" + (compiled ? *compiled : v.compile(true)) + ")";
 }
 
 /* parqit.* KV fragment from the view's carried metadata */
@@ -804,7 +788,7 @@ bool eager_filter_sql(const std::string &scan_sql, const std::string &expr,
     }
     if (!g_statamissing && !g_statamissing_chosen) /* STATAMISS-WARN-1 */
         warn_missing_rules(parqit::missing_rule_differences(expr, schema, true));
-    *where_sql = r.sql;
+    *where_sql = r.sql_where; /* STATAMISS-PUSHDOWN-1: rows read where it is TRUE */
     return true;
 }
 
@@ -890,15 +874,12 @@ bool expand_glob(const std::string &pattern, std::vector<std::string> *files, st
     if (!s.query("SELECT file FROM glob(" + parqit::quote_literal(pattern) + ") ORDER BY file", &res,
                  err))
         return false;
+    const parqit::ResultGuard guard{&res};
     const idx_t n = duckdb_row_count(&res);
     for (idx_t r = 0; r < n; r++) {
-        char *v = duckdb_value_varchar(&res, 0, r);
-        if (v) {
-            files->push_back(v);
-            duckdb_free(v);
-        }
+        const parqit::CText v = parqit::result_text(&res, 0, r);
+        if (v) files->push_back(v.get());
     }
-    duckdb_destroy_result(&res);
     return true;
 }
 
@@ -980,6 +961,8 @@ ST_retcode cmd_text_prepare(const std::vector<std::string> &args) {
      * in a main source. */
     pr.check_undeclared = mode == "using" || mode == "lookup";
     pr.session_default = encoding_session_default();
+    /* CSV-SCAN-PARALLEL-1: the UTF-8 scan runs on the engine's threads */
+    pr.threads = static_cast<int>(Session::instance().threads());
 
     std::error_code ec;
     const bool exists = fs::exists(fs::u8path(pr.path), ec);
@@ -1597,7 +1580,7 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
     /* remember the backing Parquet paths: a later pure-passthrough collect
      * can size its columns from row-group statistics (the F2 metadata path
      * `parqit use` uses) instead of a redundant full scan. */
-    candidate.set_source_paths(src.paths_sql);
+    candidate.set_source_paths(src.paths_sql, src.single_file);
     /* INT64-PROTECT-1: carry the open's int64() to every later collect of
      * this view ("" = decided by `parqit set int64` at collect time) */
     candidate.set_int64_mode(int64_req);
@@ -2202,13 +2185,13 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             duckdb_result pres;
             if (e.empty() && !s.query(probe, &pres, &err)) e = "parqit egen: " + err;
             if (e.empty()) {
+                const parqit::ResultGuard guard{&pres};
                 const idx_t nr = duckdb_row_count(&pres), ncol = duckdb_column_count(&pres);
                 for (idx_t r = 0; r < nr; r++) {
                     std::vector<std::string> row;
                     for (idx_t cc = 0; cc < ncol; cc++) row.push_back(text_cell(pres, cc, r));
                     sp.probe_rows.push_back(row);
                 }
-                duckdb_destroy_result(&pres);
             }
         }
         if (e.empty()) e = candidate.egen(sp, g_statamissing, arg_type);
@@ -2287,15 +2270,12 @@ ST_retcode cmd_view_info(const std::vector<std::string> &args) {
             cry("parqit explain: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         idx_t n = duckdb_row_count(&res);
         for (idx_t r = 0; r < n; r++) {
-            char *k = duckdb_value_varchar(&res, 0, r);
-            char *v = duckdb_value_varchar(&res, 1, r);
-            w.rec("plan", {}, {k ? k : "", v ? v : ""});
-            if (k) duckdb_free(k);
-            if (v) duckdb_free(v);
+            const parqit::CText k = parqit::result_text(&res, 0, r), v = parqit::result_text(&res, 1, r);
+            w.rec("plan", {}, {k ? k.get() : "", v ? v.get() : ""});
         }
-        duckdb_destroy_result(&res);
     } else if (what == "describe") {
         const auto &cols = g_view_ref().cols();
         for (size_t i = 0; i < cols.size(); i++) {
@@ -2318,6 +2298,173 @@ ST_retcode cmd_view_info(const std::vector<std::string> &args) {
 }
 
 /* ============================================== collect (prepare) ===== */
+
+#ifdef PARQIT_DUCKDB_200
+namespace {
+bool materialisation_files_unchanged(const std::vector<FileIdentity> &files, std::string *error) {
+    for (const auto &before : files) {
+        FileIdentity after;
+        if (!file_identity(before.abs, &after, false) ||
+            !identity_diff(before, after, false).empty()) {
+            *error = "source file changed during materialisation planning; retry when the file is stable";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool plan_compact_file_sort(Session &s, const View &view, std::string *sql,
+                             std::vector<FileIdentity> *files, std::string *error) {
+    const auto keys = view.compact_sort_keys();
+    if (keys.empty() || view.source_paths_sql().empty()) return true;
+    std::string preserves_order;
+    if (!s.query_scalar("SELECT current_setting('preserve_insertion_order')",
+                         &preserves_order, error)) return false;
+    if (preserves_order != "true") return true;
+    auto snapshot = snapshot_source_files(s, view.source_paths_sql());
+    if (snapshot.empty()) return true;
+    const std::set<std::string> wanted(keys.begin(), keys.end());
+    const auto source = view.compile_prefix(0);
+    duckdb_result description{};
+    if (!s.query("DESCRIBE " + source, &description, error)) return false;
+    parqit::ResultGuard description_guard{&description};
+    std::vector<std::pair<std::string, std::string>> candidates;
+    for (idx_t row = 0; row < duckdb_row_count(&description); ++row) {
+        const parqit::CText raw_name = parqit::result_text(&description, 0, row),
+                            raw_type = parqit::result_text(&description, 1, row);
+        const std::string q = quote_ident(raw_name ? raw_name.get() : "");
+        const std::string type = raw_type ? raw_type.get() : "";
+        // Converting a wider integer to DOUBLE cannot falsely prove that it
+        // fits INTEGER: every value in the candidate range is exactly binary64.
+        if (wanted.count(q) && (type == "DOUBLE" || type == "BIGINT" ||
+            type == "INTEGER" || type == "SMALLINT" || type == "UBIGINT" ||
+            type == "UINTEGER" || type == "USMALLINT"))
+            candidates.emplace_back(q, type);
+    }
+    description_guard.reset();
+    if (candidates.empty()) return true;
+    std::string proof = "SELECT ", proof_fields;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (i) proof += ", ";
+        const auto alias = "p" + std::to_string(i);
+        proof += "__parqit_sort_storage(CAST(" + candidates[i].first +
+                 " AS DOUBLE)) AS " + alias;
+        proof_fields += (proof_fields.empty() ? "" : ", ") + alias + ".mask, " + alias + ".reversible";
+    }
+    proof += " FROM (" + source + ")";
+    proof = "SELECT " + proof_fields + " FROM (" + proof + ")";
+    duckdb_result result{};
+    if (!s.query(proof, &result, error)) return false;
+    std::map<std::string, View::SortCast> casts;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const auto mask = duckdb_value_uint32(&result, 2*i, 0);
+        const auto &type = candidates[i].second;
+        const int old_bytes = type == "SMALLINT" || type == "USMALLINT" ? 2 :
+            type == "INTEGER" || type == "UINTEGER" ? 4 : 8;
+        const int new_bytes = mask & 1 ? 1 : mask & 2 ? 2 : mask & 4 ? 4 : 8;
+        if (new_bytes < old_bytes)
+            casts[candidates[i].first] = {"__parqit_sort_i" +
+                std::to_string(new_bytes * 8), type};
+        else if (type == "DOUBLE" && duckdb_value_boolean(&result, 2*i + 1, 0))
+            casts[candidates[i].first] = {"__parqit_sort_bits", type, "__parqit_sort_restore"};
+    }
+    duckdb_destroy_result(&result);
+    if (casts.empty()) return true;
+    if (!materialisation_files_unchanged(snapshot, error)) return false;
+    *sql = view.compile_compact_sort(casts);
+    *files = std::move(snapshot);
+    return true;
+}
+
+bool plan_compact_file_aggregate(Session &s, const View &view, std::string *sql,
+                                  std::vector<FileIdentity> *files, std::string *error) {
+    const auto columns = view.compact_collapse_columns();
+    if (columns.empty()) return true;
+    const char *disabled = std::getenv("PARQIT_DISABLE_COMPACT_AGGREGATES");
+    if (disabled && std::string(disabled) == "1") return true;
+    auto snapshot = snapshot_source_files(s, view.source_paths_sql());
+    // This initial implementation requires one literal file and strong
+    // identity fields. Globs, directories and platforms without those fields
+    // retain the original accumulator rather than trusting a stale row bound.
+    if (snapshot.size() != 1 || snapshot[0].ctime == "0" || snapshot[0].inode == "0:0") return true;
+    // DERIVED-COLLAPSE-1: the proof scans exactly the prefix the aggregate re-evaluates
+    const auto source = view.compact_collapse_source();
+    const std::set<std::string> wanted(columns.begin(), columns.end());
+    duckdb_result description{};
+    if (!s.query("DESCRIBE " + source, &description, error)) return false;
+    parqit::ResultGuard description_guard{&description};
+    std::vector<std::string> candidates;
+    for (idx_t row = 0; row < duckdb_row_count(&description); ++row) {
+        const parqit::CText raw_name = parqit::result_text(&description, 0, row),
+                            raw_type = parqit::result_text(&description, 1, row);
+        const std::string name = raw_name ? raw_name.get() : "", type = raw_type ? raw_type.get() : "";
+        if (wanted.count(name) && type == "DOUBLE") candidates.push_back(name);
+    }
+    description_guard.reset();
+    if (candidates.empty()) return true;
+    const auto groups = view.compact_collapse_groups();
+    std::string group_list, sample_projection;
+    std::set<std::string> projected;
+    for (const auto &name : groups) {
+        const auto q = quote_ident(name);
+        group_list += (group_list.empty() ? "" : ", ") + q;
+        if (projected.insert(name).second) sample_projection += (sample_projection.empty() ? "" : ", ") + q;
+    }
+    for (const auto &name : candidates)
+        if (projected.insert(name).second)
+            sample_projection += (sample_projection.empty() ? "" : ", ") + quote_ident(name);
+    auto proof_query = [&](const std::vector<std::string> &names, bool sample) {
+        std::string aggregates, fields;
+        if (sample) {
+            aggregates = "count(DISTINCT row(" + group_list + ")) AS __parqit_groups";
+            fields = "__parqit_groups";
+        }
+        for (size_t i = 0; i < names.size(); ++i) {
+            const auto alias = "p" + std::to_string(i);
+            aggregates += (aggregates.empty() ? "" : ", ") + std::string("__parqit_sum_storage(") +
+                          quote_ident(names[i]) + ") AS " + alias;
+            for (const auto *field : {"n", "exponent", "width", "safe", "integer32"})
+                fields += (fields.empty() ? "" : ", ") + alias + "." + field;
+        }
+        const auto input = sample ? "SELECT " + sample_projection + " FROM (" + source + ") LIMIT 65536" : source;
+        return "SELECT " + fields + " FROM (SELECT " + aggregates + " FROM (" + input + "))";
+    };
+    // A bounded pilot avoids a full proof scan for few-group workloads or
+    // already-disqualified exponent spans. It never certifies eligibility.
+    duckdb_result sample{};
+    if (!s.query(proof_query(candidates, true), &sample, error)) return false;
+    std::vector<std::string> promising;
+    if (duckdb_value_uint64(&sample, 0, 0) >= 4096)
+        for (size_t i = 0; i < candidates.size(); ++i)
+            if (duckdb_value_boolean(&sample, 1 + 5*i + 3, 0)) promising.push_back(candidates[i]);
+    duckdb_destroy_result(&sample);
+    if (!materialisation_files_unchanged(snapshot, error)) return false;
+    if (promising.empty()) return true;
+    duckdb_result proof{};
+    if (!s.query(proof_query(promising, false), &proof, error)) return false;
+    std::map<std::string, View::ExactSum> exact;
+    for (size_t i = 0; i < promising.size(); ++i)
+        if (duckdb_value_boolean(&proof, 5*i + 3, 0))
+            exact[promising[i]] = {duckdb_value_int32(&proof, 5*i + 1, 0),
+                                   duckdb_value_boolean(&proof, 5*i + 4, 0)};
+    duckdb_destroy_result(&proof);
+    if (!materialisation_files_unchanged(snapshot, error)) return false;
+    if (exact.empty()) return true;
+    *sql = view.compile_compact_collapse(exact);
+    *files = std::move(snapshot);
+    const char *trace = std::getenv("PARQIT_TEST_COMPACT_AGGREGATES");
+    if (trace && std::string(trace) == "1") {
+        std::string note = "PARQIT_COMPACT_AGGREGATES|";
+        for (const auto &column : exact)
+            note += column.first + ":" + (column.second.integer32 ? "integer32" :
+                    std::to_string(column.second.exponent)) + "|";
+        note += "\n";
+        SF_display(const_cast<char *>(note.c_str()));
+    }
+    return true;
+}
+} // namespace
+#endif
 
 ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     std::string err;
@@ -2413,7 +2560,7 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
                 "; use parqit keep if instead");
             return kRcUsage;
         }
-        sql = "SELECT * FROM (" + sql + ") WHERE " + tr.sql;
+        sql = "SELECT * FROM (" + sql + ") WHERE " + tr.sql_where; /* STATAMISS-PUSHDOWN-1 */
         warn_missing_rules(missing_rule_cmps(pfilter, true)); /* STATAMISS-WARN-1 */
     }
     std::vector<std::string> pvars;
@@ -2470,6 +2617,18 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
          * recovery) and, over a Hive tree, tag it as a partition key */
         vsrc.filename_column = g_view_ref().source_filename_column();
     } else {
+#ifdef PARQIT_DUCKDB_200
+        std::vector<FileIdentity> sort_snapshot;
+        if (label == "collect" &&
+            (g_view_ref().n_stages() <= 1 || !g_view_ref().compact_collapse_columns().empty()) &&
+            g_view_ref().pending_ranges().empty() && limit < 0 && pf < 1 &&
+            pfilter.empty() && pvars.empty() &&
+            (!plan_compact_file_sort(s, g_view_ref(), &sql, &sort_snapshot, &err) ||
+             !plan_compact_file_aggregate(s, g_view_ref(), &sql, &sort_snapshot, &err))) {
+            cry(who + err);
+            return kRcEngine;
+        }
+#endif
         if (!s.exec("CREATE TEMP TABLE " + quote_ident(table) + " AS " + sql, &err)) {
             /* BINARY-DECODE-1: a view with stages materialises HERE, before
              * the planner runs, so a binary(text) column that is not valid
@@ -2481,6 +2640,14 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
             cry(who + err);
             return decode_fail ? kRcUsage : kRcEngine;
         }
+#ifdef PARQIT_DUCKDB_200
+        if (!materialisation_files_unchanged(sort_snapshot, &err)) {
+            std::string cleanup_error;
+            s.exec("DROP TABLE " + quote_ident(table), &cleanup_error);
+            cry(who + err);
+            return kRcEngine;
+        }
+#endif
         vsrc.scan_sql = quote_ident(table);
         drop_source_after = true;
     }
@@ -2638,6 +2805,22 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     ctx.meta.chars = g_view_ref().chars();
     ctx.meta.dtalabel = g_view_ref().dtalabel();
     ctx.meta.sortedby = g_view_ref().sortedby_names();
+
+    // A nontrivial view already has one spillable snapshot. A pure file read
+    // has source-identity guards. Raw SQL without either may be volatile, so
+    // leave its compress entirely native instead of evaluating it twice.
+    if (req.value("compress", false) && label == "collect" &&
+        (drop_source_after || !ctx.files.empty())) {
+        rc = plan_integer_compression(s, vsrc, &ctx, &err);
+        if (rc != 0) {
+            if (drop_source_after) {
+                std::string cleanup_error;
+                s.exec("DROP TABLE IF EXISTS " + quote_ident(table), &cleanup_error);
+            }
+            cry(who + err);
+            return rc;
+        }
+    }
 
     parqit::ResponseWriter w;
     if (!w.open(respfile, &err)) {
@@ -2919,6 +3102,25 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
         return rrc;
     }
 
+    std::string planned;
+    const std::string *planned_query = nullptr;
+    std::function<bool(std::string *)> identity_guard;
+    const std::function<bool(std::string *)> *pre_publish = nullptr;
+#ifdef PARQIT_DUCKDB_200
+    std::vector<FileIdentity> snapshot;
+    planned = g_view_ref().compile(true);
+    if (!plan_compact_file_sort(s, g_view_ref(), &planned, &snapshot, &err) ||
+        !plan_compact_file_aggregate(s, g_view_ref(), &planned, &snapshot, &err)) {
+        cry("parqit save: " + err);
+        return kRcEngine;
+    }
+    if (!snapshot.empty()) {
+        planned_query = &planned;
+        identity_guard = [&](std::string *error) { return materialisation_files_unchanged(snapshot, error); };
+        pre_publish = &identity_guard;
+    }
+#endif
+
     /* ATOM-2: a view over a Parquet source has no Stata extended missings to
      * collapse, but compile_for_save rounds non-integer date/period values
      * exactly as the in-memory save_data path does. Surface the same
@@ -2927,10 +3129,10 @@ ST_retcode cmd_view_save(const std::vector<std::string> &args) {
     std::vector<std::string> frac = detect_frac_rounding(s, g_view_ref());
 
     long long written = 0;
-    ST_retcode rc = copy_out_parquet(s, compile_for_save(g_view_ref()), dest, replace,
+    ST_retcode rc = copy_out_parquet(s, compile_for_save(g_view_ref(), planned_query), dest, replace,
                                      compression, comp_level, partition_by, chunk,
                                      view_kv_fragment(g_view_ref()), &written, &err,
-                                     case_alias ? &leaf_names : nullptr, nullptr,
+                                     case_alias ? &leaf_names : nullptr, pre_publish,
                                      partition_mode, &pnote);
     if (rc != 0) {
         cry("parqit save: " + err);
@@ -3922,16 +4124,13 @@ static ST_retcode wide_j_scan(const std::string &jname,
         cry("parqit " + verb + ": " + err);
         return kRcEngine;
     }
+    const parqit::ResultGuard guard{&res};
     jvals->clear();
     idx_t n = duckdb_row_count(&res);
     for (idx_t r = 0; r < n; r++) {
-        char *v = duckdb_value_varchar(&res, 0, r);
-        if (v) {
-            jvals->push_back(v);
-            duckdb_free(v);
-        }
+        const parqit::CText v = parqit::result_text(&res, 0, r);
+        if (v) jvals->push_back(v.get());
     }
-    duckdb_destroy_result(&res);
     if (jvals->size() > 2000) {
         cry("parqit " + wide_verb + ": " + std::to_string(jvals->size()) +
             " distinct " + jdesc + " would create too many columns" + cap_hint);
@@ -4306,16 +4505,13 @@ ST_retcode cmd_view_sql(const std::vector<std::string> &args) {
         duckdb_result dres;
         std::string derr;
         if (s.query("DESCRIBE " + sql, &dres, &derr)) {
+            const parqit::ResultGuard guard{&dres};
             if (duckdb_row_count(&dres) == ncol && duckdb_column_count(&dres) > 0) {
                 for (idx_t c = 0; c < ncol; c++) {
-                    char *nm = duckdb_value_varchar(&dres, 0, c);
-                    if (nm) {
-                        raw_names[c] = nm;
-                        duckdb_free(nm);
-                    }
+                    const parqit::CText nm = parqit::result_text(&dres, 0, c);
+                    if (nm) raw_names[c] = nm.get();
                 }
             }
-            duckdb_destroy_result(&dres);
         }
     }
     std::vector<std::string> stata_names = parqit::sanitize_unique(raw_names, nullptr);
@@ -4533,7 +4729,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         if_sql = tr.sql;
-        base = "(SELECT * FROM " + base + " WHERE " + tr.sql + ")";
+        base = "(SELECT * FROM " + base + " WHERE " + tr.sql_where + ")"; /* STATAMISS-PUSHDOWN-1 */
         warn_missing_rules(missing_rule_cmps(ifexpr, true)); /* STATAMISS-WARN-1 */
     }
     parqit::ResponseWriter w;
@@ -4893,17 +5089,16 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit levelsof: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         idx_t n = duckdb_row_count(&res);
         if (static_cast<long long>(n) > limit) {
             cry("parqit levelsof: more than " + std::to_string(limit) +
                 " distinct levels; raise limit() or collapse instead");
-            duckdb_destroy_result(&res);
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
             w.rec("lvl", {}, {text_cell(res, 0, i, "")});
         }
-        duckdb_destroy_result(&res);
         save_local("_parqit_n_levels", std::to_string(n));
         save_local("_parqit_lvl_kind", std::string(1, kind ? kind : 'n'));
     } else if (what == "tab2") {
@@ -4953,6 +5148,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit tabulate: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         idx_t n = duckdb_row_count(&res);
         /* PERF-TAB2-PRECOUNT-1: derive the distinct-r2 count from the already
          * materialised (cell-bounded) GROUP BY result instead of a second full
@@ -4967,20 +5163,17 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             if (distinct_c.size() > 30) {
                 cry("parqit tabulate: " + vars[1] + " has more than 30 distinct values; "
                     "swap the variables or collapse instead");
-                duckdb_destroy_result(&res);
                 return kRcUsage;
             }
         }
         if (n > 10000) {
             cry("parqit tabulate: more than 10,000 cells; collapse instead");
-            duckdb_destroy_result(&res);
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
             w.rec("t2", {std::to_string(duckdb_value_int64(&res, 2, i))},
                   {text_cell(res, 0, i), text_cell(res, 1, i)});
         }
-        duckdb_destroy_result(&res);
     } else if (what == "tabulate") {
         if (vars.size() != 1) {
             cry("parqit tabulate: exactly one variable");
@@ -5018,17 +5211,16 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit tabulate: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         idx_t n = duckdb_row_count(&res);
         if (n > 10000) {
             cry("parqit tabulate: more than 10,000 distinct values; collapse instead");
-            duckdb_destroy_result(&res);
             return kRcUsage;
         }
         for (idx_t i = 0; i < n; i++) {
             w.rec("tab", {std::to_string(duckdb_value_int64(&res, 1, i))},
                   {text_cell(res, 0, i)});
         }
-        duckdb_destroy_result(&res);
     } else if (what == "countif") {
         std::string expr;
         if (!parqit::req_text(req, "expr", &expr, &err)) {
@@ -5051,8 +5243,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         std::string n;
-        if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + tr.sql, &n,
-                            &err)) {
+        if (!s.query_scalar("SELECT count(*) FROM " + base + " WHERE " + tr.sql_where, &n,
+                            &err)) { /* STATAMISS-PUSHDOWN-1 */
             cry("parqit count: " + err);
             return kRcEngine;
         }
@@ -5089,6 +5281,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit codebook: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         auto cell = [&](idx_t c) -> std::string {
             return text_cell(res, c);
         };
@@ -5106,7 +5299,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                    std::string(1, targets[ti].second)},
                   {targets[ti].first, cell(off + 2), cell(off + 3), lab});
         }
-        duckdb_destroy_result(&res);
     } else if (what == "unique") {
         /* UNIQUE-1 (BPLIM feedback, 2026-10-13): the community-contributed
          * unique (Brady/Hills, SSC): the number of distinct values of the
@@ -5184,9 +5376,9 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit unique: " + err);
                 return kRcEngine;
             }
+            const parqit::ResultGuard guard{&bres};
             const idx_t nr = duckdb_row_count(&bres);
             if (nr > 10000) {
-                duckdb_destroy_result(&bres);
                 cry("parqit unique: by() has more than 10,000 groups; collapse the view instead");
                 return kRcUsage;
             }
@@ -5201,7 +5393,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                     std::to_string(duckdb_value_int64(&bres, static_cast<idx_t>(byn.size()) + 1, r))};
                 w.rec("unqb", nums, keys);
             }
-            duckdb_destroy_result(&bres);
             std::vector<std::string> bynames = byn;
             w.rec("unqby", {}, bynames);
         }
@@ -5281,6 +5472,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 cry("parqit duplicates list: " + err);
                 return kRcEngine;
             }
+            const parqit::ResultGuard guard{&res};
             w.rec("dlh", {std::to_string(keyvars.size())}, keyvars);
             /* the value labels of the keys, so the list shows them like native */
             const json &vl = g_view_ref().vallabs();
@@ -5313,7 +5505,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                        std::to_string(duckdb_value_int64(&res, 1, i))},
                       row);
             }
-            duckdb_destroy_result(&res);
             w.rec("dlt", {std::to_string(total), std::to_string(n), std::to_string(ngroups)}, {});
         }
     } else if (what == "misspatterns") {
@@ -5347,16 +5538,15 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit misstable patterns: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         w.rec("mph", {}, {names});
         idx_t n = duckdb_row_count(&res);
         w.rec("mptotal", {std::to_string(n ? duckdb_value_int64(&res, 2, 0) : 0)}, {});
         for (idx_t i = 0; i < n; i++) {
-            char *p = duckdb_value_varchar(&res, 0, i);
+            const parqit::CText p = parqit::result_text(&res, 0, i);
             w.rec("mpat", {std::to_string(duckdb_value_int64(&res, 1, i))},
-                  {p ? p : ""});
-            if (p) duckdb_free(p);
+                  {p ? p.get() : ""});
         }
-        duckdb_destroy_result(&res);
     } else if (what == "tabstat") {
         std::vector<std::string> stats;
         if (!parqit::req_text_list(req, "stats", &stats, &err, false)) {
@@ -5486,6 +5676,7 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit tabstat: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&res};
         idx_t nrows = duckdb_row_count(&res);
         idx_t off = by.empty() ? 0 : 1;
         for (idx_t g = 0; g < nrows; g++) {
@@ -5502,7 +5693,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
                 w.rec("ts", plain, {targets[t], gv});
             }
         }
-        duckdb_destroy_result(&res);
     } else if (what == "corr") {
         bool pairwise = req.value("pairwise", false);
         std::vector<std::string> targets, display_targets;
@@ -5605,8 +5795,8 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
             cry("parqit histogram: " + err);
             return kRcEngine;
         }
+        const parqit::ResultGuard guard{&mres};
         if (duckdb_value_is_null(&mres, 0, 0)) {
-            duckdb_destroy_result(&mres);
             cry("parqit histogram: no nonmissing values");
             return kRcUsage;
         }
@@ -5617,7 +5807,6 @@ ST_retcode cmd_view_stats(const std::vector<std::string> &args) {
         const std::string lo_sql = "CAST(" + quote_literal(text_cell(mres, 0)) + " AS " + type + ")";
         const std::string hi_sql = "CAST(" + quote_literal(text_cell(mres, 1)) + " AS " + type + ")";
         long long nn = duckdb_value_int64(&mres, 2, 0);
-        duckdb_destroy_result(&mres);
         long long bins = req.value("bins", 0LL);
         if (bins < 0) {
             cry("parqit histogram: bins() must be nonnegative (0 selects automatic bins)");

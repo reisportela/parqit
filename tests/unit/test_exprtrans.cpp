@@ -91,6 +91,32 @@ static std::string eval_at(const std::string &expr, int id, bool stmiss = false)
     return v; /* "" means NULL */
 }
 
+TEST_CASE("DERIVED-COLLAPSE-1 certifies only reviewed row-local numeric expressions") {
+    ExprSchema s = test_schema();
+    for (const char *ok : {"x/y", "-x*2 + y^2", "x > y", "!missing(x) & y != .", "cond(x > 0, x, y, 0)",
+                           "round(abs(x), 0.25)", "mod(floor(x), 3) + ceil(y) + int(x) + trunc(y)",
+                           "exp(x) + ln(y) + log(x) + log10(y) + sqrt(x)", "min(x, y, 1) + max(x, .)",
+                           "inrange(x, 0, 1) + inlist(y, 1, 2, 3)", "float(x)", "mi(x)", "\"a\"", "s"}) {
+        auto r = translate_expression(ok, s, false);
+        REQUIRE_MESSAGE(r.ok, ok);
+        CHECK_MESSAGE(r.repeatable, ok);
+        CHECK_MESSAGE(translate_filter(std::string(ok) == "\"a\"" || std::string(ok) == "s" ? "x > 0" : ok,
+                                       s, true).repeatable, ok);
+    }
+    for (const char *no : {"x + _n", "_N", "x[_n-1]", "strlen(s)", "real(s)", "regexm(s, \"a\")",
+                           "year(d)", "td(01jan2020)", "date(s, \"DMY\")", "x + strpos(s, \"a\")"}) {
+        auto r = translate_expression(no, s, false);
+        REQUIRE_MESSAGE(r.ok, no);
+        CHECK_MESSAGE(!r.repeatable, no);
+    }
+    s.ts_panel = "x";
+    s.ts_time = "d";
+    auto lagged = translate_expression("L.y", s, false);
+    REQUIRE(lagged.ok);
+    CHECK(!lagged.repeatable);
+    CHECK(!translate_expression("bogus(x)", s, false).ok);
+}
+
 TEST_CASE("filters: SQL missing semantics match Stata keep-if outcomes") {
     CHECK(count_where("x > 2") == 2);          /* 4,5 — NULL x drops */
     CHECK(count_where("x >= 1 & x <= 2") == 2);
@@ -987,4 +1013,73 @@ TEST_CASE("DATEFN-1: the date functions translate and evaluate as native Stata")
     CHECK_FALSE(translate_expression("clock(s, \"DMYms\")", test_schema(), false).ok);
     CHECK_FALSE(translate_expression("monthly(s, \"YQ\")", test_schema(), false).ok);
     CHECK_FALSE(translate_expression("date(x, \"DMY\")", test_schema(), false).ok);
+}
+
+/* STATAMISS-PUSHDOWN-1: the WHERE form keeps exactly the rows the full form
+ * keeps (counted on the fixture, which has missing x, y, s and d), and drops
+ * the missing-value branches only where they cannot change a WHERE */
+static long long count_where_form(const std::string &expr, bool stmiss) {
+    make_fixture();
+    ExprResult r = translate_filter(expr, test_schema(), stmiss);
+    REQUIRE_MESSAGE(r.ok, r.error);
+    Session &s = Session::instance();
+    std::string v, err;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT count(*) FROM __t WHERE " + r.sql_where, &v, &err),
+                    (err + " [sql: " + r.sql_where + "]"));
+    return std::strtoll(v.c_str(), nullptr, 10);
+}
+
+TEST_CASE("STATAMISS-PUSHDOWN-1: a positive WHERE drops redundant missing-value branches, same rows") {
+    const char *exprs[] = {"x == 2",  "x < 3",   "x <= 3",  "x > 3",   "x >= 3",   "3 < x",   "3 > x",
+                           "2 == x",  "x != 2",  "!(x == 2)", "x == 2 | y > 25", "x == 2 & y < 25",
+                           "(x == 2) == 1", "x == y", "x < y", "x == . ", "x < .", "d == 21916",
+                           "strpos(s, \"b\") > 0", "strpos(s, \"b\") == 0", "!(strpos(s, \"b\") > 0)",
+                           "x > 1 & (y < 25 | x == 5)", "x", "x + 1 > 2", "f == 0.1",
+                           "(x < 3) != 1", "(x == 2) != 1", "(x == 2) == 0", "(x < 3) < 1",
+                           "inrange(x, 2, 4)", "inrange(x, ., 4)", "inrange(x, 2, .)", "inrange(x, 4, 2)",
+                           "!inrange(x, 2, 4)", "inrange(x, y, 4)", "inrange(f, 0.1, 2)",
+                           "inlist(x, 1, 2, 5)", "inlist(x, ., 2)", "inlist(x, 2, y)", "!inlist(x, 1, 2)",
+                           "inlist(s, \"a\", \"b\")", "inlist(x, 1, 2) & y < 25",
+                           "inlist(strpos(s, \"b\"), 0, 1)"};
+    for (const char *e : exprs)
+        for (bool stmiss : {true, false}) {
+            INFO(e << " statamissing " << stmiss);
+            CHECK(count_where_form(e, stmiss) == count_where(e, stmiss));
+        }
+    auto where = [](const std::string &e) { return translate_filter(e, test_schema(), true).sql_where; };
+    auto full = [](const std::string &e) { return translate_filter(e, test_schema(), true).sql; };
+    /* the forms that reach the scan: the comparison alone */
+    for (const char *e : {"x == 2", "2 == x", "x < 3", "x <= 3", "3 > x", "3 >= x", "d == 21916"}) {
+        INFO(e);
+        CHECK(where(e).find("IS NULL") == std::string::npos);
+        CHECK(where(e).find("IS NOT NULL") == std::string::npos);
+        CHECK(full(e).find("IS NOT NULL") != std::string::npos); /* the value form keeps them */
+    }
+    /* a missing value makes these true in Stata: the branches stay */
+    for (const char *e : {"x > 3", "x >= 3", "3 < x", "x != 2", "!(x == 2)", "x == y"}) {
+        INFO(e);
+        CHECK(where(e) == full(e));
+    }
+    /* under & and |, each side keeps or drops its own branches */
+    CHECK(where("x == 2 & y > 25").find("(\"x\" = 2)") != std::string::npos);
+    CHECK(where("x == 2 & y > 25").find("\"y\" IS NULL") != std::string::npos);
+    /* inrange() and inlist() with bounds and values that cannot be missing */
+    for (const char *e : {"inrange(x, 2, 4)", "inlist(x, 1, 2, 5)"}) {
+        INFO(e);
+        CHECK(where(e).find("IS NULL") == std::string::npos);
+        CHECK(where(e).find("IS NOT NULL") == std::string::npos);
+        CHECK(where(e).find("coalesce") == std::string::npos);
+    }
+    for (const char *e : {"inrange(x, ., 4)", "inrange(x, y, 4)", "!inrange(x, 2, 4)", "!inlist(x, 1, 2)"}) {
+        INFO(e);
+        CHECK(where(e) == full(e));
+    }
+    /* strpos() is never missing: its comparisons are plain in every context */
+    CHECK(full("strpos(s, \"b\") > 0").find("IS NULL") == std::string::npos);
+    CHECK(translate_expression("strpos(s, \"b\") > 0", test_schema(), true).sql.find("IS NULL") ==
+          std::string::npos);
+    /* a value context keeps the Stata result for a missing x (0, not missing) */
+    CHECK(translate_expression("x == 2", test_schema(), true).sql.find("IS NOT NULL") != std::string::npos);
+    /* SQL semantics (statamissing off) are untouched */
+    CHECK(translate_filter("x == 2", test_schema(), false).sql_where == translate_filter("x == 2", test_schema(), false).sql);
 }

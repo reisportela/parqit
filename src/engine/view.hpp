@@ -16,6 +16,8 @@
  */
 #pragma once
 
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -124,8 +126,9 @@ class View {
      * passthrough collect size columns from row-group statistics (the same
      * F2 metadata path `parqit use` uses) instead of re-scanning. Reset by
      * close() (which re-default-constructs). */
-    void set_source_paths(const std::string &paths_sql) {
+    void set_source_paths(const std::string &paths_sql, bool single_file = false) {
         src_paths_sql_ = paths_sql;
+        source_single_file_ = single_file;
     }
     const std::string &source_paths_sql() const { return src_paths_sql_; }
 
@@ -242,8 +245,19 @@ class View {
         std::string target;
         std::string source;
     };
+    struct ExactSum {
+        int exponent = 0;
+        bool integer32 = false;
+    };
     std::string collapse(const std::vector<CollapseSpec> &specs,
-                         const std::vector<std::string> &by);
+                         const std::vector<std::string> &by,
+                         const std::map<std::string, ExactSum> &exact = {});
+    std::vector<std::string> compact_collapse_columns() const;
+    std::vector<std::string> compact_collapse_groups() const;
+    /* DERIVED-COLLAPSE-1: the input the proof scans — the source, or the
+     * certified gen prefix the compact aggregate re-evaluates verbatim */
+    std::string compact_collapse_source() const;
+    std::string compile_compact_collapse(const std::map<std::string, ExactSum> &exact) const;
     std::string contract(const std::vector<std::string> &by, const std::string &freq);
     /* IF-ALL-1: with if_expr, only the rows the condition selects are
      * deduplicated (the first of each group in the current order stays); every
@@ -387,6 +401,16 @@ class View {
     /* ---- compilation -------------------------------------------------- */
     /* full pipeline; with_order: append the final ORDER BY */
     std::string compile(bool with_order = true) const;
+    /* Physical sort adaptation: quoted numeric key references, including the
+     * physical tie carrier. No stages/volatile expressions may be evaluated
+     * twice; the materialiser proves and guards a pure file source first. */
+    std::vector<std::string> compact_sort_keys() const;
+    struct SortCast {
+        std::string function;
+        std::string original_type;
+        std::string restore_function;
+    };
+    std::string compile_compact_sort(const std::map<std::string, SortCast> &casts) const;
     /* SQL of the pipeline up to and including stage k (for validation) */
     std::string compile_prefix(size_t stages) const;
     /* dbplyr-style pretty form for parqit show */
@@ -469,6 +493,7 @@ class View {
     std::string scan_;
     std::string source_desc_;
     std::string src_paths_sql_; /* Parquet footer paths, "" unless file-backed */
+    bool source_single_file_ = false;
     std::string int64_mode_;    /* int64() carried from the open; "" = session */
     std::string src_filename_col_; /* FILENAME-1 provenance column, "" if none */
     std::vector<std::string> xm_folded_; /* XMISS-1 columns read as plain . */
@@ -487,6 +512,23 @@ class View {
         std::string definition;
     };
     std::vector<EgenStage> egen_stages_;
+    struct FileCollapse {
+        std::vector<ViewCol> columns;
+        std::vector<CollapseSpec> specs;
+        std::vector<std::string> by;
+        size_t prefix = 0; /* DERIVED-COLLAPSE-1: certified gen stages before it */
+    };
+    std::shared_ptr<const FileCollapse> file_collapse_;
+    /* DERIVED-COLLAPSE-1: how many leading stages are gens whose value and
+     * condition are ExprResult::repeatable, without by() or row context; any
+     * other stage ends the run, so it equals stages_.size() only while every
+     * stage so far is one */
+    size_t repeatable_stages_ = 0;
+    /* DEDUP-SORT-1: how many leading stages keep a subset of the source rows
+     * with every column, value and type unchanged (duplicates drop without a
+     * varlist or if); the source proof of compact sort keys then holds for
+     * their output. Any other stage ends the run. */
+    size_t subset_stages_ = 0;
     struct EgenBatch {
         size_t first = 0, end = 0;
         std::vector<std::string> by;

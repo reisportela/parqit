@@ -5,7 +5,7 @@ file(GLOB_RECURSE _parqit_identity_inputs CONFIGURE_DEPENDS
     RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     "src/engine/*.cpp" "src/engine/*.hpp"
     "src/plugin/*.cpp" "src/plugin/*.hpp" "src/plugin/*.map" "src/plugin/*.def" "src/plugin/*.exports"
-    "cmake/*.cmake" "cmake/*.in"
+    "cmake/*.cmake" "cmake/*.in" "cmake/*.inc"
     "vendor/stata/*.c" "vendor/stata/*.h"
     "vendor/arrow/*.h" "vendor/json/*.hpp")
 list(APPEND _parqit_identity_inputs "CMakeLists.txt" "CMakePresets.json")

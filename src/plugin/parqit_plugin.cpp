@@ -131,6 +131,9 @@ bool verify_window_contract(std::string *err) {
     duckdb_config config = nullptr;
     if (duckdb_create_config(&config) != DuckDBSuccess ||
         duckdb_set_config(config, "threads", "1") != DuckDBSuccess ||
+#ifdef PARQIT_DUCKDB_200
+        duckdb_set_config(config, "async_threads", "1") != DuckDBSuccess ||
+#endif
         duckdb_set_config(config, "memory_limit", "64MB") != DuckDBSuccess) {
         duckdb_destroy_config(&config);
         *err = "could not configure the numerical selftest";
@@ -164,7 +167,7 @@ bool verify_window_contract(std::string *err) {
     };
     if (!query("CREATE SEQUENCE parqit_probe", false)) return false;
     for (const char *value : {"nextval('parqit_probe')",
-                             "list_transform([1], x -> nextval('parqit_probe'))[1]"}) {
+                             "list_transform([1], lambda x : nextval('parqit_probe'))[1]"}) {
         const std::string sql =
             "SELECT count(*)=2 AND bool_and(n=500 AND m=expected) FROM ("
             "SELECT g,count(*) n,min(m) m,avg(x) expected FROM ("

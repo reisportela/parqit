@@ -15,7 +15,7 @@ must be installed. Activate any required Red Hat compiler toolset first.
 Optional environment settings:
   CC, CXX                  GCC compiler executables
   PARQIT_CMAKE              CMake executable (otherwise tries cmake and cmake3)
-  PARQIT_DUCKDB_ARCHIVE     Local, pinned duckdb-1.5.6.tar.gz for offline builds
+  PARQIT_DUCKDB_ARCHIVE     Local, pinned duckdb-2.0.0.tar.gz for offline builds
 
 Output: ado/plus/p/parqit.plugin, alongside the matching ado/help files.
 HELP

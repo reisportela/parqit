@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -161,6 +162,20 @@ struct ReadOptions {
     /* the session's code page (parqit set encoding) for a file that declares
      * none, and for bytes of a UTF-8 file that are not UTF-8; "" = windows-1252 */
     std::string default_encoding;
+    /* threads of the profile pass (SPSS-PARALLEL-1); 1 = serial */
+    int threads = 1;
+    /* cases per block of that pass; 0 = block_cases_for (tests use few) */
+    int64_t block_cases = 0;
+    /* A3: the route, chosen before the profile (Plan::parallel): the parallel
+     * passes for a file of at least parallel_min_blocks blocks of cases (the
+     * declared cases over the block size; 0 = any size, -1 = the measured
+     * rule for the file's compression, parallel_min_blocks()), else one
+     * thread and the table function's conversion. route -1 = by size, 0 =
+     * serial, 1 = parallel; profile -1 = as the route, 0 = serial, 1 =
+     * parallel (the tests' and the calibration's switches). Either needs
+     * threads > 1. */
+    int64_t parallel_min_blocks = 0;
+    int route = -1, profile = -1;
 };
 
 /* Reads and validates the dictionary (and, for .zsav, the block map).
@@ -181,17 +196,36 @@ bool decode_text(const Dictionary &d, const char *raw, size_t n, std::string *ou
 bool spss_code_page(int code_page, bool *utf8, LegacyEncoding *enc);
 
 /* Sequential reader of the cases. Opens its own handle, so several readers of
- * one file never share a seek position. Throws SavError. */
+ * one file never share a seek position. Throws SavError. A .zsav's ZLIB blocks
+ * are inflated ahead on `ahead` threads (B2; 0: one at a time), with the same
+ * bytes and the same errors at the same case. */
 class CaseReader {
   public:
-    CaseReader(const std::string &path, const Dictionary &dict);
+    /* where a case starts in a compressed file's bytecode stream: everything a
+     * reader needs to expand the cases from there on (B1) */
+    struct Restart {
+        uint64_t offset = 0;       /* the stream's next byte (inflated, for a .zsav) */
+        unsigned char cmd[8] = {}; /* the command block being read */
+        int cmd_pos = 8;           /* its next code; 8: a new block comes next */
+        int64_t cases = 0;         /* the cases before it */
+    };
+    CaseReader(const std::string &path, const Dictionary &dict, int ahead = 0);
+    /* a reader of a compressed file from `at` on, decoding exactly as the
+     * reader that walked there would have (B1) */
+    CaseReader(const std::string &path, const Dictionary &dict, const Restart &at);
     ~CaseReader();
     CaseReader(const CaseReader &) = delete;
     CaseReader &operator=(const CaseReader &) = delete;
 
     /* Decodes the next case; false at the end of the data. */
     bool next();
+    /* Walks the next case of a compressed file without decoding it: the same
+     * checks, errors and end as next(), no slots (B1). */
+    bool skip();
+    Restart restart() const;
     int64_t cases_read() const { return cases_; }
+    /* the threads inflating the ZLIB blocks ahead (B2; 0: none), for the tests */
+    size_t ahead_threads() const;
 
     /* the value of a numeric variable (SYSMIS returned as its bit pattern) */
     double number(const Variable &v) const;
@@ -199,6 +233,8 @@ class CaseReader {
     /* the bytes of a string variable, segments joined, trailing blanks and
      * NULs removed (SPSS pads with blanks; some writers with NULs) */
     void raw_string(const Variable &v, std::string *out) const;
+    /* the current case's d.nslots slots (SPSS-PARALLEL-1 copies them out) */
+    const uint64_t *slots() const { return slots_.data(); }
 
     /* the byte source of the case data (the file, or its inflated ZLIB blocks) */
     struct Stream;
@@ -207,6 +243,10 @@ class CaseReader {
     const Dictionary &d_;
     std::string path_;                  /* for messages */
     std::unique_ptr<Stream> in_;
+    /* SPSS-BUFFER-1: the bytes of the stream's last span not yet taken; the
+     * cases are read from the span in place, without a call per read */
+    const unsigned char *sp_ = nullptr;
+    size_t sn_ = 0;
     std::vector<uint64_t> slots_;       /* numeric slots: native-order bits;
                                          * string slots: the 8 file bytes */
     std::vector<unsigned char> buf_;    /* one uncompressed case */
@@ -214,9 +254,34 @@ class CaseReader {
     bool done_ = false;
     unsigned char cmd_[8];
     int cmd_pos_ = 8;
+    bool advance(bool decode);
     bool read_case_uncompressed();
-    bool read_case_bytecode();
+    bool read_case_bytecode(bool decode);
+    /* up to n bytes of the case data; fewer only at its end */
+    size_t take(unsigned char *dst, size_t n) {
+        if (n <= sn_) {
+            std::memcpy(dst, sp_, n);
+            sp_ += n;
+            sn_ -= n;
+            return n;
+        }
+        return take_spans(dst, n);
+    }
+    size_t take_spans(unsigned char *dst, size_t n);
 };
+
+/* B2: the ZLIB blocks a reader inflates ahead on `threads` threads, the
+ * largest inflating to `biggest` bytes: at most 64 MiB of them and at least
+ * two, else 0 (none ahead: inflated one at a time). The threads inflate into
+ * these slots and hold no inflated block of their own; each keeps one
+ * compressed block to read into */
+size_t zlib_ahead_window(size_t threads, uint64_t biggest);
+
+/* CaseReader's accessors over the slots of one case copied out of it
+ * (SPSS-PARALLEL-1): the same decoding for a case held in a block. */
+double slot_number(const Variable &v, const uint64_t *slots);
+bool slot_is_sysmis(const Dictionary &d, const Variable &v, const uint64_t *slots);
+void slot_raw_string(const Variable &v, const uint64_t *slots, std::string *out);
 
 /* seconds since 14 Oct 1582 at 1 Jan 1970 (141,428 days) */
 constexpr int64_t kSpssEpochToUnixSeconds = 12219379200LL;

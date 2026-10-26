@@ -129,6 +129,28 @@ parqit use `"`dir'/by_m"', clear
 sort id
 assert m[2] == . & m[1] == 1 & m[3] == 3
 
+* The legacy NULL marker is case-insensitive. Refuse all spellings before
+* publication, and never decode a literal percent escape twice.
+foreach marker in null Null nUlL {
+    replace k = "`marker'" in 2
+    capture noisily parqit save `"`dir'/case_`marker'"', data partition_by(k)
+    assert _rc == 198
+}
+replace k = "%4EULL" in 1
+replace k = "N%55LL" in 2
+replace k = "%5F_HIVE_DEFAULT_PARTITION__" in 3
+tempfile escaped_reference
+save `"`escaped_reference'"'
+parqit save `"`dir'/escaped_literals"', data partition_by(k)
+parqit use `"`dir'/escaped_literals"', clear
+sort id
+cf _all using `"`escaped_reference'"'
+parqit use using `"`dir'/escaped_literals"'
+parqit collect, clear
+sort id
+cf _all using `"`escaped_reference'"'
+parqit close _all
+
 * ---------- a foreign tree with such directories loads with a note --------------
 python:
 from sfi import Macro

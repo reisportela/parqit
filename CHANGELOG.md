@@ -6,12 +6,309 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-26
+
+### Changed
+
+- DuckDB 2.0.0 is the default embedded engine, by the maintainer's decision;
+  the distributed plugins embed it. 1.5.6 remains an optional source build
+  (`-DPARQIT_DUCKDB_VERSION=1.5.6`) and is no longer distributed. Raw
+  `sql`/`query` use the native 2.0 dialect (below); the Stata-flavoured verbs
+  keep their values, types, metadata and missing-value rules. The engine is
+  compiled for the same baseline CPUs as before: DuckDB 2.0's default
+  AVX2 (`x86-64-v3`) build profile is turned off. In the pre-release C28
+  comparison on 100 million rows against the published 0.5.1, 91 workflows
+  took 168.7 s versus 372.1 s as sums of their medians, with 51 faster and
+  37 within the observed dispersion. These are historical measurements,
+  not a new timing campaign of the final release binary.
+  The engine's window operator is slower on a handful of very large groups
+  (an `egen` mean with `by()` over 18 groups about 1.2 s longer, `tabstat`
+  percentiles by group about 0.4 s); small files carry a fixed engine cost of
+  a few hundredths of a second.
+- The maintainer accepted the measured cost of opening many-file trees for
+  this release: opening and counting 6336 files took about 7.6 s on 2.0
+  versus 5.9 s on the same parqit source with 1.5.6 at 48 threads, in the
+  pre-release audit. With one thread, those times were about 3.7 and 3.0 s.
+  Reader admission remains based on nominal declared block sizes; decoder
+  buffers, converted batches and allocator capacity mean that these budgets
+  are not hard ceilings on allocated memory or process RAM.
+- Under `statamissing on` (the default), a comparison that a missing operand
+  makes false in Stata (`x == c`, `x < c`, `x <= c`, `c > x`, `c >= x`, with `c`
+  a number, a date literal or `strpos()`; `inrange()` and `inlist()` with
+  bounds and values that cannot be missing) is passed to the engine without its
+  missing-value branches where only the rows that satisfy a condition are kept
+  (`keep if`, `count if`, `list if`, the `if` of `use` and `tabulate`). It
+  reaches the Parquet scan as a filter again, as with `statamissing off`; the
+  rows are native Stata's (v190: 23 forms against native Stata, and the
+  scan's filter in `parqit explain`). `drop if`, negations, `!=`, the upper
+  tail and comparisons used as values keep their branches.
+- The SPSS reader takes the case data from spans in place (the rest of an
+  inflated ZLIB block, or 1 MB of the file) instead of making a call per
+  value. On one thread, reading 20 million cases fell from 0.94 to 0.67 s
+  (uncompressed), from 2.94 to 1.02 s (bytecode) and from 1.67 to 0.93 s
+  (`.zsav`). The slots, errors, positions in messages and restart points are
+  those of the previous reader, compared over 1683 generated files. End to
+  end, with 20 million cases, converting an SPSS file to Parquet takes
+  1.9–2.6 s instead of 8.6–13.0 s with 0.5.1 and loading it into Stata
+  2.3–3.2 s instead of 8.9–13.8 s; an R file of 20 million rows converts in
+  5.8–5.9 s instead of 14.6–15.0 s and loads in 6.3–6.4 s instead of
+  15.3–15.7 s.
+- Requested `use, clear compress` and `collect, clear compress` can allocate
+  double columns directly as byte/int/long after an actual-value proof. The
+  final storage types follow native Stata `compress`; other columns retain
+  native compression where needed, including string/strL handling. Ordinary reads retain
+  their existing types. The staged fill rechecks integrality and range before
+  adoption, and raw SQL without a stable snapshot keeps the native path.
+- Ungrouped `egen std()` computes its existing numerical state with a parallel
+  aggregate over one materialised input, then broadcasts the result. Arguments
+  and qualifiers share one realisation, including volatile inputs; grouped
+  windows and the precision/storage rules are unchanged.
+- DuckDB 2.0 materialisers can sort proven integer-valued keys in narrower
+  physical types and encode other normal Double keys reversibly as integers,
+  restoring their original values and logical types afterwards. Checked
+  conversions, source identities, signed-zero handling and physical tie order
+  protect the existing values and metadata.
+- DuckDB 2.0 automatic result buffering is bounded at 1024 MB to match the new
+  consumer's replenishment behaviour. Explicit caps and the zero/RESET setting
+  retain their existing precedence and meaning.
+- Large-group `collapse` plans over a single literal Parquet file can use
+  native integer sums after proving an exact binary scale over actual values.
+  Final sums and means retain the existing correctly rounded Double contract,
+  including subnormal means and exact cancellation. Ineligible inputs retain
+  the original numerical accumulator; `collect` and `save, view` share the
+  adaptation and source-identity checks.
+- That exact `collapse` adaptation also applies after `gen` steps whose value
+  and condition are certified repeatable: operators, literals, variables and
+  a closed list of numeric functions, without `by`, `_n`/`_N`, subscripts or
+  time-series operators. The proof scan and the aggregate evaluate the same
+  compiled step. Any other step, function or qualifier keeps the original
+  accumulator; results, types and metadata are unchanged (v177).
+- A whole-row `duplicates drop` keeps the lossless physical sort keys for a
+  following `sort`/`gsort`: its rows are a subset of the source rows with every
+  value unchanged, so the source proof still holds. A varlist, an `if` or any
+  other step keeps the original sort (v178).
+- DuckDB 2.0 partitioned `save ..., partition_by()` writes in parallel again.
+  Two pinned engine corrections stop a partition with a small delayed buffer
+  from routing its later large batches through the one-thread delayed writer,
+  and let every task pack a single-key hash group. Sorted or rotating copies
+  keep the upstream routing; window functions keep the upstream packing. Rows,
+  partitions, keys and metadata are unchanged; a partition may be written in
+  more than one file, and rows may sit in a different order inside a file,
+  which partitioned writes never guaranteed (with few open files the engine
+  splits partitions with or without the corrections).
+- `parqit save ..., data`, and every bridge of the dataset in memory built on
+  it (`parqit open _data` among them), reads the dataset on the fill workers
+  (`parqit set fill_threads`; `1` keeps the pass serial) in blocks of whole row
+  groups and whole bytes of the validity bitmap, one Arrow batch per block, and
+  the engine writes the batches in parallel and in order. Numeric cells are
+  read concurrently; string cells are read one at a time, as Stata's string
+  accessors require. The first bad cell, the notes and their order, the
+  transcoding tallies, the payload and the metadata are those of the serial
+  pass (v179, and v182 for any `chunk()`); row groups follow the blocks.
+- The UTF-8 check of delimited text (`encoding(utf8)`, or undeclared text in a
+  lookup) scans the file as ranges of whole lines on threads of its own, as
+  many as `parqit set threads`, with the serial scan's answer and errors.
+- SPSS files (`parqit use`, `parqit save … using`) are profiled and converted
+  on the engine threads: one reader expands the cases in file order into
+  blocks, workers profile and decode them, and the engine writes the batches
+  in parallel and in case order. The Parquet file, the metadata, the notes and
+  the error messages are those of the one-thread conversion (v180). R data
+  files (`.rds`, `.RData`) profile and convert their columns in parallel, and
+  their gzip CRC-32 is computed eight bytes at a time; the Parquet file and
+  the messages are those of the one-thread conversion (v181). Files below a
+  measured size keep the one-thread route, chosen before the profile, so small
+  files no longer pay the parallel route's overhead (on SPSS files of 250,000
+  to 500,000 cases 0.02-0.06 s a conversion remains, measured against the
+  published 0.5.1: ASSUMPTIONS #229); blocks of a wide file stay within 64 MB,
+  and the raw and converted data read ahead within budgets set by estimate
+  (v184, v188).
+
+- With DuckDB 2.0, `parqit sql` and `parqit query` use native 2.0
+  SQL semantics, as authorised by the maintainer. Differences from the public
+  1.5.6 engine include factorial precedence, regex matching, binary/bit and
+  typeless-NULL literals, huge integers, lambda syntax and integer division by
+  zero. The temporary legacy lambda/division overrides and bare-huge-integer
+  parser rewrite are removed. Stata expressions keep their existing translation,
+  precision and missing-value rules.
+- A CSV file on the `using` side of `merge`, `append` and `joinby` is read as
+  `parqit use` reads it: column names as the file writes them (they were
+  lowercased), decimals in double (they were stored as float, with a silent
+  loss of precision) and dates as dates (they were text). A do-file that named
+  such columns in lower case must now use the file's own names (v189).
+- `egen seq()` without `to()` runs to `_N`, the number of observations, and
+  starts again, as native `egen` does; it kept increasing (v189).
+- `partitions(replace|append)` checks every file the tree keeps, in every
+  branch, hidden ones included, against the result, not the tree's first file
+  only: an update of a tree whose files already disagree is refused, naming
+  the first such file in file order whatever the threads (v186). The footers
+  are read on several engine connections at once, at most 512 files at a
+  time. Observed on 6336 files, one query over their footers took as long
+  on 48 threads as on one, or longer; this does not establish its scheduling
+  mechanism. The check adds 0.66 s instead of 1.64 s on that tree.
+
+### Added
+
+- A source build of DuckDB 2.0.0, now the default engine (above). It retains the
+  required hash-checked dependency corrections, explicitly registers the
+  static extensions, preserves offline operation and Stata contracts, and
+  adds migration and PLAIN-string NULL regressions.
+
 ### Fixed
 
+- The engine's byte cache keeps open readers tied to one source generation.
+  Late reads cannot insert old bytes into a replacement file's cache or
+  consume that replacement's bytes. This fixes a deterministic Snappy size
+  mismatch on 1.5.6 and incorrect reads with 2.0's opt-in local cache.
+  Lazy cache misses revalidate before combining cached and newly read bytes;
+  stable cache hits retain their existing I/O savings. Clearing the engine
+  cache no longer reopens an existing reader onto a different file: a new
+  reader observes the replacement. Source files still need to remain stable
+  throughout commands; this is not snapshot isolation.
+- `partitions(replace|append)` follows file links hop by hop, including
+  directory-link dependencies, and refuses an intermediate or final target
+  inside the tree even when the final file is external. An update cannot
+  leave an untouched partition's link dangling by replacing another leaf
+  (v192; Codex final audit, finding 1).
+- Partition rollback handles exceptions separately for each removal and
+  restoration, removes newly created empty parent directories, and reports
+  an incomplete rollback as "NOT as it was". Only recovery copies verified
+  to remain are named; injected removal failures now leave the addition on
+  disk (v191, v192; Codex final audit, finding 2).
+- Both first-file schema and metadata refusals name the tree's reference
+  file. Result and text buffers are owned before subsequent allocations,
+  including explain, compact planning, relaxed schemas and BLOB extraction
+  (Codex final audit, findings 3 and 5; unit tests).
+- `egen group(), label truncate(#)` gives native Stata's value labels: the text
+  of a string or of a value label is cut to `#` display columns and trimmed of
+  its spaces, and a number without a value label stays whole; numbers were cut
+  too ("15 0" became "1 0") (v189).
+- `partitions(append)`: an entry of a staged partition that cannot be read,
+  or staged partitions that cannot be listed, fail the update — rolled back,
+  or before anything is published; a partition could be left out with no
+  error (v186).
+- Parallel R conversion: a batch with a column whose conversion failed is never
+  handed to the engine, a temporal value that fails to convert is never
+  written, and after an error the conversion keeps the memory bound of its
+  read-ahead; SPSS files that declare no case count start no more workers than
+  their blocks. Results and messages are unchanged — the failing conversion
+  always failed and published nothing (unit tests, v188).
+- Parallel SPSS conversion: a worker that fails while it expands its block,
+  before it decodes, ends the conversion with its error; with the read-ahead
+  full, the conversion waited for ever. A worker that restarts a `.zsav` file
+  exactly at the end of a compressed block stands where the one-thread reader
+  stands: a damaged block that the declared cases never reach is no longer an
+  error, and a corrupt code just after the block is reported at the one-thread
+  reader's position. The read-ahead of inflated blocks keeps to 64 MB (its
+  threads inflate into the read-ahead's own slots) and the workers' restart
+  readers to 512 MB, counted from the blocks' declared sizes whatever they
+  are; past them, the one reader does that work, as before. A block that
+  failed fails again if asked for again. Results and messages are the
+  one-thread conversion's (unit tests).
+- The `use`/`collect` fill (its worker threads, its producer and the start of
+  its threads, since 0.5.1), the UTF-8 scan of delimited text and the footer
+  check of `partitions()` record a failure without allocating and word it
+  once their threads have stopped: under memory exhaustion, wording the error
+  could itself fail and end Stata. The command now fails with its error, or
+  a generic one, and a nonzero return code (v183, unit tests).
+- A value of a query result that cannot be copied out of the engine as text
+  for lack of memory is an error; it read as missing, so a `parqit.*`
+  metadata key, a column name or a file name could be dropped without a word,
+  a `tabulate` cell shown empty, or an `egen cut(), group()` cutpoint taken as
+  0 (since 0.5.1; DuckDB's C API answers such a failure as it answers a
+  NULL). `egen cut(), group()` also reads its cutpoints whatever the locale
+  of the C library.
+- `partitions(replace|append)`: a partition that is a symbolic link to a
+  directory is refused. The reader of the tree never follows such a link, so
+  an append into it wrote rows into the link's target, where they were never
+  read. As the reader does, a link to a regular file is checked as a file, and
+  special files, broken links and hidden links to directories are passed over
+  (v186). A link to a file of the tree itself is refused: the reader reads that
+  file twice, and a replace could leave the link reading other rows or none.
+- `partitions(replace|append)` checks the existing tree whatever its first
+  branch holds. Since 0.5.1 the comparison ran only when a file was found
+  down the tree's first branch: an empty first leaf, one holding only hidden
+  files, or a partition linked to an empty directory turned it off, and an
+  update was published that the tree then read without its labels, or whose
+  rows were never read; a FIFO named `*.parquet` there hung the session. The
+  whole tree is now walked before anything is written, and again, under the
+  output lock, before anything is published (v191).
+- `partitions(replace|append)` publishes so that a failure leaves the tree as
+  it was: a failure after a partition was swapped in, or after a file was
+  added, including one of memory, is rolled back (an allocation failing at
+  that point could leave the partitions set aside to be deleted); a rollback
+  that cannot remove what it added says the tree is not as it was; an
+  appended name already there is refused under the coordinated-writer
+  contract (parqit writers hold the output lock). An uncoordinated writer
+  racing that same new name is not detected; publication is not an atomic
+  no-clobber operation (v191; Codex final audit, finding 4, option B).
+- `parqit save ..., partition_by() partitions(append)` fails, and rolls the
+  tree back, when a staged partition's files cannot be listed. It counted the
+  partition as extended and left its new files in the staging tree, which is
+  then removed, so their rows were lost without an error (v186).
+- `help parqit` documents every expression function with its arguments and
+  every `egen` function with its arguments and options, listing only what
+  parqit implements. The former summary said `egen` took the native options,
+  and gave `min()` a `missing` option, although `autotype` and the
+  `label(name, ...)` form of `group()` are not taken and `min()` does not use
+  `missing`; it also omitted the `sum()` synonym and `cut()`'s `lname()`.
+  `help parqit_technical` points to that list. Documentation only; no command
+  changes.
+- Numeric callbacks read the input block's row count once per invocation.
+  DuckDB 2.0 may derive this count from vector buffers; repeating the C API
+  lookup for every row added avoidable cost to correlation, conversion,
+  sampling keys, rounding/modulo and histogram callbacks. The iteration range
+  and all arithmetic remain unchanged.
+- DuckDB 2.0 review: histogram callbacks recover dictionary reuse only after
+  proving their actual bound types and constant limits. The proof evaluates
+  literal constants and matching stateless built-in casts, preserving runtime
+  errors for parameters, dynamic limits, invalid constants and fallible input
+  expressions. Histogram values and public options are unchanged.
+- `collapse`/`pivot`: binomial standard errors require every nonmissing input
+  to be 0 or 1; Poisson standard errors reject negative inputs and round the
+  exact total to an integer before evaluating `sqrt(total)/n`. The public
+  release checked only the mean and omitted Poisson's count rounding.
+  Dedicated exact aggregates avoid double rounding and intermediate overflow,
+  retaining the established exact-value policy instead of reproducing native
+  Stata's arithmetic defects at rounding and overflow boundaries.
+- DuckDB 2.0 review: preserve the underlying plan's ordering and parallel
+  collection when the C API executes a prepared statement through `EXECUTE`.
+  The default collector now analyses the referenced plan without changing its
+  ownership. This restores parallel Parquet collection and prevents explicit
+  `ORDER BY` from being lost when insertion-order preservation is disabled.
+  A regression test checks concurrent producers and exact output order.
+- Parquet range planning no longer issues a doomed metadata query before its
+  existing observed-range pass. Both pinned engines expose logical type
+  annotations in `parquet_schema`, not `parquet_metadata`; the removed query
+  always fell back to that same pass. Storage sizing and transfer-time range
+  and precision guards are unchanged.
+- DuckDB 2.0 review: exact C++ comparison of scanned integer extrema prevents
+  footer statistics from folding away the precision guard. Constant-string
+  page statistics preserve NULL validity, and pruned-page placeholders are
+  excluded before evaluating filters that can accept NULL.
+- DuckDB 2.0 review: CSV conversions follow parsing of the detected type;
+  local paths preserve OS resolution of symlink/`..`; Parquet `UNKNOWN`
+  annotations retain their physical type; schema optionality and legacy Hive
+  NULL markers retain the published contract. Reserved marker checks include
+  case variants and decode literal percent escapes only once.
+- DuckDB 2.0 review: join row bounds respect preserved sides and survive
+  recursive child visits. Volatile window keys are materialised once per row
+  before hashing, sorting, peer detection and RANGE evaluation. This also fixes
+  a pre-existing 1.5.6 defect in volatile inline partition keys; syntactically
+  equivalent window specifications share keys, while separate key occurrences
+  and independent frame offsets remain separate calls.
+- DuckDB 2.0 review: restore finite-result errors for native dispersion and
+  correlation, while native 2.0 integer literals and explicit `BIGNUM` retain
+  their engine types. The asynchronous I/O pool
+  follows the requested query thread budget instead of the host-wide default.
+- DuckDB 2.0 review: recover dictionary evaluation only for internal scalar
+  callbacks whose totality is proved from their actual bound types. Runtime
+  readers share those type rules; value-dependent errors and fallible input
+  expressions retain their ordering guards. Keep the 1.5.6 streaming-buffer
+  default and RESET budget of 1,000,000 bytes.
 - Tests: the forged-footer oracle of `v49` reads the data page and the footer
   statistic with pyarrow instead of the `duckdb` CLI; a DuckDB 2.0.0
   development CLI answers `max()` from the forged statistics, which stopped
-  the test before parqit ran. The plugin embeds DuckDB 1.5.6 regardless of
+  the test before parqit ran. The plugin uses its embedded engine regardless of
   any CLI installed on the host.
 
 ## [0.5.1] — 2026-10-21

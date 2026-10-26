@@ -34,7 +34,8 @@ licensed suite against the staged package and verify the exact CI binaries.
   (GCC ≥ 10 on Linux, GCC 14 on macOS, or MSVC 2019+).
 - Network access on the first configure (CMake fetches pinned sources and
   verifies their SHA256), **or** pre-downloaded archives. DuckDB uses
-  `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-1.5.6.tar.gz`.
+  `-DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-2.0.0.tar.gz` (the 1.5.6 archive
+  for the optional 1.5.6 build).
 - macOS uses Homebrew `gcc@14`; put its `bin` directory on PATH. Build each
   architecture on its corresponding host. The preset rejects a compiler
   targeting the wrong architecture. Its compiler runtime is linked statically.
@@ -44,6 +45,28 @@ licensed suite against the staged package and verify the exact CI binaries.
   Interface header, nlohmann/json and doctest are vendored in `vendor/`.
 
 ## One-command builds
+
+DuckDB 2.0.0 is the default engine, by the maintainer's decision; the
+distributed plugins embed it. `-DPARQIT_DUCKDB_VERSION=1.5.6` remains an
+optional build, no longer distributed, for comparisons and fallback. The 2.0.0
+build sets `DUCKDB_OPTIMIZATION_PROFILE=NONE`: DuckDB 2.0's default profile
+would compile the engine for x86-64-v3 (AVX2) on Linux, which the plugin must
+not require. Raw SQL
+uses the native 2.0 dialect under the maintainer's explicit policy; the helps
+document changes from 1.5.6, independently of the preserved Stata-expression
+contract. Performance acceptance considers absolute timings, variability and
+scale, with small costs weighed against substantial gains in other workflows.
+Keep a 1.5.6 build directory and its
+`PARQIT_LOCAL_ADO_DIR` separate from the default installation. Both supported
+build choices have fixed archive hashes; every other engine version is refused.
+The [initial audit](docs/audits/AUDITORIA_MIGRACAO_DUCKDB_2_0_0_2026-10-22.md)
+and [remediation report](docs/audits/CORRECOES_MIGRACAO_DUCKDB_2_0_0_2026-10-22.md)
+record the corrections, executed checks and conditions for accepting the upgrade.
+The [source study](docs/audits/ESTUDO_DUCKDB_1_5_6_2_0_0_2026-10-23.md) and
+[implementation results](docs/audits/IMPLEMENTACAO_PARALELISMO_DUCKDB_2_0_0_2026-10-23.md)
+record the subsequent prepared-execution correction and its measured effects.
+Set `-DPARQIT_LOCAL_ADO_DIR=<isolated-build>/ado/plus/p` explicitly for **both**
+comparison builds; the normal build default refreshes the repository's ado tree.
 
 On Linux, `bash build.sh` provides a convenience wrapper around the existing
 CMake preset: it checks GCC/CMake, builds with two jobs and runs the C++ checks.
@@ -72,8 +95,10 @@ cmake --preset windows && cmake --build --preset windows
 
 The plugin lands at `build/<preset>/parqit.plugin`. The first build compiles
 DuckDB from source and takes several minutes; afterwards only parqit's own
-files recompile. The pinned engine also receives hash-checked local fixes:
-source pins accept uniform LF or CRLF encodings, with the same canonical hash;
+files recompile. The pinned engine also receives hash-checked local fixes; the
+2.0.0 corrections are listed in [vendor/VERSIONS.md](vendor/VERSIONS.md), and
+those of the optional 1.5.6 build follow. Source pins accept uniform LF or
+CRLF encodings, with the same canonical hash;
 mixed endings and unknown content are refused. Staging is verified before a
 source is replaced, and CI also reconfigures the already-patched source tree.
 The fixes cover
@@ -118,6 +143,24 @@ zero memory errors, including errors after the assertions have passed.
 a change. Its default is the repo's `ado/plus/p`. Keep a deliberately isolated
 staging path while testing, and point a fresh Stata process at that directory;
 do not overwrite a historical install merely to restore the default.
+
+A ThreadSanitizer harness of the SPSS and R reader workers (`tests/tsan`, with
+the fault and delay hooks `PARQIT_TEST_FAULT` / `PARQIT_TEST_DELAY`) builds in a
+directory of its own:
+
+```bash
+cmake -S . -B build/tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPARQIT_TSAN=ON \
+      -DPARQIT_LOCAL_ADO_DIR="$PWD/build/tsan/ado/plus/p"
+cmake --build build/tsan --target parqit_tsan_readers -j
+ctest --test-dir build/tsan -R tsan_readers --output-on-failure
+```
+
+It needs GCC or Clang with `libtsan`; where the compiler in use lacks it (for
+example gcc-toolset-12 on EL9), add `-DCMAKE_EXE_LINKER_FLAGS=-B<dir of a
+compiler that has it>`. The harness links only DuckDB's bundled miniz and zstd:
+a TSan binary with the whole static engine segfaulted at start-up where it was
+written, so the engine's reading of the Arrow batches is emulated, not
+instrumented.
 
 ## Using parqit from the repo (recommended)
 

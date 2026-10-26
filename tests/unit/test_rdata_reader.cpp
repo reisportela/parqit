@@ -8,23 +8,35 @@
  * against R itself (readRDS / load) on files R wrote. */
 #include "doctest.h"
 
+#include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
+#include <new>
+#include <random>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "duckdb.h"
+#include "engine/rdata_convert.hpp"
+#include "engine/rdata_parallel.hpp"
 #include "engine/rdata_plan.hpp"
 #include "engine/rdata_reader.hpp"
 #include "engine/rdata_table.hpp"
 #include "engine/session.hpp"
+#include "engine/test_fault.hpp"
 #include "miniz.hpp"
+#include "test_env.hpp"
 #include "test_tmp.hpp"
 #include "zstd.h"
 
@@ -898,6 +910,44 @@ TEST_CASE("R-READ-1: the plan: types, labels, dates, missing values, names and m
     CHECK(got == "2|2020-03-01|2020-03-01 00:00:00.5|01:01:01|1.0|9007199254740993|0|a;"
                  "1|2020-03-02|1970-01-01 00:00:00|00:00:00|NULL|NULL|2|b;"
                  "NULL|NULL|NULL|23:59:59.5|NULL|-5|1|c");
+
+    /* RDATA-PARALLEL-1: the Arrow batches (rows in batches of 1 and 2, four
+     * workers over the columns) write the table function's file */
+    auto dump = [&](const std::string &f) {
+        std::string types, kv;
+        REQUIRE(s.query_scalar("SELECT string_agg(column_name || ' ' || column_type, ',') FROM (DESCRIBE "
+                               "SELECT * FROM read_parquet(" + parqit::quote_literal(f) + "))",
+                               &types, &err));
+        REQUIRE(s.query_scalar("SELECT string_agg(decode(key) || '=' || decode(value), ';' ORDER BY "
+                               "decode(key)) FROM parquet_kv_metadata(" + parqit::quote_literal(f) + ")",
+                               &kv, &err));
+        return types + "#" + kv;
+    };
+    auto every_cell = [&](const std::string &f) {
+        std::string cells;
+        REQUIRE(s.query_scalar("SELECT string_agg(concat_ws('|', COLUMNS(*)::VARCHAR), ';' ORDER BY "
+                               "file_row_number) FROM read_parquet(" + parqit::quote_literal(f) +
+                                   ", file_row_number = true)",
+                               &cells, &err));
+        return cells;
+    };
+    for (int64_t batch_rows : {1, 2}) {
+        const std::string out_ar = parqit_test::tmp_path("rdata_plan_arrow.parquet");
+        RdataArrowSource src(sp, 4, batch_rows);
+        src.start();
+        REQUIRE(duckdb_arrow_scan(s.con(), "rdata_arrow_view",
+                                  reinterpret_cast<duckdb_arrow_stream>(src.stream())) == DuckDBSuccess);
+        REQUIRE_MESSAGE(s.exec("COPY (SELECT * FROM rdata_arrow_view) TO " + parqit::quote_literal(out_ar) +
+                                   " (FORMAT PARQUET, " + sp->kv_metadata_sql + ")",
+                               &err),
+                        err);
+        CHECK(src.finish().empty());
+        CHECK(src.batches() == (batch_rows == 1 ? 3 : 2));
+        s.exec("DROP VIEW IF EXISTS rdata_arrow_view", &err);
+        CHECK(every_cell(out_ar) == every_cell(out));
+        CHECK(dump(out_ar) == dump(out));
+        std::remove(out_ar.c_str());
+    }
     std::remove(out.c_str());
     std::remove(path.c_str());
 }
@@ -1155,4 +1205,427 @@ TEST_CASE("R-AUDIT: malformed compact sequences are rejected before integer cast
             std::remove(path.c_str());
         }
     }
+}
+
+TEST_CASE("RDATA-PARALLEL-1: the eight-bytes-at-a-time gzip CRC-32 is miniz's") {
+    std::mt19937 rng(20261024);
+    std::vector<unsigned char> buf(1 << 16);
+    for (auto &b : buf) b = static_cast<unsigned char>(rng());
+    /* every length and alignment up to 64, then whole buffers in uneven pieces */
+    for (size_t off = 0; off < 9; off++)
+        for (size_t n = 0; n <= 64; n++)
+            CHECK(parqit::rdata::gzip_crc32(0, buf.data() + off, n) ==
+                  static_cast<uint32_t>(duckdb_miniz::mz_crc32(0, buf.data() + off, n)));
+    uint32_t a = 0;
+    duckdb_miniz::mz_ulong b = 0;
+    for (size_t at = 0; at < buf.size();) {
+        const size_t n = std::min<size_t>(buf.size() - at, 1 + rng() % 5000);
+        a = parqit::rdata::gzip_crc32(a, buf.data() + at, n);
+        b = duckdb_miniz::mz_crc32(b, buf.data() + at, n);
+        at += n;
+    }
+    CHECK(a == static_cast<uint32_t>(b));
+    const unsigned char check[] = "123456789"; /* the CRC-32 check value */
+    CHECK(parqit::rdata::gzip_crc32(0, check, 9) == 0xCBF43926u);
+}
+
+namespace {
+
+/* A5: a conversion's stream read as the engine reads it, alone; every run
+ * must end within 5 seconds (a hang fails the test instead of the suite) */
+struct Drained {
+    int64_t rows = 0, peak = 0, max = 0;
+    int workers = 0;
+    bool failed = false;
+    std::string message, finish;
+};
+
+/* sync forces an interleaving (PARQIT_TEST_SYNC); delay_ms is a slow engine */
+Drained drain(const std::shared_ptr<const Plan> &plan, int threads, int64_t batch_rows,
+              const std::string &fault, int64_t stop_after = -1, const std::string &sync = "",
+              int delay_ms = 0) {
+    parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", fault);
+    parqit_test::ScopedEnv order("PARQIT_TEST_SYNC", sync);
+    parqit::test_sync_reset();
+    auto src = std::make_shared<RdataArrowSource>(plan, threads, batch_rows);
+    std::packaged_task<Drained()> task([src, stop_after, delay_ms] {
+        Drained d;
+        src->start();
+        ArrowArrayStream *st = src->stream();
+        for (int64_t k = 0; stop_after < 0 || k < stop_after; k++) {
+            ArrowArray a{};
+            if (st->get_next(st, &a) != 0) {
+                d.failed = true;
+                d.message = st->get_last_error(st);
+                break;
+            }
+            if (!a.release) break;
+            d.rows += a.length;
+            a.release(&a);
+            if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+        d.finish = src->finish();
+        d.peak = src->peak_batches();
+        d.max = src->max_batches();
+        d.workers = src->workers();
+        return d;
+    });
+    auto done = task.get_future();
+    std::thread(std::move(task)).detach();
+    REQUIRE_MESSAGE(done.wait_for(std::chrono::seconds(5)) == std::future_status::ready, "hung: " << fault);
+    return done.get();
+}
+
+/* a destination of convert_rows that fails at one row */
+struct ThrowAt {
+    uint64_t at;
+    void hit(uint64_t r) const {
+        if (r == at) throw std::bad_alloc();
+    }
+    void text(uint64_t r, const char *, size_t) { hit(r); }
+    void boolean(uint64_t r, bool) { hit(r); }
+    void i64(uint64_t r, int64_t) { hit(r); }
+    void i32(uint64_t r, int32_t) { hit(r); }
+    void f64(uint64_t r, double) { hit(r); }
+    void days(uint64_t r, int32_t) { hit(r); }
+    void timestamp(uint64_t r, int64_t) { hit(r); }
+    void time(uint64_t r, int64_t) { hit(r); }
+    void valid(uint64_t, bool) {}
+    void code(uint64_t, int8_t) {}
+};
+
+} // namespace
+
+TEST_CASE("A5 (F12): a failing read or destination names the row being converted") {
+    std::vector<double> v(3000);
+    for (size_t i = 0; i < v.size(); i++) v[i] = static_cast<double>(i) + 0.5;
+    X x;
+    x.header();
+    data_frame(x, {{"d", [&](X &x) { x.reals(v); }}}, 3000);
+    const std::string path = write_file("rdata_a5_rows.rds", x.b);
+    const Plan plan = make_plan(path, opts());
+    REQUIRE(plan.cols.size() == 1);
+    std::string text;
+    {
+        /* the destination fails after the read: the row is the one read */
+        Cursor cur(plan.parsed.source, plan.cols[0].vec, plan.parsed.codec);
+        ThrowAt o{2047};
+        uint64_t row = 0;
+        CHECK_THROWS_AS(convert_rows(plan, plan.cols[0], cur, 0, 3000, o, &text, &row), std::bad_alloc);
+        CHECK(row == 2047);
+        CHECK(cur.index() == 2048);
+    }
+    {
+        /* the read itself fails at element 2047 (it crosses the end of the
+         * stream): the cursor stays on the failing element */
+        VecRef near_end = plan.cols[0].vec;
+        near_end.offset = plan.parsed.source->size() - 2047 * 8 - 4;
+        Cursor cut(plan.parsed.source, near_end, plan.parsed.codec, 4096);
+        for (int i = 0; i < 2047; i++) cut.next_real();
+        CHECK(cut.index() == 2047);
+        CHECK_THROWS_AS(cut.next_real(), RError);
+        CHECK(cut.index() == 2047);
+    }
+    std::remove(path.c_str());
+}
+
+TEST_CASE("A5 (F12): the first error is the table function's whatever the batch size") {
+    /* two Date columns of 3000 rows, changed in place after the profile (same
+     * size and time): column b no longer fits at row 1, column a at row 4. The
+     * table function meets column a's first (vector 0, column 0, row 3), and
+     * so must the batches, of 3 rows (a later batch) and of the default */
+    const int n = 3000;
+    std::vector<double> days(static_cast<size_t>(n));
+    for (int i = 0; i < n; i++) days[static_cast<size_t>(i)] = 18000.0 + i % 400;
+    X x;
+    x.header();
+    data_frame(x,
+               {{"a", [&](X &x) {
+                     x.reals(days, 1, 1);
+                     x.class_attr({"Date"});
+                     x.nil();
+                 }},
+                {"b", [&](X &x) {
+                     x.reals(days, 1, 1);
+                     x.class_attr({"Date"});
+                     x.nil();
+                 }}},
+               n);
+    const std::string path = write_file("rdata_a5_order.rds", x.b);
+    auto plan = std::make_shared<const Plan>(make_plan(path, opts()));
+    REQUIRE(plan->cols.size() == 2);
+    const auto stamp = std::filesystem::last_write_time(path);
+    auto patch = [&](size_t col, int row) {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        const auto at = static_cast<std::streamoff>(plan->cols[col].vec.offset + 8 * static_cast<uint64_t>(row));
+        char be[8];
+        f.seekg(at);
+        f.read(be, 8);
+        uint64_t was = 0;
+        for (int k = 0; k < 8; k++) was = (was << 8) | static_cast<unsigned char>(be[k]);
+        double old;
+        std::memcpy(&old, &was, 8);
+        REQUIRE(old == days[static_cast<size_t>(row)]);
+        const double bad = 1e300;
+        uint64_t u;
+        std::memcpy(&u, &bad, 8);
+        for (int k = 0; k < 8; k++) be[k] = static_cast<char>(u >> (8 * (7 - k)));
+        f.seekp(at);
+        f.write(be, 8);
+    };
+    patch(1, 0);
+    patch(0, 3);
+    std::filesystem::last_write_time(path, stamp);
+    parqit::Session &s = parqit::Session::instance();
+    REQUIRE(s.ensure_open());
+    std::string want;
+    {
+        const PlanRegistration reg(plan);
+        const std::string out = parqit_test::tmp_path("rdata_a5_order.parquet");
+        CHECK_FALSE(s.exec("COPY (SELECT * FROM parqit_read_rdata(" + parqit::quote_literal(reg.token()) +
+                               ")) TO " + parqit::quote_literal(out) + " (FORMAT PARQUET)",
+                           &want));
+        std::remove(out.c_str());
+    }
+    CHECK(contains(want, "column a, row 4"));
+    for (int64_t rows : {3, 0})
+        for (int threads : {2, 4}) {
+            INFO("batch rows " << rows << ", threads " << threads);
+            const Drained d = drain(plan, threads, rows, "");
+            CHECK(d.failed);
+            CHECK(contains(d.message, "column a, row 4"));
+            CHECK(contains(want, d.message));
+            CHECK(d.finish == d.message);
+        }
+    std::remove(path.c_str());
+}
+
+/* two Date columns, a and b, of 3000 rows, changed in place after the profile
+ * (same size and time) so that each (column, row) given no longer fits */
+static std::shared_ptr<const Plan> changed_dates(const std::string &name,
+                                                 const std::vector<std::pair<size_t, int>> &bad) {
+    const int n = 3000;
+    std::vector<double> days(static_cast<size_t>(n));
+    for (int i = 0; i < n; i++) days[static_cast<size_t>(i)] = 18000.0 + i % 400;
+    auto date = [&](X &x) {
+        x.reals(days, 1, 1);
+        x.class_attr({"Date"});
+        x.nil();
+    };
+    X x;
+    x.header();
+    data_frame(x, {{"a", date}, {"b", date}}, n);
+    const std::string path = write_file(name, x.b);
+    auto plan = std::make_shared<const Plan>(make_plan(path, opts()));
+    REQUIRE(plan->cols.size() == 2);
+    const auto stamp = std::filesystem::last_write_time(path);
+    for (const auto &[col, row] : bad) {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        const auto at = static_cast<std::streamoff>(plan->cols[col].vec.offset + 8 * static_cast<uint64_t>(row));
+        const double worse = 1e300;
+        uint64_t u;
+        std::memcpy(&u, &worse, 8);
+        char be[8];
+        for (int k = 0; k < 8; k++) be[k] = static_cast<char>(u >> (8 * (7 - k)));
+        f.seekp(at);
+        f.write(be, 8);
+    }
+    std::filesystem::last_write_time(path, stamp);
+    return plan;
+}
+
+TEST_CASE("G5: a batch with a failed column is never handed on, in any order of the workers") {
+    /* Column b no longer fits at row 1, column a at row 4; batches of 3 on two
+     * workers, one column each. The forced order: b's worker records its error
+     * in batch 0, then waits until a's has recorded the earlier one (vector 0,
+     * column a, row 4) in batch 1, and only then finishes batch 0, which must
+     * not be handed on with b unconverted. Every batch lies in the error's
+     * vector, so none is handed on in any order. */
+    auto plan = changed_dates("rdata_g5.rds", {{1, 0}, {0, 3}});
+    for (const char *sync : {"rdata_failed:0>rdata_failed:1", "rdata_failed:1>rdata_failed:0", ""})
+        for (int rep = 0; rep < 5; rep++) {
+            INFO(sync << ", rep " << rep);
+            const Drained d = drain(plan, 2, 3, "", -1, sync);
+            CHECK(d.failed);
+            CHECK(contains(d.message, "column a, row 4"));
+            CHECK(d.rows == 0);
+            CHECK(d.finish == d.message);
+        }
+    /* the same order when b's conversion throws in batch 0 (rdata_column:
+     * batch * 100000 + column) */
+    auto thrown = changed_dates("rdata_g5x.rds", {{0, 3}});
+    for (int rep = 0; rep < 5; rep++) {
+        INFO("thrown, rep " << rep);
+        const Drained d = drain(thrown, 2, 3, "rdata_column:1", -1, "rdata_failed:0>rdata_failed:1");
+        CHECK(d.failed);
+        CHECK(contains(d.message, "column a, row 4"));
+        CHECK(d.rows == 0);
+    }
+    std::remove(plan->path.c_str());
+    std::remove(thrown->path.c_str());
+}
+
+TEST_CASE("G8: after an error the R conversion keeps no more batches than before it") {
+    /* column b no longer fits at row 2001; the work before it (column a to the
+     * end of vector 0) runs on while a slow engine reads: the batches alive
+     * never exceed the bound kept before the error, and every batch before the
+     * error's is handed on whole */
+    auto plan = changed_dates("rdata_g8.rds", {{1, 2000}});
+    for (int rep = 0; rep < 3; rep++) {
+        INFO("rep " << rep);
+        const Drained d = drain(plan, 2, 3, "", -1, "", 1);
+        CHECK(d.failed);
+        CHECK(contains(d.message, "column b, row 2001"));
+        CHECK(d.rows == 1998);
+        CHECK(d.peak >= 1);
+        CHECK(d.peak <= d.max);
+        CHECK(d.workers == 2);
+    }
+    std::remove(plan->path.c_str());
+}
+
+TEST_CASE("A5: a failing worker, allocation or thread ends the parallel R conversion with its error") {
+    /* 300 rows of three columns in batches of 3 (100 batches) on three
+     * workers; PARQIT_TEST_FAULT throws std::bad_alloc at one place */
+    std::vector<double> d(300);
+    std::vector<int32_t> iv(300);
+    std::vector<std::string> sv(300);
+    for (int k = 0; k < 300; k++) {
+        d[static_cast<size_t>(k)] = k + 0.25;
+        iv[static_cast<size_t>(k)] = k;
+        sv[static_cast<size_t>(k)] = "s" + std::to_string(k % 7);
+    }
+    X x;
+    x.header();
+    data_frame(x,
+               {{"d", [&](X &x) { x.reals(d); }},
+                {"i", [&](X &x) { x.ints(iv); }},
+                {"s", [&](X &x) { x.strs(sv); }}},
+               300);
+    const std::string path = write_file("rdata_a5_faults.rds", x.b);
+    auto plan = std::make_shared<const Plan>(make_plan(path, opts()));
+    for (int rep = 0; rep < 10; rep++) {
+        const Drained clean = drain(plan, 4, 3, "");
+        CHECK_FALSE(clean.failed);
+        CHECK(clean.rows == 300);
+        CHECK(clean.finish.empty());
+        CHECK(clean.workers == 3); /* G10: the workers created, one per column */
+        CHECK(clean.peak <= clean.max);
+        for (const char *site : {"rdata_batch", "rdata_convert", "rdata_ready"})
+            for (int b : {0, 3, 99}) {
+                const std::string fault = std::string(site) + ":" + std::to_string(b);
+                INFO(fault);
+                const Drained o = drain(plan, 4, 3, fault);
+                CHECK(o.failed);
+                CHECK(o.rows <= 3 * b);
+                CHECK_FALSE(o.message.empty());
+                CHECK(o.finish == o.message);
+            }
+        const Drained no_thread = drain(plan, 4, 3, "rdata_thread:2");
+        CHECK(no_thread.failed);
+        CHECK(contains(no_thread.message, "could not start the R conversion workers"));
+        const Drained cancelled = drain(plan, 4, 3, "", 2); /* the engine stops reading */
+        CHECK(cancelled.rows == 6);
+        CHECK(cancelled.finish.empty());
+    }
+    /* an exception between registering a plan and the COPY leaves none behind */
+    const size_t before = registered_plans();
+    try {
+        const PlanRegistration reg(plan);
+        CHECK(registered_plans() == before + 1);
+        throw std::runtime_error("between registering and the COPY");
+    } catch (const std::runtime_error &) {
+    }
+    CHECK(registered_plans() == before);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("A2: an R batch stays within 64 MB, down to one row") {
+    CHECK(batch_rows_for(1) == 122880);
+    CHECK(batch_rows_for(546) == 122880);
+    CHECK(batch_rows_for(547) == 120832);  /* 122685 rows, in whole vectors */
+    CHECK(batch_rows_for(32768) == 2048);
+    CHECK(batch_rows_for(32769) == 2047);  /* below a vector: any number */
+    CHECK(batch_rows_for(int64_t(40) << 20) == 1);
+    CHECK(batch_rows_for(int64_t(1) << 40) == 1);
+    for (int64_t b = 1; b < (int64_t(1) << 28); b = b * 3 + 1) {
+        const int64_t rows = batch_rows_for(b);
+        INFO("row bytes " << b);
+        CHECK(rows >= 1);
+        CHECK((rows * b <= (int64_t(64) << 20) || rows == 1));
+    }
+}
+
+TEST_CASE("A3: the R route is chosen from the frame's rows; both profiles plan the same") {
+    ReadOptions o = opts();
+    o.threads = 4;
+    const Compression gz = Compression::Gzip;
+    o.parallel_min_rows = 1000;
+    CHECK(parallel_route(1000, gz, o));
+    CHECK_FALSE(parallel_route(999, gz, o));
+    o.parallel_min_rows = 0;
+    CHECK(parallel_route(1, gz, o));
+    o.route = 0;
+    CHECK_FALSE(parallel_route(1 << 20, gz, o));
+    o.route = 1;
+    o.parallel_min_rows = int64_t(1) << 40;
+    CHECK(parallel_route(1, gz, o));
+    o.threads = 1;
+    CHECK_FALSE(parallel_route(1, gz, o));
+    /* the measured rule (ASSUMPTIONS #229): by compression and thread regime */
+    CHECK(parallel_min_rows(48, Compression::Gzip) == 1000000);
+    CHECK(parallel_min_rows(8, Compression::Zstd) == 500000);
+    CHECK(parallel_min_rows(8, Compression::None) == 500000);
+    CHECK(parallel_min_rows(2, Compression::None) == 2000000);
+    o.route = -1;
+    o.parallel_min_rows = -1;
+    o.threads = 48;
+    CHECK(parallel_route(1000000, gz, o));
+    CHECK_FALSE(parallel_route(999999, gz, o));
+    CHECK(parallel_route(500000, Compression::Zstd, o));
+    o.threads = 4;
+    CHECK_FALSE(parallel_route(1999999, Compression::None, o));
+    /* the serial and the parallel profile of the same file plan the same */
+    const std::string path = write_file("rdata_a3.rds", basic_rds());
+    ReadOptions ser = opts(), par = opts();
+    ser.threads = par.threads = 4;
+    ser.route = 0;
+    par.route = 1;
+    const Plan a = make_plan(path, ser), b = make_plan(path, par);
+    CHECK_FALSE(a.profile_parallel);
+    CHECK_FALSE(a.parallel);
+    CHECK(b.profile_parallel);
+    CHECK(b.parallel);
+    CHECK(a.nrow == b.nrow);
+    REQUIRE(a.cols.size() == b.cols.size());
+    for (size_t i = 0; i < a.cols.size(); i++) {
+        CHECK(a.cols[i].kind == b.cols[i].kind);
+        CHECK(a.cols[i].stata_type == b.cols[i].stata_type);
+        CHECK(a.cols[i].max_bytes == b.cols[i].max_bytes);
+        CHECK(a.cols[i].companion == b.cols[i].companion);
+    }
+    CHECK(a.kv_metadata_sql == b.kv_metadata_sql);
+    CHECK(a.notes == b.notes);
+    CHECK(a.transcoded_cells == b.transcoded_cells);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("G4: the measured R route just below, at and just above each threshold, at 7 and 8 threads") {
+    ReadOptions o = opts();
+    o.route = -1;
+    o.parallel_min_rows = -1;
+    for (int threads : {7, 8, 48})
+        for (Compression c : {Compression::None, Compression::Gzip, Compression::Zstd}) {
+            INFO("threads " << threads << ", compression " << static_cast<int>(c));
+            o.threads = threads;
+            const int64_t t = parallel_min_rows(threads, c);
+            CHECK_FALSE(parallel_route(t - 1, c, o));
+            CHECK(parallel_route(t, c, o));
+            CHECK(parallel_route(t + 1, c, o));
+        }
+    for (Compression c : {Compression::None, Compression::Gzip, Compression::Zstd})
+        CHECK(parallel_min_rows(7, c) == 2000000);
+    CHECK(parallel_min_rows(8, Compression::Gzip) == 1000000);
+    CHECK(parallel_min_rows(8, Compression::Zstd) == 500000);
+    CHECK(parallel_min_rows(8, Compression::None) == 500000);
 }

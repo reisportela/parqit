@@ -28,7 +28,7 @@ assert _N == 1000 & m == i
 parqit close _all
 * The volatile body is held in lambda bind data, not ordinary children.
 foreach argument in 1 i {
-    parqit sql "SELECT i%2 AS g,list_transform([`argument'],y -> random())[1] AS x FROM range(1000) t(i)"
+    parqit sql "SELECT i%2 AS g,list_transform([`argument'],lambda y : random())[1] AS x FROM range(1000) t(i)"
     parqit egen double m = mean(x), by(g)
     parqit collect, clear
     assert _N == 1000

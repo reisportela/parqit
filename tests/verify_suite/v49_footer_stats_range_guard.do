@@ -1,8 +1,9 @@
 * v49 — NUM1/IO1 (+T2): a narrowing fill must never silently convert a real
 * value to missing.
 *
-* The F2 fast path sizes byte/int/long/float columns from the Parquet
-* footer's stats_min/max (exact for honest writers — the spec requires it).
+* DuckDB can answer observed-range aggregates from Parquet footer statistics
+* (exact for honest writers — the spec requires it), even without an explicit
+* parquet_metadata query. Keep the actual-value guard during transfer.
 * A file whose footer UNDERSTATES the true range (hand-forged here by
 * byte-patching the stats while leaving the data pages intact, the same
 * class as a historically-buggy writer) made parqit pick a too-narrow Stata

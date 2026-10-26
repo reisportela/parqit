@@ -30,6 +30,22 @@ bool register_table_function(duckdb_connection con, std::string *err);
  * releases it (also on failure). */
 std::string register_plan(std::shared_ptr<const Plan> plan);
 void release_plan(const std::string &token);
+/* plans registered now (the tests' check that none is left behind) */
+size_t registered_plans();
+
+/* One conversion's registration, released on every path out of its scope, an
+ * exception between registering and the COPY included (A5). */
+class PlanRegistration {
+  public:
+    explicit PlanRegistration(std::shared_ptr<const Plan> plan) : token_(register_plan(std::move(plan))) {}
+    ~PlanRegistration() { release_plan(token_); }
+    PlanRegistration(const PlanRegistration &) = delete;
+    PlanRegistration &operator=(const PlanRegistration &) = delete;
+    const std::string &token() const { return token_; }
+
+  private:
+    std::string token_;
+};
 
 } // namespace spss
 } // namespace parqit

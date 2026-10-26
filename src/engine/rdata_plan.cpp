@@ -1,6 +1,7 @@
 #include "engine/rdata_plan.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -8,6 +9,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <thread>
 
 #include "json.hpp"
 
@@ -530,6 +532,18 @@ size_t Plan::companions() const {
 
 /* ------------------------------------------------------------------ plan */
 
+int64_t parallel_min_rows(int threads, Compression compression) {
+    if (threads >= 8) return compression == Compression::Gzip ? 1000000 : 500000;
+    return 2000000;
+}
+
+bool parallel_route(int64_t nrow, Compression compression, const ReadOptions &opt) {
+    if (opt.threads < 2) return false;
+    if (opt.route >= 0) return opt.route == 1;
+    if (opt.parallel_min_rows == 0) return true;
+    return nrow >= (opt.parallel_min_rows > 0 ? opt.parallel_min_rows : parallel_min_rows(opt.threads, compression));
+}
+
 Plan make_plan(const std::string &path, const ReadOptions &opt) {
     Plan plan;
     plan.path = path;
@@ -629,6 +643,45 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
     std::vector<size_t> became_ts, became_days, date_nonfinite, time_seconds, ts_numbers, factor_text,
         bad_codes, tz_notes, tagged_cols, bad_tag_cols, no_code_cols, deferred_cols;
     std::vector<std::string> long_labels, char_labels, str_missing;
+    /* RDATA-PARALLEL-1: one column's profile reads only that column (its own
+     * cursor) and its user-missing values, fixed above, so the columns are
+     * profiled on opt.threads threads before the choices below are made in
+     * column order; a failure is the lowest failing column's, as serially */
+    std::vector<Profile> profiles(plan.cols.size());
+    /* A3: the route, from the frame's dimensions, before any value is read */
+    plan.parallel = parallel_route(plan.nrow, plan.parsed.info.compression, opt);
+    plan.profile_parallel = opt.threads > 1 && (opt.profile >= 0 ? opt.profile == 1 : plan.parallel);
+    {
+        const Attrs empty;
+        auto levels_of = [&](size_t k) -> size_t {
+            const ColumnSpec &s = plan.cols[k];
+            const Attrs &a = s.col >= 0 ? fr.cols[static_cast<size_t>(s.col)].attrs : empty;
+            const RValue *levels = sems[k] == Sem::Factor ? attr_of(a, "levels") : nullptr;
+            return levels && levels->type == STRSXP && levels->kept() ? levels->strs.size() : 0;
+        };
+        const size_t ncols = plan.cols.size();
+        const size_t nthreads = std::min<size_t>(plan.profile_parallel ? opt.threads : 1, std::max<size_t>(1, ncols));
+        std::vector<std::exception_ptr> errs(ncols);
+        std::atomic<size_t> next{0};
+        auto run = [&]() {
+            for (size_t k; (k = next.fetch_add(1)) < ncols;) {
+                try {
+                    profiles[k] = profile_column(plan, plan.cols[k], sems[k], levels_of(k));
+                } catch (...) {
+                    errs[k] = std::current_exception();
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        try {
+            for (size_t t = 1; t < nthreads; t++) pool.emplace_back(run);
+        } catch (...) {
+        }
+        run();
+        for (std::thread &t : pool) t.join();
+        for (const std::exception_ptr &e : errs)
+            if (e) std::rethrow_exception(e);
+    }
     for (size_t k = 0; k < plan.cols.size(); k++) {
         ColumnSpec &s = plan.cols[k];
         const Sem sem = sems[k];
@@ -637,7 +690,7 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
         const RValue *levels = sem == Sem::Factor ? attr_of(a, "levels") : nullptr;
         const bool levels_ok = levels && levels->type == STRSXP && levels->kept();
         const size_t nlevels = levels_ok ? levels->strs.size() : 0;
-        const Profile p = profile_column(plan, s, sem, nlevels);
+        const Profile &p = profiles[k];
         s.transcoded_cells = p.transcoded;
         plan.transcoded_cells += p.transcoded;
         const bool is_int = s.vec.type == INTSXP;

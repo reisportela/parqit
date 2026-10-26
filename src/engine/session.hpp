@@ -11,7 +11,11 @@
  */
 #pragma once
 
+#include <exception>
+#include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "duckdb.h"
 
@@ -70,6 +74,19 @@ class Session {
      * NULL). */
     bool query_scalar(const std::string &sql, std::string *value, std::string *err);
 
+    /* PART-SCHEMA-PARALLEL-1: independent read-only queries run on up to
+     * `threads` connections to this database at once (this session's and
+     * others opened for the call), for work the engine does serially within
+     * a query, such as reading many Parquet footers. Each query's rows as
+     * text (an empty optional for NULL), or its error, in the order given:
+     * what running them one after another returns. */
+    struct TextResult {
+        std::string err; /* empty: the query ran */
+        std::vector<std::vector<std::optional<std::string>>> rows;
+        std::exception_ptr failure; /* internal: a worker's failure, worded after the join */
+    };
+    std::vector<TextResult> query_text_many(const std::vector<std::string> &sqls, int threads);
+
     /* Register nonthrowing moment aggregates only for an overflow retry. */
     bool prepare_stats_fallback(std::string *err);
 
@@ -113,6 +130,41 @@ class Session {
  * Identifiers are quoted with quote_ident. */
 std::string quote_literal(const std::string &s);
 std::string quote_ident(const std::string &s);
+
+/* duckdb_value_varchar, except that a cell that is not NULL but comes back
+ * without text throws std::bad_alloc instead of reading as NULL: the C API
+ * returns nullptr for both, its copy failing to allocate
+ * (capi/cast/utils.hpp ToCStringCastWrapper, generic.hpp TryCastCInternal;
+ * Codex audit, round 2, finding 2). nullptr still means SQL NULL; the caller
+ * frees the text with duckdb_free. A type the C API has no text for keeps
+ * its answer (c_api_text_type). */
+char *result_varchar(duckdb_result *res, idx_t col, idx_t row);
+
+/* Length-bearing text extraction shared with the plugin and its unit tests
+ * (Codex final audit, finding 3). */
+std::string text_cell(duckdb_result &res, idx_t col, idx_t row = 0,
+                      const std::string &missing = ".");
+
+/* result_varchar's text, freed with duckdb_free when it goes out of scope,
+ * and a materialised result destroyed when its guard does, so that a failure
+ * between two reads leaks neither (Fable final audit, A7) */
+using CText = std::unique_ptr<char, void (*)(void *)>;
+inline CText result_text(duckdb_result *res, idx_t col, idx_t row) {
+    return CText(result_varchar(res, col, row), duckdb_free);
+}
+struct ResultGuard {
+    duckdb_result *res;
+    ~ResultGuard() { reset(); }
+    void reset() {
+        if (res) duckdb_destroy_result(res);
+        res = nullptr;
+    }
+};
+
+/* whether the old C API turns a cell of this type into text: the 21 types of
+ * capi/cast/generic.hpp GetInternalCValue, the same in 1.5.6 and 2.0.0 (Fable
+ * final audit, A2: the guard covered VARCHAR only) */
+bool c_api_text_type(duckdb_type t);
 
 /* Locale-INDEPENDENT double<->text. std::to_string / printf("%g") / strtod all
  * honour LC_NUMERIC, so under a comma-decimal locale they would emit/parse

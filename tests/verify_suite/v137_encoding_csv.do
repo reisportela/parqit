@@ -318,6 +318,14 @@ if ("`has_symlink'" == "1") {
         di as err "F18: link/.. read `inplace' in place and " place[1] " decoded"
         local ++fails
     }
+    * The same OS resolution is required when the path has no glob character.
+    parqit use `"`stem'_symtest/sym/lnk/../hv2u/a.csv"', clear
+    local inplace = place[1]
+    parqit use `"`stem'_symtest/sym/lnk/../hv2/a.csv"', clear encoding(cp1251)
+    if ("`inplace'" != "Москва" | place[1] != "Москва") {
+        di as err "F18: plain link/.. path resolved lexically"
+        local ++fails
+    }
 }
 else di as txt "(no symbolic links here: F18 not checked)"
 * F22: a UTF-8 file read with a single-byte code page says so truthfully

@@ -1,9 +1,11 @@
 #include "engine/spss_plan.hpp"
+#include "engine/spss_parallel.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <locale>
 #include <map>
 #include <set>
@@ -109,12 +111,42 @@ struct Profile {
     long long um_cells = 0;      /* user-missing cells */
     std::set<double> in_range;   /* the smallest distinct values seen inside the range */
     bool range_more = false;     /* ... and there were more than kept */
+    /* the first zero inside the range (case, sign): the set keeps the sign of
+     * the first zero inserted, -0.0 and 0.0 being one element */
+    int64_t zero_case = -1;
+    bool zero_negative = false;
     size_t max_bytes = 0;
     long long transcoded = 0;
     long long undecodable = 0;   /* cells with bytes the encoding does not define */
 };
 
 constexpr size_t kRangeKeep = 64;
+
+/* the tallies of two sets of cases, as one profile of both: the merge does not
+ * depend on which cases each saw or in what order (SPSS-PARALLEL-1) */
+void merge_profile(Profile *a, const Profile &b) {
+    a->finite = a->finite && b.finite;
+    a->whole_days = a->whole_days && b.whole_days;
+    a->days_fit = a->days_fit && b.days_fit;
+    a->us_fit = a->us_fit && b.us_fit;
+    a->in_day = a->in_day && b.in_day;
+    a->um_cells += b.um_cells;
+    a->max_bytes = std::max(a->max_bytes, b.max_bytes);
+    a->transcoded += b.transcoded;
+    a->undecodable += b.undecodable;
+    /* the kRangeKeep smallest distinct values, and whether any were left out:
+     * one side left some out exactly when it saw more than kRangeKeep */
+    a->range_more = a->range_more || b.range_more;
+    if (b.zero_case >= 0 && (a->zero_case < 0 || b.zero_case < a->zero_case)) {
+        a->zero_case = b.zero_case;
+        a->zero_negative = b.zero_negative;
+    }
+    a->in_range.insert(b.in_range.begin(), b.in_range.end());
+    while (a->in_range.size() > kRangeKeep) {
+        a->in_range.erase(std::prev(a->in_range.end()));
+        a->range_more = true;
+    }
+}
 
 std::string date_mask(int type, int width) {
     switch (type) {
@@ -235,6 +267,33 @@ size_t Plan::companions() const {
 
 /* ---------------------------------------------------------------- plan */
 
+int64_t parallel_min_blocks(int threads, Compression compression) {
+    constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
+    if (threads >= 8) return compression == Compression::None ? 9 : 17;
+    return compression == Compression::None ? kNever : compression == Compression::Zlib ? 17 : 41;
+}
+
+namespace {
+/* the blocks `cases` cases fill */
+int64_t blocks_of(int64_t cases, const Dictionary &d, const ReadOptions &opt) {
+    const int64_t block = opt.block_cases > 0 ? opt.block_cases : block_cases_for(d);
+    return cases / block + (cases % block != 0);
+}
+} // namespace
+
+bool parallel_route(const Dictionary &d, const ReadOptions &opt) {
+    if (opt.threads < 2) return false;
+    if (opt.route >= 0) return opt.route == 1;
+    if (opt.parallel_min_blocks == 0) return true;
+    const int64_t min_blocks =
+        opt.parallel_min_blocks > 0 ? opt.parallel_min_blocks : parallel_min_blocks(opt.threads, d.compression);
+    /* not declared: an uncompressed payload holds whole cases; a compressed
+     * one is decided once the profile has counted them */
+    const int64_t cases = planned_cases(d);
+    if (cases < 0) return false;
+    return blocks_of(cases, d, opt) >= min_blocks;
+}
+
 Plan make_plan(const std::string &path, const ReadOptions &opt) {
     Plan plan;
     plan.path = path;
@@ -243,31 +302,46 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
     plan.dict = read_dictionary(path, opt);
     const Dictionary &d = plan.dict;
     const size_t nv = d.vars.size();
+    /* A3: the route, from the dictionary alone, before any case is read */
+    plan.parallel = parallel_route(d, opt);
+    plan.profile_parallel = opt.threads > 1 && (opt.profile >= 0 ? opt.profile == 1 : plan.parallel);
 
     /* ---- the profile pass: every case, every variable ------------------ */
+    /* SPSS-PARALLEL-1: blocks of cases on opt.threads workers, each with its
+     * own tallies; every tally merges independently of the order of the cases
+     * (AND, OR, sums, maxima, the kRangeKeep smallest distinct values) */
     std::vector<Profile> prof(nv);
     {
-        CaseReader r(path, d);
-        std::string raw, utf8;
-        while (r.next()) {
+        const int threads = plan.profile_parallel ? opt.threads : 1;
+        std::vector<std::vector<Profile>> local(static_cast<size_t>(threads), std::vector<Profile>(nv));
+        std::vector<std::string> raws(static_cast<size_t>(threads)), utf8s(static_cast<size_t>(threads));
+        plan.ncases = for_each_block(path, d, threads, opt.block_cases > 0 ? opt.block_cases : block_cases_for(d),
+                                     [&](const CaseBlock &b, int w) {
+            std::string &raw = raws[static_cast<size_t>(w)], &utf8 = utf8s[static_cast<size_t>(w)];
+            for (int64_t k = 0; k < b.n; k++) {
+            const uint64_t *slots = &b.slots[static_cast<size_t>(k) * d.nslots];
             for (size_t i = 0; i < nv; i++) {
                 const Variable &v = d.vars[i];
-                Profile &p = prof[i];
+                Profile &p = local[static_cast<size_t>(w)][i];
                 if (v.is_string()) {
-                    r.raw_string(v, &raw);
+                    slot_raw_string(v, slots, &raw);
                     size_t bad = 0;
                     if (decode_text(d, raw.data(), raw.size(), &utf8, &bad)) p.transcoded++;
                     if (bad) p.undecodable++;
                     p.max_bytes = std::max(p.max_bytes, utf8.size());
                     continue;
                 }
-                if (r.is_sysmis(v)) continue;
-                const double x = r.number(v);
+                if (slot_is_sysmis(d, v, slots)) continue;
+                const double x = slot_number(v, slots);
                 if (!v.missing.empty() && v.missing.matches(x)) {
                     p.um_cells++;
                     if (v.missing.has_range &&
                         std::find(v.missing.values.begin(), v.missing.values.end(), x) ==
                             v.missing.values.end()) {
+                        if (x == 0.0 && p.zero_case < 0) {
+                            p.zero_case = b.first + k;
+                            p.zero_negative = std::signbit(x);
+                        }
                         if (p.in_range.size() < kRangeKeep || x < *p.in_range.rbegin()) {
                             p.in_range.insert(x);
                             if (p.in_range.size() > kRangeKeep) {
@@ -302,9 +376,21 @@ Plan make_plan(const std::string &path, const ReadOptions &opt) {
                 }
                 if (t == Temporal::Time && !(x >= 0.0 && x < 86400.0)) p.in_day = false;
             }
-        }
-        plan.ncases = r.cases_read();
+            }
+        }, nullptr, nullptr, 0, planned_cases(d));
+        for (const auto &mine : local)
+            for (size_t i = 0; i < nv; i++) merge_profile(&prof[i], mine[i]);
+        for (Profile &p : prof) /* the zero kept is the first one, as in the serial pass */
+            if (p.zero_case >= 0 && p.in_range.erase(0.0))
+                p.in_range.insert(p.zero_negative ? -0.0 : 0.0);
     }
+    /* A3: a compressed file that declares no count takes its conversion
+     * route from the cases the profile counted */
+    if (opt.threads > 1 && opt.route < 0 && opt.parallel_min_blocks != 0 && d.ncases < 0 &&
+        d.compression != Compression::None)
+        plan.parallel = blocks_of(plan.ncases, d, opt) >=
+                        (opt.parallel_min_blocks > 0 ? opt.parallel_min_blocks
+                                                     : parallel_min_blocks(opt.threads, d.compression));
 
     /* ---- one column per variable ---------------------------------------- */
     /* column indices for the notes, named by their Stata names once known */

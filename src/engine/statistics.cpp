@@ -1,9 +1,15 @@
 #include "engine/statistics.hpp"
+#include "engine/scalar_registration.hpp"
 #include "engine/sample_key.hpp"
 #include "engine/statistics_math.hpp"
+#include "engine/standard_errors.hpp"
+#include "engine/integer_storage.hpp"
+#include "engine/sort_storage.hpp"
+#include "engine/sum_storage.hpp"
 #include "engine/typemap.hpp"
 
 #include <new>
+#include <cfenv>
 #include <vector>
 
 namespace parqit::statistics {
@@ -139,35 +145,15 @@ namespace {
 #define PARQIT_AGGREGATE_TARGETS
 #endif
 
-struct Input {
+struct Input : NumericTypeInfo {
     void *data;
     uint64_t *mask;
-    duckdb_type type;
-    unsigned scale = 0;
-    bool floating = false, supported = true, null_type = false;
 
     explicit Input(duckdb_vector vector)
         : data(duckdb_vector_get_data(vector)), mask(duckdb_vector_get_validity(vector)) {
         auto logical = duckdb_vector_get_column_type(vector);
-        type = duckdb_get_type_id(logical);
-        if (type == DUCKDB_TYPE_DECIMAL) {
-            scale = duckdb_decimal_scale(logical);
-            type = duckdb_decimal_internal_type(logical);
-        }
+        static_cast<NumericTypeInfo &>(*this) = numeric_type_info(logical);
         duckdb_destroy_logical_type(&logical);
-        floating = type == DUCKDB_TYPE_DOUBLE || type == DUCKDB_TYPE_FLOAT;
-        null_type = type == DUCKDB_TYPE_SQLNULL;
-        switch (type) {
-        case DUCKDB_TYPE_BOOLEAN:
-        case DUCKDB_TYPE_TINYINT: case DUCKDB_TYPE_SMALLINT:
-        case DUCKDB_TYPE_INTEGER: case DUCKDB_TYPE_BIGINT:
-        case DUCKDB_TYPE_UTINYINT: case DUCKDB_TYPE_USMALLINT:
-        case DUCKDB_TYPE_UINTEGER: case DUCKDB_TYPE_UBIGINT:
-        case DUCKDB_TYPE_HUGEINT: case DUCKDB_TYPE_UHUGEINT:
-        case DUCKDB_TYPE_FLOAT: case DUCKDB_TYPE_DOUBLE:
-        case DUCKDB_TYPE_SQLNULL: break;
-        default: supported = false;
-        }
     }
     bool present(idx_t row) const {
         if (null_type || (mask && !(mask[row / 64] & (uint64_t(1) << (row % 64))))) return false;
@@ -241,6 +227,190 @@ void update_real(const Input &input, duckdb_aggregate_state *states, idx_t count
     if (input.type == DUCKDB_TYPE_FLOAT) add(static_cast<float *>(input.data));
     else add(static_cast<double *>(input.data));
 }
+
+void update_integer_storage(duckdb_function_info info, duckdb_data_chunk chunk,
+                            duckdb_aggregate_state *states) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    if (input.type == DUCKDB_TYPE_DATE) {
+        const auto *values = static_cast<const duckdb_date *>(input.data);
+        for (idx_t i = 0; i < count; ++i) {
+            if (!input.present(i)) continue;
+            auto &state = *reinterpret_cast<IntegerStorage *>(states[i]);
+            const auto days = values[i].days;
+            if (days == std::numeric_limits<int32_t>::max() ||
+                days == -std::numeric_limits<int32_t>::max()) state.invalid_date = true;
+            else state.add(static_cast<double>(days) + kEpochShiftDays);
+        }
+        return;
+    }
+    if (input.type != DUCKDB_TYPE_DOUBLE) {
+        duckdb_aggregate_function_set_error(info, "integer storage proof requires DOUBLE or DATE input");
+        return;
+    }
+    const auto *values = static_cast<const double *>(input.data);
+    for (idx_t i = 0; i < count; ++i)
+        if (input.present(i)) reinterpret_cast<IntegerStorage *>(states[i])->add(values[i]);
+}
+
+void update_sort_storage(duckdb_function_info info, duckdb_data_chunk chunk,
+                         duckdb_aggregate_state *states) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    if (input.type != DUCKDB_TYPE_DOUBLE) {
+        duckdb_aggregate_function_set_error(info, "sort storage proof requires DOUBLE input");
+        return;
+    }
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    const auto *values = static_cast<const double *>(input.data);
+    for (idx_t i = 0; i < count; ++i)
+        if (input.present(i)) reinterpret_cast<SortStorage *>(states[i])->add(values[i]);
+}
+
+void update_sum_storage(duckdb_function_info info, duckdb_data_chunk chunk,
+                         duckdb_aggregate_state *states) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    if (input.type != DUCKDB_TYPE_DOUBLE) {
+        duckdb_aggregate_function_set_error(info, "binary sum proof requires DOUBLE input");
+        return;
+    }
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    const auto *values = static_cast<const double *>(input.data);
+    for (idx_t i = 0; i < count; ++i)
+        if (input.present(i)) reinterpret_cast<SumStorage *>(states[i])->add(values[i]);
+}
+
+void finalize_sum_storage(duckdb_function_info, duckdb_aggregate_state *states,
+                           duckdb_vector output, idx_t count, idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    auto *parent = duckdb_vector_get_validity(output);
+    duckdb_vector child[5];
+    uint64_t *valid[5];
+    for (idx_t col = 0; col < 5; ++col) {
+        child[col] = duckdb_struct_vector_get_child(output, col);
+        duckdb_vector_ensure_validity_writable(child[col]);
+        valid[col] = duckdb_vector_get_validity(child[col]);
+    }
+    auto *n = static_cast<uint64_t *>(duckdb_vector_get_data(child[0]));
+    auto *exponent = static_cast<int32_t *>(duckdb_vector_get_data(child[1]));
+    auto *width = static_cast<int32_t *>(duckdb_vector_get_data(child[2]));
+    auto *safe = static_cast<bool *>(duckdb_vector_get_data(child[3]));
+    auto *integer32 = static_cast<bool *>(duckdb_vector_get_data(child[4]));
+    for (idx_t i = 0; i < count; ++i) {
+        const auto &state = *reinterpret_cast<SumStorage *>(states[i]);
+        const auto row = offset + i;
+        duckdb_validity_set_row_valid(parent, row);
+        for (auto *mask : valid) duckdb_validity_set_row_valid(mask, row);
+        n[row] = state.n;
+        exponent[row] = state.exponent();
+        width[row] = static_cast<int32_t>(state.width());
+        safe[row] = state.safe();
+        integer32[row] = !state.invalid && (state.integer_mask & 4);
+    }
+}
+
+void scalar_scaled_integer(duckdb_function_info info, duckdb_data_chunk chunk,
+                            duckdb_vector output) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    Input scales(duckdb_data_chunk_get_vector(chunk, 1));
+    if (input.type != DUCKDB_TYPE_DOUBLE) {
+        duckdb_scalar_function_set_error(info, "binary scaling requires DOUBLE input");
+        return;
+    }
+    duckdb_vector_ensure_validity_writable(output);
+    auto *valid = duckdb_vector_get_validity(output);
+    auto *values = static_cast<duckdb_hugeint *>(duckdb_vector_get_data(output));
+    const auto *exponent = static_cast<const int32_t *>(scales.data);
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < count; ++i) {
+        if (!input.present(i) || !scales.present(i)) {
+            duckdb_validity_set_row_invalid(valid, i);
+            continue;
+        }
+        ScaledInteger value;
+        if (!value.assign(input.real(i), exponent[i])) {
+            duckdb_scalar_function_set_error(info, "source no longer fits its exact binary scaling proof");
+            return;
+        }
+        values[i].lower = value.low;
+        std::memcpy(&values[i].upper, &value.high, sizeof value.high);
+        duckdb_validity_set_row_valid(valid, i);
+    }
+}
+
+template <class Integer, uint32_t Bit>
+void scalar_sort_integer(duckdb_function_info info, duckdb_data_chunk chunk,
+                          duckdb_vector output) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    duckdb_vector_ensure_validity_writable(output);
+    auto *valid = duckdb_vector_get_validity(output);
+    auto *values = static_cast<Integer *>(duckdb_vector_get_data(output));
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < count; ++i) {
+        if (!input.present(i)) {
+            duckdb_validity_set_row_invalid(valid, i);
+            continue;
+        }
+        const double value = input.real(i);
+        if (!(SortStorage::fits(value) & Bit)) {
+            duckdb_scalar_function_set_error(info,
+                "parqit sort: source no longer fits its lossless integer proof");
+            return;
+        }
+        duckdb_validity_set_row_valid(valid, i);
+        values[i] = static_cast<Integer>(value);
+    }
+}
+
+template <bool Restore>
+void scalar_sort_bits(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_vector output) {
+    Input input(duckdb_data_chunk_get_vector(chunk, 0));
+    duckdb_vector_ensure_validity_writable(output);
+    auto *valid = duckdb_vector_get_validity(output);
+    auto *values = static_cast<unsigned char *>(duckdb_vector_get_data(output));
+    const auto *source = static_cast<const unsigned char *>(input.data);
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < count; ++i) {
+        if (!input.present(i)) { duckdb_validity_set_row_invalid(valid, i); continue; }
+        uint64_t bits;
+        std::memcpy(&bits, source + i*sizeof bits, sizeof bits);
+        if constexpr (Restore) bits = SortStorage::original_bits(bits);
+        else {
+            if (!SortStorage::bits_safe(bits)) {
+                duckdb_scalar_function_set_error(info, "source no longer fits its lossless floating sort-key proof");
+                return;
+            }
+            bits = SortStorage::ordered_bits(bits);
+        }
+        std::memcpy(values + i*sizeof bits, &bits, sizeof bits);
+        duckdb_validity_set_row_valid(valid, i);
+    }
+}
+
+template <class State>
+void finalize_storage(duckdb_function_info, duckdb_aggregate_state *states,
+                       duckdb_vector output, idx_t count, idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    auto *parent = duckdb_vector_get_validity(output);
+    auto child = duckdb_struct_vector_get_child(output, 0);
+    duckdb_vector_ensure_validity_writable(child);
+    auto *valid = duckdb_vector_get_validity(child);
+    auto *mask = static_cast<uint32_t *>(duckdb_vector_get_data(child));
+    for (idx_t i = 0; i < count; ++i) {
+        duckdb_validity_set_row_valid(parent, offset + i);
+        duckdb_validity_set_row_valid(valid, offset + i);
+        mask[offset + i] = reinterpret_cast<State *>(states[i])->result();
+    }
+    if constexpr (std::is_same<State, SortStorage>::value) {
+        auto child_bits = duckdb_struct_vector_get_child(output, 1);
+        duckdb_vector_ensure_validity_writable(child_bits);
+        auto *bits_valid = duckdb_vector_get_validity(child_bits);
+        auto *reversible = static_cast<bool *>(duckdb_vector_get_data(child_bits));
+        for (idx_t i = 0; i < count; ++i) {
+            duckdb_validity_set_row_valid(bits_valid, offset + i);
+            reversible[offset + i] = reinterpret_cast<SortStorage *>(states[i])->reversible;
+        }
+    }
+}
 template <class State>
 PARQIT_AGGREGATE_TARGETS
 void update(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_aggregate_state *states) {
@@ -265,7 +435,10 @@ void update_corr(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_aggr
         duckdb_aggregate_function_set_error(info, "parqit correlation requires numeric values");
         return;
     }
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    // 2.0 can derive cardinality from vector buffers. The input chunk is
+    // immutable throughout this callback; do not repeat that walk per row.
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         if (!a.valid(i) || !b.valid(i)) continue;
         auto &state = *reinterpret_cast<Correlation *>(states[i]);
         if (a.floating && b.floating) state.add(a.real(i), b.real(i));
@@ -308,13 +481,100 @@ void scalar_double(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_ve
     duckdb_vector_ensure_validity_writable(output);
     auto *values = static_cast<double *>(duckdb_vector_get_data(output));
     auto *mask = duckdb_vector_get_validity(output);
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         if (!input.present(i)) {
             values[i] = NAN;
             duckdb_validity_set_row_invalid(mask, i);
         } else {
             values[i] = input.floating ? input.real(i) : input.number(i).as_double();
             duckdb_validity_set_row_valid(mask, i);
+        }
+    }
+}
+
+void scalar_integer_mean(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_vector output) {
+    Input numerator(duckdb_data_chunk_get_vector(chunk, 0));
+    Input denominator(duckdb_data_chunk_get_vector(chunk, 1));
+    if (!numerator.supported || numerator.floating) {
+        duckdb_scalar_function_set_error(info, "exact integer mean requires an integral or DECIMAL numerator");
+        return;
+    }
+    if (!denominator.supported || denominator.floating || denominator.scale) {
+        duckdb_scalar_function_set_error(info, "exact integer mean requires an integer count");
+        return;
+    }
+    RealOutput result(output);
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    constexpr uint64_t exact = uint64_t(1) << 53;
+    const bool nearest = std::fegetround() == FE_TONEAREST;
+    for (idx_t i = 0; i < count; ++i) {
+        if (!numerator.present(i) || !denominator.present(i)) {
+            result.set(i, NAN);
+            continue;
+        }
+        const auto count_value = denominator.integer(i);
+        if (count_value.negative() || count_value.word[1] || count_value.word[2] || count_value.word[3]) {
+            duckdb_scalar_function_set_error(info, "exact integer mean count is outside uint64 range");
+            return;
+        }
+        const uint64_t n = count_value.word[0];
+        if (!n) { result.set(i, NAN); continue; }
+        const auto value = numerator.integer(i);
+        const bool negative = value.negative();
+        const auto magnitude = negative ? value.negated() : value;
+        // With two exact binary64 operands, one IEEE division rounds once.
+        // Wider numerators/counts and decimal scaling use the existing exact
+        // midpoint comparison, without first rounding the numerator to double.
+        if (nearest && !numerator.scale && n <= exact &&
+            !(magnitude.word[1] | magnitude.word[2] | magnitude.word[3]) &&
+            magnitude.word[0] <= exact) {
+            const double x = static_cast<double>(magnitude.word[0]);
+            result.set(i, (negative ? -x : x) / static_cast<double>(n));
+        } else {
+            result.set(i, numeric::integer_ratio(value, n, numerator.scale));
+        }
+    }
+}
+
+template <bool Mean>
+void scalar_scaled_result(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_vector output) {
+    Input numerator(duckdb_data_chunk_get_vector(chunk, 0));
+    Input scales(duckdb_data_chunk_get_vector(chunk, Mean ? 2 : 1));
+    if (!numerator.supported || numerator.floating || numerator.scale) {
+        duckdb_scalar_function_set_error(info, "scaled total requires an integer numerator");
+        return;
+    }
+    RealOutput result(output);
+    const auto count = duckdb_data_chunk_get_size(chunk);
+    const auto *exponent = static_cast<const int32_t *>(scales.data);
+    if constexpr (Mean) {
+        Input counts(duckdb_data_chunk_get_vector(chunk, 1));
+        if (!counts.supported || counts.floating || counts.scale) {
+            duckdb_scalar_function_set_error(info, "scaled mean requires an integer count");
+            return;
+        }
+        for (idx_t i = 0; i < count; ++i) {
+            if (!numerator.present(i) || !scales.present(i) || !counts.present(i)) {
+                result.set(i, NAN);
+                continue;
+            }
+            const auto n = counts.integer(i);
+            if (n.negative() || n.word[1] || n.word[2] || n.word[3] ||
+                exponent[i] < -1074 || exponent[i] > 1022) {
+                duckdb_scalar_function_set_error(info, "scaled mean count or exponent is outside its exact domain");
+                return;
+            }
+            result.set(i, scaled_mean(numerator.integer(i), n.word[0], exponent[i]));
+        }
+    } else {
+        for (idx_t i = 0; i < count; ++i) {
+            if (!numerator.present(i) || !scales.present(i)) { result.set(i, NAN); continue; }
+            if (exponent[i] < -1074 || exponent[i] > 1022) {
+                duckdb_scalar_function_set_error(info, "scaled total exponent is outside the binary64 domain");
+                return;
+            }
+            result.set(i, scaled_sum(numerator.integer(i), exponent[i]));
         }
     }
 }
@@ -326,7 +586,8 @@ void scalar_exact_double_key(duckdb_function_info info, duckdb_data_chunk chunk,
         return;
     }
     RealOutput result(output);
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         const Number source = input.number(i);
         Number rounded;
         rounded.valid = source.valid;
@@ -344,7 +605,8 @@ void scalar_compare(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_v
     duckdb_vector_ensure_validity_writable(output);
     auto *values = static_cast<int32_t *>(duckdb_vector_get_data(output));
     auto *mask = duckdb_vector_get_validity(output);
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         const Number left = a.number(i), right = b.number(i);
         if (!left.valid || !right.valid) {
             values[i] = 0;
@@ -365,13 +627,14 @@ void scalar_binary(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_ve
         return;
     }
     if constexpr (operation == BinaryOperation::Midpoint || operation == BinaryOperation::Difference) {
-        if (!a.null_type && !b.null_type && (a.floating != b.floating || a.scale != b.scale)) {
+        if (!numeric_families_match(a, b)) {
             duckdb_scalar_function_set_error(info, "parqit endpoints must have the same numeric family and scale");
             return;
         }
     }
     RealOutput result(output);
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         const Number left = a.number(i), right = b.number(i);
         double value = NAN;
         if constexpr (operation == BinaryOperation::Midpoint) value = midpoint(left, right);
@@ -395,7 +658,8 @@ void scalar_sample_count(duckdb_function_info info, duckdb_data_chunk chunk, duc
     bool cached = false;
     uint64_t previous_n = 0, previous_result = 0;
     double previous_p = 0;
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         if ((nm && !(nm[i / 64] & (1ULL << (i % 64)))) ||
             (pm && !(pm[i / 64] & (1ULL << (i % 64))))) {
             duckdb_validity_set_row_invalid(mask, i);
@@ -424,7 +688,8 @@ void scalar_sample_key(duckdb_function_info, duckdb_data_chunk chunk, duckdb_vec
     duckdb_vector_ensure_validity_writable(output);
     auto *out = static_cast<uint64_t *>(duckdb_vector_get_data(output));
     auto *mask = duckdb_vector_get_validity(output);
-    for (idx_t i = 0; i < duckdb_data_chunk_get_size(chunk); ++i) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t i = 0; i < input_rows; ++i) {
         if ((sm && !(sm[i / 64] & (1ULL << (i % 64)))) ||
             (xm && !(xm[i / 64] & (1ULL << (i % 64))))) {
             duckdb_validity_set_row_invalid(mask, i);
@@ -462,7 +727,8 @@ void histogram_bins(duckdb_function_info info, duckdb_data_chunk chunk, duckdb_v
     std::vector<Exact> edges;
     Number previous_low, previous_high;
     uint64_t previous_bins = 0;
-    for (idx_t row = 0; row < duckdb_data_chunk_get_size(chunk); ++row) {
+    const idx_t input_rows = duckdb_data_chunk_get_size(chunk);
+    for (idx_t row = 0; row < input_rows; ++row) {
         const Number x = values.number(row), lo = low.number(row), hi = high.number(row);
         if (!x.valid || !lo.valid || !hi.valid || !bin_input.present(row)) {
             duckdb_validity_set_row_invalid(mask, row);
@@ -509,7 +775,8 @@ void scalar_histogram(duckdb_function_info info, duckdb_data_chunk chunk, duckdb
 
 bool register_scalar(duckdb_connection connection, const char *name,
                      const std::vector<duckdb_type> &types, duckdb_type result_type,
-                     duckdb_scalar_function_t callback, std::string *error) {
+                     duckdb_scalar_function_t callback, std::string *error,
+                     ScalarErrorPolicy policy = ScalarErrorPolicy::ValueDependent) {
     auto function = duckdb_create_scalar_function();
     duckdb_scalar_function_set_name(function, name);
     for (auto type : types) {
@@ -522,7 +789,7 @@ bool register_scalar(duckdb_connection connection, const char *name,
     duckdb_destroy_logical_type(&result);
     duckdb_scalar_function_set_special_handling(function);
     duckdb_scalar_function_set_function(function, callback);
-    const auto rc = duckdb_register_scalar_function(connection, function);
+    const auto rc = register_known_scalar(connection, function, policy);
     duckdb_destroy_scalar_function(&function);
     if (rc != DuckDBSuccess && error) *error = std::string("could not register internal scalar ") + name;
     return rc == DuckDBSuccess;
@@ -604,6 +871,18 @@ void finalize_corr(duckdb_function_info info, duckdb_aggregate_state *states,
 }
 
 template <class State>
+void finalize_standard_error(duckdb_function_info, duckdb_aggregate_state *states,
+                             duckdb_vector output, idx_t count, idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    auto *parent = duckdb_vector_get_validity(output);
+    RealOutput result(duckdb_struct_vector_get_child(output, 0));
+    for (idx_t i = 0; i < count; ++i) {
+        duckdb_validity_set_row_valid(parent, offset + i);
+        result.set(offset + i, reinterpret_cast<State *>(states[i])->result());
+    }
+}
+
+template <class State>
 bool register_aggregate(duckdb_connection connection, const char *name, idx_t nargs,
                         const std::vector<const char *> &names,
                         const std::vector<duckdb_type> &types,
@@ -630,27 +909,61 @@ bool register_aggregate(duckdb_connection connection, const char *name, idx_t na
 }
 } // namespace
 
+Number vector_number(duckdb_vector vector, idx_t row) {
+    Input input(vector);
+    return input.supported ? input.number(row) : Number{};
+}
+
 bool register_functions(duckdb_connection connection, std::string *error) {
     const auto d = DUCKDB_TYPE_DOUBLE, n = DUCKDB_TYPE_UBIGINT, any = DUCKDB_TYPE_ANY;
-    return register_scalar(connection, "__parqit_double", {any}, d, scalar_double, error) &&
-           register_scalar(connection, "__parqit_exact_double_key", {any}, d, scalar_exact_double_key, error) &&
-           register_scalar(connection, "__parqit_compare", {any, any}, DUCKDB_TYPE_INTEGER, scalar_compare, error) &&
+    return register_scalar(connection, "__parqit_double", {any}, d, scalar_double, error, ScalarErrorPolicy::NumericUnary) &&
+           register_scalar(connection, "__parqit_integer_mean", {any, any}, d, scalar_integer_mean, error) &&
+           register_scalar(connection, "__parqit_scaled_integer", {any, DUCKDB_TYPE_INTEGER}, DUCKDB_TYPE_HUGEINT,
+                           scalar_scaled_integer, error) &&
+           register_scalar(connection, "__parqit_scaled_sum", {any, DUCKDB_TYPE_INTEGER}, d,
+                           scalar_scaled_result<false>, error) &&
+           register_scalar(connection, "__parqit_scaled_mean", {any, any, DUCKDB_TYPE_INTEGER}, d,
+                           scalar_scaled_result<true>, error) &&
+           register_scalar(connection, "__parqit_sort_i8", {d}, DUCKDB_TYPE_TINYINT,
+                           scalar_sort_integer<int8_t, 1>, error) &&
+           register_scalar(connection, "__parqit_sort_i16", {d}, DUCKDB_TYPE_SMALLINT,
+                           scalar_sort_integer<int16_t, 2>, error) &&
+           register_scalar(connection, "__parqit_sort_i32", {d}, DUCKDB_TYPE_INTEGER,
+                           scalar_sort_integer<int32_t, 4>, error) &&
+           register_scalar(connection, "__parqit_sort_bits", {d}, n, scalar_sort_bits<false>, error) &&
+           register_scalar(connection, "__parqit_sort_restore", {n}, d, scalar_sort_bits<true>, error,
+                           ScalarErrorPolicy::Total) &&
+           register_scalar(connection, "__parqit_exact_double_key", {any}, d, scalar_exact_double_key, error, ScalarErrorPolicy::NumericUnary) &&
+           register_scalar(connection, "__parqit_compare", {any, any}, DUCKDB_TYPE_INTEGER, scalar_compare, error, ScalarErrorPolicy::NumericBinary) &&
            register_scalar(connection, "__parqit_midpoint", {any, any}, d,
-                           scalar_binary<BinaryOperation::Midpoint>, error) &&
+                           scalar_binary<BinaryOperation::Midpoint>, error, ScalarErrorPolicy::MatchingNumeric) &&
            register_scalar(connection, "__parqit_difference", {any, any}, d,
-                           scalar_binary<BinaryOperation::Difference>, error) &&
+                           scalar_binary<BinaryOperation::Difference>, error, ScalarErrorPolicy::MatchingNumeric) &&
            register_scalar(connection, "__parqit_round", {any, any}, d,
-                           scalar_binary<BinaryOperation::Round>, error) &&
+                           scalar_binary<BinaryOperation::Round>, error, ScalarErrorPolicy::NumericBinary) &&
            register_scalar(connection, "__parqit_mod", {any, any}, d,
-                           scalar_binary<BinaryOperation::Mod>, error) &&
+                           scalar_binary<BinaryOperation::Mod>, error, ScalarErrorPolicy::NumericBinary) &&
            register_scalar(connection, "__parqit_sample_count", {n, d}, n, scalar_sample_count, error) &&
-           register_scalar(connection, "__parqit_sample_key_d", {n, d}, n, scalar_sample_key<false>, error) &&
+           register_scalar(connection, "__parqit_sample_key_d", {n, d}, n, scalar_sample_key<false>, error, ScalarErrorPolicy::Total) &&
            register_scalar(connection, "__parqit_sample_key_s", {n, DUCKDB_TYPE_VARCHAR}, n,
-                           scalar_sample_key<true>, error) &&
+                           scalar_sample_key<true>, error, ScalarErrorPolicy::Total) &&
            register_scalar(connection, "__parqit_histbin", {any, any, any, n}, DUCKDB_TYPE_BIGINT,
-                           scalar_histogram, error) &&
+                           scalar_histogram, error, ScalarErrorPolicy::HistogramBounds) &&
            register_aggregate<Total>(connection, "__parqit_total", 1,
                {"n", "sum", "mean"}, {n, d, d}, update<Total>, finalize<Total>, error) &&
+           register_aggregate<IntegerStorage>(connection, "__parqit_integer_storage", 1,
+               {"mask"}, {DUCKDB_TYPE_UINTEGER}, update_integer_storage, finalize_storage<IntegerStorage>, error) &&
+           register_aggregate<SortStorage>(connection, "__parqit_sort_storage", 1,
+               {"mask", "reversible"}, {DUCKDB_TYPE_UINTEGER, DUCKDB_TYPE_BOOLEAN},
+               update_sort_storage, finalize_storage<SortStorage>, error) &&
+           register_aggregate<SumStorage>(connection, "__parqit_sum_storage", 1,
+               {"n", "exponent", "width", "safe", "integer32"},
+               {n, DUCKDB_TYPE_INTEGER, DUCKDB_TYPE_INTEGER, DUCKDB_TYPE_BOOLEAN, DUCKDB_TYPE_BOOLEAN},
+               update_sum_storage, finalize_sum_storage, error) &&
+           register_aggregate<BinomialError>(connection, "__parqit_sebinomial", 1,
+               {"value"}, {d}, update<BinomialError>, finalize_standard_error<BinomialError>, error) &&
+           register_aggregate<PoissonError>(connection, "__parqit_sepoisson", 1,
+               {"value"}, {d}, update<PoissonError>, finalize_standard_error<PoissonError>, error) &&
            register_aggregate<Moments<2>>(connection, "__parqit_stats", 1,
                {"n", "sum", "mean", "sd", "variance"}, {n, d, d, d, d},
                update<Moments<2>>, finalize<Moments<2>>, error) &&

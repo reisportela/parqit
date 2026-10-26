@@ -7,6 +7,16 @@
 
 namespace parqit {
 
+bool beyond_stata_integer_guard(duckdb_hugeint value) {
+    constexpr uint64_t limit = uint64_t(1) << 53;
+    if (value.upper >= 0) return value.upper != 0 || value.lower > limit;
+    return value.upper != -1 || value.lower < uint64_t(0) - limit;
+}
+
+bool beyond_stata_integer_guard(duckdb_uhugeint value) {
+    return value.upper != 0 || value.lower > (uint64_t(1) << 53);
+}
+
 /* XMISS-1 (see typemap.hpp): the 27 Stata missing doubles and their codes.
  * (1 + k/4096) and its product with 2^1023 are exact in binary64, so the
  * round trip is bit-exact; anything that is not one of the 27 values (a

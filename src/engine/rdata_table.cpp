@@ -1,4 +1,5 @@
 #include "engine/rdata_table.hpp"
+#include "engine/rdata_convert.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -118,6 +119,33 @@ void rdata_init(duckdb_init_info info) {
     }
 }
 
+/* the table function's destination of convert_rows: one DuckDB vector (and
+ * its companion's) */
+struct VectorOut {
+    duckdb_vector vec;
+    uint64_t *validity;
+    void *data;
+    int8_t *codes;
+    uint64_t *cvalid;
+    void text(uint64_t r, const char *p, size_t n) { duckdb_vector_assign_string_element_len(vec, r, p, n); }
+    void boolean(uint64_t r, bool b) { static_cast<bool *>(data)[r] = b; }
+    void i64(uint64_t r, int64_t v) { static_cast<int64_t *>(data)[r] = v; }
+    void i32(uint64_t r, int32_t v) { static_cast<int32_t *>(data)[r] = v; }
+    void f64(uint64_t r, double v) { static_cast<double *>(data)[r] = v; }
+    void days(uint64_t r, int32_t d) { static_cast<duckdb_date *>(data)[r].days = d; }
+    void timestamp(uint64_t r, int64_t us) { static_cast<duckdb_timestamp *>(data)[r].micros = us; }
+    void time(uint64_t r, int64_t us) { static_cast<duckdb_time *>(data)[r].micros = us; }
+    void valid(uint64_t r, bool v) {
+        if (v) duckdb_validity_set_row_valid(validity, r);
+        else duckdb_validity_set_row_invalid(validity, r);
+    }
+    void code(uint64_t r, int8_t k) {
+        if (!codes) return;
+        codes[r] = k;
+        duckdb_validity_set_row_valid(cvalid, r);
+    }
+};
+
 void rdata_scan(duckdb_function_info info, duckdb_data_chunk out) {
     const auto *bd = static_cast<const BindData *>(duckdb_function_get_bind_data(info));
     auto *id = static_cast<InitData *>(duckdb_function_get_init_data(info));
@@ -144,140 +172,12 @@ void rdata_scan(duckdb_function_info info, duckdb_data_chunk out) {
                 cvalid = duckdb_vector_get_validity(cv);
                 codes = static_cast<int8_t *>(duckdb_vector_get_data(cv));
             }
-            for (idx_t r = 0; r < rows; r++) {
-                bool ok = true, null = false;
-                int code = 0;
-                switch (c.kind) {
-                case OutKind::Varchar: {
-                    if (c.conv == Conv::FactorText) {
-                        const int32_t k = cur.next_int();
-                        if (k == kNaInteger || k < 1 || static_cast<size_t>(k) > c.levels.size()) {
-                            null = true;
-                        } else {
-                            const std::string &t = c.levels[static_cast<size_t>(k) - 1];
-                            duckdb_vector_assign_string_element_len(vec, r, t.data(), t.size());
-                        }
-                    } else {
-                        bool tr = false;
-                        if (cur.next_string(&id->text, &tr))
-                            duckdb_vector_assign_string_element_len(vec, r, id->text.data(), id->text.size());
-                        else
-                            null = true;
-                    }
-                    break;
-                }
-                case OutKind::Boolean: {
-                    const int32_t x = cur.next_int();
-                    if (x == kNaInteger) null = true;
-                    else static_cast<bool *>(data)[r] = x != 0;
-                    break;
-                }
-                case OutKind::BigInt: {
-                    const double x = cur.next_real();
-                    int64_t b;
-                    std::memcpy(&b, &x, 8);
-                    if (b == INT64_MIN) null = true;
-                    else static_cast<int64_t *>(data)[r] = b;
-                    break;
-                }
-                default: {
-                    /* numbers and dates: NA (tagged or not), user-missing, value */
-                    const bool is_int = c.vec.type == INTSXP;
-                    double x = 0.0;
-                    int32_t xi = 0;
-                    if (is_int) {
-                        xi = cur.next_int();
-                        if (xi == kNaInteger) {
-                            null = true;
-                            break;
-                        }
-                        x = xi;
-                    } else {
-                        x = cur.next_real();
-                        if (is_na_real(x)) {
-                            null = true;
-                            if (c.tagged) {
-                                const char t = na_tag(x);
-                                if (t >= 'a' && t <= 'z') code = t - 'a' + 1;
-                            }
-                            break;
-                        }
-                    }
-                    if (!std::isnan(x) && c.user_missing(x)) {
-                        null = true;
-                        code = c.code_of(x);
-                        break;
-                    }
-                    switch (c.conv) {
-                    case Conv::IntDays:
-                        static_cast<duckdb_date *>(data)[r].days = xi;
-                        break;
-                    case Conv::RealDays: {
-                        if (!std::isfinite(x)) {
-                            null = true;
-                            break;
-                        }
-                        int32_t d;
-                        ok = days_to_date(x, &d);
-                        static_cast<duckdb_date *>(data)[r].days = d;
-                        break;
-                    }
-                    case Conv::RealDaysTs: {
-                        if (!std::isfinite(x)) {
-                            null = true;
-                            break;
-                        }
-                        int64_t us;
-                        ok = days_to_us(x, &us);
-                        static_cast<duckdb_timestamp *>(data)[r].micros = us;
-                        break;
-                    }
-                    case Conv::IntSecTs:
-                        static_cast<duckdb_timestamp *>(data)[r].micros = static_cast<int64_t>(xi) * 1000000;
-                        break;
-                    case Conv::RealSecTs: {
-                        if (!std::isfinite(x)) {
-                            null = true;
-                            break;
-                        }
-                        int64_t us;
-                        ok = seconds_to_us(x, &us);
-                        static_cast<duckdb_timestamp *>(data)[r].micros = us;
-                        break;
-                    }
-                    case Conv::IntSecTime:
-                        ok = xi >= 0 && xi < 86400;
-                        static_cast<duckdb_time *>(data)[r].micros = static_cast<int64_t>(xi) * 1000000;
-                        break;
-                    case Conv::RealSecTime: {
-                        int64_t us;
-                        ok = seconds_to_time_us(x, &us);
-                        static_cast<duckdb_time *>(data)[r].micros = us;
-                        break;
-                    }
-                    default:
-                        if (c.kind == OutKind::Integer) static_cast<int32_t *>(data)[r] = xi;
-                        else static_cast<double *>(data)[r] = x;
-                    }
-                }
-                }
-                if (!ok) {
-                    /* the profile proved every value fits; one that does not
-                     * means the file is not the one profiled */
-                    duckdb_function_set_error(
-                        info, ("the R data file " + plan.path + " changed while it was being "
-                               "converted (column " + c.name + ", row " +
-                               std::to_string(id->done + r + 1) + "); convert it again")
-                                  .c_str());
-                    duckdb_data_chunk_set_size(out, 0);
-                    return;
-                }
-                if (null) duckdb_validity_set_row_invalid(valid, r);
-                else duckdb_validity_set_row_valid(valid, r);
-                if (codes) {
-                    codes[r] = static_cast<int8_t>(code);
-                    duckdb_validity_set_row_valid(cvalid, r);
-                }
+            VectorOut o{vec, valid, data, codes, cvalid};
+            const std::string err = convert_rows(plan, c, cur, id->done, rows, o, &id->text);
+            if (!err.empty()) {
+                duckdb_function_set_error(info, err.c_str());
+                duckdb_data_chunk_set_size(out, 0);
+                return;
             }
         }
         id->done += rows;
@@ -322,6 +222,11 @@ std::string register_plan(std::shared_ptr<const Plan> plan) {
 void release_plan(const std::string &token) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_plans.erase(token);
+}
+
+size_t registered_plans() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_plans.size();
 }
 
 } // namespace rdata

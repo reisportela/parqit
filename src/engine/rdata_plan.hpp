@@ -105,8 +105,21 @@ struct Plan {
     std::vector<std::string> xmissing_stata;   /* Stata names with a companion */
     std::vector<std::string> dropped;          /* R columns left out */
     long long transcoded_cells = 0, transcoded_meta = 0;
+    /* A3: the route chosen: the parallel conversion (Arrow batches), else the
+     * table function's; the profile ran on threads when profile_parallel */
+    bool parallel = false, profile_parallel = false;
     size_t companions() const;
 };
+
+/* A3: the rows from which the parallel route won in every repetition, and at
+ * every larger size sampled, for a file of this compression on `threads`
+ * engine threads (ASSUMPTIONS #229); a count between those measured (2, 8,
+ * 48) takes the smaller count's threshold */
+int64_t parallel_min_rows(int threads, Compression compression);
+
+/* A3: whether a frame of `nrow` rows from a file of this compression takes
+ * the parallel route under ReadOptions' route, threads and parallel_min_rows. */
+bool parallel_route(int64_t nrow, Compression compression, const ReadOptions &opt);
 
 /* Reads, profiles and plans. Throws RError. */
 Plan make_plan(const std::string &path, const ReadOptions &opt = ReadOptions());

@@ -28,10 +28,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -54,6 +56,8 @@
 #include "engine/legacy_encoding.hpp"
 #include "engine/parquet_footer.hpp"
 #include "engine/sanitize.hpp"
+#include "engine/save_blocks.hpp"
+#include "engine/test_fault.hpp"
 
 namespace parqit_plugin {
 
@@ -220,8 +224,13 @@ struct OutputTransaction {
         /* If publication and rollback both fail, the old payload may live only
          * under root/old.  That root becomes a recovery object whose exact
          * path is reported to the caller; deleting it here would convert a
-         * loud publication failure into loss of the previously valid data. */
-        if (!retain_root && !root.empty()) std::filesystem::remove_all(root, ec);
+         * loud publication failure into loss of the previously valid data.
+         * remove_all may throw std::bad_alloc, which must not leave a
+         * destructor: the root then stays. */
+        try {
+            if (!retain_root && !root.empty()) std::filesystem::remove_all(root, ec);
+        } catch (...) {
+        }
         if (owns_lock && !lock.empty()) {
             ec.clear();
             /* remove(), deliberately not remove_all(): an unexpected entrant
@@ -252,6 +261,12 @@ std::string output_nonce() {
 bool output_test_hook(const char *name) {
     const char *value = std::getenv(name);
     return value && std::strcmp(value, "1") == 0;
+}
+
+void trace_partitions(const char *step) {
+    if (!output_test_hook("PARQIT_TEST_TRACE_PARTITIONS")) return;
+    const std::string line = std::string("PARQIT_PARTITIONS_TRACE ") + step + "\n";
+    SF_display(const_cast<char *>(line.c_str()));
 }
 
 size_t arrow_offset_limit() {
@@ -392,6 +407,27 @@ static std::string glob_escape(const std::string &p) {
  * and both in-memory writers fold it to ''), so under a VARCHAR key such a
  * directory can only have come from the literal text. Checked on the staged
  * tree before it is published; "" when clean, else the loud refusal. */
+static std::string decode_partition_component(const std::string &encoded) {
+    std::string decoded;
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        if (encoded[i] == '%' && i + 2 < encoded.size()) {
+            std::string byte;
+            if (parqit::hex_decode(encoded.substr(i + 1, 2), byte)) {
+                decoded += byte;
+                i += 2;
+                continue;
+            }
+        }
+        decoded += encoded[i];
+    }
+    return decoded;
+}
+
+static bool reserved_partition_marker(const std::string &value) {
+    return parqit::ascii_lower(value) == "null" || value == "__HIVE_DEFAULT_PARTITION__";
+}
+
 static std::string partition_string_keys_check(Session &s, const std::string &query_sql,
                                                const std::vector<std::string> &keys,
                                                const std::string &staged_root) {
@@ -420,13 +456,14 @@ static std::string partition_string_keys_check(Session &s, const std::string &qu
         const std::string leaf = it->path().filename().u8string();
         const size_t eq = leaf.find('=');
         if (eq == std::string::npos || eq == 0) continue;
-        const std::string key = leaf.substr(0, eq), val = leaf.substr(eq + 1);
+        const std::string key = decode_partition_component(leaf.substr(0, eq));
+        const std::string val = decode_partition_component(leaf.substr(eq + 1));
         if (!str_keys.count(key)) continue;
-        if (val == "NULL" || val == "__HIVE_DEFAULT_PARTITION__")
+        if (reserved_partition_marker(val))
             return "partition_by(" + key + "): the string value \"" + val +
-                   "\" cannot be written as a partition directory — the engine reads "
-                   "that directory back as a missing partition, so the value would "
-                   "load as \"\"; recode it first (parqit replace) or save a single file";
+                   "\" cannot be written as a partition directory: reserved for missing "
+                   "partitions in supported files; "
+                   "recode it first (parqit replace) or save a single file";
     }
     return "";
 }
@@ -763,18 +800,16 @@ ST_retcode strict_schema_gate(Session &s, const Source &src,
             *err = friendly_engine_error(*err);
             return nofile ? kRcFileNotFound : kRcEngine;
         }
+        const parqit::ResultGuard guard{&nres};
         if (duckdb_row_count(&nres) > 0) {
-            char *nm = duckdb_value_varchar(&nres, 0, 0);
-            std::string shown = nm ? nm : "";
-            if (nm) duckdb_free(nm);
-            duckdb_destroy_result(&nres);
+            const parqit::CText nm = parqit::result_text(&nres, 0, 0);
+            std::string shown = nm ? nm.get() : "";
             *err = "column name \"" + shown +
                    "\" contains a NUL byte, which Stata's plugin interface "
                    "cannot carry (it would silently collide with a sibling "
                    "column and lose data); rename the column upstream";
             return kRcUsage;
         }
-        duckdb_destroy_result(&nres);
     }
 
     if (relaxed) return 0;
@@ -786,6 +821,7 @@ ST_retcode strict_schema_gate(Session &s, const Source &src,
     }
 
     duckdb_result res;
+    std::map<std::string, std::string> rep_of; /* fingerprint -> first file */
     if (!s.query("SELECT file_name, string_agg(lower(name) || ':' || type || "
                  "':' || coalesce(converted_type, '') || ':' || "
                  "coalesce(logical_type, '') || ':' || coalesce(precision, -1) "
@@ -795,16 +831,14 @@ ST_retcode strict_schema_gate(Session &s, const Source &src,
                      "GROUP BY file_name",
                  &res, err))
         return kRcEngine;
-    std::map<std::string, std::string> rep_of; /* fingerprint -> first file */
-    idx_t n = duckdb_row_count(&res);
-    for (idx_t r = 0; r < n; r++) {
-        char *f = duckdb_value_varchar(&res, 0, r);
-        char *fp = duckdb_value_varchar(&res, 1, r);
-        if (f && fp && !rep_of.count(fp)) rep_of[fp] = f;
-        if (f) duckdb_free(f);
-        if (fp) duckdb_free(fp);
+    {
+        const parqit::ResultGuard guard{&res};
+        idx_t n = duckdb_row_count(&res);
+        for (idx_t r = 0; r < n; r++) {
+            const parqit::CText f = parqit::result_text(&res, 0, r), fp = parqit::result_text(&res, 1, r);
+            if (f && fp && !rep_of.count(fp.get())) rep_of[fp.get()] = f.get();
+        }
     }
-    duckdb_destroy_result(&res);
     if (rep_of.size() <= 1) return 0;
 
     struct Rep {
@@ -822,22 +856,21 @@ ST_retcode strict_schema_gate(Session &s, const Source &src,
                          quote_literal(rep.file) + ")",
                      &d, err))
             return kRcEngine;
-        idx_t dn = duckdb_row_count(&d);
-        for (idx_t r = 0; r < dn; r++) {
-            char *nm = duckdb_value_varchar(&d, 0, r);
-            char *ty = duckdb_value_varchar(&d, 1, r);
-            if (nm && ty) {
-                std::string low = nm;
-                std::transform(low.begin(), low.end(), low.begin(),
-                               [](unsigned char c) { return std::tolower(c); });
-                rep.cols.emplace_back(low, ty);
-                rep.by_name[low] = ty;
-                rep.display[low] = nm;
+        {
+            const parqit::ResultGuard guard{&d};
+            idx_t dn = duckdb_row_count(&d);
+            for (idx_t r = 0; r < dn; r++) {
+                const parqit::CText nm = parqit::result_text(&d, 0, r), ty = parqit::result_text(&d, 1, r);
+                if (nm && ty) {
+                    std::string low = nm.get();
+                    std::transform(low.begin(), low.end(), low.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    rep.cols.emplace_back(low, ty.get());
+                    rep.by_name[low] = ty.get();
+                    rep.display[low] = nm.get();
+                }
             }
-            if (nm) duckdb_free(nm);
-            if (ty) duckdb_free(ty);
         }
-        duckdb_destroy_result(&d);
         reps.push_back(std::move(rep));
     }
     const Rep &a = reps[0];
@@ -897,12 +930,13 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
                      paths_sql + ") ORDER BY file_name",
                  &res, &err))
         return m;
-    for (idx_t r = 0; r < duckdb_row_count(&res); r++) {
-        char *f = duckdb_value_varchar(&res, 0, r);
-        if (f) all_files.insert(f);
-        if (f) duckdb_free(f);
+    {
+        const parqit::ResultGuard guard{&res};
+        for (idx_t r = 0; r < duckdb_row_count(&res); r++) {
+            const parqit::CText f = parqit::result_text(&res, 0, r);
+            if (f) all_files.insert(f.get());
+        }
     }
-    duckdb_destroy_result(&res);
     /* A4-3: hand the matched-file list to the caller (the torn-read guard) */
     if (files) files->assign(all_files.begin(), all_files.end());
     if (all_files.empty()) return m;
@@ -912,25 +946,23 @@ ParqitMeta read_parqit_meta(Session &s, const std::string &paths_sql,
      * label/format because a third-party writer added one binary sidecar key.
      * try() nulls just the undecodable entry; the parqit.* keys (valid UTF-8
      * by construction) survive. */
+    std::map<std::string, std::map<std::string, std::string>> per_file;
+    for (const auto &f : all_files) per_file[f] = {};
     if (!s.query("SELECT file_name, try(decode(key)) AS k, "
                  "try(decode(value)) AS v FROM "
                  "parquet_kv_metadata(" + paths_sql + ") "
                  "WHERE try(decode(key)) LIKE 'parqit.%'",
                  &res, &err))
         return m; /* no metadata channel — fine */
-    std::map<std::string, std::map<std::string, std::string>> per_file;
-    for (const auto &f : all_files) per_file[f] = {};
-    idx_t nrow = duckdb_row_count(&res);
-    for (idx_t r = 0; r < nrow; r++) {
-        char *f = duckdb_value_varchar(&res, 0, r);
-        char *k = duckdb_value_varchar(&res, 1, r);
-        char *v = duckdb_value_varchar(&res, 2, r);
-        if (f && k && v) per_file[f][k] = v;
-        if (f) duckdb_free(f);
-        if (k) duckdb_free(k);
-        if (v) duckdb_free(v);
+    {
+        const parqit::ResultGuard guard{&res};
+        idx_t nrow = duckdb_row_count(&res);
+        for (idx_t r = 0; r < nrow; r++) {
+            const parqit::CText f = parqit::result_text(&res, 0, r), k = parqit::result_text(&res, 1, r),
+                                v = parqit::result_text(&res, 2, r);
+            if (f && k && v) per_file[f.get()][k.get()] = v.get();
+        }
     }
-    duckdb_destroy_result(&res);
     const auto &first = per_file.begin()->second;
     bool has_xmissing = false;
     for (const auto &pf : per_file)
@@ -1216,15 +1248,15 @@ ST_retcode plan_columns(Session &s, const Source &src,
                             "file_name = (SELECT min(file_name) FROM parquet_schema(" +
                             src.paths_sql + "))",
                         &sres, &serr)) {
+                parqit::ResultGuard guard{&sres};
                 const idx_t n = duckdb_row_count(&sres);
                 std::vector<std::string> leaves;
                 leaves.reserve(static_cast<size_t>(n));
                 for (idx_t c = 0; c < n; c++) {
-                    char *nm = duckdb_value_varchar(&sres, 0, c);
-                    leaves.push_back(nm ? nm : "");
-                    if (nm) duckdb_free(nm);
+                    const parqit::CText nm = parqit::result_text(&sres, 0, c);
+                    leaves.push_back(nm ? nm.get() : "");
                 }
-                duckdb_destroy_result(&sres);
+                guard.reset();
                 leaf_names_seen = leaves;
                 /* a flat scan has exactly the leaves (plus partition keys for a
                  * Hive directory); anything else (nested children) is left alone */
@@ -1256,6 +1288,7 @@ ST_retcode plan_columns(Session &s, const Source &src,
             if (s.query("SELECT file_name, name FROM parquet_schema(" + src.paths_sql +
                             ") WHERE num_children = 0 OR num_children IS NULL",
                         &sres, &serr)) {
+                parqit::ResultGuard guard{&sres};
                 /* files in the engine's own (batch-ordered) file order; each
                  * file's leaves in schema order */
                 std::vector<std::string> file_order;
@@ -1263,21 +1296,19 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 std::vector<std::vector<std::string>> leaves;
                 const idx_t n = duckdb_row_count(&sres);
                 for (idx_t r = 0; r < n; r++) {
-                    char *f = duckdb_value_varchar(&sres, 0, r);
-                    char *nm = duckdb_value_varchar(&sres, 1, r);
+                    const parqit::CText f = parqit::result_text(&sres, 0, r),
+                                        nm = parqit::result_text(&sres, 1, r);
                     if (f) {
-                        auto it = file_index.find(f);
+                        auto it = file_index.find(f.get());
                         if (it == file_index.end()) {
-                            it = file_index.emplace(f, leaves.size()).first;
-                            file_order.push_back(f);
+                            it = file_index.emplace(f.get(), leaves.size()).first;
+                            file_order.push_back(f.get());
                             leaves.emplace_back();
                         }
-                        leaves[it->second].push_back(nm ? nm : "");
+                        leaves[it->second].push_back(nm ? nm.get() : "");
                     }
-                    if (f) duckdb_free(f);
-                    if (nm) duckdb_free(nm);
                 }
-                duckdb_destroy_result(&sres);
+                guard.reset();
                 std::vector<std::vector<std::string>> deduped;
                 deduped.reserve(leaves.size());
                 for (const auto &lv : leaves) {
@@ -1384,11 +1415,8 @@ ST_retcode plan_columns(Session &s, const Source &src,
         auto varchar_cell = [](duckdb_result *res, idx_t col, idx_t row) {
             std::string v;
             if (!duckdb_value_is_null(res, col, row)) {
-                char *x = duckdb_value_varchar(res, col, row);
-                if (x) {
-                    v = x;
-                    duckdb_free(x);
-                }
+                const parqit::CText x = parqit::result_text(res, col, row);
+                if (x) v = x.get();
             }
             return v;
         };
@@ -1398,8 +1426,8 @@ ST_retcode plan_columns(Session &s, const Source &src,
             if (s.query("SELECT file FROM glob(" + src.csv_first_sql +
                             ") ORDER BY file LIMIT 1",
                         &fres, &perr)) {
+                const parqit::ResultGuard guard{&fres};
                 if (duckdb_row_count(&fres) > 0) first = varchar_cell(&fres, 0, 0);
-                duckdb_destroy_result(&fres);
             }
         }
         std::string delim, quote, esc, skip, comment;
@@ -1409,6 +1437,7 @@ ST_retcode plan_columns(Session &s, const Source &src,
             if (s.query("SELECT Delimiter, Quote, Escape, SkipRows, HasHeader, Comment "
                         "FROM sniff_csv(" + quote_literal(first) + ")",
                         &sres, &perr)) {
+                const parqit::ResultGuard guard{&sres};
                 if (duckdb_row_count(&sres) == 1) {
                     /* sniff_csv reports an unset quote/escape/comment as the
                      * literal text "(empty)" (verified: read_csv then refuses
@@ -1423,7 +1452,6 @@ ST_retcode plan_columns(Session &s, const Source &src,
                     comment = unset(varchar_cell(&sres, 5, 0));
                     sniffed = true;
                 }
-                duckdb_destroy_result(&sres);
             }
         }
         /* CSV-OPT-1: a dialect the user forced with csv(...) wins over the
@@ -1446,12 +1474,12 @@ ST_retcode plan_columns(Session &s, const Source &src,
             duckdb_result hres;
             if (s.query("SELECT * FROM read_csv(" + quote_literal(first) + opts + ") LIMIT 1",
                         &hres, &perr)) {
+                const parqit::ResultGuard guard{&hres};
                 const idx_t n = duckdb_column_count(&hres);
                 /* FILENAME-1: the provenance column has no header cell */
                 if (duckdb_row_count(&hres) == 1 && n == ncol_eff) {
                     for (idx_t c = 0; c < n; c++) recover_at(c, varchar_cell(&hres, c, 0));
                 }
-                duckdb_destroy_result(&hres);
             }
         }
     }
@@ -1701,8 +1729,10 @@ ST_retcode plan_columns(Session &s, const Source &src,
                 start = c + 1;
                 const size_t eq = comp.find('=');
                 if (eq == std::string::npos || eq == 0) continue;
-                const std::string key = comp.substr(0, eq), val = comp.substr(eq + 1);
-                if (val != "NULL" && val != "__HIVE_DEFAULT_PARTITION__") continue;
+                const std::string key = decode_partition_component(comp.substr(0, eq));
+                const std::string val = comp.substr(eq + 1);
+                // Hive checks raw markers before decoding literal values.
+                if (!reserved_partition_marker(val)) continue;
                 if (!ctx->hive_columns.count(key)) continue;
                 bool is_str = false;
                 for (const auto &p : plans)
@@ -1828,80 +1858,15 @@ ST_retcode plan_columns(Session &s, const Source &src,
         return kRcUsage;
     }
 
-    /* observed-range pass: sizes integers and strings exactly. Parquet
-     * carries exact per-row-group min/max in its footer, so the integer/
-     * float bounds can come from metadata for FREE — a column only needs a
-     * real data scan when metadata cannot answer exactly:
-     *   - strings: parquet stores min/max VALUES, not max byte length;
-     *   - >2^53 detection: needs the true magnitude (double would round);
-     *   - floats whose metadata bound exceeds Stata's float range: must
-     *     distinguish a finite overflow (widen) from a mere ±Inf (keep);
-     *   - duplicate column names / files lacking stats: fall back to a scan.
-     * Bounds taken from metadata are EXACT for the columns that use them:
-     * needs_minmax columns are all ≤32-bit (64-bit ints carry needs_big53
-     * and are excluded), and float values are a subset of double. */
+    /* Observed-range pass: sizes integers and strings and checks float range
+     * and precision. The old footer shortcut referenced converted_type and
+     * logical_type in parquet_metadata, but both pinned engines expose those
+     * fields only in parquet_schema. It always failed binding and reached
+     * this pass. Keep that existing behaviour without the failed query;
+     * introducing a working footer shortcut would need a separate review of
+     * statistics completeness, logical units and forged bounds. */
     if (with_stats) {
         std::vector<ColumnStats> stats(ctx->active.size());
-
-        /* metadata stats keyed by source (parquet) name; only trusted when
-         * every row group of the column carries a non-null min AND max */
-        struct MetaStat { bool has = false; double mn = 0, mx = 0; };
-        std::map<std::string, MetaStat> meta_stats;
-        /* only worth a footer read if some column could actually be sized from
-         * it — a column that already needs a strlen/>2^53 scan cannot, so an
-         * all-string file pays nothing extra (never increases read time) */
-        bool any_meta_candidate = false;
-        for (const auto &p : ctx->active)
-            any_meta_candidate |= (p.needs_minmax || p.needs_float_range) &&
-                                  !p.needs_strlen && !p.needs_big53 &&
-                                  !p.needs_float_exact;
-        const bool dup_free = ctx->parquet_names.empty();
-        if (any_meta_candidate && dup_free && src.paths_sql != "[]" &&
-            !src.paths_sql.empty()) {
-            duckdb_result mres;
-            std::string merr;
-            /* TYPE-PARITY-1: DATE / TIMESTAMP columns (range-sized when the
-             * manifest records a narrow type) read their bounds in Stata
-             * units — days / ms since 1960 — from the footer too; a stat that
-             * does not parse leaves has=false and falls back to the scan */
-            const std::string shift_ms = std::to_string(parqit::kEpochShiftMs);
-            auto stat_expr = [&](const char *col) {
-                const std::string v = col;
-                return "CASE WHEN converted_type = 'DATE' OR logical_type LIKE 'DateType%' "
-                       "THEN CAST(TRY_CAST(" + v + " AS DATE) - DATE '1960-01-01' AS DOUBLE) "
-                       "WHEN converted_type LIKE 'TIMESTAMP%' OR logical_type LIKE 'TimestampType%' "
-                       "THEN floor(epoch_us(TRY_CAST(" + v + " AS TIMESTAMP)) / 1000.0) + " + shift_ms + " "
-                       "ELSE TRY_CAST(" + v + " AS DOUBLE) END";
-            };
-            if (s.query("SELECT path_in_schema, "
-                        "min(" + stat_expr("stats_min_value") + "), "
-                        "max(" + stat_expr("stats_max_value") + "), "
-                        "count(*), count(stats_min_value), count(stats_max_value) "
-                        "FROM parquet_metadata(" + src.paths_sql +
-                            ") GROUP BY path_in_schema",
-                        &mres, &merr)) {
-                idx_t mn = duckdb_row_count(&mres);
-                for (idx_t r = 0; r < mn; r++) {
-                    char *nm = duckdb_value_varchar(&mres, 0, r);
-                    if (nm) {
-                        long long ng = duckdb_value_int64(&mres, 3, r);
-                        long long ngmin = duckdb_value_int64(&mres, 4, r);
-                        long long ngmax = duckdb_value_int64(&mres, 5, r);
-                        MetaStat ms;
-                        ms.has = ng > 0 && ngmin == ng && ngmax == ng &&
-                                 !duckdb_value_is_null(&mres, 1, r) &&
-                                 !duckdb_value_is_null(&mres, 2, r);
-                        if (ms.has) {
-                            ms.mn = duckdb_value_double(&mres, 1, r);
-                            ms.mx = duckdb_value_double(&mres, 2, r);
-                        }
-                        meta_stats[nm] = ms;
-                        duckdb_free(nm);
-                    }
-                }
-                duckdb_destroy_result(&mres);
-            }
-        }
 
         std::string sel;
         std::vector<std::pair<size_t, char>> slots;
@@ -1913,30 +1878,6 @@ ST_retcode plan_columns(Session &s, const Source &src,
         for (size_t i = 0; i < ctx->active.size(); i++) {
             ColumnPlan &p = ctx->active[i];
             const std::string ref = quote_ident(p.source_name);
-            /* try metadata first, but never for a column that also needs a
-             * strlen or >2^53 scan (those force a scan anyway, and the
-             * metadata bound for a >2^53 column would be a rounded double) */
-            bool from_meta = false;
-            if ((p.needs_minmax || p.needs_float_range) && !p.needs_strlen &&
-                !p.needs_big53 && !p.needs_float_exact) {
-                auto it = meta_stats.find(p.source_name);
-                if (it != meta_stats.end() && it->second.has) {
-                    if (p.needs_minmax) {
-                        stats[i].has_minmax = true;
-                        stats[i].min = it->second.mn;
-                        stats[i].max = it->second.mx;
-                        from_meta = true;
-                    } else if (std::fabs(it->second.mn) <= parqit::kStataFloatMax &&
-                               std::fabs(it->second.mx) <= parqit::kStataFloatMax) {
-                        /* metadata proves every value fits Stata's float */
-                        stats[i].has_minmax = true;
-                        stats[i].min = it->second.mn;
-                        stats[i].max = it->second.mx;
-                        from_meta = true;
-                    }
-                }
-            }
-            if (from_meta) continue;
             /* the range is measured over the CASTED value in Stata units: a
              * Hive key's TRY_CAST (A1-3), a DATE's day count, a TIMESTAMP's ms
              * count (TYPE-PARITY-1); plain integers/floats cast to themselves */
@@ -1984,14 +1925,15 @@ ST_retcode plan_columns(Session &s, const Source &src,
                  * threshold unsigned too; mixed 128-bit signs promote to
                  * DOUBLE. Casting only the extrema preserves DECIMAL's
                  * existing rounding policy without converting every row. */
-                if (p.src_type == DUCKDB_TYPE_UHUGEINT)
-                    add("coalesce(max(" + ref +
-                            ") > 9007199254740992::UHUGEINT, false)", i, 'b');
-                else
-                    add("coalesce(min(" + ref +
-                            ")::HUGEINT < -9007199254740992::HUGEINT OR max(" +
-                            ref + ")::HUGEINT > 9007199254740992::HUGEINT, false)",
-                        i, 'b');
+                // The engine may fold a comparison from a dishonest footer
+                // even while min/max themselves still read the actual values.
+                // Fetch exact extrema and make the protection decision here.
+                if (p.src_type == DUCKDB_TYPE_UHUGEINT) {
+                    add("max(" + ref + ")::UHUGEINT", i, 'u');
+                } else {
+                    add("min(" + ref + ")::HUGEINT", i, 'b');
+                    add("max(" + ref + ")::HUGEINT", i, 'B');
+                }
                 /* INT64-PROTECT-1: under int64(string) the affected columns
                  * become exact text, and their width must be measured over
                  * the very expression plan_big53_as_text() will project. The
@@ -2015,7 +1957,9 @@ ST_retcode plan_columns(Session &s, const Source &src,
              * Keep first(1) in this final SELECT to prevent that substitution;
              * its constant update is O(1) per chunk. It has no response slot. */
             if (std::any_of(slots.begin(), slots.end(),
-                            [](const auto &slot) { return slot.second == 'b'; }))
+                            [](const auto &slot) {
+                                return slot.second == 'b' || slot.second == 'u';
+                            }))
                 sel += ", first(1)";
             duckdb_result sres;
             if (!s.query("SELECT " + sel + " FROM " + src.scan_sql, &sres, err)) {
@@ -2071,8 +2015,15 @@ ST_retcode plan_columns(Session &s, const Source &src,
                     stats[pi].max_strlen = isnull ? 0 : duckdb_value_int64(&sres, k, 0);
                     break;
                 case 'b':
-                    stats[pi].any_beyond_2p53 =
-                        !isnull && duckdb_value_boolean(&sres, k, 0);
+                case 'B':
+                    if (!isnull)
+                        stats[pi].any_beyond_2p53 |= parqit::beyond_stata_integer_guard(
+                            duckdb_value_hugeint(&sres, k, 0));
+                    break;
+                case 'u':
+                    if (!isnull)
+                        stats[pi].any_beyond_2p53 |= parqit::beyond_stata_integer_guard(
+                            duckdb_value_uhugeint(&sres, k, 0));
                     break;
                 case 'f':
                     stats[pi].float_exact_checked = true;
@@ -2149,7 +2100,68 @@ ST_retcode plan_columns(Session &s, const Source &src,
     return 0;
 }
 
+ST_retcode plan_integer_compression(Session &s, const Source &src,
+                                    PlanContext *ctx, std::string *err) {
+    // Empty datasets retain their existing types under native compress.
+    if (ctx->nrows <= 0) return 0;
+    std::string select;
+    std::vector<size_t> targets;
+    for (size_t i = 0; i < ctx->active.size(); ++i) {
+        const auto &p = ctx->active[i];
+        const bool integer_transfer = p.transfer == Transfer::Int8 || p.transfer == Transfer::Int16 ||
+                                      p.transfer == Transfer::Int32 || p.transfer == Transfer::Int64;
+        const bool numeric_double = p.transfer == Transfer::Float64 && p.stata_type == StType::Double;
+        // This includes lazy dates already converted to integer Stata units.
+        const bool formatted_integer = integer_transfer && !p.stata_format.empty() &&
+                                       (p.stata_type == StType::Int || p.stata_type == StType::Long);
+        const bool date = p.transfer == Transfer::Date32 &&
+                          (p.stata_type == StType::Double || p.stata_type == StType::Long ||
+                           p.stata_type == StType::Int);
+        if (!numeric_double && !formatted_integer && !date) continue;
+        const auto ref = p.cast_sql.empty() ? quote_ident(p.source_name) : p.cast_sql;
+        // DATE reaches the proof in its native representation: the callback
+        // applies the same exact +3653 day shift and infinity rule as the fill.
+        const auto argument = date ? ref : "CAST(" + ref + " AS DOUBLE)";
+        select += (select.empty() ? "" : ", ") +
+                  std::string("(__parqit_integer_storage(") + argument + ")).mask";
+        targets.push_back(i);
+    }
+    if (targets.empty()) return 0;
+    duckdb_result result;
+    if (!s.query("SELECT " + select + " FROM " + src.scan_sql, &result, err)) return kRcEngine;
+    std::vector<bool> proved(ctx->active.size(), false);
+    for (size_t j = 0; j < targets.size(); ++j) {
+        auto &p = ctx->active[targets[j]];
+        const auto mask = duckdb_value_uint32(&result, j, 0);
+        if (!mask) continue;
+        if (mask == 8) {
+            if (p.stata_type == StType::Double) proved[targets[j]] = true;
+            continue;
+        }
+        const auto target = (mask & 1) ? StType::Byte : (mask & 2) ? StType::Int : StType::Long;
+        if (p.stata_type == StType::Int && target == StType::Long) continue;
+        // Native compress retains the display format. A foreign DOUBLE with
+        // no metadata would first receive Stata's %10.0g default; allocating
+        // byte/int directly must not substitute their %8.0g default.
+        if (p.stata_format.empty()) p.stata_format = "%10.0g";
+        p.stata_type = target;
+        p.compression_integer = true;
+        proved[targets[j]] = true;
+    }
+    duckdb_destroy_result(&result);
+    ctx->compression_planned = true;
+    for (size_t i = 0; i < ctx->active.size(); ++i)
+        if (!proved[i]) ctx->compression_pending.push_back(ctx->active[i].stata_name);
+    return 0;
+}
+
 void write_var_records(parqit::ResponseWriter &w, const PlanContext &ctx) {
+    if (ctx.compression_planned) {
+        std::string pending;
+        for (const auto &name : ctx.compression_pending)
+            pending += (pending.empty() ? "" : " ") + name;
+        w.rec("compress", {}, {pending});
+    }
     for (size_t i = 0; i < ctx.active.size(); i++) {
         const ColumnPlan &p = ctx.active[i];
         std::string original = p.source_name;
@@ -2359,15 +2371,14 @@ std::vector<FileIdentity> snapshot_source_files(Session &s, const std::string &p
                      ") ORDER BY file_name",
                  &res, &err))
         return out;
+    const parqit::ResultGuard guard{&res};
     for (idx_t r = 0; r < duckdb_row_count(&res); r++) {
-        char *f = duckdb_value_varchar(&res, 0, r);
+        const parqit::CText f = parqit::result_text(&res, 0, r);
         if (f) {
             FileIdentity id;
-            if (file_identity(f, &id, false)) out.push_back(id);
-            duckdb_free(f);
+            if (file_identity(f.get(), &id, false)) out.push_back(id);
         }
     }
-    duckdb_destroy_result(&res);
     return out;
 }
 
@@ -2452,6 +2463,200 @@ bool hive_tree_probe(const std::filesystem::path &dir,
     return true;
 }
 
+/* PART-SCHEMA-ALL-1: every Parquet file of the existing tree, which must be a
+ * Hive tree over `keys` in every branch (hive_tree_probe's rules, applied to
+ * the whole tree); false, and why, when it is not one or cannot be read */
+/* What the reader's glob `**` / `*.parquet` makes of an entry (DuckDB's
+ * local_file_system.cpp, the same in 1.5.6 and 2.0.0: the crawl skips every
+ * symbolic link; a listing keeps what stat() reports as a regular file or a
+ * directory): a directory it descends, a file it may read (a link to a
+ * regular file included), a link to a directory (never read below), or
+ * nothing (a special file, a broken link). Codex audit, round 2, finding 3. */
+enum class TreeEntry { Directory, File, LinkToDirectory, UnresolvedLink, Ignored };
+TreeEntry tree_entry(const std::filesystem::directory_entry &e, std::error_code *ec) {
+    namespace fs = std::filesystem;
+    const fs::file_status ls = e.symlink_status(*ec);
+    if (*ec) return TreeEntry::Ignored;
+    if (fs::is_symlink(ls)) {
+        std::error_code ect;
+        const fs::file_status ts = fs::status(e.path(), ect);
+        if (ect == std::errc::too_many_symbolic_link_levels) return TreeEntry::UnresolvedLink;
+        if (ect) return TreeEntry::Ignored;
+        if (fs::is_directory(ts)) return TreeEntry::LinkToDirectory;
+        return fs::is_regular_file(ts) ? TreeEntry::File : TreeEntry::Ignored;
+    }
+    if (fs::is_directory(ls)) return TreeEntry::Directory;
+    return fs::is_regular_file(ls) ? TreeEntry::File : TreeEntry::Ignored;
+}
+
+bool is_parquet_name(const std::string &name) {
+    return name.size() >= 8 && name.compare(name.size() - 8, 8, ".parquet") == 0;
+}
+
+/* whether `path` lies at or below `root` (both canonical) */
+bool path_within(const std::filesystem::path &path, const std::filesystem::path &root) {
+    auto p = path.begin();
+    for (auto r = root.begin(); r != root.end(); ++r, ++p)
+        if (p == path.end() || *p != *r) return false;
+    return true;
+}
+
+/* true, and why, when a file entry of the tree is a symbolic link to a file of
+ * the tree itself (root: the tree's canonical path): the reader reads that
+ * file twice, and an update could leave the link reading other rows or none
+ * (Fable final audit, from its Codex consultation: a replace of the target's
+ * partition) */
+bool tree_link_alias(const std::filesystem::directory_entry &e, const std::filesystem::path &root,
+                     std::string *err) {
+    namespace fs = std::filesystem;
+    std::error_code ecl;
+    if (root.empty() || !e.is_symlink(ecl) || ecl) return false;
+    /* Codex final audit, finding 1: resolve components before collapsing ..,
+     * including real directory dependencies (Astra max follow-up). */
+    auto refuse = [&](const fs::path &hop, const std::string &why) {
+        *err = "partitions(): " + e.path().u8string() + " is a symbolic link through " +
+               hop.u8string() + ", " + why + "; replace the link by a copy of the file, or remove it";
+        return true;
+    };
+    std::error_code ec;
+    const fs::path origin = fs::weakly_canonical(e.path().parent_path(), ec);
+    if (ec) return refuse(e.path(), "a directory that cannot be resolved: " + ec.message());
+    fs::path directory = origin;
+    std::deque<fs::path> pending{e.path().filename()};
+    size_t hops = 0;
+    bool first = true;
+    while (!pending.empty()) {
+        const fs::path part = std::move(pending.front());
+        pending.pop_front();
+        if (part == ".") continue;
+        if (part == "..") {
+            directory = directory.parent_path();
+            continue;
+        }
+        const fs::path parent = fs::weakly_canonical(directory, ec);
+        if (ec) return refuse(directory, "a directory that cannot be resolved: " + ec.message());
+        const fs::path next = parent / part;
+        const fs::file_status status = fs::symlink_status(next, ec);
+        if (ec) return refuse(next, "a target that cannot be resolved: " + ec.message());
+        if (fs::is_symlink(status)) {
+            if (!first && path_within(next, root))
+                return refuse(next, "an entry of the tree itself that an update could change or remove");
+            first = false;
+            if (++hops > 40) return refuse(next, "a link chain beyond the 40-hop limit (possibly a loop)");
+            const fs::path target = fs::read_symlink(next, ec);
+            if (ec) return refuse(next, "a link that cannot be read: " + ec.message());
+            directory = target.is_absolute() ? target.root_path() : parent;
+            const fs::path rest = target.relative_path();
+            for (auto p = rest.end(); p != rest.begin();) pending.push_front(*--p);
+            continue;
+        }
+        if (path_within(next, root) &&
+            (pending.empty() || !fs::is_directory(status) || !path_within(origin, next)))
+            return refuse(next, "an entry of the tree itself that an update could change or remove");
+        if (pending.empty()) return false;
+        if (!fs::is_directory(status)) return refuse(next, "a path component that is not a directory");
+        directory = next;
+    }
+    return path_within(directory, root) &&
+           refuse(directory, "a target of the tree itself that an update could change or remove");
+}
+
+/* whether a directory holds a file the reader reads, at any depth below it
+ * through directories it descends (false and why when it cannot be read) */
+bool dir_holds_parquet(const std::filesystem::path &dir, bool *holds, std::string *err) {
+    namespace fs = std::filesystem;
+    *holds = false;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(dir, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        std::error_code ecd;
+        const TreeEntry kind = tree_entry(*it, &ecd);
+        if (ecd) {
+            *err = "partitions(): could not read " + it->path().u8string() + ": " + ecd.message();
+            return false;
+        }
+        if (kind == TreeEntry::File && is_parquet_name(it->path().filename().u8string())) {
+            *holds = true;
+            return true;
+        }
+    }
+    if (ec) {
+        *err = "partitions(): could not read " + dir.u8string() + ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool hive_tree_files(const std::filesystem::path &dir, const std::vector<std::string> &keys,
+                     size_t depth, std::vector<std::filesystem::path> *files, std::string *err,
+                     const std::filesystem::path &root = {}) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::directory_iterator it(dir, ec);
+    for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const fs::directory_entry &e = *it;
+        const std::string name = e.path().filename().u8string();
+        if (name.empty()) continue;
+        std::error_code ecd;
+        const TreeEntry kind = tree_entry(e, &ecd);
+        if (ecd) {
+            *err = "partitions(): could not read " + e.path().u8string() + ": " + ecd.message();
+            return false;
+        }
+        if (kind == TreeEntry::UnresolvedLink && is_parquet_name(name) &&
+            tree_link_alias(e, root, err)) return false;
+        const bool is_dir = kind == TreeEntry::Directory;
+        /* Codex audit, finding 4: the reader takes every *.parquet below the
+         * tree, hidden ones and those in hidden directories included, so they
+         * are checked too; a hidden entry it does not read (.DS_Store, a hidden
+         * directory without Parquet files, a link to a directory) is passed
+         * over, as it is there; a file named ".parquet" matches the reader's
+         * *.parquet too */
+        if (name[0] == '.') {
+            bool holds = false;
+            if (is_dir && !dir_holds_parquet(e.path(), &holds, err)) return false;
+            const bool parquet = kind == TreeEntry::File && is_parquet_name(name);
+            if (!parquet && !holds) continue;
+        }
+        if (kind == TreeEntry::LinkToDirectory && depth < keys.size()) {
+            /* round 2, finding 3: rows added or replaced below it would land
+             * where the reader never reads */
+            *err = "partitions(): " + e.path().u8string() +
+                   " is a symbolic link to a directory, which the reader of the tree does not "
+                   "follow; replace it by the directory itself to update the tree";
+            return false;
+        }
+        if (kind == TreeEntry::LinkToDirectory || (kind == TreeEntry::Ignored && depth >= keys.size()))
+            continue; /* read by no one: a link to a directory, a special file, a broken link */
+        if (depth < keys.size()) {
+            const std::string prefix = keys[depth] + "=";
+            if (!is_dir || name.compare(0, prefix.size(), prefix) != 0) {
+                *err = "partitions(): " + e.path().u8string() +
+                       " is not a partition directory of key " + keys[depth] +
+                       "; the existing tree must be a Hive tree over " +
+                       join_keys(keys) + " in that order";
+                return false;
+            }
+            if (!hive_tree_files(e.path(), keys, depth + 1, files, err, root)) return false;
+        } else {
+            if (is_dir) {
+                *err = "partitions(): " + e.path().u8string() +
+                       " is a directory below the last partition key " + keys.back();
+                return false;
+            }
+            if (is_parquet_name(name)) {
+                if (tree_link_alias(e, root, err)) return false;
+                files->push_back(e.path());
+            }
+        }
+    }
+    if (ec) {
+        *err = "partitions(): could not read " + dir.u8string() + ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
 /* parqit.* key-value metadata of one file, keyed exactly as the reader
  * compares files of a glob (plan_columns): raw key -> raw value. */
 bool parqit_kv_of(Session &s, const std::string &file,
@@ -2462,15 +2667,12 @@ bool parqit_kv_of(Session &s, const std::string &file,
                  ") WHERE try(decode(key)) LIKE 'parqit.%'",
                  &res, err))
         return false;
+    const parqit::ResultGuard guard{&res};
     const idx_t n = duckdb_row_count(&res);
     for (idx_t r = 0; r < n; r++) {
-        char *k = duckdb_value_varchar(&res, 0, r);
-        char *v = duckdb_value_varchar(&res, 1, r);
-        if (k && v) (*out)[k] = v;
-        if (k) duckdb_free(k);
-        if (v) duckdb_free(v);
+        const parqit::CText k = parqit::result_text(&res, 0, r), v = parqit::result_text(&res, 1, r);
+        if (k && v) (*out)[k.get()] = v.get();
     }
-    duckdb_destroy_result(&res);
     return true;
 }
 
@@ -2484,15 +2686,12 @@ bool parquet_columns_of(Session &s, const std::string &file,
                      quote_literal(glob_escape(file)) + ", hive_partitioning = false)",
                  &res, err))
         return false;
+    const parqit::ResultGuard guard{&res};
     const idx_t n = duckdb_row_count(&res);
     for (idx_t r = 0; r < n; r++) {
-        char *c = duckdb_value_varchar(&res, 0, r);
-        char *t = duckdb_value_varchar(&res, 1, r);
-        out->emplace_back(c ? c : "", t ? t : "");
-        if (c) duckdb_free(c);
-        if (t) duckdb_free(t);
+        const parqit::CText c = parqit::result_text(&res, 0, r), t = parqit::result_text(&res, 1, r);
+        out->emplace_back(c ? c.get() : "", t ? t.get() : "");
     }
-    duckdb_destroy_result(&res);
     return true;
 }
 
@@ -2641,21 +2840,179 @@ std::string describe_meta_diff(const std::map<std::string, std::string> &tree,
     return s;
 }
 
-void collect_leaf_dirs(const std::filesystem::path &root, const std::filesystem::path &rel,
-                       size_t depth, size_t nkeys, std::vector<std::filesystem::path> *out) {
+/* PART-SCHEMA-ALL-1: every file the tree keeps must read as one table with
+ * the result — the same columns with the same engine types, the same parqit.*
+ * metadata — read from all their footers, in chunks of 64 files. The engine
+ * reads a query's footers one after another, and more slowly on more threads,
+ * so a round of chunks (at most 512 files) runs on several connections at once
+ * (PART-SCHEMA-PARALLEL-1); the results are taken in file order, each round's
+ * released before the next is read. PARQIT_TEST_TREE_CHUNK_FILES sets the
+ * chunk for the suite. 0; else the first file, in file order, that differs
+ * (kRcUsage, named) or whose footer cannot be read (kRcEngine), whatever the
+ * chunk size or the threads. */
+ST_retcode tree_files_agree(Session &s, const std::vector<std::filesystem::path> &files,
+                            const std::filesystem::path &result_sample, std::string *err) {
+    using Cols = std::vector<std::pair<std::string, std::string>>;
+    using Meta = std::map<std::string, std::string>;
+    using Rows = std::vector<std::vector<std::optional<std::string>>>;
+    auto list_of = [](const std::vector<std::string> &paths) {
+        std::string l = "[";
+        for (size_t i = 0; i < paths.size(); i++) l += (i ? ", " : "") + quote_literal(glob_escape(paths[i]));
+        return l + "]";
+    };
+    auto schema_sql = [&](const std::vector<std::string> &paths) {
+        return "SELECT file_name, name, duckdb_type FROM parquet_schema(" + list_of(paths) + ")";
+    };
+    auto meta_sql = [&](const std::vector<std::string> &paths) {
+        return "SELECT file_name, try(decode(key)) AS k, try(decode(value)) AS v FROM "
+               "parquet_kv_metadata(" + list_of(paths) + ") WHERE try(decode(key)) LIKE 'parqit.%'";
+    };
+    auto text = [](const std::optional<std::string> &v) { return v ? *v : std::string(); };
+    /* each file's columns in order; a file's first schema element is its root */
+    auto schemas = [&](const Rows &rows, std::map<std::string, Cols> *out) {
+        std::set<std::string> rooted;
+        for (const auto &row : rows) {
+            const std::string file = text(row[0]);
+            if (rooted.insert(file).second) (*out)[file];
+            else (*out)[file].emplace_back(text(row[1]), text(row[2]));
+        }
+    };
+    auto metas = [&](const Rows &rows, std::map<std::string, Meta> *out) {
+        for (const auto &row : rows)
+            if (row[0] && row[1] && row[2]) (*out)[*row[0]][*row[1]] = *row[2];
+    };
+    /* the engine names a file as it was given, or as its glob expanded */
+    auto find = [](const auto &m, const std::string &path) {
+        auto it = m.find(path);
+        return it != m.end() ? it : m.find(glob_escape(path));
+    };
+    const std::string rs = result_sample.u8string();
+    std::map<std::string, Cols> rsc;
+    std::map<std::string, Meta> rsm;
+    {
+        const auto r = s.query_text_many({schema_sql({rs}), meta_sql({rs})}, 1);
+        for (const auto &q : r)
+            if (!q.err.empty()) {
+                *err = q.err;
+                return kRcEngine;
+            }
+        schemas(r[0].rows, &rsc);
+        metas(r[1].rows, &rsm);
+    }
+    const Cols rcols = rsc.empty() ? Cols() : rsc.begin()->second;
+    const Meta rmeta = rsm.empty() ? Meta() : rsm.begin()->second;
+    size_t chunk = 64;
+    if (const char *e = std::getenv("PARQIT_TEST_TREE_CHUNK_FILES")) {
+        const long long v = std::atoll(e);
+        if (v > 0) chunk = static_cast<size_t>(v);
+    }
+    /* Codex audit, finding 5: no more than 512 files' footers are held at once
+     * (the serial read held one chunk of 512): a round is as many chunks as
+     * the engine has threads and 512 files allow, read at once and taken in
+     * order before the next round is read */
+    const size_t round = std::max<size_t>(
+        1, std::min<size_t>(static_cast<size_t>(std::min<long long>(s.threads(), 64)), 512 / chunk));
+    for (size_t at = 0; at < files.size(); at += chunk * round) {
+        std::vector<std::vector<std::string>> chunks;
+        std::vector<std::string> sqls;
+        for (size_t c = at; c < files.size() && c < at + chunk * round; c += chunk) {
+            std::vector<std::string> paths;
+            for (size_t i = c; i < files.size() && i < c + chunk; i++) paths.push_back(files[i].u8string());
+            sqls.push_back(schema_sql(paths));
+            sqls.push_back(meta_sql(paths));
+            chunks.push_back(std::move(paths));
+        }
+        /* the files of one chunk against the result, in order: 0, or the
+         * first that differs, named */
+        auto agree = [&](const std::vector<std::string> &paths, const Rows &schema_rows,
+                         const Rows &meta_rows) -> ST_retcode {
+            std::map<std::string, Cols> sc;
+            std::map<std::string, Meta> sm;
+            schemas(schema_rows, &sc);
+            metas(meta_rows, &sm);
+            for (const std::string &f : paths) {
+                const auto c = find(sc, f);
+                const auto m = find(sm, f);
+                const Meta fmeta = m == sm.end() ? Meta() : m->second;
+                std::string diff;
+                if (c == sc.end() || c->second != rcols) {
+                    Cols a, b;
+                    if (!parquet_columns_of(s, f, &a, err) || !parquet_columns_of(s, rs, &b, err)) return kRcEngine;
+                    diff = describe_column_diff(a, b);
+                } else if (fmeta != rmeta) {
+                    diff = describe_meta_diff(fmeta, rmeta);
+                } else {
+                    continue;
+                }
+                *err = "partitions(): the existing tree does not read as one dataset: its file " + f +
+                       " differs from the result (" + diff + "; \"tree\" is that file). Every file of "
+                       "the tree must agree for it to read as one dataset: repair or remove that file, "
+                       "rewrite the tree with replace, or write elsewhere";
+                return kRcUsage;
+            }
+            return 0;
+        };
+        const auto results = s.query_text_many(sqls, static_cast<int>(chunks.size()));
+        for (size_t k = 0; k < chunks.size(); k++) {
+            const std::string &qerr = !results[2 * k].err.empty() ? results[2 * k].err : results[2 * k + 1].err;
+            if (qerr.empty()) {
+                if (const ST_retcode rc = agree(chunks[k], results[2 * k].rows, results[2 * k + 1].rows)) return rc;
+                continue;
+            }
+            /* a chunk whose query failed is read again one file at a time: the
+             * first file, in file order, that cannot be read or that differs
+             * is named, whatever the chunk size or the threads (Codex audit,
+             * round 2: the message and return code do not depend on them) */
+            for (const std::string &f : chunks[k]) {
+                const auto one = s.query_text_many({schema_sql({f}), meta_sql({f})}, 1);
+                for (const auto &q : one)
+                    if (!q.err.empty()) {
+                        *err = q.err;
+                        return kRcEngine;
+                    }
+                if (const ST_retcode rc = agree({f}, one[0].rows, one[1].rows)) return rc;
+            }
+            *err = qerr; /* every file reads alone and agrees: the chunk's own failure stands */
+            return kRcEngine;
+        }
+    }
+    return 0;
+}
+
+/* the leaf directories of the staged tree, relative to root; false, and why,
+ * when a directory or an entry cannot be read (G6: a staged partition missed
+ * would be dropped with no failure, and so nothing to roll back) */
+bool collect_leaf_dirs(const std::filesystem::path &root, const std::filesystem::path &rel,
+                       size_t depth, size_t nkeys, std::vector<std::filesystem::path> *out,
+                       std::string *err) {
     namespace fs = std::filesystem;
     if (depth == nkeys) {
         out->push_back(rel);
-        return;
+        return true;
     }
+    const fs::path dir = rel.empty() ? root : root / rel;
     std::error_code ec;
-    for (const auto &e : fs::directory_iterator(rel.empty() ? root : root / rel, ec)) {
+    fs::directory_iterator it(dir, ec);
+    if (output_test_hook("PARQIT_TEST_FAIL_PARTITION_LEAVES"))
+        ec = std::make_error_code(std::errc::io_error);
+    for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
         std::error_code ecd;
-        if (!e.is_directory(ecd)) continue;
-        collect_leaf_dirs(root, rel.empty() ? fs::path(e.path().filename())
-                                            : rel / e.path().filename(),
-                          depth + 1, nkeys, out);
+        const bool is_dir = it->is_directory(ecd);
+        if (ecd) {
+            *err = "could not read the staged partition " + it->path().u8string() + ": " + ecd.message();
+            return false;
+        }
+        if (!is_dir) continue;
+        if (!collect_leaf_dirs(root, rel.empty() ? fs::path(it->path().filename())
+                                                 : rel / it->path().filename(),
+                               depth + 1, nkeys, out, err))
+            return false;
     }
+    if (ec) {
+        *err = "could not list the staged partitions under " + dir.u8string() + ": " + ec.message();
+        return false;
+    }
+    return true;
 }
 
 std::string random_hex16() {
@@ -2680,18 +3037,38 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
                               std::string *err) {
     namespace fs = std::filesystem;
     struct LeafMove {
+        struct Parent { fs::path path; bool created = false; };
         fs::path target, aside;
         bool had_old = false, moved_dir = false;
         std::vector<fs::path> added;
+        std::vector<Parent> parents;
+        bool restored = false;
     };
     std::vector<fs::path> leaves;
-    collect_leaf_dirs(staged, fs::path(), 0, nkeys, &leaves);
+    {
+        std::string lerr;
+        if (!collect_leaf_dirs(staged, fs::path(), 0, nkeys, &leaves, &lerr)) {
+            *err = lerr + "; the existing tree was left as it was";
+            return kRcEngine;
+        }
+    }
     const fs::path asideroot = tx.root / "aside";
+    /* Fable final audit (from its Codex consultation): each step is in the
+     * journal before it is made, which then needs no allocation, and an
+     * exception from here on reaches the rollback below; the transaction's
+     * root, which holds what was set aside, is retained until the publication
+     * or its rollback is complete (its destructor would delete it) */
     std::vector<LeafMove> moves;
+    moves.reserve(leaves.size());
     std::string failure;
+    std::exception_ptr thrown;
+    tx.retain_root = true;
+    const bool faults = std::getenv("PARQIT_TEST_FAULT") != nullptr;
+    try {
     for (size_t i = 0; i < leaves.size(); i++) {
         const fs::path from = staged / leaves[i];
-        LeafMove m;
+        moves.emplace_back();
+        LeafMove &m = moves.back();
         m.target = dest / leaves[i];
         std::error_code ec;
         const bool target_exists = fs::exists(m.target, ec);
@@ -2703,13 +3080,22 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
                 if (ec) {
                     failure = "could not set aside partition " + m.target.u8string() +
                               ": " + ec.message();
-                    moves.push_back(m);
                     break;
                 }
                 m.had_old = true;
+                if (faults) parqit::test_fault("publish_step", static_cast<long long>(2 * i));
             }
-            fs::create_directories(m.target.parent_path(), ec);
+            /* Codex final audit, finding 2: journal missing parents before
+             * creating them, deepest first for the rollback. */
+            for (fs::path p = m.target.parent_path(); !p.empty() && !fs::exists(p, ec);
+                 p = p.parent_path()) {
+                if (ec) break;
+                m.parents.push_back({p, false});
+            }
+            for (auto p = m.parents.rbegin(); !ec && p != m.parents.rend(); ++p)
+                p->created = fs::create_directory(p->path, ec);
             if (!ec) {
+                if (faults) parqit::test_fault("publish_before_leaf", static_cast<long long>(i));
                 if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH") && i + 1 == leaves.size())
                     ec = std::make_error_code(std::errc::io_error);
                 else
@@ -2718,18 +3104,60 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
             if (ec) {
                 failure = "could not publish partition " + m.target.u8string() + ": " +
                           ec.message();
-                moves.push_back(m);
                 break;
             }
             m.moved_dir = true;
+            if (faults) parqit::test_fault("publish_step", static_cast<long long>(2 * i + 1));
             if (target_exists) ++*n_replaced; else ++*n_added;
         } else {
-            const std::string token = random_hex16();
-            for (const auto &e : fs::directory_iterator(from, ec)) {
+            const char *fixed = std::getenv("PARQIT_TEST_APPEND_TOKEN"); /* the tests' name clash */
+            const std::string token = fixed && *fixed ? std::string(fixed) : random_hex16();
+            /* the staged files, counted first, so the journal holds every move
+             * without allocating */
+            size_t nfiles = 0;
+            {
+                std::error_code ecn;
+                for (fs::directory_iterator c(from, ecn); !ecn && c != fs::directory_iterator();
+                     c.increment(ecn))
+                    nfiles++;
+            }
+            m.added.reserve(nfiles);
+            /* A6: a listing that fails, at the start or midway, is a failure
+             * (rolled back), never a partition counted as extended with files
+             * left behind; so is an entry that cannot be read (G6). Tests:
+             * PARQIT_TEST_FAIL_PARTITION_LIST=1 fails the listing at its start,
+             * =2 after the first file moved; PARQIT_TEST_FAIL_PARTITION_STAT=1
+             * fails reading the first entry. */
+            const char *list_hook = std::getenv("PARQIT_TEST_FAIL_PARTITION_LIST");
+            const bool list_after_first = list_hook && std::strcmp(list_hook, "2") == 0;
+            fs::directory_iterator it(from, ec);
+            if (output_test_hook("PARQIT_TEST_FAIL_PARTITION_LIST"))
+                ec = std::make_error_code(std::errc::io_error);
+            for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                const fs::directory_entry &e = *it;
                 std::error_code ecf;
-                if (!e.is_regular_file(ecf)) continue;
-                const fs::path to = m.target / (e.path().stem().u8string() + "_" + token +
-                                                e.path().extension().u8string());
+                const bool regular = e.is_regular_file(ecf);
+                if (output_test_hook("PARQIT_TEST_FAIL_PARTITION_STAT"))
+                    ecf = std::make_error_code(std::errc::io_error);
+                if (ecf) {
+                    failure = "could not read " + e.path().u8string() + ": " + ecf.message();
+                    break;
+                }
+                if (!regular) continue;
+                fs::path to = m.target / (e.path().stem().u8string() + "_" + token +
+                                          e.path().extension().u8string());
+                if (m.added.size() == m.added.capacity()) {
+                    failure = "the staged partition " + from.u8string() + " changed while it was published";
+                    break;
+                }
+                /* Codex final audit, finding 4, option B: coordinated writers
+                 * hold the output lock; an already occupied name is refused. */
+                std::error_code ece; /* set to ENOENT too, with not_found (libstdc++) */
+                const fs::file_status taken = fs::symlink_status(to, ece);
+                if (fs::exists(taken) || (ece && taken.type() != fs::file_type::not_found)) {
+                    failure = "could not add " + to.u8string() + ": a file of that name exists";
+                    break;
+                }
                 std::error_code ecm;
                 if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_PUBLISH") && i + 1 == leaves.size())
                     ecm = std::make_error_code(std::errc::io_error);
@@ -2739,48 +3167,121 @@ ST_retcode publish_partitions(const std::filesystem::path &dest,
                     failure = "could not add " + to.u8string() + ": " + ecm.message();
                     break;
                 }
-                m.added.push_back(to);
+                m.added.push_back(std::move(to));
+                if (faults) parqit::test_fault("publish_file", static_cast<long long>(m.added.size() - 1));
+                if (list_after_first) {
+                    ec = std::make_error_code(std::errc::io_error);
+                    break;
+                }
             }
-            if (!failure.empty()) {
-                moves.push_back(m);
-                break;
-            }
+            if (ec && failure.empty())
+                failure = "could not list the files of partition " + from.u8string() + ": " + ec.message();
+            if (!failure.empty()) break;
             ++*n_extended; /* PART-NOTE-1: an existing partition got a file */
         }
-        moves.push_back(m);
     }
-    if (failure.empty()) {
-        std::error_code ecr;
-        fs::remove_all(asideroot, ecr);
+    } catch (...) {
+        thrown = std::current_exception();
+    }
+    if (failure.empty() && !thrown) {
+        try { /* published: what was set aside goes (or stays, if it cannot) */
+            std::error_code ecr;
+            fs::remove_all(asideroot, ecr);
+            tx.retain_root = false;
+        } catch (...) {
+        }
         return 0;
     }
-    /* rollback, newest first */
-    bool rollback_failed = false;
+    /* rollback, newest first: what this update added and cannot remove
+     * leaves the tree not as it was, and says so */
+    bool rollback_failed = false, not_removed = false;
+    long long removal = 0, restoration = 0;
     for (auto it = moves.rbegin(); it != moves.rend(); ++it) {
-        std::error_code ec;
-        if (it->moved_dir) fs::remove_all(it->target, ec);
-        for (const auto &f : it->added) fs::remove(f, ec);
-        if (it->had_old) {
-            std::error_code ecb;
-            if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_ROLLBACK"))
-                ecb = std::make_error_code(std::errc::io_error);
-            else {
-                fs::create_directories(it->target.parent_path(), ecb);
-                if (!ecb) fs::rename(it->aside, it->target, ecb);
+        auto remove_added = [&](const fs::path &path, bool directory) {
+            /* Codex final audit, finding 2: inject before removal, and an
+             * exception in one step must not skip the remaining steps. */
+            const long long index = removal++;
+            try {
+                if (faults) parqit::test_fault("rollback_remove", index);
+                std::error_code ec;
+                if (output_test_hook("PARQIT_TEST_FAIL_ROLLBACK_REMOVE"))
+                    ec = std::make_error_code(std::errc::io_error);
+                else if (directory)
+                    fs::remove_all(path, ec);
+                else
+                    fs::remove(path, ec);
+                if (ec) not_removed = true;
+            } catch (...) {
+                not_removed = true;
             }
-            if (ecb) rollback_failed = true;
+        };
+        if (it->moved_dir) remove_added(it->target, true);
+        for (const auto &f : it->added) remove_added(f, false);
+        if (it->had_old) {
+            const long long index = restoration++;
+            try {
+                if (faults) parqit::test_fault("rollback_restore", index);
+                std::error_code ecb;
+                if (output_test_hook("PARQIT_TEST_FAIL_OUTPUT_ROLLBACK"))
+                    ecb = std::make_error_code(std::errc::io_error);
+                else {
+                    fs::create_directories(it->target.parent_path(), ecb);
+                    if (!ecb) fs::rename(it->aside, it->target, ecb);
+                }
+                if (ecb) rollback_failed = true;
+                else it->restored = true;
+            } catch (...) {
+                rollback_failed = true;
+            }
+        }
+        for (const auto &p : it->parents) {
+            if (!p.created) continue;
+            try {
+                std::error_code ec;
+                fs::remove(p.path, ec); /* only empty directories */
+                if (ec) not_removed = true;
+            } catch (...) {
+                not_removed = true;
+            }
+        }
+    }
+    if (thrown) {
+        try {
+            std::rethrow_exception(thrown);
+        } catch (const std::exception &e) {
+            failure = std::string("could not publish the partitions: ") + e.what();
+        } catch (...) {
+            failure = "could not publish the partitions: unknown error";
         }
     }
     *err = failure;
     if (rollback_failed) {
-        tx.retain_root = true;
-        *err += "; rollback also failed: the previous partition(s) were NOT deleted and "
-                "are retained for recovery under " + asideroot.u8string();
+        *err += "; rollback also failed: not every previous partition was restored";
+        for (const auto &m : moves) {
+            if (!m.had_old || m.restored) continue;
+            try {
+                std::error_code ec;
+                const auto st = fs::symlink_status(m.aside, ec);
+                if (fs::exists(st))
+                    *err += "; previous partition retained for recovery at " + m.aside.u8string();
+                else if (ec && st.type() != fs::file_type::not_found)
+                    *err += "; could not verify the recovery copy at " + m.aside.u8string();
+            } catch (...) {
+                *err += "; recovery inventory could not be completed";
+            }
+        }
     } else {
-        std::error_code ecr;
-        fs::remove_all(asideroot, ecr);
-        *err += "; the existing tree was left as it was";
+        try {
+            std::error_code ecr;
+            fs::remove_all(asideroot, ecr);
+            tx.retain_root = false;
+        } catch (...) {
+        }
     }
+    if (not_removed || rollback_failed)
+        *err += "; rollback did not restore every file or directory, so the existing tree is NOT as it was";
+    else if (!rollback_failed)
+        *err += "; the existing tree was left as it was";
     return kRcEngine;
 }
 
@@ -2912,12 +3413,27 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
         } else {
             /* PART-MODE-1: the tree we are about to update must be a Hive tree
              * over the same keys; its first file is the schema/metadata
-             * reference every new partition must agree with */
+             * reference every new partition must agree with. Fable final
+             * audit, A0/A1: the whole tree is walked before anything is
+             * written, as the reader sees it, and the reference is the first
+             * file of the walk — not a file looked for down the first branch
+             * only, which an empty or hidden-only first branch, a link to an
+             * empty directory or a FIFO turned into no reference (no check at
+             * all) or a session that never returned */
             std::string perr;
-            if (!hive_tree_probe(fs::path(dest), partition_by, 0, &tree_sample, &perr)) {
+            std::vector<fs::path> inventory;
+            trace_partitions("first_walk"); /* Codex final audit: order of operations */
+            std::error_code ecr;
+            const fs::path troot = fs::canonical(fs::path(dest), ecr);
+            if (ecr) {
+                *err = "partitions(): could not resolve " + dest + ": " + ecr.message();
+                return kRcUsage;
+            }
+            if (!hive_tree_files(fs::path(dest), partition_by, 0, &inventory, &perr, troot)) {
                 *err = perr;
                 return kRcUsage;
             }
+            if (!inventory.empty()) tree_sample = inventory.front();
             if (!tree_sample.empty()) {
                 if (!parqit_kv_of(s, tree_sample.u8string(), &tree_meta, err))
                     return kRcEngine;
@@ -3100,7 +3616,21 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             std::error_code ec3;
             fs::remove_all(tmpdest, ec3);
         };
-        if (!run_copy(tmpdest, ", PARTITION_BY (" + pby + ")")) {
+        /* tests: partitions written in several files, by the engine's
+         * eviction (PARQIT_TEST_PARTITION_EVICT=1) */
+        const bool evict = output_test_hook("PARQIT_TEST_PARTITION_EVICT");
+        std::string ignored;
+        if (evict) {
+            s.exec("SET partitioned_write_max_open_files = 1", &ignored);
+            s.exec("SET partitioned_write_flush_threshold = 1024", &ignored);
+        }
+        if (per_leaf) trace_partitions("COPY");
+        const bool copied = run_copy(tmpdest, ", PARTITION_BY (" + pby + ")");
+        if (evict) {
+            s.exec("RESET partitioned_write_max_open_files", &ignored);
+            s.exec("RESET partitioned_write_flush_threshold", &ignored);
+        }
+        if (!copied) {
             cleanup_tmp();
             return kRcEngine;
         }
@@ -3159,9 +3689,53 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
             return kRcEngine;
         }
         if (per_leaf) {
+            /* Codex final audit: a coordinated change between the two walks. */
+            const char *plant = std::getenv("PARQIT_TEST_PARTITIONS_PLANT_SOURCE");
+            const char *relative = std::getenv("PARQIT_TEST_PARTITIONS_PLANT_TARGET");
+            if (plant && *plant && relative && *relative) {
+                const fs::path rel(relative);
+                if (rel.is_absolute() || std::find(rel.begin(), rel.end(), fs::path("..")) != rel.end()) {
+                    cleanup_tmp();
+                    *err = "partitions(): test plant target must stay inside the tree";
+                    return kRcUsage;
+                }
+                std::error_code ec;
+                const fs::path target = fs::path(dest) / rel;
+                fs::create_directories(target.parent_path(), ec);
+                if (!ec) fs::copy_file(fs::path(plant), target, fs::copy_options::none, ec);
+                if (ec) {
+                    cleanup_tmp();
+                    *err = "partitions(): could not plant the test file: " + ec.message();
+                    return kRcEngine;
+                }
+            }
             /* PART-MODE-1: the new partitions must read as one table with the
-             * tree — same columns and types, same parqit.* metadata */
-            if (tree_live) {
+             * tree — same columns and types, same parqit.* metadata. Fable
+             * final audit, A0: the tree is walked again now, under the output
+             * lock, whatever the first walk found, and compared whenever it
+             * holds a file (the first walk's reference, or now the first file
+             * of this one) */
+            std::vector<fs::path> kept;
+            trace_partitions("second_walk");
+            {
+                std::string terr;
+                std::error_code ecr;
+                const fs::path troot = fs::canonical(fs::path(dest), ecr);
+                if (ecr || !hive_tree_files(fs::path(dest), partition_by, 0, &kept, &terr, troot)) {
+                    cleanup_tmp();
+                    *err = ecr ? "partitions(): could not resolve " + dest + ": " + ecr.message() : terr;
+                    return kRcUsage;
+                }
+            }
+            if (tree_sample.empty() && !kept.empty()) {
+                tree_sample = kept.front();
+                if (!parqit_kv_of(s, tree_sample.u8string(), &tree_meta, err)) {
+                    cleanup_tmp();
+                    return kRcEngine;
+                }
+                tree_has_meta = !tree_meta.empty();
+            }
+            if (!kept.empty()) {
                 fs::path staged_sample;
                 std::string perr;
                 if (!hive_tree_probe(fs::path(tmpdest), partition_by, 0, &staged_sample,
@@ -3182,6 +3756,7 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                     cleanup_tmp();
                     *err = "partitions(): the result's columns differ from the existing "
                            "tree's (" + describe_column_diff(a, b) +
+                           ") (the tree's reference file " + tree_sample.u8string() +
                            "); the tree must stay readable as one dataset. Rewrite it "
                            "with replace, or write elsewhere";
                     return kRcUsage;
@@ -3196,6 +3771,7 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                         cleanup_tmp();
                         *err = "partitions(): the result's Stata metadata differs from "
                                "the existing tree's (" + describe_meta_diff(tree_meta, staged_meta) +
+                               ") (the tree's reference file " + tree_sample.u8string() +
                                "); a tree whose files disagree loses its labels and "
                                "formats on read. Make the result match the tree "
                                "(parqit describe <tree> shows its types and labels), "
@@ -3203,8 +3779,34 @@ ST_retcode copy_out_parquet(Session &s, const std::string &query_sql,
                         return kRcUsage;
                     }
                 }
+                /* PART-SCHEMA-ALL-1: not the first file only — every file the
+                 * tree keeps (all of them on append; those outside the replaced
+                 * partitions on replace), and every branch is a Hive branch */
+                std::string terr;
+                if (partition_mode == "replace") {
+                    std::vector<fs::path> leaves;
+                    if (!collect_leaf_dirs(fs::path(tmpdest), fs::path(), 0, partition_by.size(), &leaves,
+                                           &terr)) {
+                        cleanup_tmp();
+                        *err = terr;
+                        return kRcEngine;
+                    }
+                    std::set<std::string> gone;
+                    for (const auto &l : leaves) gone.insert((fs::path(dest) / l).lexically_normal().u8string());
+                    kept.erase(std::remove_if(kept.begin(), kept.end(),
+                                              [&](const fs::path &f) {
+                                                  return gone.count(f.parent_path().lexically_normal().u8string()) > 0;
+                                              }),
+                               kept.end());
+                }
+                const ST_retcode arc = tree_files_agree(s, kept, staged_sample, err);
+                if (arc != 0) {
+                    cleanup_tmp();
+                    return arc;
+                }
             }
             long long n_replaced = 0, n_added = 0, n_extended = 0;
+            trace_partitions("publication");
             ST_retcode prc = publish_partitions(fs::path(dest), fs::path(tmpdest), tx,
                                                 partition_by.size(), partition_mode,
                                                 &n_replaced, &n_added, &n_extended, err);
@@ -3362,6 +3964,11 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
     if (rc != 0) {
         cry("parqit use: " + err);
         return rc;
+    }
+
+    if (req.value("compress", false)) {
+        rc = plan_integer_compression(s, src, &ctx, &err);
+        if (rc != 0) { cry("parqit use: " + err); return rc; }
     }
 
     parqit::ResponseWriter w;
@@ -3596,12 +4203,18 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
     }
     case Transfer::Float64: {
         const double *v = static_cast<const double *>(col->buffers[1]);
+        const bool compression_integer = p.compression_integer;
         for (int64_t r = 0; r < col->length; r++)
             if (valid(r)) {
                 double d = v[off + r];
                 bool unstorable = std::isnan(d) || std::isinf(d) ||
                                   std::fabs(d) >= SV_missval;
                 if (!std::isnan(d) && unstorable && inf_seen) (*inf_seen)++;
+                if (!unstorable && compression_integer && d != std::trunc(d)) {
+                    *err = "column " + p.stata_name +
+                           " contains a fractional value after an integer storage proof; refusing to round it";
+                    return false;
+                }
                 if (!unstorable && !in_range(d)) unstorable = true;
                 if (!store_num(r, unstorable ? SV_missval : d)) return false;
             }
@@ -3859,7 +4472,7 @@ constexpr long long kStreamBufferFloor = 16LL * 1000 * 1000;
 /* The user's explicit ceiling on the streaming buffer — `parqit set
  * stream_buffer_mb` for the session (STREAM-BUFFER-SET-1, outranks the
  * variable), else PARQIT_STREAM_BUFFER_MB:
- *   unset / auto       -> 0  : no ceiling beyond the estimated result size;
+ *   unset / auto       -> 0  : the per-engine automatic policy below;
  *   n > 0              -> n MB, authoritative even below the floor — a smaller
  *                         buffer is a deliberate memory/time trade, and is
  *                         documented as such (no upper clamp: the buffer is a
@@ -3951,6 +4564,7 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
         ChunkSlot slot;
         bool owns = false;
         std::string lerr;
+        std::exception_ptr failure;
         bool ok = true;
         ArrowArray arr;
         std::memset(&arr, 0, sizeof(arr));
@@ -4010,11 +4624,9 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                         break;
                     }
             }
-        } catch (const std::exception &e) {
-            lerr = std::string("fill failed: ") + e.what();
-            ok = false;
         } catch (...) {
-            lerr = "fill failed: unknown error";
+            /* nothing that allocates in the handler (Codex audit, finding 2) */
+            failure = std::current_exception();
             ok = false;
         }
 
@@ -4026,10 +4638,22 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
         if (!ok) {
             try {
                 std::lock_guard<std::mutex> lk(fq.m);
-                if (fq.err.empty()) fq.err = lerr;
                 fq.aborted = true;
                 fq.cv_not_empty.notify_all();
                 fq.cv_not_full.notify_all();
+                try { /* the abort stands even when the message cannot be written */
+                    if (failure) {
+                        try {
+                            std::rethrow_exception(failure);
+                        } catch (const std::exception &e) {
+                            lerr = std::string("fill failed: ") + e.what();
+                        } catch (...) {
+                            lerr = "fill failed: unknown error";
+                        }
+                    }
+                    if (fq.err.empty()) fq.err = lerr;
+                } catch (...) {
+                }
             } catch (...) { /* mutex unusable: nothing safe left to do */
             }
             return;
@@ -4114,16 +4738,12 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
      * ready (a corrupt page, a bad cast) still surfaces here, exactly as it did
      * from duckdb_query, and takes the same branch. */
     const bool materialized = fetch_materialized();
-    /* Size the streaming buffer for THIS result, before the stream exists (no
-     * statement may run on the connection once it does). The rule: normally at
-     * least the whole estimated result, because a cap the producers actually
-     * reach stops and restarts the parallel scan (see
-     * Session::set_streaming_buffer_bytes); the estimate is a cap, not a
-     * reservation, so peak memory is still bounded by the result itself —
-     * i.e. never more than the materialised copy this replaces (measured a
-     * little less; the whole result sits in chunks when the fetch starts). A
-     * user who wants less memory sets PARQIT_STREAM_BUFFER_MB and accepts a
-     * slower, stop-and-go fill-bound read. */
+    /* Size THIS result before the stream exists. In 1.5.6 the whole-result
+     * estimate avoids empty-queue producer restarts. In 2.0 replenishment
+     * instead aims at half the TOTAL budget: a whole-result cap delays the
+     * consumer and leaves many GB cold before the fill. Bound only its auto
+     * policy at 1024 MB; explicit session/environment caps remain authoritative.
+     * These are soft limits on produced chunks, never memory reservations. */
     if (!materialized) {
         const long long cap = stream_buffer_cap_bytes();
         if (cap < 0) {
@@ -4138,6 +4758,9 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 parqit::estimate_transfer_bytes(prep.plans, prep.nrows);
             if (want < kStreamBufferFloor) want = kStreamBufferFloor;
             if (cap > 0 && want > cap) want = cap;
+#ifdef PARQIT_DUCKDB_200
+            if (cap == 0) want = std::min(want, 1024LL * 1000000LL);
+#endif
             std::string berr;
             if (!s.set_streaming_buffer_bytes(want, &berr)) {
                 cry("parqit use: could not size the streaming buffer: " + berr);
@@ -4325,6 +4948,35 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
             nthreads, std::vector<long long>(k, 0));
         std::vector<std::thread> workers;
         workers.reserve(nthreads);
+        /* Codex audit, round 2, finding 1: whatever leaves this block, a
+         * failure while a failure is being worded included, stops and joins
+         * the workers first (a joinable std::thread ends the process); the
+         * handlers below keep their failure without allocating, worded after
+         * the join */
+        struct StopAndJoin {
+            FillQueue &fq;
+            std::vector<std::thread> &workers;
+            ~StopAndJoin() {
+                bool live = false;
+                for (std::thread &w : workers) live = live || w.joinable();
+                if (!live) return;
+                try {
+                    std::lock_guard<std::mutex> lk(fq.m);
+                    fq.aborted = true;
+                    fq.producer_done = true;
+                } catch (...) {
+                }
+                fq.cv_not_empty.notify_all();
+                fq.cv_not_full.notify_all();
+                for (std::thread &w : workers)
+                    if (w.joinable()) try {
+                            w.join();
+                        } catch (...) {
+                        }
+            }
+        } stop_and_join{fq, workers};
+        std::exception_ptr start_failure, read_failure;
+        bool read_first = false; /* the producer's failure came before any worker's */
         /* LIFE-018: std::thread's destructor terminates the process while it is
          * joinable.  If creating worker N throws after workers 0..N-1 exist,
          * signal those workers, join them, and return a normal loud error. */
@@ -4349,23 +5001,21 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                     std::ref(inf_locals[t]), std::ref(nul_locals[t]),
                     std::ref(rng_locals[t]), std::ref(subms_locals[t]));
             }
-        } catch (const std::exception &e) {
-            std::lock_guard<std::mutex> lk(fq.m);
-            fq.aborted = true;
-            fq.producer_done = true;
-            fq.err = std::string("could not create fill worker: ") + e.what();
-            rc = kRcEngine;
         } catch (...) {
-            std::lock_guard<std::mutex> lk(fq.m);
-            fq.aborted = true;
-            fq.producer_done = true;
-            fq.err = "could not create fill worker: unknown error";
+            start_failure = std::current_exception();
             rc = kRcEngine;
         }
         if (rc != 0) {
+            try {
+                std::lock_guard<std::mutex> lk(fq.m);
+                fq.aborted = true;
+                fq.producer_done = true;
+            } catch (...) {
+            }
             fq.cv_not_empty.notify_all();
             fq.cv_not_full.notify_all();
         }
+        const bool faults = std::getenv("PARQIT_TEST_FAULT") != nullptr;
 
         /* The producer runs under try/catch too: a throw here (e.g. a deque
          * push_back std::bad_alloc under memory pressure) must not unwind past the
@@ -4388,6 +5038,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                     fq.cv_not_empty.notify_all();
                     break;
                 }
+                if (faults) parqit::test_fault("fill_produce", static_cast<long long>(nfetched));
                 duckdb_data_chunk chunk =
                     fetch_next(res, fail_fetch_at, &nfetched, &injected_err);
                 if (!chunk) { /* end of stream, DuckDB error or test injection */
@@ -4417,15 +5068,14 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                 fq.q.push_back(slot);
                 fq.cv_not_empty.notify_one();
                 }
-            } catch (const std::exception &e) {
-                std::lock_guard<std::mutex> lk(fq.m);
-                fq.aborted = true;
-                if (fq.err.empty())
-                    fq.err = std::string("read failed: ") + e.what();
             } catch (...) {
-                std::lock_guard<std::mutex> lk(fq.m);
-                fq.aborted = true;
-                if (fq.err.empty()) fq.err = "read failed: unknown error";
+                read_failure = std::current_exception();
+                try {
+                    std::lock_guard<std::mutex> lk(fq.m);
+                    read_first = fq.err.empty();
+                    fq.aborted = true;
+                } catch (...) {
+                }
             }
         }
 
@@ -4441,6 +5091,25 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
         /* Anything still queued when a worker aborted must be freed here. */
         for (ChunkSlot &slot : fq.q) duckdb_destroy_data_chunk(&slot.chunk);
         fq.q.clear();
+
+        /* the failures kept above, worded now that the workers have stopped
+         * (the first one recorded, as before); a message that cannot be
+         * written leaves "fill failed", which needs no allocation */
+        if (start_failure || (read_failure && read_first)) {
+            const bool start = static_cast<bool>(start_failure);
+            try {
+                try {
+                    std::rethrow_exception(start ? start_failure : read_failure);
+                } catch (const std::exception &e) {
+                    if (faults) parqit::test_fault("fill_word", 0);
+                    fq.err = std::string(start ? "could not create fill worker: " : "read failed: ") + e.what();
+                } catch (...) {
+                    fq.err = start ? "could not create fill worker: unknown error" : "read failed: unknown error";
+                }
+            } catch (...) {
+                fq.err = "fill failed";
+            }
+        }
 
         if (fq.aborted && rc == 0) {
             rc = kRcEngine;
@@ -4630,15 +5299,12 @@ ST_retcode cmd_describe(const std::vector<std::string> &args) {
     std::map<std::string, std::string> scan_types;
     duckdb_result dres;
     if (s.query("DESCRIBE SELECT * FROM " + src.scan_sql, &dres, &err)) {
+        const parqit::ResultGuard guard{&dres};
         idx_t n = duckdb_row_count(&dres);
         for (idx_t r = 0; r < n; r++) {
-            char *nm = duckdb_value_varchar(&dres, 0, r);
-            char *ty = duckdb_value_varchar(&dres, 1, r);
-            if (nm && ty) scan_types[nm] = ty;
-            if (nm) duckdb_free(nm);
-            if (ty) duckdb_free(ty);
+            const parqit::CText nm = parqit::result_text(&dres, 0, r), ty = parqit::result_text(&dres, 1, r);
+            if (nm && ty) scan_types[nm.get()] = ty.get();
         }
-        duckdb_destroy_result(&dres);
     }
     for (const auto &p : ctx.active) {
         auto it = scan_types.find(p.source_name);
@@ -5107,17 +5773,58 @@ inline const char *arrow_format_for(WKind w) {
 void noop_arrow_schema_release(ArrowSchema *s) { s->release = nullptr; }
 void noop_arrow_array_release(ArrowArray *a) { a->release = nullptr; }
 
-/* Assemble the whole result as one zero-copy Arrow struct array and COPY it
+/* SAVE-PARALLEL-1: the record batches of the direct writer, served in row
+ * order as a single-pass ArrowArrayStream. DuckDB's arrow_scan claims one batch
+ * at a time under its own lock and numbers it (the batch index), so the COPY
+ * keeps the observation order while its threads convert and write different
+ * batches. The buffers belong to save_assemble_arrow, which outlives the COPY;
+ * every release is a no-op. */
+struct SaveBatchStream {
+    ArrowSchema *schema = nullptr;
+    std::vector<ArrowArray> *batches = nullptr;
+    size_t next = 0;
+};
+int save_stream_schema(ArrowArrayStream *st, ArrowSchema *out) {
+    *out = *static_cast<SaveBatchStream *>(st->private_data)->schema;
+    out->release = noop_arrow_schema_release;
+    return 0;
+}
+int save_stream_next(ArrowArrayStream *st, ArrowArray *out) {
+    auto *b = static_cast<SaveBatchStream *>(st->private_data);
+    if (b->next >= b->batches->size()) {
+        std::memset(out, 0, sizeof(*out)); /* a released array ends the stream */
+        return 0;
+    }
+    *out = (*b->batches)[b->next++];
+    return 0;
+}
+const char *save_stream_error(ArrowArrayStream *) { return nullptr; }
+void save_stream_release(ArrowArrayStream *st) { st->release = nullptr; }
+
+/* Rows per batch: whole row groups of the requested size (else the engine's
+ * 122880) and whole bytes of the validity bitmap, at least about half a
+ * million rows (engine/save_blocks.hpp). The engine writes every batch as its
+ * own row groups, so whole row groups per batch keep the layout the
+ * single-array scan wrote; whole bytes give each batch its own bitmap bytes,
+ * so the blocks tile [0, N) of the bitmap and no byte is written by two.
+ * PARQIT_TEST_SAVE_BLOCK_ROWS lets the suite drive many blocks and workers
+ * through small data, like PARQIT_FILL_THREADS does for the fill. */
+long long save_batch_rows(long long row_group_size, long long nrows) {
+    return parqit::save_block_rows(row_group_size, nrows,
+                                   std::getenv("PARQIT_TEST_SAVE_BLOCK_ROWS"));
+}
+
+/* Assemble the result as zero-copy Arrow record batches and COPY them
  * straight to Parquet via a registered Arrow scan — the "assemble each column
  * once, then write" model (as Polars/pq do). This skips the DuckDB temp-table
  * round-trip that the staged path pays, which a microbenchmark showed costs
  * ~2× on the write assembly for both strings and numerics. Conversions go
  * through convert_save_numeric, so the staged rows are byte-identical.
  *
- * Uses duckdb_arrow_array_scan (deprecated in DuckDB but present in the pinned
- * 1.5.x; pinned by ASSUMPTIONS #48 and the engine-capability test). Full-range
- * only (save_data never has if/in), so the Arrow length equals the row count
- * and the buffer index equals the obs index. */
+ * Uses duckdb_arrow_scan (deprecated in DuckDB but present in the pinned 1.5.x
+ * and 2.0; the stream stays the caller's in both). Full-range only (save_data
+ * never has if/in), so the Arrow lengths add up to the row count and the
+ * buffer index equals the obs index. */
 ST_retcode save_assemble_arrow(
     Session &s, const std::vector<SaveVar> &vars, const std::vector<WKind> &wk,
     const std::vector<std::string> &engine_names, const std::string &dest,
@@ -5152,148 +5859,331 @@ ST_retcode save_assemble_arrow(
     }
     const long long N = static_cast<long long>(in2) - in1 + 1;
 
-    struct ACol {
-        bool is_str = false;
+    /* SAVE-PARALLEL-1 (2026-10-24): the cell pass reads the dataset on worker
+     * threads over disjoint blocks of observations, one Arrow record batch per
+     * block (the calling thread is one of the workers and alone watches Break).
+     * A numeric column is one buffer (a batch points at its slice; blocks start
+     * on whole bytes of the validity bitmap, and every slot is written, so no
+     * serial zero-fill precedes the pass); strings are built per batch with
+     * their own offsets. Numeric cells are read concurrently, like the parallel
+     * fill stores them (ASSUMPTIONS #37); every string cell (str# and strL) is
+     * read under one mutex, because Stata's string accessors are not reentrant
+     * (concurrent SF_sdatalen calls freed one buffer twice, v179) — the UTF-8
+     * checks, transcoding and copying after the read still run in parallel.
+     * What the serial pass reported is rebuilt
+     * in its order: the first failing cell in observation-then-variable order
+     * (a block after a failed one cannot matter and stops), each warning list
+     * ordered by every variable's first such cell, the ENC-2 tallies summed
+     * (widest cell: the maximum). fill_threads 0/1 runs the same pass serially. */
+    struct NCol {
         int width = 0;
-        std::vector<uint8_t> data;  /* numeric: N*width */
-        std::vector<uint8_t> valid; /* validity bitmap, all-valid init */
-        long long null_count = 0;
-        std::vector<int32_t> offs;  /* strings: N+1 offsets */
-        std::vector<char> bytes;    /* strings: contiguous payload */
+        std::unique_ptr<uint8_t[]> data;  /* N*width */
+        std::unique_ptr<uint8_t[]> valid; /* validity bitmap */
     };
-    std::vector<ACol> cols(k);
+    struct SaveBlock {
+        long long start = 0, rows = 0;
+        std::vector<long long> nulls;           /* per column */
+        std::vector<std::vector<int32_t>> offs; /* string columns: rows+1 */
+        std::vector<std::vector<char>> bytes;   /* string columns: payload */
+        std::vector<long long> frac_at, ext_at; /* first such obs, or -1 */
+        ST_retcode rc = 0;
+        std::string err;
+        std::exception_ptr ex; /* a throw, worded after the pass (A5) */
+    };
+    const long long brows = save_batch_rows(chunk, N);
+    if (brows <= 0 || brows % 8 != 0) {
+        *err = "internal: parqit save cannot size its blocks for chunk(" + std::to_string(chunk) + ")";
+        return kRcEngine;
+    }
+    const long long nb = N > 0 ? parqit::save_blocks_ceil_div(N, brows) : 0;
+    std::vector<bool> is_str(static_cast<size_t>(k), false);
+    std::vector<NCol> ncols(static_cast<size_t>(k));
     const long long vbytes = (N + 7) / 8;
     for (int i = 0; i < k; i++) {
         if (wk[i] == WStr || wk[i] == WStrL) {
-            cols[i].is_str = true;
-            cols[i].offs.assign(static_cast<size_t>(N) + 1, 0);
-        } else {
-            cols[i].width = wkind_width(wk[i]);
-            cols[i].data.assign(static_cast<size_t>(N) * cols[i].width, 0);
-            cols[i].valid.assign(static_cast<size_t>(vbytes), 0xFF);
+            is_str[static_cast<size_t>(i)] = true;
+            continue;
         }
+        NCol &c = ncols[static_cast<size_t>(i)];
+        c.width = wkind_width(wk[i]);
+        c.data.reset(new uint8_t[static_cast<size_t>(N) * c.width]);
+        c.valid.reset(new uint8_t[static_cast<size_t>(vbytes)]);
     }
-
-    std::vector<bool> warned_frac(k, false), warned_ext(k, false);
-    std::string strbuf(8192, '\0');
-    std::string fixed; /* ENC-2 scratch for a transcoded cell */
+    std::vector<SaveBlock> blocks(static_cast<size_t>(nb));
     const size_t offset_limit = arrow_offset_limit();
     /* XMISS-1: one TINYINT code column per variable that holds an extended
-     * missing, allocated on its first such cell (0 everywhere else, no validity
-     * buffer); appended after the k columns as `_parqit_xm_<var>` and listed
-     * under parqit.xmissing. A variable with only plain . gets none. */
-    std::vector<std::vector<int8_t>> xcodes(static_cast<size_t>(k));
-    ST_retcode rc = 0;
-    for (ST_int j = in1; j <= in2 && rc == 0; j++) {
-        if (!SF_ifobs(j)) continue;
-        const long long idx = static_cast<long long>(j) - in1;
-        for (int i = 0; i < k && rc == 0; i++) {
-            const SaveVar &v = vars[i];
-            ACol &c = cols[i];
-            if (c.is_str) {
-                if (SF_var_is_binary(i + 1, j)) {
-                    *err = "parqit save: " + v.name + "[" + std::to_string(j) +
-                           "] contains binary data (binary strLs are not "
-                           "supported; see help parqit)";
-                    rc = kRcUsage;
-                    break;
-                }
-                const ST_int len = SF_sdatalen(i + 1, j);
-                if (len < 0) {
-                    *err = "parqit save: could not measure string " + v.name +
-                           "[" + std::to_string(j) + "]";
-                    rc = kRcEngine;
-                    break;
-                }
-                if (static_cast<size_t>(len) + 1 > strbuf.size())
-                    strbuf.resize(static_cast<size_t>(len) + 1);
-                if (wk[i] == WStrL) {
-                    const ST_int capacity =
-                        len < kSpiMaxObs ? len + 1 : len;
-                    const ST_int copied = SF_strldata(
-                        i + 1, j, &strbuf[0], capacity);
-                    if (copied != len) {
-                        *err = "parqit save: incomplete strL read for " +
-                               v.name + "[" + std::to_string(j) +
-                               "] (copied=" + std::to_string(copied) +
-                               ", expected=" + std::to_string(len) + ")";
-                        rc = kRcEngine;
-                        break;
+     * missing, allocated (zeroed) on its first such cell (0 everywhere else, no
+     * validity buffer); appended after the k columns as `_parqit_xm_<var>` and
+     * listed under parqit.xmissing. A variable with only plain . gets none. */
+    std::vector<std::unique_ptr<int8_t[]>> xcodes(static_cast<size_t>(k));
+    std::vector<std::once_flag> xonce(static_cast<size_t>(k));
+    const int nthreads = static_cast<int>(
+        std::max<long long>(1, std::min<long long>(fill_thread_count(N, k), nb)));
+    std::atomic<long long> next_block{0};
+    std::atomic<long long> failed_at{std::numeric_limits<long long>::max()};
+    std::atomic<bool> interrupted{false};
+    std::mutex str_mu;
+    std::vector<SaveTranscode> ltr(static_cast<size_t>(nthreads), tr);
+    for (SaveTranscode &t : ltr) t.reset_counts();
+
+    auto fail = [&](SaveBlock &o, long long b, ST_retcode code, std::string msg) {
+        o.rc = code;
+        o.err = std::move(msg);
+        long long cur = failed_at.load();
+        while (b < cur && !failed_at.compare_exchange_weak(cur, b)) {
+        }
+    };
+    auto run_block = [&](long long b, SaveTranscode &t, std::string &strbuf,
+                         std::string &fixed, bool on_main) {
+        SaveBlock &o = blocks[static_cast<size_t>(b)];
+        o.start = b * brows;
+        o.rows = std::min(brows, N - o.start);
+        /* F1: a block starts on its own byte of the bitmap and on a requested
+         * row group, checked before anything writes to the bitmap */
+        if (o.start % 8 != 0 || (chunk > 0 && o.start % chunk != 0) || o.rows <= 0) {
+            fail(o, b, kRcEngine, "internal: parqit save block " + std::to_string(b) +
+                                      " does not start on a whole byte of the bitmap");
+            return;
+        }
+        o.nulls.assign(static_cast<size_t>(k), 0);
+        o.frac_at.assign(static_cast<size_t>(k), -1);
+        o.ext_at.assign(static_cast<size_t>(k), -1);
+        o.offs.resize(static_cast<size_t>(k));
+        o.bytes.resize(static_cast<size_t>(k));
+        const size_t vlo = static_cast<size_t>(o.start / 8);
+        const size_t vhi = static_cast<size_t>((o.start + o.rows + 7) / 8);
+        for (int i = 0; i < k; i++) {
+            if (is_str[static_cast<size_t>(i)])
+                o.offs[static_cast<size_t>(i)].assign(static_cast<size_t>(o.rows) + 1, 0);
+            else
+                std::memset(ncols[static_cast<size_t>(i)].valid.get() + vlo, 0xFF, vhi - vlo);
+        }
+        std::string cerr;
+        for (long long r = 0; r < o.rows; r++) {
+            if (failed_at.load(std::memory_order_relaxed) < b ||
+                interrupted.load(std::memory_order_relaxed))
+                return;
+            if (on_main && SW_stopflag) {
+                interrupted = true;
+                return;
+            }
+            const long long idx = o.start + r;
+            const ST_int j = static_cast<ST_int>(idx + in1);
+            if (!SF_ifobs(j)) {
+                /* F6 (audit of 25 Oct 2026): save_data never carries if/in
+                 * (SAVE-RANGE-1); an excluded observation would be written as a
+                 * valid 0, so the save is refused instead */
+                fail(o, b, kRcEngine, "internal: direct save requires every observation");
+                return;
+            }
+            for (int i = 0; i < k; i++) {
+                const SaveVar &v = vars[i];
+                const size_t ci = static_cast<size_t>(i);
+                if (is_str[ci]) {
+                    std::unique_lock<std::mutex> str_guard(str_mu);
+                    if (SF_var_is_binary(i + 1, j)) {
+                        fail(o, b, kRcUsage,
+                             "parqit save: " + v.name + "[" + std::to_string(j) +
+                                 "] contains binary data (binary strLs are not "
+                                 "supported; see help parqit)");
+                        return;
                     }
-                } else if (SF_sdata(i + 1, j, &strbuf[0]) != 0) {
-                    *err = "parqit save: could not read " + v.name + "[" +
-                           std::to_string(j) + "]";
-                    rc = kRcEngine;
-                    break;
-                }
-                const char *cell = strbuf.data();
-                size_t clen = static_cast<size_t>(len);
-                save_cell_utf8(&cell, &clen, &fixed, tr, i); /* ENC-2 */
-                c.bytes.insert(c.bytes.end(), cell, cell + clen);
-                if (c.bytes.size() > offset_limit) {
-                    /* Regular Arrow utf8 uses signed int32 offsets.  Re-run
-                     * through the chunked staged writer before narrowing an
-                     * offset; no output transaction has started yet. */
-                    rc = kRcRetryStaged;
-                    break;
-                }
-                c.offs[static_cast<size_t>(idx) + 1] =
-                    static_cast<int32_t>(c.bytes.size());
-            } else {
-                double d = 0;
-                if (SF_vdata(i + 1, j, &d) != 0) {
-                    *err = "parqit save: could not read " + v.name + "[" +
-                           std::to_string(j) + "]";
-                    rc = kRcEngine;
-                    break;
-                }
-                if (SF_is_missing(d)) {
-                    if (d > SV_missval && !warned_ext[i]) {
-                        warned_ext[i] = true;
-                        ext_missing.push_back(v.name);
+                    const ST_int len = SF_sdatalen(i + 1, j);
+                    if (len < 0) {
+                        fail(o, b, kRcEngine,
+                             "parqit save: could not measure string " + v.name + "[" +
+                                 std::to_string(j) + "]");
+                        return;
                     }
-                    if (xmissing && d > SV_missval) { /* XMISS-1 */
-                        const int code = parqit::stata_missing_code(d);
-                        if (code > 0) {
-                            std::vector<int8_t> &xc = xcodes[static_cast<size_t>(i)];
-                            if (xc.empty()) xc.assign(static_cast<size_t>(N), 0);
-                            xc[static_cast<size_t>(idx)] = static_cast<int8_t>(code);
+                    if (static_cast<size_t>(len) + 1 > strbuf.size())
+                        strbuf.resize(static_cast<size_t>(len) + 1);
+                    if (wk[i] == WStrL) {
+                        const ST_int capacity = len < kSpiMaxObs ? len + 1 : len;
+                        const ST_int copied = SF_strldata(i + 1, j, &strbuf[0], capacity);
+                        if (copied != len) {
+                            fail(o, b, kRcEngine,
+                                 "parqit save: incomplete strL read for " + v.name + "[" +
+                                     std::to_string(j) + "] (copied=" + std::to_string(copied) +
+                                     ", expected=" + std::to_string(len) + ")");
+                            return;
                         }
+                    } else if (SF_sdata(i + 1, j, &strbuf[0]) != 0) {
+                        fail(o, b, kRcEngine,
+                             "parqit save: could not read " + v.name + "[" + std::to_string(j) + "]");
+                        return;
                     }
-                    c.valid[static_cast<size_t>(idx) >> 3] &=
-                        static_cast<uint8_t>(~(1u << (idx & 7)));
-                    c.null_count++;
+                    str_guard.unlock();
+                    const char *cell = strbuf.data();
+                    size_t clen = static_cast<size_t>(len);
+                    save_cell_utf8(&cell, &clen, &fixed, t, i); /* ENC-2 */
+                    std::vector<char> &bytes = o.bytes[ci];
+                    bytes.insert(bytes.end(), cell, cell + clen);
+                    if (bytes.size() > offset_limit) {
+                        /* Regular Arrow utf8 uses signed int32 offsets.  Re-run
+                         * through the chunked staged writer before narrowing an
+                         * offset; no output transaction has started yet. */
+                        fail(o, b, kRcRetryStaged, std::string());
+                        return;
+                    }
+                    o.offs[ci][static_cast<size_t>(r) + 1] = static_cast<int32_t>(bytes.size());
                 } else {
-                    bool fd = false;
-                    int crc = convert_save_numeric(wk[i], d, c.data.data(),
-                                                   static_cast<idx_t>(idx), &fd,
-                                                   v.name, j, err);
-                    if (fd && !warned_frac[i]) {
-                        warned_frac[i] = true;
-                        frac_warned.push_back(v.name);
+                    NCol &c = ncols[ci];
+                    double d = 0;
+                    if (SF_vdata(i + 1, j, &d) != 0) {
+                        fail(o, b, kRcEngine,
+                             "parqit save: could not read " + v.name + "[" + std::to_string(j) + "]");
+                        return;
                     }
-                    if (crc != 0) {
-                        rc = static_cast<ST_retcode>(crc);
-                        break;
+                    if (SF_is_missing(d)) {
+                        if (d > SV_missval && o.ext_at[ci] < 0) o.ext_at[ci] = j;
+                        if (xmissing && d > SV_missval) { /* XMISS-1 */
+                            const int code = parqit::stata_missing_code(d);
+                            if (code > 0) {
+                                std::call_once(xonce[ci], [&] {
+                                    xcodes[ci].reset(new int8_t[static_cast<size_t>(N)]());
+                                });
+                                xcodes[ci][static_cast<size_t>(idx)] = static_cast<int8_t>(code);
+                            }
+                        }
+                        c.valid[static_cast<size_t>(idx) >> 3] &=
+                            static_cast<uint8_t>(~(1u << (idx & 7)));
+                        o.nulls[ci]++;
+                        std::memset(c.data.get() + idx * c.width, 0, static_cast<size_t>(c.width));
+                    } else {
+                        bool fd = false;
+                        const int crc = convert_save_numeric(wk[i], d, c.data.get(),
+                                                             static_cast<idx_t>(idx), &fd, v.name,
+                                                             j, &cerr);
+                        if (fd && o.frac_at[ci] < 0) o.frac_at[ci] = j;
+                        if (crc != 0) {
+                            fail(o, b, static_cast<ST_retcode>(crc), cerr);
+                            return;
+                        }
                     }
                 }
             }
         }
-        if (rc != 0) break;
-        if (SW_stopflag) {
-            *err = "parqit save: interrupted";
-            rc = 1;
-            break;
+    };
+    /* No exception may cross a thread boundary (charter §6.8): a throw (e.g.
+     * std::bad_alloc on a string block) fails its block like a soft error,
+     * and recording it allocates nothing (A5, F10: the message is worded after
+     * the pass, on this thread). A worker whose own buffers cannot be made
+     * takes no block; the calling thread's failure fails the save. */
+    auto fail_ex = [&](long long b, std::exception_ptr e) {
+        SaveBlock &o = blocks[static_cast<size_t>(b)];
+        o.rc = kRcEngine;
+        o.ex = e;
+        long long cur = failed_at.load();
+        while (b < cur && !failed_at.compare_exchange_weak(cur, b)) {
+        }
+    };
+    std::vector<std::exception_ptr> setup_err(static_cast<size_t>(nthreads));
+    auto worker = [&](int t, bool on_main) {
+        try {
+            parqit::test_fault("save_worker", t);
+            std::string strbuf(8192, '\0');
+            std::string fixed; /* ENC-2 scratch for a transcoded cell */
+            for (;;) {
+                const long long b = next_block.fetch_add(1);
+                if (b >= nb || interrupted.load() || b > failed_at.load()) return;
+                try {
+                    run_block(b, ltr[static_cast<size_t>(t)], strbuf, fixed, on_main);
+                } catch (...) {
+                    fail_ex(b, std::current_exception());
+                }
+            }
+        } catch (...) {
+            setup_err[static_cast<size_t>(t)] = std::current_exception();
+        }
+    };
+    {
+        /* LIFE-018: a worker that cannot be created leaves its blocks to the
+         * others; every created worker is joined before anything returns. */
+        std::vector<std::thread> pool;
+        struct JoinAll {
+            std::vector<std::thread> &pool;
+            ~JoinAll() {
+                for (std::thread &th : pool)
+                    if (th.joinable()) th.join();
+            }
+        } join_all{pool};
+        try {
+            pool.reserve(static_cast<size_t>(nthreads > 1 ? nthreads - 1 : 0));
+            for (int t = 1; t < nthreads; t++) {
+                parqit::test_fault("save_thread", t);
+                pool.emplace_back(worker, t, false);
+            }
+        } catch (...) {
+        }
+        worker(0, true);
+        for (std::thread &th : pool) th.join();
+        if (std::getenv("PARQIT_TEST_SAVE_TRACE")) {
+            const std::string line = "save cell pass: blocks " + std::to_string(nb) +
+                                     ", workers " + std::to_string(pool.size() + 1) + "\n";
+            SF_display(const_cast<char *>(line.c_str()));
         }
     }
-    if (rc != 0) return rc;
+    auto what = [](const std::exception_ptr &e) -> std::string {
+        try {
+            std::rethrow_exception(e);
+        } catch (const std::exception &x) {
+            return std::string("parqit save: reading the dataset failed: ") + x.what();
+        } catch (...) {
+        }
+        return "parqit save: reading the dataset failed";
+    };
+    if (interrupted.load()) {
+        *err = "parqit save: interrupted";
+        return 1;
+    }
+    if (setup_err[0]) {
+        *err = what(setup_err[0]);
+        return kRcEngine;
+    }
+    if (failed_at.load() != std::numeric_limits<long long>::max()) {
+        const SaveBlock &o = blocks[static_cast<size_t>(failed_at.load())];
+        *err = o.ex ? what(o.ex) : o.err;
+        return o.rc;
+    }
+    for (const SaveBlock &o : blocks)
+        if (o.nulls.size() != static_cast<size_t>(k)) {
+            *err = "internal: a block of the dataset was not read";
+            return kRcEngine;
+        }
+    for (const SaveTranscode &t : ltr)
+        for (size_t v = 0; v < static_cast<size_t>(k); v++) {
+            tr.cells[v] += t.cells[v];
+            tr.revalid[v] += t.revalid[v];
+            tr.undecodable[v] += t.undecodable[v];
+            tr.max_bytes[v] = std::max(tr.max_bytes[v], t.max_bytes[v]);
+        }
+    {
+        std::vector<std::pair<long long, int>> frac_first, ext_first;
+        for (int i = 0; i < k; i++) {
+            const size_t ci = static_cast<size_t>(i);
+            for (const SaveBlock &o : blocks)
+                if (o.frac_at[ci] >= 0) {
+                    frac_first.emplace_back(o.frac_at[ci], i);
+                    break;
+                }
+            for (const SaveBlock &o : blocks)
+                if (o.ext_at[ci] >= 0) {
+                    ext_first.emplace_back(o.ext_at[ci], i);
+                    break;
+                }
+        }
+        std::sort(frac_first.begin(), frac_first.end());
+        std::sort(ext_first.begin(), ext_first.end());
+        for (const auto &f : frac_first) frac_warned.push_back(vars[f.second].name);
+        for (const auto &f : ext_first) ext_missing.push_back(vars[f.second].name);
+    }
 
     /* XMISS-1: the companions follow the k columns, in variable order; their
      * exact leaf names extend `leaf` (positional, like the columns') and the
      * pairs are recorded for the KV metadata built by make_kv below. */
     std::vector<int> xm_vars;
     for (int i = 0; i < k; i++)
-        if (!xcodes[static_cast<size_t>(i)].empty()) xm_vars.push_back(i);
+        if (xcodes[static_cast<size_t>(i)]) xm_vars.push_back(i);
     const int kk = k + static_cast<int>(xm_vars.size());
     std::vector<std::string> xm_engine_names;
     for (int i : xm_vars) {
@@ -5303,56 +6193,66 @@ ST_retcode save_assemble_arrow(
         if (xm_pairs) (*xm_pairs)[vars[i].name] = leaf.back();
     }
 
-    /* Wrap the buffers as an Arrow struct array (record batch). All structs and
-     * buffer-pointer arrays are locals that outlive the synchronous COPY. */
+    /* Wrap the buffers as one Arrow struct array (record batch) per block. All
+     * structs and buffer-pointer arrays are locals that outlive the synchronous
+     * COPY. */
     std::vector<ArrowSchema> child_s(kk);
     std::vector<ArrowSchema *> child_s_ptr(kk);
-    std::vector<ArrowArray> child_a(kk);
-    std::vector<ArrowArray *> child_a_ptr(kk);
-    std::vector<std::vector<const void *>> bufp(kk);
-    for (int i = 0; i < k; i++) {
+    for (int i = 0; i < kk; i++) {
         child_s[i] = ArrowSchema{};
-        child_s[i].format = arrow_format_for(wk[i]);
-        child_s[i].name = engine_names[i].c_str(); /* NAME-CASE-1 alias */
+        child_s[i].format = i < k ? arrow_format_for(wk[i]) : "c"; /* XMISS-1: int8 */
+        child_s[i].name = i < k ? engine_names[i].c_str() /* NAME-CASE-1 alias */
+                                : xm_engine_names[static_cast<size_t>(i - k)].c_str();
         child_s[i].flags = kArrowFlagNullable;
         child_s[i].release = noop_arrow_schema_release;
         child_s_ptr[i] = &child_s[i];
-
-        child_a[i] = ArrowArray{};
-        child_a[i].length = N;
-        child_a[i].offset = 0;
-        child_a[i].release = noop_arrow_array_release;
-        if (cols[i].is_str) {
-            child_a[i].null_count = 0;
-            child_a[i].n_buffers = 3;
-            bufp[i] = {nullptr, cols[i].offs.data(), cols[i].bytes.data()};
-        } else {
-            child_a[i].null_count = cols[i].null_count;
-            child_a[i].n_buffers = 2;
-            const void *validity =
-                cols[i].null_count ? cols[i].valid.data() : nullptr;
-            bufp[i] = {validity, cols[i].data.data()};
-        }
-        child_a[i].buffers = bufp[i].data();
-        child_a_ptr[i] = &child_a[i];
     }
-    for (size_t j = 0; j < xm_vars.size(); j++) { /* XMISS-1: int8, no nulls */
-        const int ci = k + static_cast<int>(j);
-        child_s[ci] = ArrowSchema{};
-        child_s[ci].format = "c";
-        child_s[ci].name = xm_engine_names[j].c_str();
-        child_s[ci].flags = kArrowFlagNullable;
-        child_s[ci].release = noop_arrow_schema_release;
-        child_s_ptr[ci] = &child_s[ci];
-        child_a[ci] = ArrowArray{};
-        child_a[ci].length = N;
-        child_a[ci].offset = 0;
-        child_a[ci].null_count = 0;
-        child_a[ci].n_buffers = 2;
-        child_a[ci].release = noop_arrow_array_release;
-        bufp[ci] = {nullptr, xcodes[static_cast<size_t>(xm_vars[j])].data()};
-        child_a[ci].buffers = bufp[ci].data();
-        child_a_ptr[ci] = &child_a[ci];
+    static const char kNoBytes = 0; /* the payload of a batch of empty strings */
+    const size_t nkk = static_cast<size_t>(kk);
+    std::vector<ArrowArray> child_a(static_cast<size_t>(nb) * nkk);
+    std::vector<ArrowArray *> child_a_ptr(static_cast<size_t>(nb) * nkk);
+    std::vector<const void *> bufp(static_cast<size_t>(nb) * nkk * 3, nullptr);
+    std::vector<const void *> struct_bufs(static_cast<size_t>(nb), nullptr);
+    std::vector<ArrowArray> batch_a(static_cast<size_t>(nb));
+    for (size_t b = 0; b < static_cast<size_t>(nb); b++) {
+        const SaveBlock &o = blocks[b];
+        for (size_t i = 0; i < nkk; i++) {
+            const size_t at = b * nkk + i;
+            ArrowArray &a = child_a[at];
+            const void **bp = &bufp[at * 3];
+            a = ArrowArray{};
+            a.length = o.rows;
+            a.offset = 0;
+            a.release = noop_arrow_array_release;
+            if (i < static_cast<size_t>(k) && is_str[i]) {
+                a.null_count = 0;
+                a.n_buffers = 3;
+                bp[1] = o.offs[i].data();
+                bp[2] = o.bytes[i].empty() ? &kNoBytes : o.bytes[i].data();
+            } else if (i < static_cast<size_t>(k)) {
+                const NCol &c = ncols[i];
+                a.null_count = o.nulls[i];
+                a.n_buffers = 2;
+                bp[0] = o.nulls[i] ? c.valid.get() + o.start / 8 : nullptr;
+                bp[1] = c.data.get() + o.start * c.width;
+            } else { /* XMISS-1: int8, no nulls */
+                a.null_count = 0;
+                a.n_buffers = 2;
+                bp[1] = xcodes[static_cast<size_t>(xm_vars[i - static_cast<size_t>(k)])].get() + o.start;
+            }
+            a.buffers = bp;
+            child_a_ptr[at] = &a;
+        }
+        ArrowArray &sa = batch_a[b];
+        sa = ArrowArray{};
+        sa.length = o.rows;
+        sa.null_count = 0;
+        sa.offset = 0;
+        sa.n_buffers = 1;
+        sa.buffers = &struct_bufs[b];
+        sa.n_children = kk;
+        sa.children = nkk ? &child_a_ptr[b * nkk] : nullptr;
+        sa.release = noop_arrow_array_release;
     }
 
     ArrowSchema struct_s = ArrowSchema{};
@@ -5361,17 +6261,6 @@ ST_retcode save_assemble_arrow(
     struct_s.n_children = kk;
     struct_s.children = child_s_ptr.data();
     struct_s.release = noop_arrow_schema_release;
-
-    const void *struct_bufs[1] = {nullptr};
-    ArrowArray struct_a = ArrowArray{};
-    struct_a.length = N;
-    struct_a.null_count = 0;
-    struct_a.offset = 0;
-    struct_a.n_buffers = 1;
-    struct_a.buffers = struct_bufs;
-    struct_a.n_children = kk;
-    struct_a.children = child_a_ptr.data();
-    struct_a.release = noop_arrow_array_release;
 
     /* ENC-2: the KV metadata is built only now, after the data pass, so the
      * recorded str# widths account for cells that grew under transcoding. */
@@ -5384,12 +6273,18 @@ ST_retcode save_assemble_arrow(
         *err = "parqit test hook: Arrow registration blocked";
         return kRcEngine;
     }
-    duckdb_arrow_stream stream = nullptr;
-    duckdb_state st = duckdb_arrow_array_scan(
-        s.con(), view.c_str(), reinterpret_cast<duckdb_arrow_schema>(&struct_s),
-        reinterpret_cast<duckdb_arrow_array>(&struct_a), &stream);
+    SaveBatchStream batches;
+    batches.schema = &struct_s;
+    batches.batches = &batch_a;
+    ArrowArrayStream stream = ArrowArrayStream{};
+    stream.get_schema = save_stream_schema;
+    stream.get_next = save_stream_next;
+    stream.get_last_error = save_stream_error;
+    stream.release = save_stream_release;
+    stream.private_data = &batches;
+    duckdb_state st = duckdb_arrow_scan(s.con(), view.c_str(),
+                                        reinterpret_cast<duckdb_arrow_stream>(&stream));
     if (st != DuckDBSuccess) {
-        if (stream) duckdb_destroy_arrow_stream(&stream);
         *err = "parqit save: could not register the Arrow result for writing";
         return kRcEngine;
     }
@@ -5400,7 +6295,6 @@ ST_retcode save_assemble_arrow(
                                       partition_by, chunk, kv, &written, err,
                                       case_alias ? &leaf : nullptr, nullptr,
                                       partition_mode, note);
-    if (stream) duckdb_destroy_arrow_stream(&stream);
     {
         std::string e2;
         s.exec("DROP VIEW IF EXISTS " + quote_ident(view), &e2);
@@ -6268,6 +7162,7 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
                 *why = err;
                 return false;
             }
+            const parqit::ResultGuard guard{&res};
             const idx_t nr = duckdb_row_count(&res);
             bool ok = true;
             for (idx_t r = 0; r < nr && ok; r++) {
@@ -6277,9 +7172,8 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
                     const bool is_str = (vars[i].st == StType::Str || vars[i].st == StType::StrL);
                     const bool fnull = duckdb_value_is_null(&res, static_cast<idx_t>(i), r);
                     if (is_str) {
-                        char *fv = fnull ? nullptr : duckdb_value_varchar(&res, static_cast<idx_t>(i), r);
-                        std::string fs = fv ? fv : "";
-                        if (fv) duckdb_free(fv);
+                        const parqit::CText fv = parqit::result_text(&res, static_cast<idx_t>(i), r);
+                        std::string fs = fv ? fv.get() : "";
                         std::string ms;
                         const ST_int len = SF_sdatalen(i + 1, obs);
                         if (len > 0) {
@@ -6306,7 +7200,6 @@ ST_retcode cmd_save_data_direct(const std::vector<std::string> &args) {
                                std::to_string(obs);
                 }
             }
-            duckdb_destroy_result(&res);
             return ok;
         };
         std::string why;

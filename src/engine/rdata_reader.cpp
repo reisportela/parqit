@@ -104,6 +104,42 @@ class ByteIn {
     size_t at_ = 0, len_ = 0;
 };
 
+/* RDATA-PARALLEL-1: the gzip CRC-32 (zlib's polynomial and conventions, the
+ * value mz_crc32 returns) eight bytes at a time: miniz's byte-at-a-time loop
+ * took about half of a large file's inflate. */
+struct Crc32Tables {
+    uint32_t t[8][256];
+    Crc32Tables() {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[0][i] = c;
+        }
+        for (uint32_t i = 0; i < 256; i++)
+            for (int k = 1; k < 8; k++) t[k][i] = (t[k - 1][i] >> 8) ^ t[0][t[k - 1][i] & 0xFF];
+    }
+};
+
+uint32_t crc32_update(uint32_t crc, const unsigned char *p, size_t n) {
+    static const Crc32Tables tab;
+    const auto &t = tab.t;
+    uint32_t c = ~crc;
+    while (n && (reinterpret_cast<uintptr_t>(p) & 7)) {
+        c = t[0][(c ^ *p++) & 0xFF] ^ (c >> 8);
+        n--;
+    }
+    while (n >= 8) {
+        const uint32_t lo = c ^ (uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 |
+                                 uint32_t(p[3]) << 24);
+        c = t[7][lo & 0xFF] ^ t[6][(lo >> 8) & 0xFF] ^ t[5][(lo >> 16) & 0xFF] ^ t[4][lo >> 24] ^
+            t[3][p[4]] ^ t[2][p[5]] ^ t[1][p[6]] ^ t[0][p[7]];
+        p += 8;
+        n -= 8;
+    }
+    while (n--) c = t[0][(c ^ *p++) & 0xFF] ^ (c >> 8);
+    return ~c;
+}
+
 void write_out(std::ofstream &out, const void *p, size_t n, const std::string &path) {
     out.write(static_cast<const char *>(p), static_cast<std::streamsize>(n));
     if (!out) throw RError("could not write the decompressed copy of " + path +
@@ -174,7 +210,7 @@ uint64_t gunzip(ByteIn &in, std::ofstream &out, const std::string &path) {
             in.consume(used);
             const size_t produced = obuf.size() - z.avail_out;
             if (produced) {
-                crc = mz::mz_crc32(crc, obuf.data(), produced);
+                crc = crc32_update(static_cast<uint32_t>(crc), obuf.data(), produced);
                 write_out(out, obuf.data(), produced, path);
                 isize += produced;
             }
@@ -1254,6 +1290,8 @@ Frame make_frame(const Parsed &p, const Located &L, const std::string &object) {
 
 } // namespace
 
+uint32_t gzip_crc32(uint32_t crc, const unsigned char *p, size_t n) { return crc32_update(crc, p, n); }
+
 /* ------------------------------------------------------------- Source */
 
 Source::Source(const std::string &path, const std::string &tmpdir) : path_(path) {
@@ -1319,6 +1357,7 @@ Source::~Source() {
 size_t Source::read(uint64_t offset, char *dst, size_t n) {
     if (offset >= size_ || n == 0) return 0;
     if (n > size_ - offset) n = static_cast<size_t>(size_ - offset);
+    std::lock_guard<std::mutex> lock(mu_);
     in_.clear();
     in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     in_.read(dst, static_cast<std::streamsize>(n));
@@ -1579,36 +1618,46 @@ uint32_t Cursor::u32() {
     return x;
 }
 
+/* index_ advances only once an element is consumed, so a read that throws
+ * leaves index() on the failing element (F12, 2026-10-25) */
 int32_t Cursor::next_int() {
     if (index_ >= v_.length) throw RError("internal error: read past the end of a column");
-    const uint64_t i = index_++;
-    if (v_.alt == VecRef::Alt::IntSeq)
-        return static_cast<int32_t>(static_cast<int64_t>(v_.seq_first) +
-                                    static_cast<int64_t>(v_.seq_incr) * static_cast<int64_t>(i));
-    return static_cast<int32_t>(u32());
+    const uint64_t i = index_;
+    const int32_t x =
+        v_.alt == VecRef::Alt::IntSeq
+            ? static_cast<int32_t>(static_cast<int64_t>(v_.seq_first) +
+                                   static_cast<int64_t>(v_.seq_incr) * static_cast<int64_t>(i))
+            : static_cast<int32_t>(u32());
+    index_ = i + 1;
+    return x;
 }
 
 double Cursor::next_real() {
     if (index_ >= v_.length) throw RError("internal error: read past the end of a column");
-    const uint64_t i = index_++;
-    if (v_.alt == VecRef::Alt::RealSeq) return v_.seq_first + v_.seq_incr * static_cast<double>(i);
+    const uint64_t i = index_;
+    if (v_.alt == VecRef::Alt::RealSeq) {
+        index_ = i + 1;
+        return v_.seq_first + v_.seq_incr * static_cast<double>(i);
+    }
     fill(8);
     const uint64_t bits = be64(reinterpret_cast<const unsigned char *>(buf_.data()) + at_);
     at_ += 8;
+    index_ = i + 1;
     return real_of(bits);
 }
 
 bool Cursor::next_string(std::string *utf8, bool *transcoded) {
     if (index_ >= v_.length) throw RError("internal error: read past the end of a column");
-    index_++;
     *transcoded = false;
     if (v_.alt == VecRef::Alt::DeferredInt) {
         const int32_t x = inner_->next_int();
         if (x == kNaInteger) {
             utf8->clear();
+            index_++;
             return false;
         }
         *utf8 = std::to_string(x);
+        index_++;
         return true;
     }
     const uint32_t flags = u32();
@@ -1618,6 +1667,7 @@ bool Cursor::next_string(std::string *utf8, bool *transcoded) {
                      " changed while it was being read (a string is no longer where it was)");
     if (len == -1) {
         utf8->clear();
+        index_++;
         return false;
     }
     if (static_cast<uint64_t>(len) > src_->size())
@@ -1627,6 +1677,7 @@ bool Cursor::next_string(std::string *utf8, bool *transcoded) {
     *transcoded = codec_->decode(buf_.data() + at_, static_cast<size_t>(len),
                                  static_cast<int>(flags >> 12), utf8);
     at_ += static_cast<size_t>(len);
+    index_++;
     return true;
 }
 

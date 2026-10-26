@@ -13,6 +13,8 @@
  * file must be the one profiled. */
 #include "plugin/plugin_spss.hpp"
 
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -23,6 +25,9 @@
 #include "engine/legacy_encoding.hpp"
 #include "engine/request.hpp"
 #include "engine/session.hpp"
+#include "abi.h"
+#include "duckdb.h"
+#include "engine/spss_parallel.hpp"
 #include "engine/spss_plan.hpp"
 #include "engine/spss_table.hpp"
 #include "plugin/plugin_io.hpp"
@@ -30,6 +35,16 @@
 namespace parqit_plugin {
 
 namespace {
+
+/* A3: PARQIT_*_ROUTE / PARQIT_*_PROFILE = serial (0) or parallel (1) force the
+ * route or the profile (tests, calibration); unset or other: -1, by size */
+int route_switch(const char *name) {
+    const char *e = std::getenv(name);
+    if (!e) return -1;
+    if (!std::strcmp(e, "serial")) return 0;
+    if (!std::strcmp(e, "parallel")) return 1;
+    return -1;
+}
 
 constexpr ST_retcode kRcUsage = 198;
 constexpr ST_retcode kRcFileNotFound = 601;
@@ -122,6 +137,14 @@ ST_retcode cmd_spss_convert(const std::vector<std::string> &args) {
     parqit::spss::ReadOptions opt;
     opt.encoding = encoding;
     opt.default_encoding = parqit::legacy_encoding_name(encoding_session_default()); /* ENC-3 */
+    /* SPSS-PARALLEL-1: both passes run on the engine's threads; A3: a file
+     * below the measured size takes the serial route instead (one thread and
+     * the table function: the 0.5.1 code), chosen before the profile */
+    const int threads = static_cast<int>(s.threads());
+    opt.threads = threads;
+    opt.parallel_min_blocks = -1; /* the measured rule for the file's compression */
+    opt.route = route_switch("PARQIT_SPSS_ROUTE");
+    opt.profile = route_switch("PARQIT_SPSS_PROFILE");
     std::shared_ptr<const parqit::spss::Plan> plan;
     try {
         plan = std::make_shared<const parqit::spss::Plan>(parqit::spss::make_plan(src, opt));
@@ -130,7 +153,8 @@ ST_retcode cmd_spss_convert(const std::vector<std::string> &args) {
         return kRcNotSpss;
     }
 
-    const std::string token = parqit::spss::register_plan(plan);
+    const parqit::spss::PlanRegistration registration(plan); /* released on every path (A5) */
+    const std::string &token = registration.token();
     long long written = -1;
     const std::function<bool(std::string *)> pre_publish = [&](std::string *perr) {
         if (written != plan->ncases) {
@@ -147,13 +171,46 @@ ST_retcode cmd_spss_convert(const std::vector<std::string> &args) {
         }
         return true;
     };
-    const std::string sql =
-        "SELECT * FROM parqit_read_sav(" + parqit::quote_literal(token) + ")";
+    /* SPSS-PARALLEL-1: the converted batches reach the engine as an Arrow
+     * stream, which its Arrow scan writes on its own threads and in case
+     * order; the serial route, and PARQIT_SPSS_TABLE_FUNCTION=1 on either,
+     * use the one-thread table function (the same decoding; the escape hatch
+     * and the A/B reference) */
+    const bool table_function = std::getenv("PARQIT_SPSS_TABLE_FUNCTION") != nullptr || !plan->parallel;
+    std::unique_ptr<parqit::spss::SavArrowSource> source;
+    std::string sql = "SELECT * FROM parqit_read_sav(" + parqit::quote_literal(token) + ")";
+    static long long views = 0;
+    const std::string view = "_parqit_sav_" + std::to_string(++views);
+    if (!table_function) {
+        source = std::make_unique<parqit::spss::SavArrowSource>(plan, threads);
+        source->start();
+        if (duckdb_arrow_scan(s.con(), view.c_str(),
+                              reinterpret_cast<duckdb_arrow_stream>(source->stream())) != DuckDBSuccess) {
+            source->finish();
+            cry(who + ": could not register the SPSS cases for writing");
+            return kRcEngine;
+        }
+        sql = "SELECT * FROM " + parqit::quote_ident(view);
+    }
     ST_retcode rc = copy_out_parquet(s, sql, dest, replace, compression, level, {}, 0,
                                      plan->kv_metadata_sql, &written, &err, nullptr, &pre_publish);
-    parqit::spss::release_plan(token);
+    /* the first error in case order, worded as the table function words it */
+    const std::string source_err = source ? source->finish() : std::string();
+    if (source) {
+        std::string e2;
+        s.exec("DROP VIEW IF EXISTS " + parqit::quote_ident(view), &e2);
+    }
+    if (std::getenv("PARQIT_TEST_SPSS_TRACE")) {
+        /* F14: the route and profile taken, the batches handed over and the
+         * threads that converted them (not the threads configured) */
+        const std::string line = std::string("spss conversion: route ") + (source ? "parallel" : "serial") +
+                                 ", profile " + (plan->profile_parallel ? "parallel" : "serial") + ", batches " +
+                                 std::to_string(source ? source->batches() : 0) + ", workers " +
+                                 std::to_string(source ? source->workers() : 1) + "\n";
+        SF_display(const_cast<char *>(line.c_str()));
+    }
     if (rc != 0) {
-        cry(who + ": " + engine_text(err));
+        cry(who + ": " + (source_err.empty() ? engine_text(err) : source_err));
         return rc;
     }
 

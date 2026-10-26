@@ -13,6 +13,8 @@
  * source file must be the one profiled. */
 #include "plugin/plugin_rdata.hpp"
 
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -21,6 +23,9 @@
 
 #include "engine/hexcodec.hpp"
 #include "engine/legacy_encoding.hpp"
+#include "abi.h"
+#include "duckdb.h"
+#include "engine/rdata_parallel.hpp"
 #include "engine/rdata_plan.hpp"
 #include "engine/rdata_table.hpp"
 #include "engine/request.hpp"
@@ -30,6 +35,16 @@
 namespace parqit_plugin {
 
 namespace {
+
+/* A3: PARQIT_*_ROUTE / PARQIT_*_PROFILE = serial (0) or parallel (1) force the
+ * route or the profile (tests, calibration); unset or other: -1, by size */
+int route_switch(const char *name) {
+    const char *e = std::getenv(name);
+    if (!e) return -1;
+    if (!std::strcmp(e, "serial")) return 0;
+    if (!std::strcmp(e, "parallel")) return 1;
+    return -1;
+}
 
 constexpr ST_retcode kRcUsage = 198;
 constexpr ST_retcode kRcFileNotFound = 601;
@@ -125,6 +140,13 @@ ST_retcode cmd_rdata_convert(const std::vector<std::string> &args) {
     opt.encoding = encoding;
     opt.default_encoding = parqit::legacy_encoding_name(encoding_session_default()); /* ENC-3 */
     opt.tmpdir = tmpdir;
+    /* RDATA-PARALLEL-1: the profile pass; A3: a frame below the measured
+     * size takes the serial route instead (one thread and the table
+     * function: the 0.5.1 code), chosen before the profile */
+    opt.threads = static_cast<int>(s.threads());
+    opt.parallel_min_rows = -1; /* the measured rule for the file's compression */
+    opt.route = route_switch("PARQIT_RDATA_ROUTE");
+    opt.profile = route_switch("PARQIT_RDATA_PROFILE");
     std::shared_ptr<const parqit::rdata::Plan> plan;
     try {
         plan = std::make_shared<const parqit::rdata::Plan>(parqit::rdata::make_plan(src, opt));
@@ -140,7 +162,8 @@ ST_retcode cmd_rdata_convert(const std::vector<std::string> &args) {
         return kRcNotR;
     }
 
-    const std::string token = parqit::rdata::register_plan(plan);
+    const parqit::rdata::PlanRegistration registration(plan); /* released on every path (A5) */
+    const std::string &token = registration.token();
     long long written = -1;
     const std::function<bool(std::string *)> pre_publish = [&](std::string *perr) {
         if (written != plan->nrow) {
@@ -157,14 +180,46 @@ ST_retcode cmd_rdata_convert(const std::vector<std::string> &args) {
         }
         return true;
     };
-    const std::string sql =
-        "SELECT * FROM parqit_read_rdata(" + parqit::quote_literal(token) + ")";
+    /* RDATA-PARALLEL-1: the columns are converted on the engine's threads into
+     * Arrow batches, which its Arrow scan writes on its own threads and in row
+     * order; PARQIT_RDATA_TABLE_FUNCTION=1 keeps the one-thread table function
+     * (the same conversion; the escape hatch and the A/B reference) */
+    const bool table_function = std::getenv("PARQIT_RDATA_TABLE_FUNCTION") != nullptr || !plan->parallel;
+    std::unique_ptr<parqit::rdata::RdataArrowSource> source;
+    std::string sql = "SELECT * FROM parqit_read_rdata(" + parqit::quote_literal(token) + ")";
+    static long long views = 0;
+    const std::string view = "_parqit_rdata_" + std::to_string(++views);
+    if (!table_function) {
+        source = std::make_unique<parqit::rdata::RdataArrowSource>(plan, static_cast<int>(s.threads()));
+        source->start();
+        if (duckdb_arrow_scan(s.con(), view.c_str(),
+                              reinterpret_cast<duckdb_arrow_stream>(source->stream())) != DuckDBSuccess) {
+            source->finish();
+            cry(who + ": could not register the R data for writing");
+            return kRcEngine;
+        }
+        sql = "SELECT * FROM " + parqit::quote_ident(view);
+    }
     ST_retcode rc = copy_out_parquet(s, sql, dest, replace, compression, level, {}, 0,
                                      plan->kv_metadata_sql, &written, &err,
                                      plan->rename_leaves ? &plan->leaf_names : nullptr, &pre_publish);
-    parqit::rdata::release_plan(token);
+    /* the first error the table function would meet, with its wording */
+    const std::string source_err = source ? source->finish() : std::string();
+    if (source) {
+        std::string e2;
+        s.exec("DROP VIEW IF EXISTS " + parqit::quote_ident(view), &e2);
+    }
+    if (std::getenv("PARQIT_TEST_RDATA_TRACE")) {
+        /* F14: the route and profile taken, the batches handed over and the
+         * threads that converted them (not the threads configured) */
+        const std::string line = std::string("rdata conversion: route ") + (source ? "parallel" : "serial") +
+                                 ", profile " + (plan->profile_parallel ? "parallel" : "serial") + ", batches " +
+                                 std::to_string(source ? source->batches() : 0) + ", workers " +
+                                 std::to_string(source ? source->workers() : 1) + "\n";
+        SF_display(const_cast<char *>(line.c_str()));
+    }
     if (rc != 0) {
-        cry(who + ": " + engine_text(err));
+        cry(who + ": " + (source_err.empty() ? engine_text(err) : source_err));
         return rc;
     }
 

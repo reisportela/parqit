@@ -411,6 +411,16 @@ struct Val {
     /* STATAMISS-WARN-1: the bare numeric columns a missing()/mi() call tests,
      * so an enclosing ! can be recognised as a nonmissing guard */
     std::vector<std::string> miss_of;
+    /* STATAMISS-PUSHDOWN-1: a value that can never be missing (a function whose
+     * translation never yields NULL); a constant counts as such too */
+    bool nonnull = false;
+    /* STATAMISS-PUSHDOWN-1: for a boolean in a positive WHERE position (the
+     * top, or under & and | there), its form where NULL may stand for FALSE;
+     * empty: the same as sql */
+    std::string pos;
+    /* STATAMISS-PUSHDOWN-1: a numeric comparison's SQL comparison alone, for
+     * inrange(), which supplies its own missing-value guard */
+    std::string cmp;
 };
 
 /* FLOAT-LIT-1: a numeric literal that a FLOAT column can hold exactly
@@ -443,6 +453,9 @@ struct Parser {
     /* ROWCTX-1: set when _n/_N is consumed, so the caller can tell whether the
      * emitted SQL still needs the view compiler's row-context substitution. */
     bool used_rowctx = false;
+    /* DERIVED-COLLAPSE-1: cleared by any function outside the reviewed numeric
+     * list in call(); see ExprResult::repeatable */
+    bool repeatable = true;
     /* ROWCTX-2: the window terms behind the placeholders (see WindowTerm);
      * identical windows share one placeholder */
     std::vector<WindowTerm> wins;
@@ -519,6 +532,14 @@ struct Parser {
         v->float32 = false;
         v->lit = false;
         v->miss_of.clear();
+        v->nonnull = false;
+        v->pos.clear();
+        v->cmp.clear();
+    }
+    /* STATAMISS-PUSHDOWN-1: a boolean's form in a positive WHERE position */
+    std::string as_where(const Val &v) {
+        if (v.kind == 'b') return v.pos.empty() ? v.sql : v.pos;
+        return as_bool(v);
     }
     std::string as_bool(const Val &v) {
         if (v.kind == 'b') return v.sql;
@@ -613,29 +634,48 @@ struct Parser {
         const std::string left = exact ? "__parqit_compare(" + a + ", " + b + ")" : a;
         const std::string right = exact ? "0" : b;
         if (!stmiss) return wrap("(" + left + o + right + ")");
+        /* STATAMISS-PUSHDOWN-1: Stata's comparisons differ from SQL's only on a
+         * missing operand. Two values that cannot be missing compare as in SQL
+         * in every context; in a positive WHERE, where NULL drops a row as FALSE
+         * does, one such side is enough when the other's missing value makes the
+         * Stata comparison false: == either side; < and <= the right; > and >=
+         * the left (missing sorts above every number). != keeps its branches. */
+        const bool lnn = l.nonnull || constant(l), rnn = r.nonnull || constant(r);
+        const std::string plain = "(" + left + o + right + ")";
+        out->cmp = plain;
+        if (lnn && rnn) return wrap(plain);
+        const bool where_plain = op == Tok::Eq ? (lnn || rnn)
+                                 : (op == Tok::Lt || op == Tok::Le) ? rnn
+                                 : (op == Tok::Gt || op == Tok::Ge) ? lnn
+                                 : false;
+        auto wrap_where = [&](const std::string &cmp) {
+            wrap(cmp);
+            if (where_plain) out->pos = plain;
+            return true;
+        };
         /* statamissing: missing sorts ABOVE every number and comparisons are
          * TOTAL (Stata comparisons never yield missing). Treat NULL as +inf. */
         switch (op) {
         case Tok::Eq:
-            return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
+            return wrap_where("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
                         " IS NOT NULL AND " + b + " IS NOT NULL AND " + left +
                         " = " + right + "))");
         case Tok::Ne:
-            return wrap("(NOT ((" + a + " IS NULL AND " + b + " IS NULL) OR (" +
+            return wrap_where("(NOT ((" + a + " IS NULL AND " + b + " IS NULL) OR (" +
                         a + " IS NOT NULL AND " + b + " IS NOT NULL AND " + left +
                         " = " + right + ")))");
         case Tok::Lt:
-            return wrap("(" + a + " IS NOT NULL AND (" + b + " IS NULL OR " + left +
+            return wrap_where("(" + a + " IS NOT NULL AND (" + b + " IS NULL OR " + left +
                         " < " + right + "))");
         case Tok::Le:
-            return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
+            return wrap_where("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + a +
                         " IS NOT NULL AND (" + b + " IS NULL OR " + left + " <= " +
                         right + ")))");
         case Tok::Gt:
-            return wrap("(" + b + " IS NOT NULL AND (" + a + " IS NULL OR " + left +
+            return wrap_where("(" + b + " IS NOT NULL AND (" + a + " IS NULL OR " + left +
                         " > " + right + "))");
         case Tok::Ge:
-            return wrap("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + b +
+            return wrap_where("((" + a + " IS NULL AND " + b + " IS NULL) OR (" + b +
                         " IS NOT NULL AND (" + a + " IS NULL OR " + left + " >= " +
                         right + ")))");
         default:
@@ -1021,6 +1061,8 @@ struct Parser {
              * !missing == 0 — matching Stata's `!.` == 0. */
             out->sql = "(NOT " + b + ")";
             out->kind = 'b';
+            out->pos.clear(); /* STATAMISS-PUSHDOWN-1: a negation keeps its branches */
+            out->nonnull = false;
             return true;
         }
         return power(out);
@@ -1169,9 +1211,11 @@ struct Parser {
             if (!rel(&r)) return false;
             std::string a = as_bool(*out), b = as_bool(r);
             if (a.empty() || b.empty()) return fail("& needs boolean operands");
+            const std::string pa = as_where(*out), pb = as_where(r);
             out->sql = "(" + a + " AND " + b + ")";
             out->kind = 'b';
             computed(out);
+            if (pa != a || pb != b) out->pos = "(" + pa + " AND " + pb + ")"; /* STATAMISS-PUSHDOWN-1 */
         }
         if (single) single_and.insert(mine);
         last_and = mine;
@@ -1201,9 +1245,11 @@ struct Parser {
             if (!and_expr(&r)) return false;
             std::string a = as_bool(*out), b = as_bool(r);
             if (a.empty() || b.empty()) return fail("| needs boolean operands");
+            const std::string pa = as_where(*out), pb = as_where(r);
             out->sql = "(" + a + " OR " + b + ")";
             out->kind = 'b';
             computed(out);
+            if (pa != a || pb != b) out->pos = "(" + pa + " OR " + pb + ")"; /* STATAMISS-PUSHDOWN-1 */
         }
         if (single && or_depth > 1) {
             /* one parenthesised disjunct belongs to the enclosing chains:
@@ -1277,6 +1323,13 @@ static bool parse_time_bound(const std::string &raw, const std::string &fmt, lon
 
 bool Parser::call(const std::string &fname, Val *out) {
     *out = Val{};
+    /* DERIVED-COLLAPSE-1: deterministic numeric functions of their arguments
+     * only. Strings, dates, parsers and every future addition stay excluded
+     * until reviewed and added here explicitly. */
+    static const std::set<std::string> kRepeatable = {
+        "abs", "exp", "ln", "log", "log10", "sqrt", "floor", "ceil", "int", "trunc",
+        "round", "mod", "min", "max", "cond", "missing", "mi", "inrange", "inlist", "float"};
+    if (!kRepeatable.count(fname)) repeatable = false;
     /* TSSET-1: tin(a, b) / twithin(a, b) on the declared time variable; the
      * bounds are literals (a number, or a date written as the time variable's
      * format displays it), consumed as raw text like the date literals */
@@ -1596,21 +1649,33 @@ bool Parser::call(const std::string &fname, Val *out) {
         out->sql = "((" + x + " IS NOT NULL) AND (" + lo + " IS NULL OR " + lower.sql +
                    ") AND (" + hi + " IS NULL OR " + upper.sql + "))";
         out->kind = 'b';
+        /* STATAMISS-PUSHDOWN-1: with bounds that cannot be missing, a missing x
+         * is the only missing operand and makes it false: in a positive WHERE
+         * the two comparisons alone keep the same rows */
+        if (stmiss && constant(args[1]) && constant(args[2]) && !lower.cmp.empty() && !upper.cmp.empty())
+            out->pos = "(" + lower.cmp + " AND " + upper.cmp + ")";
         return true;
     }
     if (fname == "inlist") {
         if (!need(2, 255)) return false;
-        std::string sql = "(";
+        std::string sql = "(", pos = "(";
+        bool shorter = false;
         for (size_t k = 1; k < args.size(); k++) {
             if ((args[k].kind == 's') != (args[0].kind == 's'))
                 return fail("inlist(): mixed string/numeric arguments");
             if (k > 1) sql += " OR ";
+            if (k > 1) pos += " OR ";
             Val eq;
             if (!relational(args[0], Tok::Eq, args[k], &eq)) return false;
             sql += eq.sql;
+            pos += as_where(eq);
+            shorter = shorter || !eq.pos.empty();
         }
         out->sql = "coalesce(" + sql + "), FALSE)";
         out->kind = 'b';
+        /* STATAMISS-PUSHDOWN-1: in a positive WHERE the disjunction of the
+         * equalities' WHERE forms keeps the same rows (NULL drops as FALSE) */
+        if (shorter) out->pos = pos + ")";
         return true;
     }
     /* ---- strings (lengths are BYTES, like Stata) ---- */
@@ -1704,6 +1769,7 @@ bool Parser::call(const std::string &fname, Val *out) {
                    "strlen(substr(" + s + ", 1, strpos(" + s + ", " + sub +
                    ") - 1)) + 1 END)";
         out->kind = 'n';
+        out->nonnull = true; /* STATAMISS-PUSHDOWN-1: both inputs coalesced, every branch a number */
         return true;
     }
     if (fname == "subinstr") {
@@ -2055,6 +2121,7 @@ ExprResult translate_expression(const std::string &expr, const ExprSchema &schem
     r.ok = true;
     r.uses_rowctx = p.used_rowctx;
     r.windows = p.wins; /* ROWCTX-2 */
+    r.repeatable = p.repeatable && !p.used_rowctx; /* DERIVED-COLLAPSE-1 */
     r.sql = v.kind == 'b'
                 ? "(CASE WHEN " + v.sql + " THEN 1 WHEN NOT (" + v.sql +
                       ") THEN 0 ELSE NULL END)"
@@ -2095,11 +2162,13 @@ ExprResult translate_filter(const std::string &expr, const ExprSchema &schema,
     r.kind = 'b';
     r.uses_rowctx = p.used_rowctx;
     r.windows = p.wins; /* ROWCTX-2 */
+    r.repeatable = p.repeatable && !p.used_rowctx; /* DERIVED-COLLAPSE-1 */
     /* Stata `keep if x`: a row is kept when x is nonzero OR missing (a missing
      * value is treated as true), matching as_bool(). */
     r.sql = (v.kind == 'b')
                 ? v.sql
                 : "((" + v.sql + ") IS NULL OR (" + v.sql + ") <> 0)";
+    r.sql_where = p.as_where(v); /* STATAMISS-PUSHDOWN-1 */
     return r;
 }
 

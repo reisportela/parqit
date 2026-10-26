@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.5.1 LANGUAGES C CXX)
+project(parqit VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,9 +52,17 @@ set(PARQIT_VENDOR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 # and core_functions extensions are statically linked in (the released
 # amalgamation is the bare engine without either — verified 2026-06-12).
 # Offline builds: -DPARQIT_DUCKDB_ARCHIVE=/path/to/duckdb-<ver>.tar.gz
+# 2.0.0 is the default engine; 1.5.6 remains an optional build
+# (-DPARQIT_DUCKDB_VERSION=1.5.6) and is no longer distributed.
 # ---------------------------------------------------------------------------
-set(PARQIT_DUCKDB_VERSION "1.5.6")
-set(PARQIT_DUCKDB_SHA256 "1fadcbe9e69e1470f9093b6bcde08daf477d729c449e59a807f45c346622099b")
+set(PARQIT_DUCKDB_VERSION "2.0.0" CACHE STRING "Reviewed embedded DuckDB release")
+if(PARQIT_DUCKDB_VERSION STREQUAL "1.5.6")
+    set(PARQIT_DUCKDB_SHA256 "1fadcbe9e69e1470f9093b6bcde08daf477d729c449e59a807f45c346622099b")
+elseif(PARQIT_DUCKDB_VERSION STREQUAL "2.0.0")
+    set(PARQIT_DUCKDB_SHA256 "7e89053255046bfb26afbd7f524a2fb84df7dbef496aa911ea35e4a1182fdc00")
+else()
+    message(FATAL_ERROR "Unreviewed DuckDB version: ${PARQIT_DUCKDB_VERSION}")
+endif()
 set(PARQIT_DUCKDB_ARCHIVE "" CACHE FILEPATH
     "Optional path to a local duckdb-${PARQIT_DUCKDB_VERSION}.tar.gz for offline builds")
 
@@ -75,8 +83,19 @@ endif()
 # DuckDB's own default extension_config.cmake.
 set(BUILD_SHELL FALSE CACHE BOOL "" FORCE)
 set(BUILD_UNITTESTS FALSE CACHE BOOL "" FORCE)
-set(ENABLE_EXTENSION_AUTOLOADING FALSE CACHE BOOL "" FORCE)
-set(ENABLE_EXTENSION_AUTOINSTALL FALSE CACHE BOOL "" FORCE)
+if(PARQIT_DUCKDB_VERSION STREQUAL "1.5.6")
+    set(ENABLE_EXTENSION_AUTOLOADING FALSE CACHE BOOL "" FORCE)
+    set(ENABLE_EXTENSION_AUTOINSTALL FALSE CACHE BOOL "" FORCE)
+else()
+    # These build switches were removed in 2.0; Session also disables both
+    # runtime settings before opening the engine. Match the 1.5.6 extensions.
+    set(SKIP_EXTENSIONS "json;icu" CACHE STRING "" FORCE)
+    # 2.0's default CLI profile compiles every engine target in Release with
+    # -march=x86-64-v3 (AVX2, FMA) on Linux; the plugin must run on every
+    # x86-64 CPU the 1.5.6 builds ran on, with the same code generation
+    # (ENGINE-BASELINE-ISA-1).
+    set(DUCKDB_OPTIMIZATION_PROFILE "NONE" CACHE STRING "" FORCE)
+endif()
 if(WIN32)
     # DuckDB defaults EXPORT_DLL_SYMBOLS=ON even when its static archives are
     # embedded in another DLL.  That annotates its public API with dllexport;
@@ -88,20 +107,32 @@ if(WIN32)
 endif()
 # The release tarball has no .git: tell DuckDB its own version explicitly so
 # version()/duckdb_library_version() report the pinned release, not v0.0.1.
-set(OVERRIDE_GIT_DESCRIBE "v${PARQIT_DUCKDB_VERSION}-0-g0000000000" CACHE STRING "" FORCE)
+if(PARQIT_DUCKDB_VERSION STREQUAL "2.0.0")
+    # 2.0 consumes an explicit version verbatim, and otherwise discovers
+    # parqit's enclosing Git repository instead of the dependency's tag.
+    set(DUCKDB_EXPLICIT_VERSION "v2.0.0")
+    set(GIT_COMMIT_HASH "d54cbbe3df17e8e5ce68312f483b4155836112aa")
+else()
+    set(OVERRIDE_GIT_DESCRIBE "v${PARQIT_DUCKDB_VERSION}-0-g0000000000" CACHE STRING "" FORCE)
+endif()
 
 FetchContent_Declare(duckdb
     URL "${_parqit_duckdb_url}"
     URL_HASH SHA256=${PARQIT_DUCKDB_SHA256}
 )
 FetchContent_MakeAvailable(duckdb)
+if(PARQIT_DUCKDB_VERSION STREQUAL "2.0.0")
+include(cmake/PatchDuckDB200.cmake)
+else()
 include(cmake/PatchDuckDBSampling.cmake)
 include(cmake/PatchDuckDBCapi.cmake)
 include(cmake/PatchDuckDBLifetime.cmake)
+include(cmake/PatchDuckDBFileCache.cmake)
 include(cmake/PatchDuckDBStreaming.cmake)
 include(cmake/PatchDuckDBWindowSelfJoin.cmake)
 include(cmake/PatchDuckDBLambdaVolatility.cmake)
 include(cmake/VerifyDuckDBScalarAPI.cmake)
+endif()
 set(PARQIT_DUCKDB_INCLUDE "${duckdb_SOURCE_DIR}/src/include")
 set(PARQIT_UTF8PROC_INCLUDE "${duckdb_SOURCE_DIR}/third_party/utf8proc/include")
 # DuckDB's bundled zlib subset (namespace duckdb_miniz, compiled into
@@ -124,6 +155,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/text_file.cpp
     src/engine/parquet_footer.cpp
     src/engine/session.cpp
+    src/engine/scalar_registration.cpp
     src/engine/statistics.cpp
     src/engine/typemap.cpp
     src/engine/sanitize.cpp
@@ -133,9 +165,11 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/view.cpp
     src/engine/spss_reader.cpp
     src/engine/spss_plan.cpp
+    src/engine/spss_parallel.cpp
     src/engine/spss_table.cpp
     src/engine/rdata_reader.cpp
     src/engine/rdata_plan.cpp
+    src/engine/rdata_parallel.cpp
     src/engine/rdata_table.cpp
 )
 add_library(parqit_engine STATIC ${PARQIT_ENGINE_SOURCES})
@@ -158,8 +192,14 @@ target_include_directories(parqit_engine PUBLIC
 # linked extensions (<name>_extension) and the generated loader that
 # registers them into separate archives with circular references; group them
 # on GNU ld (macOS ld64 and MSVC resolve archives globally and need no group).
-set(PARQIT_DUCKDB_LIBS duckdb_static duckdb_generated_extension_loader
-    parquet_extension core_functions_extension)
+set(PARQIT_DUCKDB_LIBS duckdb_static parquet_extension core_functions_extension)
+if(PARQIT_DUCKDB_VERSION STREQUAL "2.0.0")
+    set(DUCKDB_MODULE_BASE_DIR "${duckdb_SOURCE_DIR}")
+    duckdb_link_extensions(parqit_engine PUBLIC EXPLICIT core_functions parquet)
+    target_compile_definitions(parqit_engine PUBLIC PARQIT_DUCKDB_200=1)
+else()
+    list(APPEND PARQIT_DUCKDB_LIBS duckdb_generated_extension_loader)
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
     target_link_libraries(parqit_engine PUBLIC
         "-Wl,--start-group" ${PARQIT_DUCKDB_LIBS} "-Wl,--end-group")
@@ -326,7 +366,9 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_text_file.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
+        tests/unit/test_file_cache.cpp
         tests/unit/test_parallelism.cpp
+        tests/unit/test_partitioned_copy.cpp
         tests/unit/test_statistics.cpp
         tests/unit/test_typemap.cpp
         tests/unit/test_sanitize.cpp
@@ -335,6 +377,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_view.cpp
         tests/unit/test_arrow_copy_bench.cpp
         tests/unit/test_streaming.cpp
+        tests/unit/test_save_blocks.cpp
         tests/unit/test_spss_reader.cpp
         tests/unit/test_rdata_reader.cpp
     )
@@ -347,11 +390,16 @@ if(PARQIT_BUILD_TESTS)
     )
     target_link_libraries(parqit_tests PRIVATE parqit_engine Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME unit COMMAND parqit_tests)
+    if(PARQIT_DUCKDB_VERSION STREQUAL "2.0.0")
+        set(_parqit_patch_guard tests/test_duckdb200_patch_guards.cmake)
+    else()
+        set(_parqit_patch_guard tests/test_duckdb_patch_guards.cmake)
+    endif()
     add_test(NAME duckdb_patch_guards COMMAND "${CMAKE_COMMAND}"
         "-DPARQIT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DDUCKDB_SOURCE_DIR=${duckdb_SOURCE_DIR}"
         "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_duckdb_patch_guards.cmake")
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/${_parqit_patch_guard}")
     if(UNIX)
         add_test(NAME runner_no_match
             COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run_stata_no_match.sh")
@@ -367,4 +415,38 @@ if(PARQIT_BUILD_TESTS)
                     "--test-case=session close reopen and process teardown preserve allocator lifetimes")
         endif()
     endif()
+endif()
+
+# B9 (audit of 25 Oct 2026): a ThreadSanitizer build of the reader workers
+# (tests/tsan). Only DuckDB's bundled miniz/zstd are linked, from the static
+# archive: a TSan binary linking the whole static engine segfaulted at start-up
+# on the host where this was written, so the engine-side consumer of the Arrow
+# stream is emulated (under one lock each consumer releases its batch and takes
+# the next, as the engine's Arrow scan does). Use a build directory of its own
+# with -DPARQIT_TSAN=ON and its own -DPARQIT_LOCAL_ADO_DIR; see BUILDING.md.
+option(PARQIT_TSAN "Build the ThreadSanitizer harness of the reader workers (tests/tsan)." OFF)
+if(PARQIT_TSAN)
+    add_executable(parqit_tsan_readers
+        tests/tsan/tsan_readers.cpp tests/tsan/stubs.cpp
+        src/engine/spss_parallel.cpp src/engine/spss_plan.cpp src/engine/spss_reader.cpp
+        src/engine/rdata_parallel.cpp src/engine/rdata_plan.cpp src/engine/rdata_reader.cpp
+        src/engine/legacy_encoding.cpp src/engine/encoding_tables.cpp src/engine/typemap.cpp
+        src/engine/datefn.cpp src/engine/sanitize.cpp src/engine/hexcodec.cpp)
+    target_include_directories(parqit_tsan_readers PRIVATE
+        src
+        "${PARQIT_DUCKDB_INCLUDE}"
+        "${PARQIT_UTF8PROC_INCLUDE}"
+        "${PARQIT_MINIZ_INCLUDE}"
+        "${PARQIT_ZSTD_INCLUDE}"
+        "${PARQIT_VENDOR_DIR}/arrow"
+        "${PARQIT_VENDOR_DIR}/json")
+    target_compile_definitions(parqit_tsan_readers PRIVATE DUCKDB_STATIC_BUILD
+        $<$<STREQUAL:${PARQIT_DUCKDB_VERSION},2.0.0>:PARQIT_DUCKDB_200=1>)
+    target_compile_options(parqit_tsan_readers PRIVATE -fsanitize=thread -O1 -g -fno-omit-frame-pointer)
+    target_link_options(parqit_tsan_readers PRIVATE -fsanitize=thread)
+    add_dependencies(parqit_tsan_readers duckdb_static)
+    target_link_libraries(parqit_tsan_readers PRIVATE "$<TARGET_FILE:duckdb_static>" Threads::Threads ${CMAKE_DL_LIBS})
+    enable_testing()
+    add_test(NAME tsan_readers COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan/run_tsan.sh"
+        "$<TARGET_FILE:parqit_tsan_readers>" "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

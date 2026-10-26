@@ -20,11 +20,41 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.5.1 — the full surface below is implemented and covered by a
+> **Status:** v0.6.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.6.0 embeds DuckDB 2.0.0 by default, by the
+maintainer's decision; 1.5.6 remains an optional source build
+(`-DPARQIT_DUCKDB_VERSION=1.5.6`) and is no longer distributed. The candidate
+passes the local test matrix; exact CI binaries and native platform coverage
+remain separate checks. The maintainer selected native 2.0 SQL for the escape
+hatches, with documented differences from the 1.5.6 dialect; Stata-flavoured
+verbs retain their own semantics.
+The [detailed source study](docs/audits/ESTUDO_DUCKDB_1_5_6_2_0_0_2026-10-23.md)
+identified and reproduced lost parallelism and ordering in prepared execution;
+the guarded correction retains the existing API and data paths. Performance is
+assessed using absolute timings, variability and scale, allowing very small
+costs where substantial gains justify them.
+The [implementation and measured results](docs/audits/IMPLEMENTACAO_PARALELISMO_DUCKDB_2_0_0_2026-10-23.md)
+record the discriminating regression test, full local validation and comparisons
+at one and ten million synthetic rows, including residual costs.
+The [comparison with the exact public release](docs/audits/AUDITORIA_SUPERFICIE_PUBLICA_DUCKDB_2_0_0_2026-10-23.md)
+covers the command/function surface, native SQL policy, additional numerical
+corrections and 78 performance scenarios. It also documents the lower-RAM,
+higher-spill cost at a small fixed memory limit and a measured configuration
+with comparable actual RAM use; memory limits are never silently increased.
+The maintainer accepted the measured opening cost of many-file trees for
+0.6.0 (about 7.6 versus 5.9 seconds for 6336 files at 48 threads in the
+pre-release comparison). Reader admission uses nominal declared block sizes;
+its budgets are not hard ceilings on allocated capacity or process RAM.
+Both limitations are documented in the technical help.
+The [initial migration audit](docs/audits/AUDITORIA_MIGRACAO_DUCKDB_2_0_0_2026-10-22.md)
+found precision, reader and runtime regressions. Their corrections, the
+Claude Fable review, validation evidence and remaining acceptance gates are
+recorded in the [remediation report](docs/audits/CORRECOES_MIGRACAO_DUCKDB_2_0_0_2026-10-22.md).
 
 The scoped evidence, closed findings, residual risks and institutional-use
 conditions for the current data-reliability baseline are recorded in the
@@ -406,7 +436,7 @@ in the path:
 Needs `git`, CMake ≥ 3.21 and a C++17 compiler. The supported release toolchains
 are GCC on Linux (≥10), GCC 14 on macOS and MSVC 2019+ on Windows; see
 [BUILDING.md](BUILDING.md) for prerequisites and per-platform presets.
-The first build downloads and compiles DuckDB 1.5.6 from source
+The first build downloads and compiles DuckDB 2.0.0 from source
 (SHA256-pinned, with hash-checked local corrections), so allow tens of minutes
 and a few GB of disk, depending on the toolchain and hardware.
 
@@ -514,7 +544,8 @@ expression, condition or intervening data transformation keeps its sequential
 meaning. `parqit explain` shows the resulting plan.
 
 `parqit version` reports both the package and embedded DuckDB versions:
-parqit 0.3.3 embeds DuckDB 1.5.3; the 0.4 series embeds 1.5.6. A newer engine
+parqit 0.3.3 embeds DuckDB 1.5.3; the 0.4 and 0.5 series embed 1.5.6; the
+next release embeds 2.0.0 (1.5.6 remains an optional build). A newer engine
 does not make every pipeline faster. Compare the same result, thread settings
 and materialiser in interleaved repeated runs, and record server load. Opening
 a lazy view, executing its plan and transferring rows into Stata are separate

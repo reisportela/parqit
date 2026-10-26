@@ -1,4 +1,6 @@
 #include "engine/session.hpp"
+#include "engine/test_fault.hpp"
+#include "engine/scalar_registration.hpp"
 #include "engine/datefn.hpp"
 #include "engine/typemap.hpp"
 #include "engine/stats_overflow.hpp"
@@ -12,6 +14,7 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
@@ -22,6 +25,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef PARQIT_DUCKDB_200
+extern "C" int32_t duckdb_register_static_extensions(void);
+#endif
 #if defined(__linux__)
 #include <sched.h>
 #endif
@@ -479,7 +485,8 @@ static bool register_scalar(duckdb_connection con, const char *name,
         scalar.SetBindCallback(nullptr);
         scalar.SetInitStateCallback(nullptr);
     }
-    duckdb_state st = duckdb_register_scalar_function(con, f);
+    duckdb_state st = register_known_scalar(con, f, fallible ? ScalarErrorPolicy::ValueDependent
+                                                          : ScalarErrorPolicy::Total);
     duckdb_destroy_scalar_function(&f);
     if (st != DuckDBSuccess) {
         if (err) *err = std::string("could not register internal function ") + name;
@@ -573,17 +580,48 @@ bool Session::ensure_open() {
     if (db_ && con_) return true;
     close();
 
+#ifdef PARQIT_DUCKDB_200
+    if (duckdb_register_static_extensions() != 0) {
+        last_error_ = "could not register the statically linked DuckDB extensions";
+        return false;
+    }
+#endif
+
     duckdb_config config = nullptr;
     if (duckdb_create_config(&config) != DuckDBSuccess) {
         last_error_ = "could not create DuckDB config";
         return false;
     }
+#ifdef PARQIT_DUCKDB_200
+    // 2.0 removed the compile-time switches. Keep the embedded engine offline;
+    // raw SQL uses the selected engine's native dialect. Stata expressions are
+    // translated separately and retain their own missing/error semantics.
+    for (const auto &setting : {
+            std::pair<const char *, const char *>{"autoload_known_extensions", "false"},
+            {"autoinstall_known_extensions", "false"}}) {
+        if (duckdb_set_config(config, setting.first, setting.second) != DuckDBSuccess) {
+            last_error_ = std::string("could not configure DuckDB setting ") + setting.first;
+            duckdb_destroy_config(&config);
+            return false;
+        }
+    }
+#endif
     /* CPUS-1: the engine's threads are bounded by the CPUs available to this
      * process unless the user chose a count (`parqit set threads`, itself
      * clamped to the same number). DuckDB's own default is
      * hardware_concurrency(), which ignores the affinity mask. */
     duckdb_set_config(config, "threads",
                       std::to_string(threads_ > 0 ? threads_ : available_cpus()).c_str());
+#ifdef PARQIT_DUCKDB_200
+    // 2.0 otherwise starts up to 256 I/O workers independently of the query
+    // thread setting and the process affinity mask. Keep both pools bounded.
+    if (duckdb_set_config(config, "async_threads",
+            std::to_string(threads_ > 0 ? threads_ : available_cpus()).c_str()) != DuckDBSuccess) {
+        last_error_ = "could not configure DuckDB asynchronous I/O threads";
+        duckdb_destroy_config(&config);
+        return false;
+    }
+#endif
     if (!memory_limit_.empty())
         duckdb_set_config(config, "memory_limit", memory_limit_.c_str());
     /* temp_directory is what lets the in-memory instance spill to disk:
@@ -626,8 +664,17 @@ bool Session::set_threads(long long n, std::string *err) {
         if (err) *err = "threads must be a positive integer";
         return false;
     }
+    if (!apply_set(*this, "SET threads = " + std::to_string(n), err)) return false;
+#ifdef PARQIT_DUCKDB_200
+    if (!apply_set(*this, "SET async_threads = " + std::to_string(n), err)) {
+        std::string ignored;
+        apply_set(*this, "SET threads = " +
+            std::to_string(threads_ > 0 ? threads_ : available_cpus()), &ignored);
+        return false;
+    }
+#endif
     threads_ = n;
-    return apply_set(*this, "SET threads = " + std::to_string(n), err);
+    return true;
 }
 
 bool Session::set_memory_limit(const std::string &limit, std::string *err) {
@@ -653,7 +700,7 @@ bool Session::set_temp_directory(const std::string &dir, std::string *err) {
 }
 
 /* PERF-STREAM-1. `streaming_buffer_size` is a LOCAL (connection) setting whose
- * engine default is 1,000,000 bytes (duckdb/main/client_config.hpp:83), split
+ * embedded default is 1,000,000 bytes. In 1.5.6 its budget is split
  * 60% read queue / 40% in-progress batches
  * (main/buffered_data/batched_buffered_data.cpp:19-20). Once a producer's share
  * is full its sink parks, and the consumer only unparks sinks when the read
@@ -665,7 +712,10 @@ bool Session::set_temp_directory(const std::string &dir, std::string *err) {
  * number. Note DuckDB may still let the read queue overshoot (its own FIXME in
  * execution/operator/helper/physical_buffered_batch_collector.cpp:66-68), so
  * this is a soft cap; and it is a cap, not a reservation — only chunks the
- * engine actually produced occupy memory. */
+ * engine actually produced occupy memory. DuckDB 2.0 aliases this setting to
+ * max_streaming_buffer_size and uses a total byte budget with parked units;
+ * it no longer uses that 60/40 split. The pinned compatibility correction
+ * retains the existing default/RESET contract for parqit. */
 bool Session::set_streaming_buffer_bytes(long long bytes, std::string *err) {
     if (!ensure_open()) {
         if (err) *err = last_error_;
@@ -748,9 +798,10 @@ bool Session::query_streaming(const std::string &sql, duckdb_result *out,
         duckdb_destroy_prepare(&stmt);
         return false;
     }
-    /* duckdb_execute_pending: duckdb.h:2375. It returns as soon as the stream's
-     * collector has a chunk ready (or the query finished); the rest of the
-     * pipeline keeps running while the caller fetches. */
+    /* In 1.5.6 execute_pending runs until the streaming result is available.
+     * In 2.0 it can hand out the stream before producing data: execution and
+     * its errors then reach the caller through fetch. The prepared EXECUTE
+     * collector correction preserves the underlying plan's parallelism/order. */
     if (duckdb_execute_pending(pending, out) != DuckDBSuccess) {
         const char *msg = duckdb_result_error(out); /* duckdb.h:1368 */
         last_error_ = (msg && *msg) ? msg : "unknown DuckDB error";
@@ -760,17 +811,12 @@ bool Session::query_streaming(const std::string &sql, duckdb_result *out,
         duckdb_destroy_prepare(&stmt);
         return false;
     }
-    /* Both handles die here, while the stream stays live:
-     *  - duckdb_execute_pending resets the pending wrapper's PendingQueryResult
-     *    before translating the result (capi/pending-c.cpp:165), so
-     *    duckdb_destroy_pending has nothing left to Close (capi/pending-c.cpp:46-56);
-     *  - the C prepared-statement wrapper owns only a PreparedStatement
-     *    (capi_internal.hpp:50-57), which holds shared_ptrs and has an empty
-     *    destructor (prepared_statement.hpp:35-37, prepared_statement.cpp:18-19).
-     *    The running query keeps its own shared_ptr to the same
-     *    PreparedStatementData in the client context's active query
-     *    (client_context.cpp:604), so the plan the stream is executing cannot be
-     *    freed here. */
+    /* Both handles die here, while the stream stays live. In 1.5.6 execution
+     * resets the pending wrapper and the prepared destructor is empty. In
+     * 2.0 execution moves the query into the stream; destroying the prepared
+     * handle removes its catalogue entry, while PhysicalExecute retains the
+     * shared plan until execution ends. The pending wrapper owns no query
+     * after that move. The lifetime/abandonment tests cover both contracts. */
     duckdb_destroy_pending(&pending);
     duckdb_destroy_prepare(&stmt);
     return true;
@@ -779,11 +825,96 @@ bool Session::query_streaming(const std::string &sql, duckdb_result *out,
 bool Session::query_scalar(const std::string &sql, std::string *value, std::string *err) {
     duckdb_result res;
     if (!query(sql, &res, err)) return false;
-    char *v = duckdb_value_varchar(&res, 0, 0);
-    *value = v ? v : "";
-    if (v) duckdb_free(v);
-    duckdb_destroy_result(&res);
+    const ResultGuard guard{&res};
+    const CText v = result_text(&res, 0, 0);
+    *value = v ? v.get() : "";
     return true;
+}
+
+std::vector<Session::TextResult> Session::query_text_many(const std::vector<std::string> &sqls,
+                                                          int threads) {
+    std::vector<TextResult> out(sqls.size());
+    if (sqls.empty()) return out;
+    if (!ensure_open()) {
+        for (TextResult &r : out) r.err = last_error_;
+        return out;
+    }
+    /* one query on one connection; nothing escapes a worker thread */
+    auto run = [&](duckdb_connection con, size_t k) {
+        TextResult &r = out[k];
+        duckdb_result res;
+        try {
+            test_fault("text_many", static_cast<long long>(k));
+            const bool ok = duckdb_query(con, sqls[k].c_str(), &res) == DuckDBSuccess;
+            const ResultGuard guard{&res}; /* Codex final audit, finding 3 */
+            if (!ok) {
+                const char *msg = duckdb_result_error(&res);
+                r.err = msg ? msg : "unknown DuckDB error";
+                return;
+            }
+            const idx_t n = duckdb_row_count(&res), m = duckdb_column_count(&res);
+            r.rows.resize(n);
+            for (idx_t i = 0; i < n; i++) {
+                r.rows[i].resize(m);
+                for (idx_t j = 0; j < m; j++) {
+                    /* a text that cannot be copied fails the query, never reads
+                     * as NULL (Codex audit, round 2, findings 2 and 6) */
+                    std::unique_ptr<char, void (*)(void *)> v(result_varchar(&res, j, i), duckdb_free);
+                    if (v) r.rows[i][j] = std::string(v.get());
+                }
+            }
+        } catch (...) {
+            /* nothing that allocates here (Codex audit, finding 2): worded
+             * after the join, on the calling thread */
+            r.rows.clear();
+            r.failure = std::current_exception();
+        }
+    };
+    std::atomic<size_t> next{0};
+    auto loop = [&](duckdb_connection con) {
+        for (size_t k; (k = next.fetch_add(1)) < sqls.size();) run(con, k);
+    };
+    const size_t workers = std::min(sqls.size(), threads > 1 ? static_cast<size_t>(threads) : size_t(1));
+    std::vector<duckdb_connection> cons;
+    std::vector<std::thread> pool;
+    {
+        struct Release {
+            std::vector<std::thread> &pool;
+            std::vector<duckdb_connection> &cons;
+            ~Release() {
+                for (std::thread &t : pool)
+                    if (t.joinable()) t.join();
+                for (duckdb_connection &c : cons) duckdb_disconnect(&c);
+            }
+        } release{pool, cons};
+        try {
+            cons.reserve(workers);
+            pool.reserve(workers);
+            for (size_t w = 1; w < workers; w++) {
+                duckdb_connection c = nullptr;
+                if (duckdb_connect(db_, &c) != DuckDBSuccess) break;
+                cons.push_back(c);
+            }
+            for (duckdb_connection c : cons) pool.emplace_back(loop, c);
+        } catch (...) {
+            /* fewer workers: the queries are shared among those that started */
+        }
+        loop(con_);
+    }
+    for (size_t k = 0; k < out.size(); k++) {
+        TextResult &r = out[k];
+        if (!r.failure) continue;
+        try {
+            std::rethrow_exception(r.failure);
+        } catch (const std::exception &e) {
+            test_fault("text_many_word", static_cast<long long>(k)); /* the wording failing too */
+            r.err = e.what();
+        } catch (...) {
+            r.err = "unknown error reading a query result";
+        }
+        r.failure = nullptr;
+    }
+    return out;
 }
 
 bool Session::prepare_stats_fallback(std::string *err) {
@@ -818,6 +949,60 @@ std::string quote_ident(const std::string &s) {
     }
     out.push_back('"');
     return out;
+}
+
+bool c_api_text_type(duckdb_type t) {
+    switch (t) {
+    case DUCKDB_TYPE_BOOLEAN: case DUCKDB_TYPE_TINYINT: case DUCKDB_TYPE_SMALLINT:
+    case DUCKDB_TYPE_INTEGER: case DUCKDB_TYPE_BIGINT: case DUCKDB_TYPE_UTINYINT:
+    case DUCKDB_TYPE_USMALLINT: case DUCKDB_TYPE_UINTEGER: case DUCKDB_TYPE_UBIGINT:
+    case DUCKDB_TYPE_FLOAT: case DUCKDB_TYPE_DOUBLE: case DUCKDB_TYPE_DATE:
+    case DUCKDB_TYPE_TIME: case DUCKDB_TYPE_TIME_NS: case DUCKDB_TYPE_TIMESTAMP:
+    case DUCKDB_TYPE_HUGEINT: case DUCKDB_TYPE_UHUGEINT: case DUCKDB_TYPE_DECIMAL:
+    case DUCKDB_TYPE_INTERVAL: case DUCKDB_TYPE_VARCHAR: case DUCKDB_TYPE_BLOB:
+        return true;
+    default:
+        return false;
+    }
+}
+
+char *result_varchar(duckdb_result *res, idx_t col, idx_t row) {
+    char *v = duckdb_value_varchar(res, col, row);
+    if (test_text_copy_fails()) {
+        duckdb_free(v);
+        v = nullptr;
+    }
+    if (!v && !duckdb_value_is_null(res, col, row) && c_api_text_type(duckdb_column_type(res, col)))
+        throw std::bad_alloc();
+    return v;
+}
+
+std::string text_cell(duckdb_result &res, idx_t col, idx_t row,
+                      const std::string &missing) {
+    if (duckdb_value_is_null(&res, col, row)) return missing;
+    /* Codex final audit, finding 3: own every C buffer before allocating. */
+    if (duckdb_column_type(&res, col) == DUCKDB_TYPE_BLOB) {
+        duckdb_blob value = duckdb_value_blob(&res, col, row);
+        if (test_text_copy_fails()) {
+            duckdb_free(value.data);
+            value.data = nullptr;
+        }
+        const CText data(static_cast<char *>(value.data), duckdb_free);
+        if (!data) {
+            const CText text = result_text(&res, col, row);
+            if (!text || *text != '\0') throw std::bad_alloc();
+            return "";
+        }
+        return std::string(data.get(), value.size);
+    }
+    duckdb_string value = duckdb_value_string(&res, col, row);
+    if (test_text_copy_fails()) {
+        duckdb_free(value.data);
+        value.data = nullptr;
+    }
+    const CText data(value.data, duckdb_free);
+    if (!data && c_api_text_type(duckdb_column_type(&res, col))) throw std::bad_alloc();
+    return data ? std::string(data.get(), value.size) : missing;
 }
 
 /* Locale-independent, full-precision (17-significant-digit, round-trippable)

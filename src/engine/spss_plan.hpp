@@ -72,8 +72,25 @@ struct Plan {
     std::vector<std::string> notes;
     std::vector<std::string> xmissing_stata;   /* Stata names with a companion */
     long long transcoded_cells = 0, transcoded_meta = 0;
+    /* A3: the route chosen: the parallel conversion (Arrow batches), else the
+     * table function's; the profile ran on threads when profile_parallel */
+    bool parallel = false, profile_parallel = false;
     size_t companions() const;
 };
+
+/* A3: the blocks of cases (block_cases_for) from which the parallel route
+ * won in every repetition, and at every larger size sampled, for a file of
+ * this compression on `threads` engine threads (ASSUMPTIONS #229); a count
+ * between those measured (2, 8, 48) takes the smaller count's threshold */
+int64_t parallel_min_blocks(int threads, Compression compression);
+
+/* A3: whether a file takes the parallel route, from its dictionary alone (no
+ * case is read): ReadOptions' route and threads, else the blocks of its
+ * declared cases (an uncompressed file's payload when it declares none)
+ * against parallel_min_blocks. A compressed file that declares no count is
+ * profiled serially and its conversion route is chosen from the cases
+ * counted. */
+bool parallel_route(const Dictionary &d, const ReadOptions &opt);
 
 /* Reads, profiles and plans. Throws SavError. */
 Plan make_plan(const std::string &path, const ReadOptions &opt = ReadOptions());

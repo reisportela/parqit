@@ -2,12 +2,16 @@
 
 #include "engine/legacy_encoding.hpp"
 #include "engine/text_file.hpp"
+#include "test_env.hpp"
 #include "test_tmp.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <string>
+#include <vector>
 
 using parqit::TextDecodeStats;
 using parqit::TextEncoding;
@@ -357,4 +361,88 @@ TEST_CASE("CSV-ENC-1: DuckDB's advice for text that is not UTF-8 becomes parqit'
     CHECK(out.find("parqit's encoding() option") != std::string::npos);
     CHECK(out.find("file = x.csv") != std::string::npos);
     CHECK(parqit::with_encoding_hint("Binder Error: x") == "Binder Error: x");
+}
+
+TEST_CASE("CSV-SCAN-PARALLEL-1: ranges of whole lines give the serial scan's answer") {
+    /* hand-written pieces: ASCII, valid 2-, 3- and 4-byte UTF-8, a lone
+     * continuation byte, a truncated lead, an overlong form and a surrogate,
+     * ending in LF, CR or CRLF; every invalid piece is invalid on its own, so
+     * the expected answer follows from which pieces a text holds */
+    const std::vector<std::string> pieces = {
+        "id,name\n", "1,Jos\xC3\xA9\n", "2,\xE5\x8C\x97\xE4\xBA\xAC\r\n", "3,\xF0\x9F\x98\x80\r",
+        "4,plain ascii text that is long enough to cross a range boundary\n", "5,\x80\n",
+        "6,\xC3\n", "7,\xC0\xAF\n", "8,\xED\xA0\x80\n", "9,caf\xC3\xA9"};
+    const std::vector<size_t> bad = {5, 6, 7, 8}, ascii = {0, 4};
+    auto in = [](const std::vector<size_t> &set, size_t p) {
+        return std::find(set.begin(), set.end(), p) != set.end();
+    };
+    std::mt19937 rng(20261024);
+    for (int round = 0; round < 400; round++) {
+        std::string text;
+        bool used_bad = false, used_non_ascii = false;
+        const int n = 1 + static_cast<int>(rng() % 60);
+        for (int i = 0; i < n; i++) {
+            size_t p = rng() % pieces.size();
+            while (round % 3 != 0 && in(bad, p)) p = rng() % pieces.size();
+            used_bad = used_bad || in(bad, p);
+            used_non_ascii = used_non_ascii || !in(ascii, p);
+            text += pieces[p];
+        }
+        const size_t skip = round % 5 == 0 ? 3 : 0;
+        if (skip) text = "\xEF\xBB\xBF" + text;
+        const std::string path = write_file("parqit_tf_par", text);
+        const size_t chunk = 1 + rng() % 24, max_line = 4 + rng() % 40;
+        bool v1 = true, a1 = false;
+        std::string err;
+        REQUIRE(parqit::text_file_utf8_scan(path, skip, &v1, &a1, &err, chunk, max_line, 1));
+        CHECK(v1 == !used_bad);
+        CHECK(a1 == (used_bad || used_non_ascii));
+        for (int threads : {2, 3, 8, 64}) {
+            bool v = !v1, a = !a1;
+            REQUIRE(parqit::text_file_utf8_scan(path, skip, &v, &a, &err, chunk, max_line, threads));
+            CHECK(v == v1);
+            CHECK(a == a1);
+        }
+    }
+    /* a missing file is the serial scan's error, with or without threads */
+    bool v = true, a = false;
+    std::string e1, e2;
+    CHECK_FALSE(parqit::text_file_utf8_scan(parqit_test::tmp_path("parqit_tf_none"), 0, &v, &a, &e1));
+    CHECK_FALSE(parqit::text_file_utf8_scan(parqit_test::tmp_path("parqit_tf_none"), 0, &v, &a, &e2,
+                                            16, 64, 8));
+    CHECK(e1 == e2);
+}
+
+TEST_CASE("Codex finding 2: a worker of the parallel UTF-8 scan that fails ends the scan with an error") {
+    /* std::bad_alloc thrown in each range's worker (PARQIT_TEST_FAULT=csv_scan:<range>): the scan returns
+     * false with a message, on the worker threads and on the calling thread (range 0), and never ends the
+     * process; the handlers keep the exception and word it after the join */
+    std::string text;
+    for (int i = 0; i < 400; i++) text += "line " + std::to_string(i) + ",caf\xC3\xA9\n";
+    const std::string path = write_file("parqit_tf_fault", text);
+    for (int range : {0, 1, 3}) {
+        INFO("range " << range);
+        parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", "csv_scan:" + std::to_string(range));
+        bool v = true, a = false;
+        std::string err;
+        CHECK_FALSE(parqit::text_file_utf8_scan(path, 0, &v, &a, &err, 64, 256, 4));
+        CHECK(err.find("cannot read " + path) == 0);
+        CHECK(err.find("bad_alloc") != std::string::npos);
+    }
+    /* round 2: the wording fails too, after the worker's failure; it throws on
+     * the calling thread once every worker has stopped (the old handler
+     * worded on the worker, where a second failure ends the process) */
+    for (int range : {1, 3}) {
+        INFO("range " << range << ", wording failing");
+        parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", "csv_scan:" + std::to_string(range) + ",csv_word:" +
+                                                            std::to_string(range));
+        bool v = true, a = false;
+        std::string err;
+        CHECK_THROWS_AS(parqit::text_file_utf8_scan(path, 0, &v, &a, &err, 64, 256, 4), std::bad_alloc);
+    }
+    bool v = false, a = false;
+    std::string err;
+    REQUIRE(parqit::text_file_utf8_scan(path, 0, &v, &a, &err, 64, 256, 4));
+    CHECK(v);
+    CHECK(a);
 }

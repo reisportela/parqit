@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -18,9 +19,20 @@
 #include "abi.h" /* Arrow C Data Interface */
 #include "duckdb.h"
 #include "engine/session.hpp"
+#include "engine/typemap.hpp"
+#include "engine/scalar_registration.hpp"
+#include "json.hpp"
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/storage/block_allocator.hpp"
+#include "test_env.hpp"
 #include "test_tmp.hpp"
+#include "engine/test_fault.hpp"
+#ifdef PARQIT_DUCKDB_200
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#endif
 
 using parqit::Session;
 
@@ -54,6 +66,8 @@ TEST_CASE("destroying an unrelated block allocator preserves live pool capacity"
 TEST_CASE("session close reopen and process teardown preserve allocator lifetimes") {
     Session &s = Session::instance();
     s.close();
+    // Exercise worker/TLS teardown with a bounded pool under Valgrind as well.
+    REQUIRE(s.set_threads(4, nullptr));
     REQUIRE(s.ensure_open());
     duckdb_result result{};
     std::string error, value;
@@ -66,6 +80,271 @@ TEST_CASE("session close reopen and process teardown preserve allocator lifetime
     CHECK(value == "1");
     // Leave the final session open: process teardown must handle TLS destruction.
 }
+
+#ifdef PARQIT_DUCKDB_200
+TEST_CASE("histogram scalar proof reuses dictionaries only for verified literal bounds") {
+    auto &s = Session::instance();
+    s.close();
+    std::string error, value;
+    REQUIRE(s.set_threads(4, &error));
+    REQUIRE(s.ensure_open());
+    static std::atomic<uint64_t> rows;
+    auto function = duckdb_create_scalar_function();
+    auto any = duckdb_create_logical_type(DUCKDB_TYPE_ANY);
+    auto count = duckdb_create_logical_type(DUCKDB_TYPE_UBIGINT);
+    auto result_type = duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE);
+    duckdb_scalar_function_set_name(function, "__histogram_bound_probe");
+    for (int i = 0; i < 3; ++i) duckdb_scalar_function_add_parameter(function, any);
+    duckdb_scalar_function_add_parameter(function, count);
+    duckdb_scalar_function_set_return_type(function, result_type);
+    duckdb_scalar_function_set_special_handling(function);
+    // This total identity satisfies the histogram proof's narrower contract;
+    // actual histogram values and error ordering are checked separately below.
+    duckdb_scalar_function_set_function(function, [](duckdb_function_info, duckdb_data_chunk input, duckdb_vector out) {
+        rows += duckdb_data_chunk_get_size(input);
+        duckdb_vector_reference_vector(out, duckdb_data_chunk_get_vector(input, 0));
+    });
+    REQUIRE(parqit::register_known_scalar(s.con(), function, parqit::ScalarErrorPolicy::HistogramBounds) == DuckDBSuccess);
+    duckdb_destroy_scalar_function(&function);
+    duckdb_destroy_logical_type(&any); duckdb_destroy_logical_type(&count); duckdb_destroy_logical_type(&result_type);
+    const auto file = parqit_test::tmp_path("histogram_bound_dictionary.parquet");
+    REQUIRE_MESSAGE(s.exec("COPY (SELECT (i%8)::DOUBLE/8 x FROM range(10007) t(i)) TO " +
+        parqit::quote_literal(file) + " (FORMAT PARQUET)", &error), error);
+    const auto from = " FROM read_parquet(" + parqit::quote_literal(file) + ")";
+    rows = 0;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT sum(__histogram_bound_probe(x, CAST('0' AS DOUBLE), "
+        "CAST('1' AS DOUBLE), 8::UBIGINT))" + from, &value, &error), error);
+    CHECK(value == "4377.625");
+    CHECK(rows.load() > 0);
+    CHECK(rows.load() < 1000);
+    rows = 0;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT sum(__histogram_bound_probe(x, x, "
+        "CAST('1' AS DOUBLE), 8::UBIGINT))" + from, &value, &error), error);
+    CHECK(value == "4377.625");
+    CHECK(rows.load() == 10007);
+    // Bare fractional bins do not implicitly cast to UBIGINT. An explicit
+    // conversion to zero must not acquire the totality annotation either.
+    duckdb_result fractional{};
+    CHECK_FALSE(s.query("SELECT __histogram_bound_probe(x, 0::DOUBLE, 1::DOUBLE, 0.4)" +
+        from, &fractional, &error));
+    rows = 0;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT sum(__histogram_bound_probe(x, 0::DOUBLE, "
+        "1::DOUBLE, CAST(0.4 AS UBIGINT)))" + from, &value, &error), error);
+    CHECK(value == "4377.625");
+    CHECK(rows.load() == 10007);
+    // A data-dependent lower bound includes invalid dictionary entries which
+    // the WHERE clause removes. Eager dictionary evaluation must not see them.
+    REQUIRE_MESSAGE(s.query_scalar("SELECT sum(__parqit_histbin(0.25::DOUBLE, x, "
+        "0.5::DOUBLE, 8::UBIGINT))" + from + " WHERE x<=0.5", &value, &error), error);
+    CHECK(value == "7506");
+    for (const auto &expression : {
+            "__parqit_histbin(x, 1::DOUBLE, 0::DOUBLE, 8::UBIGINT)",
+            "__parqit_histbin(x, 0::DOUBLE, 1::DOUBLE, 0::UBIGINT)",
+            "__parqit_histbin(x, 0::DOUBLE, 1::DOUBLE, 1001::UBIGINT)",
+            "__parqit_histbin(x, 0::DOUBLE, 1::DOUBLE, CAST(0.4 AS UBIGINT))",
+            "__parqit_histbin(x, CAST('bad' AS DOUBLE), 1::DOUBLE, 8::UBIGINT)",
+            "__parqit_histbin(x, 0::BIGINT, 1::DOUBLE, 8::UBIGINT)"}) {
+        duckdb_result result{};
+        CHECK_FALSE(s.query("SELECT " + std::string(expression) + from, &result, &error));
+        REQUIRE_FALSE(error.empty());
+        REQUIRE_MESSAGE(s.query("SELECT " + std::string(expression) + from + " WHERE false", &result, &error), error);
+        CHECK(duckdb_row_count(&result) == 0);
+        duckdb_destroy_result(&result);
+    }
+    REQUIRE(s.exec("PREPARE __hist_parameter AS SELECT __parqit_histbin(0.25::DOUBLE, "
+        "$1::DOUBLE, 1::DOUBLE, 8::UBIGINT)", &error));
+    REQUIRE(s.query_scalar("EXECUTE __hist_parameter(0)", &value, &error));
+    CHECK(value == "2");
+    duckdb_result bad{};
+    CHECK_FALSE(s.query("EXECUTE __hist_parameter(2)", &bad, &error));
+    REQUIRE(s.query_scalar("EXECUTE __hist_parameter(0)", &value, &error));
+    CHECK(value == "2");
+    // Integer/decimal bounds use the same exact reader/comparator as runtime.
+    REQUIRE(s.query_scalar("SELECT __parqit_histbin(9007199254740993::BIGINT, "
+        "'9007199254740992'::BIGINT, '9007199254740994'::BIGINT, 2::UBIGINT)", &value, &error));
+    CHECK(value == "1");
+    REQUIRE(s.query_scalar("SELECT coalesce(__parqit_histbin(0::DOUBLE, 'NaN'::DOUBLE, "
+        "1::DOUBLE, 10::UBIGINT)::VARCHAR, 'NULL')", &value, &error));
+    CHECK(value == "NULL");
+    REQUIRE(s.query_scalar("SELECT __parqit_histbin(0::BIGINT, "
+        "'-9223372036854775808'::BIGINT, '9223372036854775807'::BIGINT, 10::UBIGINT)", &value, &error));
+    CHECK(value == "5");
+    CHECK_FALSE(s.query("SELECT __parqit_histbin(1::UBIGINT, '18446744073709551615'::UBIGINT, "
+        "5::UBIGINT, 10::UBIGINT)", &bad, &error));
+    REQUIRE(s.query_scalar("SELECT __parqit_histbin('0.50'::DECIMAL(38,2), "
+        "'0.00'::DECIMAL(38,2), '1.00'::DECIMAL(38,2), 2::UBIGINT)", &value, &error));
+    CHECK(value == "1");
+    std::remove(file.c_str());
+    s.close();
+}
+
+TEST_CASE("proved scalar contracts retain dictionaries without weakening errors") {
+    auto &s = Session::instance();
+    s.close();
+    std::string error, value;
+    REQUIRE(s.set_threads(4, &error));
+    REQUIRE(s.ensure_open());
+    CHECK(parqit::register_known_scalar(s.con(), nullptr, parqit::ScalarErrorPolicy::Total) == DuckDBError);
+    static std::atomic<uint64_t> callback_rows;
+    auto add_probe = [&](const char *name, bool known) {
+        auto f = duckdb_create_scalar_function();
+        auto type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+        duckdb_scalar_function_set_name(f, name);
+        duckdb_scalar_function_add_parameter(f, type);
+        duckdb_scalar_function_set_return_type(f, type);
+        duckdb_destroy_logical_type(&type);
+        duckdb_scalar_function_set_special_handling(f);
+        duckdb_scalar_function_set_function(f, [](duckdb_function_info, duckdb_data_chunk input, duckdb_vector out) {
+            callback_rows += duckdb_data_chunk_get_size(input);
+            duckdb_vector_reference_vector(out, duckdb_data_chunk_get_vector(input, 0));
+        });
+        auto &native = *reinterpret_cast<duckdb::ScalarFunction *>(f);
+        const auto original_binder = native.GetBindCallback();
+        const auto rc = known ? parqit::register_known_scalar(s.con(), f, parqit::ScalarErrorPolicy::Total)
+                              : duckdb_register_scalar_function(s.con(), f);
+        CHECK(native.GetBindCallback() == original_binder);
+        if (known) {
+            // Reusing the C handle must retain the delegated binder contract.
+            duckdb_scalar_function_set_name(f, (std::string(name) + "_reused").c_str());
+            CHECK(parqit::register_known_scalar(s.con(), f, parqit::ScalarErrorPolicy::Total) == DuckDBSuccess);
+            native.SetBindCallback(nullptr);
+            CHECK(parqit::register_known_scalar(s.con(), f, parqit::ScalarErrorPolicy::Total) == DuckDBError);
+            CHECK(native.GetBindCallback() == nullptr);
+        }
+        duckdb_destroy_scalar_function(&f);
+        REQUIRE(rc == DuckDBSuccess);
+    };
+    add_probe("__known_scalar_probe", true);
+    add_probe("__ordinary_scalar_probe", false);
+    const auto fixture = parqit_test::tmp_path("scalar_dictionary_contract.parquet");
+    REQUIRE_MESSAGE(s.exec("COPY (SELECT CASE WHEN i%9=0 THEN NULL ELSE 'v'||(i%8)::VARCHAR END c "
+        "FROM range(10007) t(i)) TO " + parqit::quote_literal(fixture) + " (FORMAT PARQUET)", &error), error);
+    callback_rows = 0;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT count(x)::VARCHAR||':'||sum(strlen(x))::VARCHAR FROM "
+        "(SELECT __known_scalar_probe(c) x FROM read_parquet(" + parqit::quote_literal(fixture) + "))",
+        &value, &error), error);
+    CHECK(value == "8895:17790");
+    CHECK(callback_rows.load() > 0);
+    CHECK(callback_rows.load() < 1000);
+    callback_rows = 0;
+    REQUIRE_MESSAGE(s.query_scalar("SELECT count(x)::VARCHAR||':'||sum(strlen(x))::VARCHAR FROM "
+        "(SELECT __ordinary_scalar_probe(c) x FROM read_parquet(" + parqit::quote_literal(fixture) + "))",
+        &value, &error), error);
+    CHECK(value == "8895:17790");
+    CHECK(callback_rows.load() == 10007);
+    std::remove(fixture.c_str());
+    for (const auto &expression : {"__parqit_double(v)", "__parqit_midpoint(1::BIGINT, v::DOUBLE)",
+                                   "__parqit_sample_count(1, v::DOUBLE)"}) {
+        const std::string data = std::string(expression).find("double(v)") != std::string::npos
+            ? "(VALUES ('bad')) t(v)" : "(VALUES (-1)) t(v)";
+        duckdb_result result{};
+        CHECK_FALSE(s.query("SELECT " + std::string(expression) + " FROM " + data, &result, &error));
+        REQUIRE_FALSE(error.empty());
+        REQUIRE_MESSAGE(s.query("SELECT " + std::string(expression) + " FROM " + data + " WHERE false",
+                                &result, &error), error);
+        CHECK(duckdb_row_count(&result) == 0);
+        duckdb_destroy_result(&result);
+    }
+    REQUIRE_MESSAGE(s.exec("PREPARE __typed_scalar_parameter AS SELECT __parqit_double($1)", &error), error);
+    REQUIRE(s.query_scalar("EXECUTE __typed_scalar_parameter(123)", &value, &error));
+    CHECK(value == "123.0");
+    duckdb_result invalid{};
+    CHECK_FALSE(s.query("EXECUTE __typed_scalar_parameter('bad')", &invalid, &error));
+    REQUIRE(s.query_scalar("EXECUTE __typed_scalar_parameter(456)", &value, &error));
+    CHECK(value == "456.0");
+    REQUIRE(s.query_scalar("SELECT coalesce(__parqit_midpoint(NULL, 1::DOUBLE)::VARCHAR,'NULL')", &value, &error));
+    CHECK(value == "NULL");
+    s.close();
+}
+
+TEST_CASE("numeric scalar proofs cover widths scales extremes and null types") {
+    auto &s = Session::instance();
+    s.close();
+    std::string error, value;
+    REQUIRE(s.set_threads(4, &error));
+    struct Type { const char *sql; bool floating; unsigned scale; };
+    const Type types[] = {{"BOOLEAN",false,0},{"TINYINT",false,0},{"SMALLINT",false,0},
+        {"INTEGER",false,0},{"BIGINT",false,0},{"HUGEINT",false,0},
+        {"UTINYINT",false,0},{"USMALLINT",false,0},{"UINTEGER",false,0},
+        {"UBIGINT",false,0},{"UHUGEINT",false,0},{"FLOAT",true,0},{"DOUBLE",true,0},
+        {"DECIMAL(4,0)",false,0},{"DECIMAL(18,0)",false,0},{"DECIMAL(38,0)",false,0},
+        {"DECIMAL(4,2)",false,2},{"DECIMAL(18,2)",false,2},{"DECIMAL(38,2)",false,2}};
+    for (const auto &a : types) for (const auto &b : types) {
+        CAPTURE(a.sql);
+        CAPTURE(b.sql);
+        const std::string args = "1::" + std::string(a.sql) + ",0::" + b.sql;
+        duckdb_result result{};
+        const bool ok = s.query("SELECT __parqit_midpoint(" + args + "),__parqit_difference(" + args + ")",
+                                &result, &error);
+        if (a.floating == b.floating && a.scale == b.scale) {
+            REQUIRE_MESSAGE(ok, error);
+            CHECK(duckdb_value_double(&result, 0, 0) == 0.5);
+            CHECK(duckdb_value_double(&result, 1, 0) == 1.0);
+            duckdb_destroy_result(&result);
+        } else CHECK_FALSE(ok);
+    }
+    duckdb_result result{};
+    REQUIRE_MESSAGE(s.query("SELECT __parqit_midpoint('-170141183460469231731687303715884105728'::HUGEINT, "
+        "'170141183460469231731687303715884105727'::HUGEINT), "
+        "__parqit_difference('170141183460469231731687303715884105727'::HUGEINT, "
+        "'-170141183460469231731687303715884105728'::HUGEINT), "
+        "__parqit_midpoint('99999999999999999999999999999999999999'::DECIMAL(38,0), "
+        "'-99999999999999999999999999999999999999'::DECIMAL(38,0)), "
+        "__parqit_difference('99999999999999999999999999999999999999'::DECIMAL(38,0), "
+        "'-99999999999999999999999999999999999999'::DECIMAL(38,0))", &result, &error), error);
+    CHECK(duckdb_value_double(&result, 0, 0) == -0.5);
+    CHECK(duckdb_value_double(&result, 1, 0) == std::ldexp(1.0,128));
+    CHECK(duckdb_value_double(&result, 2, 0) == 0.0);
+    CHECK(duckdb_value_double(&result, 3, 0) == 2e38);
+    duckdb_destroy_result(&result);
+    REQUIRE_MESSAGE(s.query_scalar("SELECT hex(encode(parqit_substr_bytes('a'||chr(0)||'b',1,20))) || ':' || "
+        "strlen(parqit_substr_bytes('abc',-9223372036854775808::DOUBLE,9223372036854775807::DOUBLE))::VARCHAR || ':' || "
+        "parqit_stata_string('NaN'::DOUBLE) || ':' || coalesce(__parqit_hms('Infinity'::DOUBLE,0,0)::VARCHAR,'NULL')",
+        &value, &error), error);
+    CHECK(value == "610062:0:.:NULL");
+    s.close();
+}
+
+TEST_CASE("asynchronous I/O workers follow the requested query thread budget") {
+    Session &s = Session::instance();
+    s.close();
+    std::string error, value;
+    REQUIRE(s.set_threads(1, &error));
+    REQUIRE(s.ensure_open());
+    REQUIRE(s.query_scalar("SELECT current_setting('async_threads')::VARCHAR", &value, &error));
+    CHECK(value == "1");
+    auto &context = *reinterpret_cast<duckdb::Connection *>(s.con())->context;
+    CHECK(duckdb::TaskScheduler::GetScheduler(context).NumberOfAsyncThreads() == 1);
+    REQUIRE(s.set_threads(4, &error));
+    REQUIRE(s.query_scalar("SELECT current_setting('async_threads')::VARCHAR", &value, &error));
+    CHECK(value == "4");
+    CHECK(duckdb::TaskScheduler::GetScheduler(context).NumberOfAsyncThreads() == 4);
+    REQUIRE(s.set_threads(1, &error));
+    CHECK(duckdb::TaskScheduler::GetScheduler(context).NumberOfAsyncThreads() == 1);
+    REQUIRE_MESSAGE(s.query_scalar("SELECT sum(i)::VARCHAR FROM range(100007) t(i)", &value, &error), error);
+    CHECK(value == "5000650021");
+    s.close();
+}
+
+TEST_CASE("streaming default and reset retain the legacy memory budget") {
+    auto &s = Session::instance();
+    s.close();
+    std::string error;
+    REQUIRE(s.ensure_open());
+    auto &context = *reinterpret_cast<duckdb::Connection *>(s.con())->context;
+    auto &config = duckdb::ClientConfig::GetConfig(context);
+    CHECK(config.max_streaming_buffer_size == 1000000);
+    REQUIRE(s.set_streaming_buffer_bytes(2000000, &error));
+    CHECK(config.max_streaming_buffer_size == 2000000);
+    REQUIRE(s.exec("RESET streaming_buffer_size", &error));
+    CHECK(config.max_streaming_buffer_size == 1000000);
+    REQUIRE(s.exec("SET memory_limit='500KB'; RESET streaming_buffer_size", &error));
+    // RESET uses the client default, also under a smaller global database
+    // limit: independently confirmed against the pinned 1.5.6 runtime.
+    CHECK(config.max_streaming_buffer_size == 1000000);
+    s.close();
+}
+#endif
 
 TEST_CASE("C API aggregate finalizer errors reach the query caller") {
     Session &s=Session::instance();
@@ -91,6 +370,151 @@ TEST_CASE("C API aggregate finalizer errors reach the query caller") {
     CHECK_FALSE(s.query("SELECT __parqit_test_finalize_failure(1::DOUBLE)",&result,&error));
     CHECK(error.find("exact invariant test")!=std::string::npos);
 }
+
+TEST_CASE("outer join bounds preserve empty-side sums and wide integer accumulation") {
+    auto &s = Session::instance();
+    s.close();
+    std::string error, value;
+    REQUIRE(s.set_threads(4, &error));
+    REQUIRE(s.exec("CREATE TABLE __parqit200_left(v INTEGER); "
+                   "INSERT INTO __parqit200_left VALUES(-1),(2); "
+                   "CREATE TABLE __parqit200_right(k BOOLEAN); "
+                   "CREATE TABLE __parqit200_wide(v BIGINT); "
+                   "INSERT INTO __parqit200_wide VALUES(9223372036854775807),(9223372036854775807)", &error));
+    const char *joins[] = {"LEFT", "RIGHT", "FULL OUTER", "SEMI", "ANTI"};
+    const char *empty_expected[] = {"1:true:2", "NULL:NULL:0", "1:true:2", "NULL:NULL:0", "1:true:2"};
+    const char *false_expected[] = {"1:true:2", "NULL:NULL:1", "1:true:3", "NULL:NULL:0", "1:true:2"};
+    for (int empty = 1; empty >= 0; --empty) {
+        if (!empty) REQUIRE(s.exec("INSERT INTO __parqit200_right VALUES(false)", &error));
+        for (size_t j = 0; j < 5; ++j) {
+            const std::string sql = "SELECT coalesce(sum(v)::VARCHAR,'NULL') || ':' || "
+                "coalesce((sum(v)>0)::VARCHAR,'NULL') || ':' || count(*)::VARCHAR "
+                "FROM __parqit200_left t " + std::string(joins[j]) +
+                " JOIN __parqit200_right s ON s.k";
+            REQUIRE_MESSAGE(s.query_scalar(sql, &value, &error), error);
+            CHECK(value == (empty ? empty_expected[j] : false_expected[j]));
+        }
+        REQUIRE_MESSAGE(s.query_scalar("SELECT sum(v)::VARCHAR FROM __parqit200_wide t "
+            "LEFT JOIN __parqit200_right s ON s.k", &value, &error), error);
+        CHECK(value == "18446744073709551614");
+    }
+    s.close();
+}
+
+#ifdef PARQIT_DUCKDB_200
+TEST_CASE("volatile window keys are evaluated once per row") {
+    auto &s = Session::instance();
+    std::string error, value;
+    for (int threads : {1, 4}) {
+        s.close();
+        REQUIRE(s.set_threads(threads, &error));
+        REQUIRE(s.exec("CREATE SEQUENCE __parqit200_sequence", &error));
+        REQUIRE_MESSAGE(s.query_scalar("SELECT count(*)::VARCHAR || ':' || min(n)::VARCHAR || ':' || max(n)::VARCHAR "
+            "FROM (SELECT count(*) OVER(PARTITION BY (nextval('__parqit200_sequence')-1)//2) n "
+            "FROM range(10000))", &value, &error), error);
+        CHECK(value == "10000:2:2");
+        REQUIRE(s.query_scalar("SELECT currval('__parqit200_sequence')::VARCHAR", &value, &error));
+        CHECK(value == "10000");
+        REQUIRE(s.exec("CREATE SEQUENCE __parqit200_order_sequence", &error));
+        REQUIRE_MESSAGE(s.query_scalar("SELECT count(*)::VARCHAR || ':' || min(n)::VARCHAR || ':' || max(n)::VARCHAR "
+            "FROM (SELECT row_number() OVER(ORDER BY nextval('__parqit200_order_sequence')) n "
+            "FROM range(10000))", &value, &error), error);
+        CHECK(value == "10000:1:10000");
+        REQUIRE(s.query_scalar("SELECT currval('__parqit200_order_sequence')::VARCHAR", &value, &error));
+        CHECK(value == "10000");
+    }
+    s.close();
+}
+
+TEST_CASE("materialised volatile keys preserve partitions peers frames and bindings") {
+    auto &s = Session::instance();
+    std::string error, value;
+    constexpr int n = 10007; // Deliberately not aligned with a data vector.
+    for (int threads : {1, 4}) {
+        s.close();
+        REQUIRE(s.set_threads(threads, &error));
+        REQUIRE(s.exec("CREATE SEQUENCE key_partition; CREATE SEQUENCE key_peers; "
+                       "CREATE SEQUENCE key_both; CREATE SEQUENCE key_range; "
+                       "CREATE SEQUENCE key_offset; CREATE SEQUENCE key_plan", &error));
+        duckdb_result actual{}, expected{};
+        REQUIRE_MESSAGE(s.query("SELECT n, count(*) AS rows FROM (SELECT count(*) OVER "
+            "(PARTITION BY hash(nextval('key_partition'))%17) n FROM range(10007)) "
+            "GROUP BY n ORDER BY n", &actual, &error), error);
+        // An independent GROUP BY on known sequence values; no window operator.
+        REQUIRE_MESSAGE(s.query("SELECT n, count(*)*n AS rows FROM "
+            "(SELECT count(*) n FROM range(1,10008) t(i) GROUP BY hash(i)%17) "
+            "GROUP BY n ORDER BY n", &expected, &error), error);
+        REQUIRE(duckdb_row_count(&actual) == duckdb_row_count(&expected));
+        for (idx_t row = 0; row < duckdb_row_count(&actual); ++row) {
+            CHECK(duckdb_value_int64(&actual, 0, row) == duckdb_value_int64(&expected, 0, row));
+            CHECK(duckdb_value_int64(&actual, 1, row) == duckdb_value_int64(&expected, 1, row));
+        }
+        duckdb_destroy_result(&actual);
+        duckdb_destroy_result(&expected);
+        REQUIRE(s.query_scalar("SELECT currval('key_partition')::VARCHAR", &value, &error));
+        CHECK(value == std::to_string(n));
+
+        REQUIRE_MESSAGE(s.query_scalar("SELECT count(*)::VARCHAR || ':' || "
+            "count(DISTINCT rn)::VARCHAR || ':' || bool_and(rn=r AND r=d)::VARCHAR "
+            "FROM (SELECT row_number() OVER w rn, rank() OVER w r, dense_rank() OVER w d "
+            "FROM range(10007) WINDOW w AS (ORDER BY nextval('key_peers')))", &value, &error), error);
+        CHECK(value == "10007:10007:true");
+        REQUIRE(s.query_scalar("SELECT currval('key_peers')::VARCHAR", &value, &error));
+        CHECK(value == std::to_string(n));
+
+        REQUIRE_MESSAGE(s.query_scalar("SELECT count(*)::VARCHAR || ':' || "
+            "min(r)::VARCHAR || ':' || max(r)::VARCHAR FROM "
+            "(SELECT row_number() OVER(PARTITION BY (nextval('key_both')-1)//2 "
+            "ORDER BY nextval('key_both')) r FROM range(10007))", &value, &error), error);
+        CHECK(value == "10007:1:2");
+        REQUIRE(s.query_scalar("SELECT currval('key_both')::VARCHAR", &value, &error));
+        CHECK(value == std::to_string(2*n));
+
+        REQUIRE_MESSAGE(s.query_scalar("SELECT sum(n)::VARCHAR FROM (SELECT count(*) OVER "
+            "(ORDER BY nextval('key_range') RANGE BETWEEN 1.5 PRECEDING AND CURRENT ROW) n "
+            "FROM range(10007))", &value, &error), error);
+        CHECK(value == std::to_string(2*n-1));
+        REQUIRE(s.query_scalar("SELECT currval('key_range')::VARCHAR", &value, &error));
+        CHECK(value == std::to_string(n));
+        REQUIRE_MESSAGE(s.query_scalar("SELECT sum(n)::VARCHAR FROM (SELECT count(*) OVER "
+            "(ORDER BY nextval('key_offset') RANGE BETWEEN nextval('key_offset') PRECEDING "
+            "AND CURRENT ROW) n FROM range(10007))", &value, &error), error);
+        CHECK(value == std::to_string(int64_t(n)*(n+1)/2));
+        REQUIRE(s.query_scalar("SELECT currval('key_offset')::VARCHAR", &value, &error));
+        CHECK(value == std::to_string(2*n));
+
+        REQUIRE_MESSAGE(s.query("EXPLAIN (FORMAT JSON) SELECT i, count(*) OVER "
+            "(PARTITION BY hash(nextval('key_plan'))%17) n FROM range(10007) t(i)", &actual, &error), error);
+        REQUIRE(duckdb_row_count(&actual) == 1);
+        char *raw = duckdb_value_varchar(&actual, 1, 0);
+        REQUIRE(raw != nullptr);
+        auto plan = nlohmann::json::parse(raw);
+        duckdb_free(raw);
+        duckdb_destroy_result(&actual);
+        int projected_calls = 0, window_nodes = 0;
+        auto visit = [&](auto &&self, const nlohmann::json &nodes, bool below_window) -> void {
+            for (const auto &node : nodes) {
+                const auto name = node.at("name").get<std::string>();
+                const auto info = node.at("extra_info").dump();
+                if (name == "WINDOW") {
+                    ++window_nodes;
+                    CHECK(info.find("nextval") == std::string::npos);
+                }
+                if (info.find("nextval") != std::string::npos) {
+                    CHECK(name == "PROJECTION");
+                    CHECK(below_window);
+                    ++projected_calls;
+                }
+                self(self, node.at("children"), below_window || name == "WINDOW");
+            }
+        };
+        visit(visit, plan, false);
+        CHECK(window_nodes == 1);
+        CHECK(projected_calls == 1);
+    }
+    s.close();
+}
+#endif
 
 TEST_CASE("exact covariance geometry survives grouped offsets and sliding windows") {
     Session &s=Session::instance();
@@ -808,27 +1232,203 @@ TEST_CASE("precision extrema fence reads payload despite dishonest exact footer 
                                    &bare_max, &error), error);
     INFO("unfenced max=" << bare_max << "; a future engine may independently read the true maximum");
 
-    /* This is the production precision predicate and its scan fence. A
-     * future optimizer must not replace it with the dishonest footer. */
+    /* Fetch actual extrema with the production scan fence, then compare in
+     * C++: SQL statistics must not be allowed to fold the protection itself. */
     REQUIRE_MESSAGE(s.query(
-        "SELECT coalesce(min(v)::HUGEINT < -9007199254740992::HUGEINT OR "
-        "max(v)::HUGEINT > 9007199254740992::HUGEINT, false), "
-        "min(v), max(v), first(1) FROM read_parquet(" + path + ")",
+        "SELECT min(v)::HUGEINT, max(v)::HUGEINT, first(1) FROM read_parquet(" + path + ")",
         &result, &error), error);
     REQUIRE(duckdb_row_count(&result) == 1);
-    REQUIRE(duckdb_column_count(&result) == 4);
-    CHECK(duckdb_column_type(&result, 0) == DUCKDB_TYPE_BOOLEAN);
-    CHECK(duckdb_column_type(&result, 1) == DUCKDB_TYPE_BIGINT);
-    CHECK(duckdb_column_type(&result, 2) == DUCKDB_TYPE_BIGINT);
-    CHECK(duckdb_column_type(&result, 3) == DUCKDB_TYPE_INTEGER);
-    for (idx_t column = 0; column < 4; ++column)
+    REQUIRE(duckdb_column_count(&result) == 3);
+    CHECK(duckdb_column_type(&result, 0) == DUCKDB_TYPE_HUGEINT);
+    CHECK(duckdb_column_type(&result, 1) == DUCKDB_TYPE_HUGEINT);
+    CHECK(duckdb_column_type(&result, 2) == DUCKDB_TYPE_INTEGER);
+    for (idx_t column = 0; column < 3; ++column)
         CHECK_FALSE(duckdb_value_is_null(&result, column, 0));
-    CHECK(duckdb_value_boolean(&result, 0, 0));
-    CHECK(duckdb_value_int64(&result, 1, 0) == 2147483648LL);
-    CHECK(duckdb_value_int64(&result, 2, 0) == 9007199254740993LL);
-    CHECK(duckdb_value_int32(&result, 3, 0) == 1);
+    CHECK_FALSE(parqit::beyond_stata_integer_guard(duckdb_value_hugeint(&result, 0, 0)));
+    CHECK(parqit::beyond_stata_integer_guard(duckdb_value_hugeint(&result, 1, 0)));
+    CHECK(duckdb_value_hugeint(&result, 0, 0).lower == 2147483648ULL);
+    CHECK(duckdb_value_hugeint(&result, 1, 0).lower == 9007199254740993ULL);
+    CHECK(duckdb_value_int32(&result, 2, 0) == 1);
     duckdb_destroy_result(&result);
     CHECK(read_bytes(forged) == altered);
+    // Stronger hostile metadata: min=max=0 must not make the scan fence a
+    // constant. Keep data pages byte-identical and change only footer extrema.
+    std::string constant_footer = original;
+    for (const auto &truth : {little_endian(2147483648ULL), true_max}) {
+        size_t count = 0, at = footer_begin;
+        while ((at = constant_footer.find(truth, at)) != std::string::npos && at + 8 <= footer_end) {
+            constant_footer.replace(at, 8, little_endian(0));
+            at += 8;
+            ++count;
+        }
+        REQUIRE(count > 0);
+    }
+    REQUIRE(constant_footer.substr(0, footer_begin) == original.substr(0, footer_begin));
+    REQUIRE(constant_footer.substr(footer_end) == original.substr(footer_end));
+    const auto constant_path = parqit_test::tmp_path("precision_footer_constant.parquet");
+    {
+        std::ofstream output(constant_path, std::ios::binary | std::ios::trunc);
+        output.write(constant_footer.data(), static_cast<std::streamsize>(constant_footer.size()));
+        REQUIRE(output.good());
+    }
+    const auto fence = "SELECT min(v)::HUGEINT, max(v)::HUGEINT, first(1) FROM read_parquet(" +
+        parqit::quote_literal(constant_path) + ")";
+    REQUIRE_MESSAGE(s.query(fence, &result, &error), error);
+    CHECK(duckdb_value_hugeint(&result, 0, 0).lower == 2147483648ULL);
+    CHECK(duckdb_value_hugeint(&result, 1, 0).lower == 9007199254740993ULL);
+    CHECK(parqit::beyond_stata_integer_guard(duckdb_value_hugeint(&result, 1, 0)));
+    duckdb_destroy_result(&result);
+    REQUIRE_MESSAGE(s.query("EXPLAIN (FORMAT JSON) " + fence, &result, &error), error);
+    char *plan_text = duckdb_value_varchar(&result, 1, 0);
+    REQUIRE(plan_text != nullptr);
+    const std::string plan(plan_text);
+    CHECK(plan.find("READ_PARQUET") != std::string::npos);
+    CHECK(plan.find("DUMMY_SCAN") == std::string::npos);
+    duckdb_free(plan_text);
+    duckdb_destroy_result(&result);
+    CHECK(read_bytes(constant_path) == constant_footer);
+    std::remove(constant_path.c_str());
     std::remove(honest.c_str());
     std::remove(forged.c_str());
+}
+
+TEST_CASE("PART-SCHEMA-PARALLEL-1: queries on several connections return what serial queries return") {
+    using parqit::quote_literal;
+    parqit::Session &s = parqit::Session::instance();
+    std::string err;
+    std::vector<std::string> files;
+    for (int i = 0; i < 37; i++) {
+        const std::string f = parqit_test::tmp_path("qtm_" + std::to_string(i) + ".parquet");
+        REQUIRE_MESSAGE(s.exec("COPY (SELECT " + std::to_string(i) + " AS a, 'x' AS b, NULL::VARCHAR AS c) TO " +
+                                   quote_literal(f) + " (FORMAT parquet, KV_METADATA {'parqit.test': '" +
+                                   std::to_string(i % 3) + "'})",
+                               &err),
+                        err);
+        files.push_back(f);
+    }
+    {
+        std::ofstream cut(files[22], std::ios::binary | std::ios::trunc);
+        cut << "PAR1 cut";
+    }
+    std::vector<std::string> sqls;
+    for (size_t at = 0; at < files.size(); at += 5) {
+        std::string l = "[";
+        for (size_t i = at; i < files.size() && i < at + 5; i++) l += (i > at ? ", " : "") + quote_literal(files[i]);
+        l += "]";
+        sqls.push_back("SELECT file_name, name, duckdb_type FROM parquet_schema(" + l + ")");
+        sqls.push_back("SELECT file_name, decode(key), decode(value) FROM parquet_kv_metadata(" + l + ")");
+    }
+    sqls.insert(sqls.begin() + 3, "SELECT FROM WHERE");          /* an error among them */
+    sqls.push_back("SELECT NULL::VARCHAR AS n, 'v' AS t");          /* NULL is not "" */
+    auto sorted = [](std::vector<parqit::Session::TextResult> r) {
+        for (auto &q : r) std::sort(q.rows.begin(), q.rows.end());
+        return r;
+    };
+    const auto one = sorted(s.query_text_many(sqls, 1));
+    REQUIRE(one.size() == sqls.size());
+    CHECK(!one[3].err.empty());
+    CHECK(one[0].err.empty());
+    size_t failed = 0;
+    for (const auto &q : one) failed += !q.err.empty();
+    CHECK(failed == 3); /* the syntax error and the two queries of the cut file's chunk */
+    CHECK(one.back().rows.size() == 1);
+    CHECK(!one.back().rows[0][0].has_value());
+    CHECK(*one.back().rows[0][1] == "v");
+    for (int threads : {2, 8, 64}) {
+        INFO("threads " << threads);
+        const auto many = sorted(s.query_text_many(sqls, threads));
+        REQUIRE(many.size() == one.size());
+        for (size_t k = 0; k < one.size(); k++) {
+            INFO("query " << k);
+            CHECK(many[k].err == one[k].err);
+            CHECK(many[k].rows == one[k].rows);
+        }
+    }
+    CHECK(s.query_text_many({}, 8).empty());
+    for (const auto &f : files) std::remove(f.c_str());
+}
+
+TEST_CASE("Codex finding 2: a failing query worker is reported in its place, never ending the process") {
+    /* std::bad_alloc thrown before query k (PARQIT_TEST_FAULT=text_many:<k>) on a worker or on the calling
+     * thread: query k reports it, the others run, on 1 and 8 connections */
+    parqit::Session &s = parqit::Session::instance();
+    std::vector<std::string> sqls;
+    for (int i = 0; i < 12; i++) sqls.push_back("SELECT " + std::to_string(i) + " AS v");
+    for (int threads : {1, 8})
+        for (int k : {0, 5, 11}) {
+            INFO("threads " << threads << " query " << k);
+            parqit_test::ScopedEnv env("PARQIT_TEST_FAULT", "text_many:" + std::to_string(k));
+            const auto r = s.query_text_many(sqls, threads);
+            REQUIRE(r.size() == sqls.size());
+            for (size_t i = 0; i < r.size(); i++) {
+                if (static_cast<int>(i) == k) {
+                    CHECK(r[i].err.find("bad_alloc") != std::string::npos);
+                    CHECK(r[i].rows.empty());
+                } else {
+                    CHECK(r[i].err.empty());
+                    REQUIRE(r[i].rows.size() == 1);
+                    CHECK(*r[i].rows[0][0] == std::to_string(i));
+                }
+            }
+        }
+    /* Codex final audit: fail inside result_varchar, so reverting its guard
+     * makes the query silently succeed with a missing metadata cell. */
+    {
+        const std::vector<std::string> meta = {
+            "SELECT 'parqit.k' || CAST(i AS VARCHAR) AS k, 'v' || CAST(i AS VARCHAR) AS v "
+            "FROM range(3) t(i) ORDER BY i"};
+        for (int threads : {1, 8}) {
+            parqit::test_text_copy_armed().store(true);
+            const auto r = s.query_text_many(meta, threads);
+            REQUIRE(r.size() == 1);
+            CHECK(r[0].err.find("bad_alloc") != std::string::npos);
+            CHECK(r[0].rows.empty());
+        }
+        const auto clean = s.query_text_many(meta, 1);
+        REQUIRE(clean[0].rows.size() == 3);
+        CHECK(*clean[0].rows[2][1] == "v2");
+    }
+    /* round 2: the wording fails too, after the worker's failure: it throws
+     * on the calling thread once the workers have stopped */
+    for (int k : {0, 5}) {
+        parqit_test::ScopedEnv env("PARQIT_TEST_FAULT",
+                                   "text_many:" + std::to_string(k) + ",text_many_word:" + std::to_string(k));
+        CHECK_THROWS_AS(s.query_text_many(sqls, 8), std::bad_alloc);
+    }
+}
+
+TEST_CASE("Codex final finding 3: failed C text copies throw for every supported cell") {
+    Session &s = Session::instance();
+    const std::vector<std::string> values = {
+        "'text'::VARCHAR", "42::INTEGER", "encode('blob')",
+        "TIMESTAMP '2026-10-25 12:34:56'"};
+    for (const auto &value : values) {
+        INFO(value);
+        duckdb_result res;
+        std::string err;
+        REQUIRE_MESSAGE(s.query("SELECT " + value, &res, &err), err);
+        const parqit::ResultGuard guard{&res};
+        parqit::test_text_copy_armed().store(true);
+        CHECK_THROWS_AS(parqit::result_text(&res, 0, 0), std::bad_alloc);
+        parqit::test_text_copy_armed().store(true);
+        CHECK_THROWS_AS(parqit::text_cell(res, 0), std::bad_alloc);
+        CHECK_FALSE(parqit::test_text_copy_armed().load());
+        CHECK_FALSE(parqit::text_cell(res, 0).empty());
+    }
+    duckdb_result res;
+    std::string err;
+    REQUIRE_MESSAGE(s.query("SELECT encode(''), [1,2], NULL::VARCHAR, encode('a' || chr(0) || 'b')",
+                             &res, &err), err);
+    const parqit::ResultGuard guard{&res};
+    const parqit::CText empty = parqit::result_text(&res, 0, 0);
+    REQUIRE(empty != nullptr);
+    CHECK(std::string(empty.get()).empty());
+    CHECK(parqit::text_cell(res, 0) == "");
+    parqit::test_text_copy_armed().store(true);
+    CHECK(parqit::text_cell(res, 0) == ""); /* legitimate malloc(0) */
+    CHECK(parqit::result_text(&res, 1, 0) == nullptr);
+    parqit::test_text_copy_armed().store(true);
+    CHECK(parqit::result_text(&res, 1, 0) == nullptr);
+    CHECK(parqit::result_text(&res, 2, 0) == nullptr);
+    CHECK(parqit::text_cell(res, 3) == std::string("a\0b", 3));
 }

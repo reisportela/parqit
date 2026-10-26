@@ -16,8 +16,14 @@
 #include "doctest.h"
 
 #include <cstdint>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "duckdb.h"
@@ -378,4 +384,110 @@ TEST_CASE("a streaming query that cannot bind fails loudly") {
     std::string v, e;
     REQUIRE(s.query_scalar("SELECT 1", &v, &e));
     CHECK(v == "1");
+}
+
+namespace {
+std::mutex stream_probe_mutex;
+std::set<std::thread::id> stream_probe_threads;
+uint64_t stream_probe_rows = 0;
+size_t stream_probe_active = 0, stream_probe_peak = 0;
+bool stream_probe_parallel = false;
+
+void observe_stream_worker(duckdb_function_info, duckdb_data_chunk input, duckdb_vector output) {
+    bool first;
+    {
+        std::lock_guard<std::mutex> lock(stream_probe_mutex);
+        first = stream_probe_rows == 0;
+        stream_probe_threads.insert(std::this_thread::get_id());
+        stream_probe_rows += duckdb_data_chunk_get_size(input);
+        stream_probe_peak = std::max(stream_probe_peak, ++stream_probe_active);
+    }
+    // Give another scheduled producer a chance even on a heavily loaded runner.
+    // A serial collector still has only one callback thread after the deadline.
+    if (first && stream_probe_parallel) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(30);
+        while (std::chrono::steady_clock::now() < until) {
+            {
+                std::lock_guard<std::mutex> lock(stream_probe_mutex);
+                if (stream_probe_peak > 1) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    duckdb_vector_reference_vector(output, duckdb_data_chunk_get_vector(input, 0));
+    std::lock_guard<std::mutex> lock(stream_probe_mutex);
+    --stream_probe_active;
+}
+}
+
+TEST_CASE("prepared streamed Parquet retains parallelism and explicit order") {
+    auto &s = Session::instance();
+    s.close();
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto path = parqit_test::tmp_path("_parqit_prepared_order_" + std::to_string(stamp) + ".parquet");
+    struct Cleanup {
+        Session &session;
+        const std::string &path;
+        bool created = false;
+        ~Cleanup() { session.close(); if (created) std::remove(path.c_str()); }
+    } cleanup{s, path};
+    std::string error;
+    const int threads = std::min(4, parqit::available_cpus());
+    REQUIRE(s.set_threads(threads, &error));
+    REQUIRE(s.ensure_open());
+    REQUIRE(s.exec("SET memory_limit='256MB'", &error));
+    REQUIRE(s.exec("SET streaming_buffer_size='1MB'", &error));
+    REQUIRE(s.exec("SET preserve_insertion_order=true", &error));
+    constexpr int64_t count = 1048576;
+    REQUIRE(s.exec("COPY (SELECT i FROM range(" + std::to_string(count) + ") t(i)) TO " +
+                   parqit::quote_literal(path) + " (FORMAT PARQUET, ROW_GROUP_SIZE 65536)", &error));
+    cleanup.created = true;
+    auto function = duckdb_create_scalar_function();
+    auto type = duckdb_create_logical_type(DUCKDB_TYPE_BIGINT);
+    duckdb_scalar_function_set_name(function, "__parqit_stream_worker_probe");
+    duckdb_scalar_function_add_parameter(function, type);
+    duckdb_scalar_function_set_return_type(function, type);
+    duckdb_destroy_logical_type(&type);
+    duckdb_scalar_function_set_function(function, observe_stream_worker);
+    duckdb_scalar_function_set_volatile(function);
+    const auto registered = duckdb_register_scalar_function(s.con(), function);
+    duckdb_destroy_scalar_function(&function);
+    REQUIRE(registered == DuckDBSuccess);
+    stream_probe_threads.clear();
+    stream_probe_rows = 0;
+    stream_probe_active = stream_probe_peak = 0;
+    stream_probe_parallel = threads > 1;
+    const auto from = " FROM read_parquet(" + parqit::quote_literal(path) + ")";
+    duckdb_result result{};
+    REQUIRE(s.query_streaming("SELECT __parqit_stream_worker_probe(i)" + from, &result, &error));
+    std::vector<int64_t> values;
+    CHECK(drain_bigints(&result, &values, nullptr, &error) == count);
+    duckdb_destroy_result(&result);
+    CHECK(error.empty());
+    REQUIRE(values.size() == static_cast<size_t>(count));
+    bool ordered = true;
+    for (int64_t i = 0; i < count; ++i) if (values[static_cast<size_t>(i)] != i) { ordered = false; break; }
+    CHECK(ordered);
+    CHECK(stream_probe_rows == static_cast<uint64_t>(count));
+    CHECK(stream_probe_threads.size() <= static_cast<size_t>(threads));
+    CHECK(stream_probe_active == 0);
+    CHECK(stream_probe_peak <= static_cast<size_t>(threads));
+    // A serial task can migrate between threads after a buffer park; distinct
+    // thread ids alone do not prove that multiple producers ran concurrently.
+    if (threads > 1) CHECK(stream_probe_peak > 1);
+
+    // Explicit SQL order must survive even when insertion-order preservation is off.
+    REQUIRE(s.exec("SET preserve_insertion_order=false", &error));
+    for (int repetition = 0; repetition < 3; ++repetition) {
+        values.clear();
+        REQUIRE(s.query_streaming("SELECT i" + from + " ORDER BY i DESC", &result, &error));
+        CHECK(drain_bigints(&result, &values, nullptr, &error) == count);
+        duckdb_destroy_result(&result);
+        CHECK(error.empty());
+        REQUIRE(values.size() == static_cast<size_t>(count));
+        ordered = true;
+        for (int64_t i = 0; i < count; ++i)
+            if (values[static_cast<size_t>(i)] != count - i - 1) { ordered = false; break; }
+        CHECK(ordered);
+    }
 }

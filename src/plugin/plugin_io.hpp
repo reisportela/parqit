@@ -193,7 +193,14 @@ struct PlanContext {
      * set). The eager readers say so; the lazy open does NOT restore them and
      * prints its own note instead. */
     std::vector<std::string> xmissing_restored;
+    bool compression_planned = false;
+    std::vector<std::string> compression_pending;
 };
+
+/* Prove Double/Float64 -> integer demotions or a required Double, DATE in Stata
+ * units, and formatted integer transfers. Other types retain native compress. */
+ST_retcode plan_integer_compression(parqit::Session &s, const Source &src,
+                                    PlanContext *ctx, std::string *err);
 
 /* INT64-PROTECT-1: the session default for int64() (`parqit set int64
  * refuse|round|string`), consulted by every read that does not carry an

@@ -79,6 +79,14 @@ forvalues i = 1/60 {
     local consistent = 0
     if (`n' == 300000 & `k' == 3 & !`has_extra' & `xmin' == 1 & `xmax' == 1) local consistent 1
     if (`n' == 100000 & `k' == 4 & `has_extra' & `xmin' == 2 & `xmax' == 2) local consistent 1
+    if (`consistent') {
+        capture assert id == _n - 1 & s == cond(x == 1, "a", "b")
+        if (_rc) local consistent 0
+        if (`has_extra') {
+            capture assert extra == 7.5
+            if (_rc) local consistent 0
+        }
+    }
     if (`consistent') local ++ok
     else {
         di as err "INCONSISTENT load `i': N=`n' k=`k' extra=`has_extra' xmin=`xmin' xmax=`xmax'"
@@ -97,11 +105,44 @@ di as txt "reads: `ok' consistent, `refused' refused loudly, `inconsistent' inco
 assert fileexists(`"`dir'/writer.done"')
 assert `inconsistent' == 0
 assert `ok' + `refused' == 60
-* the dataset in memory after a refusal is intact: a final clean load works
+* Independent full-payload check after the writer stops, without printing rows.
+python:
+import hashlib, json
+from pathlib import Path
+table = pq.read_table(Macro.getLocal("shared"))
+is_a, is_b = table.equals(a), table.equals(b)
+assert is_a or is_b, "stable disk payload differs from both independently generated tables"
+Macro.setLocal("stable_rows", str(table.num_rows))
+_ = Path("v73_stable_oracle.json").write_text(json.dumps({
+    "rows": table.num_rows, "columns": table.num_columns,
+    "matches_A": is_a, "matches_B": is_b,
+    "sha256": hashlib.sha256(Path(Macro.getLocal("shared")).read_bytes()).hexdigest()
+}, indent=2) + "\n")
+def preserve_failed_fixture():
+    import shutil
+    dest = Path("v73_failed_fixture")
+    dest.mkdir()
+    for name in ("A.parquet", "B.parquet", "shared.parquet", "writer.log", "writer.done"):
+        source = Path(Macro.getLocal("dir")) / name
+        if source.exists():
+            shutil.copy2(source, dest / name)
+end
+* Two stable reads must work without clearing the engine cache between them.
 file open fh using `"`stop'"', write replace
 file close fh
-parqit use using `"`shared'"', clear
-assert inlist(_N, 300000, 100000)
+forvalues stable = 1/2 {
+    capture noisily parqit use using `"`shared'"', clear
+    local final_rc = _rc
+    if (`final_rc') {
+        python: preserve_failed_fixture()
+        exit `final_rc'
+    }
+    assert _N == `stable_rows'
+    assert id == _n - 1
+    assert x == cond(_N == 300000, 1, 2)
+    assert s == cond(_N == 300000, "a", "b")
+    if (_N == 100000) assert extra == 7.5
+}
 
 * the identity guard also fires on a plain in-place change between plan and
 * fetch — simulate with the type/count guard on a glob whose file is replaced

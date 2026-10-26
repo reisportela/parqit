@@ -1,11 +1,17 @@
 /* parqit — delimited text in any encoding → UTF-8 (CSV-ENC-1). See text_file.hpp. */
 #include "engine/text_file.hpp"
+#include "engine/test_fault.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <exception>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -332,17 +338,28 @@ bool text_file_sniff(const std::string &path, TextSniffResult *out, std::string 
     return true;
 }
 
-bool text_file_utf8_scan(const std::string &path, size_t skip, bool *valid, bool *non_ascii,
-                         std::string *err, size_t chunk, size_t max_line) {
+namespace {
+
+/* The scan of the bytes [begin, end) of the file, cut into the serial scan's
+ * pieces: begin is the first byte after the byte-order mark or a byte just
+ * after a CR or LF, end the file's end or such a byte, so every line and every
+ * max_line cut (relative to its line's start) is the one the whole-file scan
+ * makes. `stop` ends it early once another range found invalid text. */
+bool utf8_scan_range(const std::string &path, size_t begin, size_t end, bool *valid,
+                     bool *non_ascii, const std::atomic<bool> *stop, std::string *err,
+                     size_t chunk, size_t max_line) {
     std::ifstream f;
-    if (!open_in(path, skip, &f, err)) return false;
+    if (!open_in(path, begin, &f, err)) return false;
     *valid = true;
     *non_ascii = false;
     std::string buf;
     size_t searched = 0;
+    size_t left = end - begin;
     for (;;) {
+        if (stop && stop->load(std::memory_order_relaxed)) return true;
         size_t got = 0;
-        if (!fill(f, &buf, chunk, &got, path, err)) return false;
+        if (!fill(f, &buf, std::min(chunk, left), &got, path, err)) return false;
+        left -= got;
         const bool eof = got == 0;
         size_t pos = 0;
         bool cut_failed = false;
@@ -359,6 +376,124 @@ bool text_file_utf8_scan(const std::string &path, size_t skip, bool *valid, bool
         searched -= pos;
         if (eof) return true;
     }
+}
+
+/* the first byte at or after `at` that starts a line (follows a CR or LF);
+ * `size` when no line starts there */
+bool next_line_start(const std::string &path, size_t at, size_t size, size_t *out,
+                     std::string *err) {
+    std::ifstream f;
+    if (!open_in(path, at - 1, &f, err)) return false;
+    std::string buf;
+    size_t base = at - 1;
+    for (;;) {
+        buf.clear();
+        size_t got = 0;
+        if (!fill(f, &buf, size_t(64) << 10, &got, path, err)) return false;
+        if (got == 0) {
+            *out = size;
+            return true;
+        }
+        for (size_t i = 0; i < got; i++)
+            if (is_eol(buf[i])) {
+                *out = std::min(base + i + 1, size);
+                return true;
+            }
+        base += got;
+    }
+}
+
+} // namespace
+
+bool text_file_utf8_scan(const std::string &path, size_t skip, bool *valid, bool *non_ascii,
+                         std::string *err, size_t chunk, size_t max_line, int threads) {
+    /* CSV-SCAN-PARALLEL-1 (2026-10-24): validity is a property of each piece
+     * and the answer is the AND of the pieces' validity and the OR of their
+     * non-ASCII bytes, so ranges of whole lines scanned on their own threads
+     * give the serial answer; an invalid piece in one range ends the others
+     * (the answer is then fixed: invalid, with non-ASCII text). */
+    std::error_code ec;
+    const uintmax_t fsize = fs::file_size(fs::u8path(path), ec);
+    const size_t size = ec ? 0 : static_cast<size_t>(fsize);
+    if (ec || threads <= 1 || size <= skip || size - skip < 2 * chunk)
+        return utf8_scan_range(path, skip, ec ? std::numeric_limits<size_t>::max() : size, valid,
+                               non_ascii, nullptr, err, chunk, max_line);
+    const size_t parts = std::min<size_t>(static_cast<size_t>(threads), (size - skip) / chunk);
+    std::vector<size_t> starts{skip};
+    for (size_t t = 1; t < parts; t++) {
+        const size_t nominal = skip + (size - skip) / parts * t;
+        if (nominal <= starts.back()) continue;
+        size_t b = 0;
+        if (!next_line_start(path, nominal, size, &b, err)) return false;
+        if (b >= size) break;
+        if (b > starts.back()) starts.push_back(b);
+    }
+    starts.push_back(size);
+    const size_t n = starts.size() - 1;
+    std::vector<char> ok(n, 1), part_valid(n, 1), part_non_ascii(n, 0);
+    std::vector<std::string> errs(n);
+    std::vector<std::exception_ptr> failures(n);
+    std::atomic<bool> stop{false};
+    auto run = [&](size_t r) {
+        try {
+            test_fault("csv_scan", static_cast<long long>(r));
+            bool v = true, na = false;
+            ok[r] = utf8_scan_range(path, starts[r], starts[r + 1], &v, &na, &stop, &errs[r], chunk,
+                                    max_line);
+            part_valid[r] = v;
+            part_non_ascii[r] = na;
+            if (!v) stop = true;
+        } catch (...) {
+            /* nothing that allocates here (Codex audit, finding 2): an
+             * allocation failing in a handler would leave the thread and end
+             * Stata; the message is written after the join */
+            ok[r] = 0;
+            failures[r] = std::current_exception();
+        }
+    };
+    {
+        std::vector<std::thread> pool;
+        struct JoinAll {
+            std::vector<std::thread> &pool;
+            ~JoinAll() {
+                for (std::thread &th : pool)
+                    if (th.joinable()) th.join();
+            }
+        } join_all{pool};
+        size_t launched = 1;
+        try {
+            pool.reserve(n);
+            for (; launched < n; launched++) pool.emplace_back(run, launched);
+        } catch (...) {
+        }
+        for (size_t r = launched; r < n; r++) run(r); /* ranges no thread took, in turn */
+        run(0);
+        for (std::thread &th : pool) th.join();
+    }
+    for (size_t r = 0; r < n; r++)
+        if (!ok[r]) {
+            if (failures[r]) {
+                try {
+                    std::rethrow_exception(failures[r]);
+                } catch (const std::exception &e) {
+                    test_fault("csv_word", static_cast<long long>(r)); /* the wording failing too */
+                    *err = "cannot read " + path + ": " + e.what();
+                } catch (...) {
+                    *err = "cannot read " + path;
+                }
+            } else {
+                *err = errs[r];
+            }
+            return false;
+        }
+    *valid = true;
+    *non_ascii = false;
+    for (size_t r = 0; r < n; r++) {
+        *valid = *valid && part_valid[r];
+        *non_ascii = *non_ascii || part_non_ascii[r];
+    }
+    if (!*valid) *non_ascii = true; /* an invalid piece holds a byte above 0x7F */
+    return true;
 }
 
 bool text_file_decode(const std::string &src, const std::string &dest, TextEncoding enc,
@@ -475,7 +610,9 @@ bool text_file_plan(const TextPlanRequest &req, TextPlan *plan, std::string *err
          * the session default when nothing is */
         if (!has_given && !req.check_undeclared) return true;
         bool valid = true, non_ascii = false;
-        if (!text_file_utf8_scan(req.path, plan->skip, &valid, &non_ascii, err)) return false;
+        if (!text_file_utf8_scan(req.path, plan->skip, &valid, &non_ascii, err, kTextChunk,
+                                 kTextMaxLine, req.threads))
+            return false;
         if (valid) return true;
         plan->decode = true;
         if (utf8_declared) plan->enc = utf8;
@@ -491,7 +628,9 @@ bool text_file_plan(const TextPlanRequest &req, TextPlan *plan, std::string *err
         /* A wholly UTF-8 source stays in place, including filename(). A
          * multibyte legacy file is otherwise decoded as a whole. */
         bool valid = true, non_ascii = false;
-        if (!text_file_utf8_scan(req.path, plan->skip, &valid, &non_ascii, err)) return false;
+        if (!text_file_utf8_scan(req.path, plan->skip, &valid, &non_ascii, err, kTextChunk,
+                                 kTextMaxLine, req.threads))
+            return false;
         if (valid) {
             plan->kept_valid = non_ascii;
             return true;

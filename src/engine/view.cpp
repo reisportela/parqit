@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <random>
 #include <set>
+#include <stdexcept>
 
 #include "engine/exprtrans.hpp"
 #include "engine/sanitize.hpp"
@@ -276,6 +277,7 @@ int View::count_window_terms(const std::string &sql) {
 
 void View::push_stage(const std::string &select_body, const std::string &desc,
                       bool keeps_order) {
+    file_collapse_.reset();
     stages_.push_back(select_body);
     superseded_at_.push_back(0);
     egen_stages_.emplace_back();
@@ -359,6 +361,48 @@ std::string View::compile(bool with_order) const {
                                                 select_list() + " FROM " + last;
     if (with_order) sql += order_by_sql();
     return sql;
+}
+
+std::vector<std::string> View::compact_sort_keys() const {
+    if (subset_stages_ != stages_.size() || sort_.empty()) return {};
+    std::vector<std::string> result;
+    std::set<std::string> seen;
+    for (const auto &key : sort_) {
+        for (const auto &column : cols_) {
+            const auto q = quote_ident(column.name);
+            if (column.kind == 'n' && (key == q || key == q + " DESC") &&
+                seen.insert(q).second) result.push_back(q);
+        }
+    }
+    if (order_live_)
+        for (const auto &q : order_cols_)
+            if (seen.insert(q).second) result.push_back(q);
+    return result;
+}
+
+std::string View::compile_compact_sort(const std::map<std::string, SortCast> &casts) const {
+    if (casts.empty() || subset_stages_ != stages_.size() || sort_.empty()) return compile(true);
+    std::string narrow, restore;
+    auto append = [&](const std::string &q, bool visible) {
+        const auto found = casts.find(q);
+        if (!narrow.empty()) narrow += ", ";
+        narrow += found == casts.end() ? q : found->second.function +
+            "(CAST(" + q + " AS DOUBLE)) AS " + q;
+        if (!visible) return;
+        if (!restore.empty()) restore += ", ";
+        if (found == casts.end()) restore += q;
+        else if (!found->second.restore_function.empty())
+            restore += found->second.restore_function + "(" + q + ") AS " + q;
+        else restore += "CAST(" + q + " AS " + found->second.original_type + ") AS " + q;
+    };
+    for (const auto &column : cols_) append(quote_ident(column.name), true);
+    if (order_live_) for (const auto &q : order_cols_) append(q, false);
+    // Restore ABOVE the sort: restoring below it would reintroduce the DOUBLE
+    // payload copy that DuckDB 2.0 retains for non-injective floating keys.
+    // DEDUP-SORT-1: over the certified row-subset stages, or the source itself.
+    return ctes(stages_.size()) + " SELECT " + restore + " FROM (SELECT * FROM (SELECT " +
+        narrow + " FROM " + prev_name(stages_.size()) + ") __parqit_compact" + order_by_sql() +
+        ") __parqit_sorted";
 }
 
 std::string View::compile_numbered(const std::string &obs) const {
@@ -810,7 +854,7 @@ std::string View::filter(const std::string &stata_expr, bool drop,
     /* keep if: WHERE expr (missing ⇒ dropped, exactly Stata's outcome);
      * drop if: keep rows where the condition is NOT TRUE — missing kept */
     std::string cond =
-        drop ? "((" + r.sql + ") IS DISTINCT FROM TRUE)" : "(" + r.sql + ")";
+        drop ? "((" + r.sql + ") IS DISTINCT FROM TRUE)" : "(" + r.sql_where + ")";
     const std::string prev = prev_name(stages_.size());
     const std::string src = rowctx_wrap({{&cond, &r.windows}}, prev, part);
     push_stage("SELECT " + stage_list() + " FROM " + src + " WHERE " + cond,
@@ -879,8 +923,14 @@ std::string View::gen(const std::string &name, const std::string &type_req,
     nc.meta_type = effective_type; /* untyped numeric gen is contractual double */
     nc.normalized = nc.kind == 'n'; /* coerce_storage already normalizes numeric results */
     cols_.push_back(nc);
+    /* DERIVED-COLLAPSE-1: a gen without by() whose value and condition are
+     * repeatable keeps the run of certified stages a compact collapse may
+     * re-evaluate; push_stage alone never extends it */
+    const bool repeatable = part.empty() && r.repeatable && (if_expr.empty() || c.repeatable);
+    const bool extends = repeatable && repeatable_stages_ == stages_.size();
     push_stage(body, by_desc(by) + "gen " + name + " = " + expr +
                          (if_expr.empty() ? "" : " if " + if_expr), true);
+    if (extends) repeatable_stages_ = stages_.size();
     return "";
 }
 
@@ -1203,7 +1253,8 @@ std::string pct_window_sql(const std::string &ref, const std::string &prn,
 }
 
 std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
-                           const std::vector<std::string> &by) {
+                           const std::vector<std::string> &by,
+                           const std::map<std::string, ExactSum> &exact) {
     std::vector<CollapseSpec> specs = input_specs;
     for (auto &sp : specs) {
         const std::string err = resolve_name(sp.source, &sp.source);
@@ -1319,6 +1370,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
         if (!outnames.insert(tgt).second)
             return "collapse: duplicate output variable " + tgt;
         const std::string ref = quote_ident(sp.source);
+        const auto promotion = exact.find(sp.source);
+        const bool promoted = promotion != exact.end();
         std::string agg;
         char kind = 'n';
         const std::string stat = std::string("(") + (dispersion.count(sp.source) ?
@@ -1326,27 +1379,31 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
         const bool floating = scol.physical_type == "FLOAT" || scol.physical_type == "DOUBLE" ||
                               (scol.physical_type.empty() && (scol.meta_type == "float" || scol.meta_type == "double"));
         /* COLLAPSE-STATS-2 (BPLIM feedback, 2026-10-13): the native list is
-         * complete — semean = sd/sqrt(n), sebinomial = sqrt(p(1-p)/n) with p
-         * the mean, sepoisson = sqrt(mean/n), rawsum = sum (weights are not
+         * complete — semean = sd/sqrt(n), sebinomial = sqrt(p(1-p)/n) on 0/1
+         * observations, sepoisson = sqrt(round(sum))/n on nonnegative data,
+         * rawsum = sum (weights are not
          * supported, so the two coincide), percent = the group's share of the
          * nonmissing observations over every group, iqr = p75 - p25 under the
-         * percentile rule. A nonreal root (sebinomial of a mean above 1) is
-         * missing, as native. Values pinned against native collapse (v147). */
-        if (sp.stat == "mean") agg = stat + ".mean";
+         * percentile rule. Invalid observations make the group's standard
+         * error missing even when its mean is in range (v171). */
+        if (sp.stat == "mean") {
+            if (!promoted) agg = stat + ".mean";
+            else if (promotion->second.integer32)
+                agg = "__parqit_integer_mean(sum(" + ref + "), count(" + ref + "))";
+            else
+                agg = "__parqit_scaled_mean(sum(" + ref + "), count(" + ref + "), " +
+                      std::to_string(promotion->second.exponent) + ")";
+        }
         else if (sp.stat == "sum" || sp.stat == "rawsum")
-            agg = floating ? stat + ".sum" : "coalesce(sum(" + ref + "), 0)";
+            agg = promoted ? "coalesce(" + std::string(promotion->second.integer32 ?
+                "__parqit_double(sum(" + ref + "))" : "__parqit_scaled_sum(sum(" + ref + "), " +
+                std::to_string(promotion->second.exponent) + ")") + ", 0)" :
+                floating ? stat + ".sum" : "coalesce(sum(" + ref + "), 0)";
         else if (sp.stat == "sd") agg = stat + ".sd";
         else if (sp.stat == "semean")
             agg = "parqit_finite(" + stat + ".sd / sqrt(CAST(" + stat + ".n AS DOUBLE)))";
-        else if (sp.stat == "sebinomial" || sp.stat == "sepoisson") {
-            /* DuckDB throws on the square root of a negative number, so the
-             * radicand is tested first: a mean outside 0..1 (binomial) or
-             * negative (Poisson) is missing, as native */
-            const std::string rad = sp.stat == "sebinomial"
-                ? stat + ".mean * (1 - " + stat + ".mean) / CAST(" + stat + ".n AS DOUBLE)"
-                : stat + ".mean / CAST(" + stat + ".n AS DOUBLE)";
-            agg = "(CASE WHEN (" + rad + ") >= 0 THEN parqit_finite(sqrt(" + rad + ")) END)";
-        }
+        else if (sp.stat == "sebinomial" || sp.stat == "sepoisson")
+            agg = "(__parqit_" + sp.stat + "(" + ref + ")).value";
         else if (sp.stat == "percent") {
             /* native: 100 * (nonmissing in the group) / (nonmissing over all
              * groups) — a window over the aggregate; a string source counts
@@ -1444,7 +1501,7 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
         }
         if (sp.stat == "mean" || sp.stat == "sd" || sp.stat == "semean" ||
             sp.stat == "sebinomial" || sp.stat == "sepoisson" || sp.stat == "percent" ||
-            ((sp.stat == "sum" || sp.stat == "rawsum") && floating)) {
+            ((sp.stat == "sum" || sp.stat == "rawsum") && (floating || promoted))) {
             nc.physical_type = "DOUBLE";
             nc.normalized = true;
         } else if (sp.stat == "count") {
@@ -1482,13 +1539,71 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
      * all-missing key group emits SQL NULL; string first/last aggregates can
      * be NULL too — clear the flag so save's coalesce guard applies */
     denormalize_strings(&ncols);
+    // Retain a structured plan only for a first, order-independent collapse
+    // over one literal file. Later stages invalidate it in push_stage. A glob
+    // must not acquire additional files between an aggregate proof and use.
+    // DERIVED-COLLAPSE-1: certified row-local gens may precede it; the proof
+    // and the aggregate then evaluate the same compiled prefix.
+    bool eligible = repeatable_stages_ == stages_.size() && source_single_file_ && ranges_.empty() &&
+                    !src_paths_sql_.empty() && !byn.empty() && exact.empty();
+    for (const auto &sp : specs)
+        eligible &= sp.stat == "mean" || sp.stat == "sum" || sp.stat == "rawsum" || sp.stat == "count";
+    std::shared_ptr<const FileCollapse> saved;
+    if (eligible) saved = std::make_shared<FileCollapse>(FileCollapse{cols_, specs, byn, stages_.size()});
     cols_ = std::move(ncols);
     push_stage(body, desc);
+    file_collapse_ = std::move(saved);
     /* Stata collapse leaves the data sorted by the by-vars; earlier keep-in
      * ranges stay on the validation list (their prefixes are unchanged) */
     sort_.clear();
     for (const auto &b : byn) sort_.push_back(quote_ident(b));
     return "";
+}
+
+std::vector<std::string> View::compact_collapse_columns() const {
+    if (!file_collapse_ || stages_.size() != file_collapse_->prefix + 1 || !ranges_.empty()) return {};
+    const std::set<std::string> groups(file_collapse_->by.begin(), file_collapse_->by.end());
+    std::set<std::string> seen;
+    std::vector<std::string> result;
+    for (const auto &spec : file_collapse_->specs) {
+        if (spec.stat == "count" || groups.count(spec.source)) continue;
+        if (seen.insert(spec.source).second) result.push_back(spec.source);
+    }
+    return result;
+}
+
+std::vector<std::string> View::compact_collapse_groups() const {
+    return compact_collapse_columns().empty() ? std::vector<std::string>{} : file_collapse_->by;
+}
+
+std::string View::compact_collapse_source() const {
+    return compile_prefix(file_collapse_ ? file_collapse_->prefix : 0);
+}
+
+std::string View::compile_compact_collapse(const std::map<std::string, ExactSum> &exact) const {
+    if (exact.empty() || compact_collapse_columns().empty()) return compile(true);
+    auto columns = file_collapse_->columns;
+    std::string select;
+    for (auto &column : columns) {
+        if (!select.empty()) select += ", ";
+        const auto q = quote_ident(column.name);
+        const auto promotion = exact.find(column.name);
+        if (promotion == exact.end()) select += q;
+        else {
+            select += promotion->second.integer32 ? "__parqit_sort_i32(" + q + ")" :
+                "__parqit_scaled_integer(" + q + ", " + std::to_string(promotion->second.exponent) + ")";
+            select += " AS " + q;
+            column.physical_type = promotion->second.integer32 ? "INTEGER" : "HUGEINT";
+        }
+    }
+    View temporary;
+    const std::string input = file_collapse_->prefix ? compile_prefix(file_collapse_->prefix) : scan_;
+    temporary.open("SELECT " + select + " FROM (" + input + ") __parqit_source", std::move(columns),
+                   {}, {}, "", source_desc_);
+    const auto error = temporary.collapse(file_collapse_->specs, file_collapse_->by, exact);
+    if (!error.empty()) throw std::logic_error("internal compact collapse plan: " + error);
+    temporary.sort_ = sort_; // a later sort/gsort declaration is still authoritative
+    return temporary.compile(true);
 }
 
 std::string View::contract(const std::vector<std::string> &by,
@@ -1602,8 +1717,11 @@ std::string View::duplicates_drop(const std::vector<std::string> &by, bool force
             sel += "any_value(" + r + ") AS " + r;
             grp += norm_group_key(r, cols_[i].kind);
         }
+        /* DEDUP-SORT-1: every output value is one of its group's source values */
+        const bool extends = subset_stages_ == stages_.size();
         push_stage("SELECT " + sel + " FROM " + prev + " GROUP BY " + grp,
                    "duplicates drop");
+        if (extends) subset_stages_ = stages_.size();
         return "";
     }
     if (!force) return "duplicates drop with a varlist requires the force option";
@@ -1793,6 +1911,54 @@ std::string utf8_prefix(const std::string &s, long long n) {
         count++;
     }
     return s.substr(0, std::min(i, s.size()));
+}
+
+/* GROUP-TRUNCATE-1: what native egen group(), label truncate(#) keeps of a
+ * text, as Stata 17 and later do with ustrtrim(udsubstr(s, 1, #)): the first
+ * characters that fit in # display columns — one column below U+2E80 and for
+ * U+FFFD, two from U+2E80 on, as udstrlen() counts them (checked for every
+ * code point on Stata 19.5) — less the Unicode white space at either end (the
+ * 25 characters ustrtrim() removes). A byte that is not UTF-8 is one column. */
+std::string display_prefix_trimmed(const std::string &s, long long cols) {
+    struct Char {
+        size_t at, len;
+        uint32_t cp;
+    };
+    std::vector<Char> chars;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        const size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        uint32_t cp = 0xFFFD;
+        bool ok = len > 0 && i + len <= s.size();
+        if (ok) {
+            cp = len == 1 ? c : c & (0x7F >> len);
+            for (size_t k = 1; k < len && ok; k++) {
+                const unsigned char d = static_cast<unsigned char>(s[i + k]);
+                ok = (d >> 6) == 2;
+                cp = (cp << 6) | (d & 0x3F);
+            }
+        }
+        if (!ok) chars.push_back({i, 1, 0xFFFD});
+        else chars.push_back({i, len, cp});
+        i += ok ? len : 1;
+    }
+    size_t n = 0;
+    long long used = 0;
+    for (; n < chars.size(); n++) {
+        const long long w = chars[n].cp < 0x2E80 || chars[n].cp == 0xFFFD ? 1 : 2;
+        if (used + w > cols) break;
+        used += w;
+    }
+    auto space = [](uint32_t c) {
+        return (c >= 0x09 && c <= 0x0D) || c == 0x20 || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+               (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F ||
+               c == 0x3000;
+    };
+    size_t first = 0, last = n;
+    while (first < last && space(chars[first].cp)) first++;
+    while (last > first && space(chars[last - 1].cp)) last--;
+    if (first == last) return std::string();
+    return s.substr(chars[first].at, chars[last - 1].at + chars[last - 1].len - chars[first].at);
 }
 
 } // namespace
@@ -2030,8 +2196,24 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
             result = "(" + wagg("__parqit_total(abs(__parqit_double(" + eref + ") - " + m + "))") + ").mean";
         } else if (fcn == "std") {
             const std::string m = quote_ident(fresh_helper("m")), sdv = quote_ident(fresh_helper("s"));
-            level("(" + wagg("__parqit_stats(" + eref + ")") + ").mean AS " + m + ", (" +
-                  wagg("__parqit_stats(" + eref + ")") + ").sd AS " + sdv);
+            if (part.empty()) {
+                // A whole-input window cannot use DuckDB's partition self-join
+                // rewrite. At large N this plan limits parallelism and makes
+                // ordered CTAS expensive. Compute the identical state with a
+                // parallel aggregate and broadcast its single row. Materialise
+                // the argument/qualifier once, including volatile/row-context work.
+                const std::string input = quote_ident(fresh_helper("std_source"));
+                const std::string aggregate = quote_ident(fresh_helper("std_aggregate"));
+                const std::string state = quote_ident(fresh_helper("std_state"));
+                lvl = "(WITH " + input + " AS MATERIALIZED (SELECT * FROM " + lvl + "), " +
+                      aggregate + " AS (SELECT __parqit_stats(" + eref + ")" + filt +
+                      " AS " + state + " FROM " + input + ") SELECT " + input + ".*, (" +
+                      aggregate + "." + state + ").mean AS " + m + ", (" + aggregate + "." +
+                      state + ").sd AS " + sdv + " FROM " + input + " CROSS JOIN " + aggregate + ")";
+            } else {
+                level("(" + wagg("__parqit_stats(" + eref + ")") + ").mean AS " + m + ", (" +
+                      wagg("__parqit_stats(" + eref + ")") + ").sd AS " + sdv);
+            }
             result = "parqit_finite((__parqit_double(" + eref + ") - " + m + ") / " + sdv + " * " +
                      dtoa(sp.sd) + " + " + dtoa(sp.mean) + ")";
         } else if (fcn == "pc") {
@@ -2091,8 +2273,15 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
         if (sp.block < 1) return "egen seq(): block() must be a positive whole number";
         const std::string k = "((" + rn + " - 1) // " + std::to_string(sp.block) + ")";
         std::string v;
-        if (!sp.has_to) v = dtoa(sp.from) + " + " + k;
-        else if (sp.to >= sp.from)
+        if (!sp.has_to) {
+            /* SEQ-TO-1: native to() is _N, every row of the data whatever if()
+             * and by(): from() up to it, then again; down from from() when it
+             * is the larger (_gseq.ado swaps them) */
+            const std::string nn = quote_ident(fresh_helper("nn")), f = dtoa(sp.from);
+            level("count(*) OVER () AS " + nn);
+            v = "CASE WHEN " + f + " <= " + nn + " THEN " + f + " + (" + k + " % (" + nn + " - " + f +
+                " + 1)) ELSE " + f + " - (" + k + " % (" + f + " - " + nn + " + 1)) END";
+        } else if (sp.to >= sp.from)
             v = dtoa(sp.from) + " + (" + k + " % " + dtoa(sp.to - sp.from + 1) + ")";
         else
             v = dtoa(sp.from) + " - (" + k + " % " + dtoa(sp.from - sp.to + 1) + ")";
@@ -2176,7 +2365,10 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
                         std::string piece = col.kind == 'n'
                             ? label_text_of(vallabs_, col.vallab, row[i], &found) : row[i];
                         if (!found && col.kind == 'n') piece = row[i].empty() ? "." : integer_label_text(row[i]);
-                        if (sp.truncate > 0) piece = utf8_prefix(piece, sp.truncate);
+                        /* GROUP-TRUNCATE-1: native truncate() cuts a string's
+                         * text or a value label's, never a number written out */
+                        if (sp.truncate > 0 && (col.kind != 'n' || found))
+                            piece = display_prefix_trimmed(piece, sp.truncate);
                         text += (i ? " " : "") + piece;
                     }
                     entries.push_back(nlohmann::json::array({std::to_string(++code), text}));
@@ -2266,11 +2458,21 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
                 return "egen cut(): the cutpoint probe returned nothing (no selected nonmissing values?)";
             const auto &row = sp.probe_rows[0];
             if (row[0].empty()) return "egen cut(): no nonmissing values to cut";
+            /* Fable final audit, A2: parsed whole and in the C locale (strtod
+             * took any text, "." included, as a number, and follows
+             * LC_NUMERIC); "." is a probe over no nonmissing value, where
+             * every result is missing whatever the cut, as before */
+            std::string bad;
+            auto cutpoint = [&](const std::string &t) {
+                double v = 0;
+                if (t != "." && !atod(t, &v) && bad.empty()) bad = t;
+                return v;
+            };
             at.clear();
-            at.push_back(std::strtod(row[0].c_str(), nullptr));
-            for (long long j = 1; j < sp.group; j++)
-                at.push_back(std::strtod(row[static_cast<size_t>(1 + j)].c_str(), nullptr));
-            at.push_back(std::strtod(row[1].c_str(), nullptr) + 1);
+            at.push_back(cutpoint(row[0]));
+            for (long long j = 1; j < sp.group; j++) at.push_back(cutpoint(row[static_cast<size_t>(1 + j)]));
+            at.push_back(cutpoint(row[1]) + 1);
+            if (!bad.empty()) return "egen cut(): the cutpoint probe returned \"" + bad + "\", not a number";
             icodes = true;
         }
         for (size_t i = 1; i < at.size(); i++)
@@ -2342,7 +2544,7 @@ std::string View::egen(const EgenSpec &sp, bool statamissing, const std::string 
             if (cols_[static_cast<size_t>(col_index(vars[i]))].kind != 'n') continue;
             lasts += (lasts.empty() ? "" : ", ") + ("__parqit_double(" + quote_ident(vars[i]) + ")");
         }
-        const std::string l = "list_filter([" + list + "], x -> x IS NOT NULL)";
+        const std::string l = "list_filter([" + list + "], lambda x : x IS NOT NULL)";
         const std::string n = "(" + nonmiss + ")";
         std::string v;
         if (fcn == "rowtotal")

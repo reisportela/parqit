@@ -60,10 +60,12 @@ bool text_file_sniff(const std::string &path, TextSniffResult *out, std::string 
 
 /* Scans the file from byte `skip` for text that is not valid UTF-8, stopping
  * at the first such line: *valid says whether all of it is valid UTF-8,
- * *non_ascii whether any byte read is not ASCII. */
+ * *non_ascii whether any byte read is not ASCII. With threads > 1 a file of
+ * at least two chunks is scanned as ranges of whole lines on that many
+ * threads, with the same answer (CSV-SCAN-PARALLEL-1). */
 bool text_file_utf8_scan(const std::string &path, size_t skip, bool *valid, bool *non_ascii,
                          std::string *err, size_t chunk = kTextChunk,
-                         size_t max_line = kTextMaxLine);
+                         size_t max_line = kTextMaxLine, int threads = 1);
 
 struct TextDecodeStats {
     long long bytes_in = 0;      /* bytes read (after the byte-order mark) */
@@ -105,6 +107,7 @@ struct TextPlanRequest {
      * engine to refuse (a file scanned in place, which is not read twice) */
     bool check_undeclared = false;
     TextEncoding session_default;
+    int threads = 1; /* the UTF-8 scan's threads (CSV-SCAN-PARALLEL-1) */
 };
 
 struct TextPlan {

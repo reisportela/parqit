@@ -246,5 +246,10 @@ void release_plan(const std::string &token) {
     g_plans.erase(token);
 }
 
+size_t registered_plans() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_plans.size();
+}
+
 } // namespace spss
 } // namespace parqit

@@ -4374,3 +4374,1170 @@ entry notes the conservative fallback if the assumption proves wrong.
     dialog keeps digits-only fields until the maintainer extends `list`.
     Item (4) of #168 is out of date: the read dialog offers `utf-8`, and the
     `.dta` bridge accepts it.
+
+206. **DuckDB 2.0.0 is an audit candidate, not an accepted default
+    (DUCKDB-200-REVIEW, 2026-10-22).** The maintainer requested an adversarial,
+    holistic migration review on a separate branch, preserving every feature,
+    option and numerical guarantee. `PARQIT_DUCKDB_VERSION` therefore selects
+    only the two exact pinned releases, defaulting to 1.5.6. The 2.0.0 source
+    archive is tied to its official final tag, not an alpha CLI on the host.
+    Its C API v1 still supports the existing bridge; the native temporal
+    callbacks continue to depend on the reviewed C++ scalar handle. Eight
+    source hashes protect that review. Retained local edits cover sampling,
+    allocator destruction and aggregate-child duplication; upstream now
+    implements the other former corrections. Static extension registration
+    needs the 2.0 helper and an explicit call before opening a database.
+    Runtime configuration replaces removed build switches for extension
+    autoload/install, and retains the 1.5.6 SQL lambda and division-by-zero
+    behaviour. Generated SQL and the selftest use modern lambdas.
+    The candidate fails the actual full suite and new independent PLAIN-string
+    NULL probe, including the protection against dishonest footer extrema.
+    Its selftest also encounters the new volatile-partition restriction.
+    Hence the decision is **NO-GO**. Performance comparison and cross-platform
+    runtime acceptance are NOT_RUN, and no performance loss is accepted.
+    The detailed evidence and reopening gates are in
+    `docs/audits/AUDITORIA_MIGRACAO_DUCKDB_2_0_0_2026-10-22.md`.
+
+207. **DuckDB 2.0 compatibility corrections preserve the published boundary
+    (DUCKDB-200-REMEDIATION, 2026-10-22).** The maintainer authorised discussion
+    with Claude Fable 5.1 at maximum effort and implementation of the necessary
+    fixes. The initial NO-GO evidence in item 206 is historical, not a statement
+    that the corrected candidate has the same failures. The separate remediation
+    report records current gates and limits. Bare integer literals beyond
+    `UHUGEINT` retain 1.5.6's checked `DOUBLE` inference: this deliberately chooses
+    the existing public precision contract over 2.0's new `BIGNUM` inference.
+    An explicit `BIGNUM` cast remains `BIGNUM` and is never silently narrowed by
+    the Stata bridge. Legacy raw Hive `NULL` markers are checked before percent
+    decoding; writer validation decodes once and refuses case-insensitive NULL
+    spellings before publication. The marker policy does not reinterpret literal
+    percent escapes twice. Syntactically equivalent ordered window specifications
+    and shared ORDER prefixes use the same materialised volatile keys; separate
+    occurrences within PARTITION/ORDER and separate RANGE offsets remain distinct.
+    Nonlinear sequence tests expose incorrect grouping in 1.5.6 itself; fixing
+    that defect in the candidate is an improvement in correctness, not a licence
+    to accept reference parity without an independent oracle. The 2.0 async pool
+    follows the query thread budget, including the Linux affinity-aware default.
+    Performance acceptance requires interleaved measurements after correctness;
+    native Windows/macOS execution and distribution remain separate gates.
+
+208. **No blanket acceptance of 2.0 costs or SQL dialect changes
+    (DUCKDB-200-ACCEPTANCE, 2026-10-23).** The corrected candidate passes the
+    executed local functional matrix, but the final five-block ABBA comparison
+    still regresses on collect, filtering and strings. These losses have not
+    been accepted as documented expected-transition costs; 1.5.6 stays the
+    default. Direct SQL also has independently reproduced, documented changes
+    in regex operators, factorial binding, X/B literals and typeless-NULL table
+    materialisation. A clarification was requested about preserving 1.5.6's
+    native-SQL semantics versus adopting 2.0's. Pending that decision, passing
+    the Stata-verb suite is not a claim of universal raw-SQL equivalence. The
+    remediation report records the exact candidate, costs and remaining gates.
+
+209. **Prepared execution must preserve the underlying plan's collection
+    capabilities (DUCKDB-200-PREPARED-ORDER, 2026-10-23).** A source study and
+    three substantive Claude Fable 5.1 max reviews preceded further production
+    changes. In 2.0 the C API's prepared execution introduces PhysicalExecute;
+    its referenced plan is not in the structural children vector. The default
+    collector's ordering/source analysis consequently missed batch-index support
+    and could also lose explicit ORDER BY when preserve_insertion_order was off.
+    Unwrap only transparent root EXECUTE nodes for that analysis, retaining the
+    original physical plan/data in the sink. Do not change generic GetChildren
+    traversal: some overrides expose extra display children. Hash guards cover
+    the correction and the source contracts on which it depends. API v1, Arrow
+    transport, precision guards and configured budgets remain unchanged.
+    The regression test measures simultaneous callbacks, since one serial task
+    may migrate between thread IDs after a buffer park. It also checks exact
+    ordered payload with insertion-order preservation disabled. The study and
+    diagnostic limits are recorded in
+    `docs/audits/ESTUDO_DUCKDB_1_5_6_2_0_0_2026-10-23.md`.
+
+210. **Judge migration performance by practical cost and robust gains
+    (DUCKDB-200-PERFORMANCE-TRADEOFF, 2026-10-23).** The maintainer explicitly
+    accepts very small performance losses in some workflows in exchange for
+    substantial gains elsewhere, and clarified that even a large percentage
+    change on a very short computation can be insignificant or machine-load
+    noise. This updates the performance criterion in item 208; it does not
+    authorise changed precision, lost features, corrupted metadata or silent
+    raw-SQL dialect changes. Report absolute deltas, same-version variability,
+    scale and the affected workflows. Do not infer a universal percentage
+    threshold or hide a material loss in a grand average. Source changes stay
+    on the review branch until their functional and integration gates pass;
+    default-engine promotion and publication remain separate decisions.
+
+211. **Raw SQL follows native 2.0 after an explicit policy choice
+    (PUBLIC-SURFACE-SQL, 2026-10-23).** During comparison with the exact public
+    v0.5.1 release, the maintainer selected native DuckDB 2.0 SQL semantics and
+    documentation of incompatibilities, after clarification that e.g. `2*3!`
+    follows conventional precedence in 2.0. This supersedes the raw-SQL decision
+    pending in item 208 and the bare-literal compatibility choice in item 207.
+    Keep the engine offline, but remove the legacy lambda/division settings and
+    restore upstream BIGNUM inference for raw huge integer literals. Existing
+    generated Stata numeric literals are already canonicalised to binary64 by
+    exprtrans.cpp, independently of the raw parser. Unsupported SQL result types
+    remain loud, and failed collection preserves the current dataset. The
+    approved dialect differences are not evidence of a regression in Stata verbs.
+
+212. **Standard-error domains and rounded Poisson counts
+    (PUBLIC-SURFACE-STANDARD-ERRORS, 2026-10-23).** The exact public v0.5.1
+    binary and the migration candidate both accepted invalid binomial/Poisson
+    observations when the group's mean happened to be admissible. Native Stata
+    requires every nonmissing binomial input to be 0/1, and every Poisson input
+    to be nonnegative. For Poisson it rounds the total to a count before
+    computing sqrt(count)/n. Dedicated aggregates enforce these rules per group
+    and sample; collapse and pivot share them. The sum is rounded in its exact
+    integer representation and the existing certified square-root kernel rounds
+    the final rational result once. This retains item 134's explicit precision
+    policy: do not copy native's false half tie immediately below 0.5, or return
+    missing merely because an intermediate total overflows while the standard
+    error is finite. V171 separately pins ordinary native parity and these
+    exact-value boundary differences with Fraction midpoint certificates for
+    both the collected values and independently read Parquet payloads. Existing
+    totals/moments retain their state and cost; only the two requested standard
+    errors use the new aggregate states.
+
+213. **Histogram dictionary evaluation requires a value proof
+    (PUBLIC-SURFACE-HISTOGRAM, 2026-10-23).** The measured residual was traced
+    to 2.0 marking the C API histogram callback fallible: on a synthetic
+    10-million-row dictionary-encoded column it processed 10 million values,
+    versus 1,100,960 with dictionary reuse and identical results. A deliberately
+    optimistic diagnostic established the cause; it is not a production flag.
+    The production binder proves matching numeric families/scales, literal
+    lower/upper limits in order, and a bin count casting within 1..1000.
+    Only literal values and stateless built-in primitive casts of literals may
+    be evaluated. Unexpected errors and cancellation propagate; only the
+    engine's normal failed-constant evaluation leaves the proof unestablished.
+    The actual cast must match the built-in implementation and
+    have no bind data or local state; overridden casts and arbitrary functions
+    are excluded. Evaluation failure leaves the expression and runtime error
+    mode intact. Parameters and row-dependent limits remain fallible, as do
+    fallible input expressions. The proof uses the callback's numeric reader
+    and exact comparator, retaining wide-integer/decimal precision. This adds
+    source-verification pins, not new DuckDB source edits or public options.
+
+214. **Cache immutable callback cardinality (PUBLIC-SURFACE-CARDINALITY,
+    2026-10-23).** DuckDB 1.5.6 returned a stored DataChunk count; 2.0 can
+    derive it from vector buffers. Eight active numeric callback loops repeated
+    `duckdb_data_chunk_get_size` per row. An isolated same-engine experiment
+    changed only those loop bounds to one count lookup per immutable input
+    chunk and retained identical correlation results across ABBA/BAAB runs.
+    Cache this loop invariant in the plugin rather than changing DuckDB's
+    cardinality contract. Existing generic aggregate updates already did so.
+    Inactive legacy fallback code is outside this measured correction.
+
+215. **Compare both configured and actual memory budgets
+    (PUBLIC-SURFACE-SPILL, 2026-10-23).** With both public v0.5.1 and the final
+    2.0 candidate configured to 128 MB, a ten-million-row sort/save takes
+    approximately 0.351 s longer in paired runs while using about 60 MiB less
+    whole-process RSS and more temporary storage. Native-engine controls
+    reproduce the cost in unmodified 2.0; disabling asynchronous I/O/read-ahead
+    does not remove it. An explicit 192 MB limit for the 2.0 candidate, compared
+    with 128 MB for public, gives nearby actual RSS (322.57 versus 328.62 MiB)
+    and a paired 0.1285 s gain in this workload. These are different configured
+    budgets, not a universal conversion formula or an excuse to relabel the
+    128/128 MB regression. Do not raise a user's memory limit automatically.
+    Report the fixed-budget exception and the explicit measured alternative;
+    correctness, ordering and complete saved payloads remain hard gates.
+
+216. **Prove requested integer compression before Stata allocation
+    (COMPRESS-2, 2026-10-24).** The 500-million-row pilot identifies native
+    post-load compression as a much larger cost than the engine migration.
+    Native `compress` demotes double only to long/int/byte, not to float;
+    native boundary probes and the installed Stata manual establish that
+    contract. A private constant-size aggregate intersects exact integer
+    storage ranges over actual Float64 values. It ignores precisely the
+    nonfinite/Stata-missing range already normalised by the fill, rejects
+    fractions and subnormals without rounding, and never trusts footer bounds.
+    Proven Double/Float64 columns are allocated narrower. A normal fractional
+    or out-of-long-range value also proves that a Double cannot be demoted;
+    subnormal-only uncertainty retains native processing. Already-integer
+    transfers with an explicit format may narrow within the existing integer
+    storage class; this includes lazy dates in Stata units. Eager DATE is
+    proved in its native representation with the fill's exact +3653 day shift;
+    infinite dates remain undecided and retain the existing atomic refusal.
+    Timestamps, float, empty datasets, strings/strL and raw SQL without a
+    stable snapshot keep native processing. A missing format retains the
+    original planned Double's native default even when allocated as integer.
+    Metadata and extended-missing restoration remain on the existing path;
+    range and integrality are rechecked while filling the atomic staged frame.
+    A missing response proof record retains the older full-native behaviour.
+
+217. **Parallel whole-input standardisation (GLOBAL-STD-1, 2026-10-24).**
+    A controlled execution of the actual 500-million-row SQL took 256.76 s
+    as a window and 3.75 s as an aggregate over one materialised source joined
+    back to that source. Both used the identical numerical aggregate, with
+    equal count/min/max/exact sum of the standardised values, and the latter
+    used less peak memory. These are kernel diagnostics, not end-to-end claims.
+    Ungrouped `egen std()` now uses that parallel aggregate and a one-row
+    broadcast. Its argument and qualifier are captured once, including volatile
+    source expressions; grouped standardisation retains its existing window.
+    The original arithmetic, storage coercion, final declared order and empty/
+    constant/missing rules remain. Native, volatile, row-context and dead-column
+    tests gate this rewrite; no approximate statistical kernel is used. Dead-
+    column pruning is DuckDB 2.0's: on 1.5.6, now the optional build, a dropped
+    fallible input is still evaluated and the collect fails loudly with the
+    dataset in memory kept, as the published 0.5.1 does (v173 checks each
+    engine's behaviour; G11, audit of the execution, 25 Oct 2026).
+    Further controls keep `preserve_insertion_order=true`: a retained physical
+    source-row identifier equals the resulting table's rowid for all 500M rows
+    with the materialised-source broadcast. Turning insertion-order preservation
+    off in the original window is diagnostic only: it reorders the rows and is
+    not a production optimisation. An additional explicit full-result sort also
+    preserves order, but uses more memory. Profiling attributes much of the
+    original cost to ordered batch CTAS; operator timings include worker waits
+    and are not interchangeable with process CPU time from getrusage.
+
+218. **Lossless physical sort keys (SORT-STORAGE-2, 2026-10-24).**
+    DuckDB 2.0 retains floating sort keys in the payload because its key
+    encoding cannot reconstruct negative zero. Do not remove that guard.
+    For an unmodified file-backed view, the materialiser can instead prove
+    actual integer values and sort checked narrow integers. Other normal
+    DOUBLE values can use a reversible, monotone UInt64 bit encoding, removing
+    the duplicate floating payload without rounding. Restore original values
+    and logical types above the sort. Negative zero, nonfinite values and
+    subnormals disqualify that encoding; checked conversions independently
+    refuse an invalid later value. Fractions/out-of-range integers cannot use
+    the narrowing path, but can use the reversible normal-value encoding.
+    Keep declared directions, NULL placement and physical tie carriers.
+    Source identities are checked before/after materialisation, including the
+    existing pre-publication guard for save. Raw SQL, stages and qualified
+    previews keep their original path. Insertion-order preservation is required
+    for this adaptation; it is never disabled to gain speed.
+
+219. **Bound the 2.0 automatic streaming budget (STREAM-BUFFER-2, 2026-10-24).**
+    The 2.0 consumer replenishes to a low-water mark derived from half of the
+    total budget. The old whole-result estimate can therefore buffer many GB
+    before useful consumption. Only the 2.0 automatic policy is capped at
+    1024 MB (decimal megabytes), retaining the existing floor for small reads.
+    Explicit session and environment caps remain authoritative, and zero
+    retains its RESET contract. The 1.5.6 policy is unchanged. Matched
+    end-to-end repetitions, full payload/order checks and memory measurements
+    gate the policy; a fetch-only pilot is not sufficient evidence by itself.
+
+220. **Use exact native integer states only after an observed-value proof
+    (SCALED-TOTAL-2, 2026-10-24).** The 2.0 native sums support clustered
+    accumulation that the C API v1 custom aggregate does not inherit. For a
+    first mean/sum/rawsum/count collapse with groups over one literal Parquet
+    file, a bounded pilot can reject unpromising workloads; it never proves
+    precision. A private full-scan aggregate counts actual nonmissing values
+    and finds their least significant binary unit and greatest occupied bit.
+    If width + ceil(log2(count)) <= 127, every partial sum of magnitudes fits
+    signed128. Convert actual DOUBLE values with a checked bit decomposition,
+    without rounding, and use native integer SUM. I32-valued columns use the
+    narrower input; other eligible columns use a binary-scaled HUGEINT.
+    The original Double result and metadata are retained. The existing exact
+    integer-ratio kernel finalises means; near subnormal output, reconstruct
+    the original BinarySum units and use its remainder-aware mean to avoid
+    double rounding. Empty/NULL sums remain zero, empty means remain missing,
+    and signed-zero results follow the existing aggregate contract.
+    Wide exponent spans, other types/stages, globs, SQL and platforms without
+    strong file identities retain the original accumulator. Require size,
+    mtime, ctime and inode continuity; save checks before publication. Native
+    HUGEINT overflow controls supplement the mathematical bound. An environment
+    escape hatch, PARQIT_DISABLE_COMPACT_AGGREGATES=1, keeps the old route for
+    same-binary controls. The prototype private integer accumulators were
+    rejected in favour of the faster native path and are not production code.
+
+221. **Restore parallel DuckDB 2.0 partitioned writes with pinned corrections
+    (PARTITION-DELAY-1, PARALLEL-PACK-1, 2026-10-24).** The 2.0.0 partitioned
+    COPY buffers flush generations in a hashed sort. A partition with fewer
+    rows than `partitioned_write_flush_threshold` in one generation is delayed,
+    and `HasDelayedPartition` then routed every later batch of that partition,
+    however large, through `FlushDelayedPartitionRun`, which encodes in one
+    thread while the scan threads wait. Date-clustered input leaves such slivers
+    at every generation edge: 500 million rows took 48-51 s against 5.4 s in
+    1.5.6, also with the official 2.0.0 CLI and no parqit code. The threshold
+    alone does not fix it (smaller is slower; larger buys time with memory that
+    grows with the input). Without ORDER_BY runs or rotation, a batch at the
+    threshold now uses the parallel PREPARE/FLUSH path beside a buffered sliver;
+    sorted or rotating copies keep the upstream routing. The single-key bypass
+    then packed each hash group in one thread under its lock; the partitioned
+    COPY now lets every materialize task copy fixed 64-vector pieces of the same
+    fragment concatenation and combines them in order, yielding the identical
+    packed collection. Window functions keep the upstream packing. Rows,
+    partitions, keys and metadata are unchanged; the number of files in a
+    partition, row order inside a file and row-group composition may differ,
+    as partitioned writes never promised any of them. The file count does
+    differ under file eviction (`partitioned_write_max_open_files`): a delayed
+    sliver can be drained into a second file of its partition after the
+    partition's state was evicted (found by the audit of 25 Oct 2026). On the
+    unit test's 449,160 rows in 120 partitions with the default 100 open
+    files, 3 partitions got a second file (2.0.0 without the corrections: none;
+    1.5.6: 6); with fewer open files every engine splits partitions. Every row
+    and partition is complete in all of them, and parqit reads a tree by glob.
+    Engine time 9.4-10.6 s, RSS 4.1-4.4 GiB.
+
+222. **Certify repeatable gen prefixes for the exact compact collapse
+    (DERIVED-COLLAPSE-1, 2026-10-24).** The proof scan and the aggregate both
+    evaluate the prefix, so it must give identical values twice. The translator
+    marks an expression repeatable only for operators, literals, variables and
+    a closed reviewed list of numeric functions (abs exp ln log log10 sqrt floor
+    ceil int trunc round mod min max cond missing mi inrange inlist float);
+    every other function, `_n`/`_N`, subscripts and time-series operators clear
+    it, and new functions stay excluded until added explicitly. Only leading
+    `gen` steps without `by`, whose value and condition are both repeatable,
+    extend the certified prefix; any other step ends it. The proof and the
+    final plan use the same `compile_prefix` text and the existing file
+    identity checks; the general accumulator remains the fallback.
+
+223. **Whole-row duplicates drop keeps lossless sort keys (DEDUP-SORT-1,
+    2026-10-24).** Without a varlist or `if`, duplicates drop returns
+    `any_value` of each column per group of normalized keys, so every output
+    value is a source value of the boundary-normalized scan. The compact sort
+    proof over the source therefore covers its output, and the checked per-row
+    casts still refuse any value outside the proof. Only leading whole-row
+    dedups extend this; a varlist, an `if` or any other step keeps the general
+    sort. The 2.0 ORDER BY of the deduplicated 500 million rows took 18.1 s
+    against 8.4 s in 1.5.6 on identical SQL.
+
+224. **Read the dataset in memory on the fill workers for save
+    (SAVE-PARALLEL-1, 2026-10-24).** `parqit save ..., data`, which every bridge
+    of the dataset in memory uses (`parqit open _data` among them), read each
+    cell through the SPI in one thread: 54 of 58 s for 500 million rows by 7
+    columns, in the public 1.5.6 build as in 2.0. The direct writer now reads
+    blocks of whole row groups and whole bytes of the validity bitmap (491,520
+    rows, or whole requested row groups rounded up to lcm(rows, 8)) on
+    the fill workers (`fill_threads`; 1 keeps the pass serial), one Arrow record
+    batch per block, served in order through a single-pass ArrowArrayStream
+    (`duckdb_arrow_scan`, deprecated but present in 1.5.6 and 2.0; in both the
+    caller keeps the stream and its arrays). DuckDB's arrow_scan claims one
+    batch at a time under its lock and numbers it, so the COPY keeps the
+    observation order while its threads write. Numeric cells are read
+    concurrently, as the fill stores them (#37). Every string cell is read
+    under one mutex: Stata's string accessors are not reentrant (three threads
+    in SF_sdatalen freed one buffer twice, v179), while the UTF-8 checks,
+    transcoding and copying after each read stay parallel. The serial pass's
+    outcomes are rebuilt in its order: the first failing cell in
+    observation-then-variable order wins (a block after a failed one stops),
+    the extended-missing and rounded-value lists follow each variable's first
+    such cell, and the ENC-2 tallies are summed (widest cell: the maximum). The
+    int32-offset fallback to the staged writer is decided per batch, with the
+    same data and metadata either way (the file's layout can differ). Data, order and metadata are unchanged;
+    the engine writes each batch as its own row groups, and whole row groups
+    per batch keep the layout (100M rows: 814 row groups in the public 0.5.1
+    and in this build alike, every cell bit-identical). The workers also call
+    SF_ifobs, a read of the plugin call's if/in markers; the save_data call
+    carries neither, so every observation is in, and an observation excluded
+    all the same now fails the save instead of being written as a valid 0
+    (F6, audit of 25 Oct 2026; v185). v179 drives four workers over
+    8-row blocks (PARQIT_TEST_SAVE_BLOCK_ROWS) against the serial pass and a
+    value oracle, and fails on the previous plugin; the suite was also run
+    with that hook. F1, found by the audit of 25 Oct 2026 before any release:
+    the blocks were whole requested row groups but not whole bitmap bytes, so
+    with chunk() not a multiple of 8 a block started inside a byte, the
+    engine read its validity shifted, and the next block's reset of the shared
+    byte erased nulls: missing values landed on the wrong rows, silently
+    (98,499 of 1.2 million cells for chunk(1001)). The hook rounded its blocks
+    to 8 rows, so the suite never met such a block. The block arithmetic now
+    lives in engine/save_blocks.hpp, every product checked, with unit tests;
+    each block's alignment is checked before the pass writes the bitmap; v182
+    saves 2,500,003 observations without the hook, for six chunk() values and
+    three worker counts, against the rule that generated them. Open for the
+    maintainer (results are the same either way): lcm(rows, 8) keeps whole
+    requested row groups per batch but makes blocks of an odd chunk() large —
+    at 100M rows chunk(1000001) runs in 13 blocks of 8,000,008 rows, 3.29 s,
+    against 1.75 s for chunk(1000000) in 100 blocks; aligning to 8 alone would
+    keep about 100 blocks and give up whole row groups per batch, which the
+    2.0 engine does not keep exactly anyway (it re-cut chunk(1000001) into
+    row groups of 848,032 to 1,001,992 rows, multiples of 2048).
+
+225. **Scan delimited text for UTF-8 on the engine threads
+    (CSV-SCAN-PARALLEL-1, 2026-10-24).** With `encoding(utf8)`, or for
+    undeclared text in a lookup, parqit scans the whole file for invalid UTF-8
+    before the engine reads it in place. The scan ran in one thread: 22 of 33 s
+    for a 23.7 GB CSV. Validity is a property of each line piece, and the
+    answer is the AND of the pieces' validity and the OR of their non-ASCII
+    bytes, so a file of at least two chunks is cut into ranges of whole lines,
+    each starting just after a CR or LF (every piece and every `max_line` cut is
+    then the serial scan's), scanned on threads of its own, as many as `parqit
+    set threads`; an invalid piece in one range ends the others. The answer and
+    the errors are the serial scan's. Unit test: 400 random texts of
+    hand-written valid and invalid pieces, with a byte-order mark, LF/CR/CRLF,
+    tiny chunks and `max_line` cuts, on 1, 2, 3, 8 and 64 threads, checked
+    against the serial scan and against the construction.
+
+226. **Keep the sortedby marker and the sampling algorithms (maintainer
+    decision, 2026-10-24).** Two serial phases found by the parallelism audit
+    stay as they are. (a) After `collect`/`use` of an ordered result the ado
+    marks Stata's sortedby with `sort …, stable`: 1.1 s for one key and 2.7 s
+    for four on 100 million ordered rows, Stata's own single-threaded pass,
+    identical in the public 0.5.1; the stable sort keeps ties in the order
+    parqit delivered (ORDER-CARRIER-1), and a unique-key sort is not faster.
+    (b) `sample #, count` uses the engine's seeded reservoir, which runs in one
+    thread so that a seed always draws the same rows, and the percentage and
+    stratified forms number rows in engine order with `row_number() OVER ()`,
+    a fixed-order streaming window that keeps their pipeline in one thread. A
+    parallel draw would select other rows for the same seed, so the algorithms
+    are kept. A faster numbering with identical results (a single Parquet
+    source and row-preserving stages numbered by file_row_number) remains
+    possible, with an identity proof as its precondition.
+
+227. **Profile and convert SPSS files on the engine threads (SPSS-PARALLEL-1,
+    2026-10-24).** A conversion read the file twice in one thread — the profile
+    pass that proves every value's type, then the table function, whose
+    one-thread scan also kept the Parquet encoding in that thread: the C API
+    table functions have no batch index, so a parallel scan would lose the case
+    order. One CaseReader still expands the cases in file order (bytecode and
+    ZLIB data can only be expanded in order, and a malformed file then fails at
+    the same case with the same message) into blocks of raw case slots, one row
+    group (122880 cases) each, fewer for wide files so a block stays within
+    64 MB, down to one case (a floor of 2048 cases made one block of 2.7 GB,
+    zeroed, for 60 cases with 40 strings of width 32767: F2, audit of 25 Oct
+    2026); a block reserves room for the cases left when the file declares
+    their number and is filled case by case, never zeroed first (v184). There
+    are never more workers than blocks: of the declared cases, or, when the
+    file declares none, of the cases its profile counted or its uncompressed
+    payload holds (G2). Workers profile the blocks with per-worker tallies whose merge does
+    not depend on the order of the cases (AND, OR, sums, maxima, the 64
+    smallest distinct range values, and the sign of the first zero, which the
+    set keeps as the serial pass does). For the conversion, workers decode each
+    block with the table function's code into one Arrow record batch (large
+    utf8 for text, which reaches 32767 bytes a value), served in case order
+    through a single-pass ArrowArrayStream, which the engine's Arrow scan writes
+    on its own threads and in order. Memory (F4, A4), by estimate: at most two
+    blocks per worker read ahead; the raw room requested by the blocks alive
+    (produced, not yet freed, in the profile and in the conversion: room times
+    the case's bytes, not the allocator's capacity) is kept within 512 MB, and
+    the converted batches not yet handed to the engine within another 512 MB
+    (row bytes from the profile's widths), a block reserving its batch's bytes
+    when it is produced, so an admitted block always completes; a block wider
+    than a budget goes alone, so progress never waits on memory that cannot
+    come. Batches the engine holds are not counted (an engine thread releases
+    its batch only after it next takes the scan's lock, which a thread waiting
+    in stream_next holds); they are parqit's allocations all the same. After a
+    failure the producer admits no block, and the room of a block whose batch
+    is never handed over (the probe past the last case, a block that failed) is
+    given back (G8, audit of the execution). Measured on the frozen C23, 48
+    threads, 20 million cases of 8 variables in three layouts: the process
+    peaks at 2.7-3.6 GiB, against 0.2 GiB for the published one-thread route —
+    the parallel COPY's buffers and the batches it holds, outside the budgets
+    — with unchanged times. The first error in case order is
+    reported with the table function's wording. The table function stays
+    (PARQIT_SPSS_TABLE_FUNCTION=1, the same decoding, for A/B checks), and small
+    files take it (#229). Like the table function, the conversion refuses a
+    file whose size or modification time changed after the profile; a file
+    replaced with the same size and preserved times is not detected (F13). Tests: the unit test compares plans and files of the serial and
+    parallel passes in the three layouts over blocks of 7 cases; v180 compares
+    both routes of the same binary on real files (pyreadstat) and traces the
+    batches.
+
+228. **Profile and convert the columns of an R data file on the engine threads
+    (RDATA-PARALLEL-1, 2026-10-24).** A 20-million-row .rds of 8 columns took
+    14.8 s in one thread: about 7 s to inflate the gzip stream (half of it in
+    miniz's byte-at-a-time CRC-32) and about 6 s of Parquet writing in the
+    table function's thread. One column's profile reads only that column,
+    through its own cursor, and its user-missing values, which are fixed before
+    profiling, so all columns are profiled in parallel before the type choices
+    are made in column order; a failure is the lowest failing column's, as
+    serially. The Source's single stream is read under a mutex (each read is a
+    cursor's buffer refill), so cursors of different columns can read at once.
+    The conversion gives each worker a share of the columns (i % workers), with
+    the table function's cursor buffer size, so a read fails at the same
+    element; every worker fills its columns of each batch of rows (one row
+    group, fewer for a wide frame so a batch stays within 64 MB, down to one
+    row) with the table function's code, now one template (convert_rows) both
+    use, and a batch is handed to the engine's Arrow scan, which writes in
+    parallel and in row order, once all workers have filled it. The first data
+    error reported is the one the table function meets first (its 2048-row
+    vector, then the column, then the row), worded as it words it, whatever the
+    batch size: once an error is recorded the workers still do the work that
+    comes before it in that order, and a cursor stays on the element it failed
+    to read (F12, audit of 25 Oct 2026; before, batches smaller than 2048 rows
+    could report a later error). A failure to allocate a batch or to open a
+    cursor is keyed as the table function would meet it, before any row, so it
+    comes first. A batch with a column that failed, or that a worker left
+    unfilled, is never handed on, even when another worker records an earlier
+    error before the batch is finished (G5); after an error the work that
+    precedes it keeps nothing unless its batch can still be handed on, so it
+    allocates no batch and waits for no room (G8): the batches alive keep the
+    bound of the read-ahead (two per thread, within 1 GB by estimate) before an
+    error and after it. A temporal value that fails to convert is never
+    written. PARQIT_RDATA_TABLE_FUNCTION=1 keeps the table
+    function, and small frames take it (#229). The size-and-time identity of
+    #227 applies (F13). The
+    gzip CRC-32 is computed eight bytes at a time (zlib's polynomial and
+    conventions; equal to mz_crc32 on every length and alignment, unit test).
+    Inflating stays sequential: a gzip stream has no independent blocks.
+    Tests: the unit test compares every cell, the types and the metadata of
+    both routes in batches of 1 and 2 rows; v181 does so on the R fixtures and
+    traces the batches; v133-v135 pass.
+
+229. **Choose the SPSS and R reader route by size, before the profile
+    (READER-ROUTE-1, 2026-10-25).** The parallel readers (#227, #228) cost a
+    fixed 0.05-0.16 s more than the published one-thread route on small files
+    (SMALL-FILE-1); the audit of 25 Oct 2026 measured it outside Stata too
+    (F3: an Arrow batch costs more than the table function's vectors for one
+    batch, and any phase on several threads leaves the serial phases after it
+    slower on this host), and the parallel profile started all its workers for
+    a file of one block (F8). The route is now chosen from what is known before
+    any case is read: an SPSS file's declared cases over its block size (an
+    uncompressed file's payload when it declares none; a compressed file that
+    declares none is profiled serially and its conversion takes the route of
+    the cases counted), an R frame's rows once the file is parsed. Below the
+    threshold the profile runs in one thread and the 0.5.1 table function
+    converts (the serial profile copies the slots into blocks as the parallel
+    one does); above, the parallel passes run, never with more workers than
+    blocks (one block: the producer alone). Thresholds, measured on the
+    frozen C22 with both routes forced (PARQIT_SPSS_ROUTE, PARQIT_RDATA_ROUTE)
+    on 50,000 to 5,000,000 rows of the public 8-column base in all seven
+    layouts, wide frames of 200 columns and long strings, on 2, 8 and 48 engine
+    threads, 5 repetitions with the route order alternated, a fresh Stata per
+    run (1,620 runs, every first-repetition output checked, 3.07 billion
+    cells): the smallest size from which the parallel route won in every
+    repetition, without overlap, and at every larger size sampled. SPSS (blocks
+    of block_cases_for: 122,880 cases of 8 slots): 8 threads and more, 9
+    blocks uncompressed and 17 compressed (at 48 threads compressed files only
+    tie at 9); fewer than 8 threads, uncompressed never (it only ties up to 5
+    million cases at 2 threads), ZLIB 17 blocks, bytecode 41. R (rows): 8
+    threads and more, 1,000,000 for gzip and 500,000 for zstd and uncompressed
+    files; fewer, 2,000,000. Counts between those measured take the smaller
+    count's threshold; one thread is always serial. Wide frames (20,000 and
+    50,000 rows of 200 columns: 1-2 blocks) and the long strings of F2 (2
+    blocks) stay serial, where the parallel route lost by up to 0.33 s. The
+    choice changes no result: both routes decode with the same code and are
+    certified equal (v180, v181, the unit tests, the calibration's checks);
+    the result is not the same by construction (the SPSS conversion has two
+    loops). PARQIT_SPSS_PROFILE / PARQIT_RDATA_PROFILE force the profile alone.
+    Traces now print the route, the profile, the batches handed on and the
+    workers that ran (F14). Validated on the frozen C23 at sizes the
+    calibration did not use (750,000 and 3,000,000 rows, all layouts, 2/8/48
+    threads, 420 runs): the rule never took the parallel route where it lost;
+    in 5 of 42 points it kept the serial route where the parallel one won by
+    about 0.10 s (uncompressed SPSS at 3 million rows on 2 threads, gzip R at
+    750,000 rows on 8 and 48), so it stays as calibrated, conservative.
+    SMALL-FILE-1 after the route (audit of the execution, G1): the parallel
+    route's overhead on small files is gone (C23 0.04-0.15 s below C18 there),
+    but a residual against the published 0.5.1 remains on SPSS files of
+    250,000-500,000 cases, +0.02 to +0.06 s a conversion (A, L23, C23, save and
+    use, 5 repetitions, 300 runs): C − L = +0.009 to +0.041 s between engine and
+    build configurations (DuckDB 2.0 with gcc 12 against 1.5.6 with gcc 11),
+    L − A = +0.007 to +0.019 s between source and build configurations on 1.5.6
+    (the published A is a gcc 12 CI build); no component is isolated. R files
+    sit at A's level or below (L − A −0.04 to −0.09 s, C − L +0.02 to +0.10
+    s). A small, measured cost of the kind #210 accepts once reported; not
+    "resolved". v188 and the unit tests drive the rule itself: just below, at
+    and just above each threshold, on 7, 8 and 48 threads, a file that
+    declares no count, truncated files and one case in the automatic route.
+    Receipts: audit_repro/fase2_sota_duckdb200_20261025/a3 and
+    audit_repro/readers_parallel_20261024/perf_attrib_{250k,500k}_c23_01.
+
+230. **Contain every failure of the reader and save workers (WORKER-FAULTS-1,
+    2026-10-25).** The audit of 25 Oct 2026 found paths where an allocation
+    failure inside a parallel pass could kill or hang Stata: the save cell
+    pass built its buffers outside the worker's try (an exception would leave
+    the thread, or destroy joinable threads on the calling one: F10); a failing
+    SPSS batch allocation or insertion only stopped the block queue, while the
+    producer could sleep in the read-ahead wait, which does not watch that
+    queue, and the COPY then waited forever (F11); the failure handlers built
+    their messages while handling, which can throw again. Now a whole worker
+    body is under one handler that records the exception without allocating
+    (std::exception_ptr, or a message swapped in) and wakes every wait that
+    could depend on it; the message is worded once the threads are joined;
+    every worker pool is joined by RAII; a batch stays owned until the map that
+    hands it on holds it; a plan's registration is released on every path out
+    of the conversion (PlanRegistration); a thread that cannot be created
+    leaves its blocks to the others in save and SPSS (LIFE-018) and fails the
+    R conversion loudly, as before. The R cursor's row index advances only
+    once an element is read, and the conversion records the row it is on, so
+    a failure names the failing row (F12). PARQIT_TEST_FAULT=<site>:<index>
+    throws std::bad_alloc at one site (batch allocation, conversion, insertion,
+    worker or thread creation, the SPSS producer) and PARQIT_TEST_DELAY holds
+    a block back; with them the unit tests drive every site ten times through
+    consumers that release their batch under the scan's lock, as the engine
+    does, and require an error (or, for a thread not created, every row) within
+    5 seconds, the budgets kept and a cancelled read stopped; a ThreadSanitizer
+    build of the reader sources, with the same consumers, reports nothing in 19
+    scenarios; v183 drives the faults through Stata (a failed command publishes
+    nothing; the session converts the same files afterwards). The audit of the
+    execution (25 Oct 2026) closed three more paths: an R batch with a failed
+    column could be handed on when another worker recorded an earlier error
+    first (G5; PARQIT_TEST_SYNC=<site>:<i>><site>:<j> forces that order: on the
+    C23 logic the malformed batch reached the engine in 13 of 20 runs, now in
+    none), a failed temporal conversion wrote an unset value, and after an error
+    the R workers allocated batches without a bound (a peak of 19 against a
+    bound of 4 on the C23 logic) and the SPSS producer admitted one more block
+    (G8). PARQIT_TEST_FAULT, PARQIT_TEST_DELAY and PARQIT_TEST_SYNC, like the
+    other PARQIT_TEST_* hooks, are read at run time in the normal binaries;
+    they are internal and absent from the help (G12). The permanent TSan target
+    (-DPARQIT_TSAN=ON, tests/tsan) runs 15 scenarios, each scenario's three
+    repetitions and checksums validated, within 300 seconds each.
+
+231. **A partition append fails loudly when a staged partition cannot be listed
+    (PART-LIST-1, 2026-10-25).** `partitions(append)` moved each staged file of
+    an existing partition into it while iterating the staged directory with an
+    error code it never checked: a listing that failed, at the start or
+    midway, counted the partition as extended with its new files left behind
+    in the staging tree, which is then removed (found by reading in the audit
+    of 25 Oct 2026). The error now fails the append, which is rolled back like
+    any other failure. PARQIT_TEST_FAIL_PARTITION_LIST injects it (v186). The
+    audit of the execution found the same fail-open pattern twice more (G6): an
+    entry of the staged partition that could not be read was skipped, and the
+    staged partitions themselves were collected ignoring every error, so a
+    partition could be left out of the publication with no failure, and so no
+    rollback. Both now fail: the first rolled back, the second before anything
+    is published. Hooks: PARQIT_TEST_FAIL_PARTITION_LIST=2 (after the first of
+    several files moved), PARQIT_TEST_FAIL_PARTITION_STAT,
+    PARQIT_TEST_FAIL_PARTITION_LEAVES, and PARQIT_TEST_PARTITION_EVICT, which
+    makes the engine write the result's partitions in several files (v186).
+
+232. **partitions() checks every file the tree keeps (PART-SCHEMA-ALL-1,
+    2026-10-25).** The check that the result reads as one dataset with the
+    existing tree (PART-MODE-1) took the tree's first file, down its first
+    branch, as the reference: a sibling elsewhere with other columns or other
+    parqit.* metadata escaped, and which file was the reference depended on the
+    directory order. The maintainer left the stricter check to the
+    implementer's judgement of correctness (25 Oct 2026). Now, after the
+    first-file comparison (unchanged, with its messages), every file the tree
+    keeps — all of them on append, those outside the replaced partitions on
+    replace — must have the result's columns and engine types (each footer's
+    schema with the engine's types) and its parqit.* metadata, read from all
+    the footers at once, 512 files per query; the first file that differs is
+    named with the difference, and nothing is published. The whole tree, not
+    its first branch, must be a Hive tree over the keys. An append into a tree
+    whose files already disagree is now refused; it read as one dataset only
+    with lost labels. v186 plants a sibling with other columns and one with
+    another variable label: refused, the tree byte-identical.
+
+233. **egen seq() without to() runs to _N (SEQ-TO-1, 2026-10-25).** Native
+    _gseq.ado sets to() to _N, every observation of the data whatever if() and
+    by(), starts again after it, and runs down when from() is the larger (it
+    swaps them). parqit's seq() without to() kept increasing, as its help said
+    (found by the features tour of 24 Oct 2026). It now does as native Stata,
+    with _N the rows of the view at that step; the help says so. A changed
+    result for code that relied on the old behaviour, on the maintainer's
+    decision to close the divergence (v189: from() below and above _N, if,
+    by() and block(), native egen as the oracle).
+
+234. **egen group(), label truncate(#) as native Stata (GROUP-TRUNCATE-1,
+    2026-10-25).** parqit cut every part of the label to # characters,
+    numbers written out included ("15 0" became "1 0"). Native _ggroup.ado
+    (Stata 17 and later) cuts a string's text and a value label's text with
+    ustrtrim(udsubstr(text, 1, #)) and writes a number without a label whole.
+    parqit now does the same: # display columns, as udstrlen() counts them —
+    one below U+2E80 and for U+FFFD, two from U+2E80 on, checked for every code
+    point against Stata 19.5 (not the Unicode East Asian Width table: Stata
+    gives U+231A one column) — then the 25 Unicode white-space characters
+    ustrtrim() removes, at either end (checked likewise). Stata 16 and older,
+    which cut by characters and truncated to 32 by default, are not followed:
+    parqit, like current Stata, has no default truncation. v189 compares the
+    codes and texts with native egen on Chinese, full-width, accented and
+    spaced strings, a value label and an unlabelled number.
+
+235. **A CSV on the using side is read as parqit use reads it (CSV-USING-1,
+    2026-10-25).** merge, append and joinby bridged a delimited using file
+    through import delimited: names lowercased, decimals stored as float (a
+    silent loss of precision), dates kept as text, unlike `parqit use` of the
+    same file (found by the features tour of 24 Oct 2026). The bridge now loads
+    it with `parqit use`, the engine's read_csv_auto after the same UTF-8
+    decoding (CSV-ENC-1): names as written, decimals in double, dates as
+    dates; the bridge's loss notes stay. Public behaviour changes: a do-file
+    that named a using CSV's columns in lower case must now use them as the
+    file writes them (on the C23 build `parqit merge 1:1 ID using f.csv` with a
+    header "ID" failed: "key ID not found in the using data"). v189: merge,
+    joinby and append against Python's parse of the file's text and against
+    parqit use of it.
+
+236. **DuckDB 2.0.0 is the default engine (ENGINE-DEFAULT-1, 2026-10-25).**
+    Revises #206. After the corrections and audits of phases 2 to 4 (the C24
+    candidate passed 254/254 Stata tests and the 100M correctness matrix,
+    91/91 against an independent verifier), the maintainer confirmed 2.0.0 as
+    the engine of the distributed plugins: `PARQIT_DUCKDB_VERSION` now
+    defaults to 2.0.0. 1.5.6 stays a reviewed, SHA256-pinned optional build
+    (`-DPARQIT_DUCKDB_VERSION=1.5.6`) for comparisons and fallback and is no
+    longer distributed; the code paths and patches of both remain, and the
+    Stata suites keep running on both. A build directory keeps the version in
+    its CMake cache: configure a new one to change engines. Raw SQL follows
+    native 2.0 (#211); the Stata-flavoured verbs keep their contract. Open
+    gates before a release: the final candidate's certification, the
+    maintainer's external audit, and a CI run on the four platforms, which
+    have not yet built 2.0.0.
+
+237. **The 2.0.0 engine keeps the baseline CPU target (ENGINE-BASELINE-ISA-1,
+    2026-10-25).** DuckDB 2.0's CMake has a Release "optimization profile",
+    `CLI` by default, that compiles every engine target with
+    `-march=x86-64-v3 -mtune=generic` (AVX2, FMA, BMI2) on Linux x86-64 with
+    GCC or Clang (`-mcpu=apple-m1` on macOS arm64; MSVC is untouched). 1.5.6
+    has no such profile. Left on, the distributed Linux plugin would stop
+    with an illegal instruction on x86-64 CPUs without AVX2, which every
+    earlier release supports, and the engine's floating-point code could be
+    contracted into FMA only on some platforms. parqit sets
+    `DUCKDB_OPTIMIZATION_PROFILE=NONE`: the engine is compiled for the
+    compiler's default target, as the 1.5.6 builds are (baseline x86-64 on
+    the AlmaLinux 8 CI; this host's EL9 compiler defaults to x86-64-v2).
+    Found on 25 Oct 2026 in the configure log ("DuckDB CLI Release
+    architecture flags: -march=x86-64-v3"); 195 compile-flag sets of the
+    engine carried it. Consequence for the evidence: every 2.0.0 candidate
+    measured before this date (C12 to C25) ran an AVX2 engine that no
+    release would have distributed; the final candidate is measured again
+    with the baseline build, and only those numbers describe the release.
+
+238. **Filters reach the scan under statamissing on (STATAMISS-PUSHDOWN-1,
+    2026-10-25).** Since 0.5.0 a comparison follows Stata's missing values by
+    default, written as `((a IS NULL AND b IS NULL) OR (a IS NOT NULL AND
+    b IS NOT NULL AND a = b))` and the like; the engine then keeps the
+    condition in a filter operator above the Parquet scan (`explain`), so it
+    neither skips row groups by their statistics nor filters while reading
+    (measured on 22 Oct on 251 daily files: a date count 0.58 s against 0.08 s
+    with `statamissing off`). A Stata comparison differs from SQL's only on a
+    missing operand, and where only the rows that make the condition TRUE are
+    kept, NULL drops a row as FALSE does. So a comparison that a missing
+    operand makes FALSE in Stata needs no missing-value branch there: `==`
+    with one side that cannot be missing (a numeric or date literal,
+    `strpos()`, which coalesces its inputs); `<` and `<=` with such a right
+    side and `>` and `>=` with such a left side (missing sorts above every
+    number); `inrange()` with bounds, and `inlist()` with values, that cannot
+    be missing; and these under `&` and `|`. Two values that cannot be missing
+    compare as in SQL in every context. `!=`, the upper tail, a negation,
+    `drop if` (it keeps the rows where the condition is not TRUE) and a
+    comparison used as a value keep their branches. The WHERE form travels as
+    `ExprResult::sql_where`, read only by `keep if`, `count if`, `list if`,
+    and the `if` of `use` and of `tabulate`; `sql` is unchanged. Evidence:
+    unit tests (the WHERE form's count equals the full form's on a fixture
+    with missing values, statamissing on and off, 43 forms), v190 (23 forms
+    against native `count if`/`keep if` and the ids kept; the scan's
+    `Filters:` and no filter operator in `explain`, which fails on C25/L25
+    only there), the translator's neighbour tests on both engines. On the
+    public 100M base (one file, in the page cache; medians of 5, the same
+    results in every arm), C25 → C27: a date count 0.092 → 0.050 s, a date
+    range by `inrange()` 0.172 → 0.057 s, `keep if` with `collect`
+    0.464 → 0.364 s, `use if` 0.557 → 0.465 s, a `strpos()` count
+    0.367 → 0.252 s; under `statamissing on` the eligible forms now take what
+    they take under `statamissing off`, and the upper-tail control is
+    unchanged.
+
+239. **The SPSS reader reads the case data in place (SPSS-BUFFER-1,
+    2026-10-25).** The producer of the parallel SPSS passes (#227) took every
+    value through a virtual call into `std::ifstream`: one call per 64-byte
+    uncompressed case, one per command block and per 8-byte literal of
+    bytecode. At 20M cases that serial producer bounded the conversion. The
+    stream now hands spans of bytes in place (the rest of an inflated ZLIB
+    block, or 1 MB of the file) and the reader takes from them inline. The
+    semantics are the old reader's: a ZLIB block is inflated, or taken from
+    the B2 threads, only when the reader needs its bytes; a read error is
+    thrown after the bytes read before it, when the reader needs the next
+    ones; `where()` and the B1 restart offsets are computed for the reader's
+    position, not the stream's. An equivalence harness
+    (`audit_repro/fase4_correccoes_20261025/spssbuf/harness/`) prints every
+    slot, restart point and message over 1683 generated files (random
+    `.sav`, bytecode and `.zsav` in both byte orders, every cut, corrupt
+    codes, damaged ZLIB blocks): 298,007 lines, identical between C25's
+    reader and the new one. One thread reading 20M cases: uncompressed
+    0.94 → 0.67 s, bytecode 2.94 → 1.02 s, `.zsav` 1.67 → 0.93 s. End to
+    end, `parqit save … using` / `parqit use using` at 20M (48 threads,
+    medians of 5, C24 → C26): uncompressed 2.18 → 1.89 / 2.62 → 2.35 s,
+    bytecode 5.45 → 2.36 / 5.93 → 2.71 s, `.zsav` 6.15 → 2.43 / 6.58 →
+    2.84 s, faster in every repetition. With the spans, B1 (the producer
+    walks, the workers expand) gains on bytecode (−0.30 to −0.60 s, 10 of 10
+    runs) and on `.zsav` (8 of 10) against the same build without it, so B1
+    stays (it lost before: the walk cost as much as decoding).
+
+240. **A tree's footers are read on several connections (PART-SCHEMA-PARALLEL-1,
+    2026-10-25).** The full check of #232 reads every footer of the tree
+    through `parquet_schema()` and `parquet_kv_metadata()`, 512 files per
+    query. Measured on a tree of 6336 files, one query over the footers took
+    as long on 48 threads as on one, or longer; this observation does not
+    establish the scheduling mechanism (a glob of
+    the tree: 1.4 s on one thread, 2.8–3.1 s on 48; a UNION ALL of the twelve
+    day branches the same), so the check cost 1.6 s (C23, first file only,
+    0.20 s for the `partitions(replace)` of one partition; C27 1.84 s). The
+    chunks' queries now run at once on connections opened for the call
+    (`Session::query_text_many`, up to the engine's thread count, at most 64)
+    and their results are taken in chunk order, exactly as the serial read
+    took them: the first chunk whose query fails gives the engine's error,
+    else the first file that differs is named. C28: 0.62 s for that tree,
+    0.16 s for one of 147 files (unchanged: one chunk), the same trees left
+    in every arm. A unit test compares 1, 2, 8 and 64 connections over 37
+    files with a truncated one and a failing query among them;
+    `PARQIT_TEST_TREE_CHUNK_FILES=2` (the forced suite) drives v186 through
+    several chunks. v186's multi-file append now writes on one thread: on
+    many, a thread given one vector holds 1,024 rows per partition and may
+    write one file per partition, which made the test's precondition fail
+    about one run in five (rows, old files and footers were right every
+    time).
+
+241. **The 2.0.0 candidate is certified; its engine costs are accepted
+    (B6-ACCEPT, 2026-10-25).** C28 (`optimised_200_28`) against the published
+    0.5.1 on the public 100M base: 91 workflows × 3 repetitions, 819/819
+    PASS, the three arms' outputs checked independently (198 checks, 44.6
+    billion cells); 51 faster, 37 within the observed dispersion, 3 to review;
+    the medians sum to 372.1 s against 168.7 s. The ones left slower were
+    split into build environment, parqit code and engine with builds of the
+    0.5.1 source and of C28's source on 1.5.6, all with gcc-toolset-12 (400
+    runs): environment and compiler within ±0.1 s, parqit code within the
+    dispersion, engine +1.23 s for an `egen` mean/count `by()` over 18 groups
+    of 5.5M rows and +0.41 s for `tabstat` percentiles by group. DuckDB's
+    profiles show the same plan on both engines and 2.0's WINDOW operator
+    summing 2.6 times the operator time (the elapsed time DuckDB's profiler
+    adds up across threads, waits included — not CPU; the process CPU the
+    system measured was 153 against 142 s) with about half the cores busy;
+    `format_xlsx`
+    showed no regression (Stata's `import excel` is bimodal). On small files
+    the engine costs +0.02 to +0.10 s (250K rows). The values are identical;
+    the maintainer accepted these costs and asked for them to be documented
+    (help, CHANGELOG, certification §11). Deferred, in `ToDo.md`: a report to
+    DuckDB with a minimal reproducer (an external publication, for the
+    maintainer to authorise), running `parqit sql …, clear` once instead of
+    three times (since 0.5.1, both engines), and only if needed a `GROUP BY`
+    and join in place of the window for few groups.
+
+242. **The Codex Astra audit of C28, round 1, and its corrections (CODEX-R1,
+    2026-10-25).** The maintainer's final audit before `main`
+    (`audit_repro/codex_astra_final_20261025/`): 2 high, 4 medium and 1 low
+    findings, none critical; it confirmed the frozen identities, the 46
+    pinned engine sources and their guards, and that every `sql_where`
+    consumer is a positive WHERE. All seven were read in the code (finding 4
+    also run) and corrected in C29, completed in C30. Revises #232, #240 and
+    #241.
+    (1) A failure while B1 expanded a block (before `work()`) woke only the
+    block queue, not the conversion's read-ahead wait: with that wait full,
+    the SPSS conversion hung (Stata inside the COPY). `for_each_block` now
+    calls `on_worker_failure` for every worker failure; the conversion marks
+    itself failed there. (2) Three worker handlers built strings while
+    handling an exception (the CSV UTF-8 scan, `query_text_many`, and the
+    `collect` fill, the last since 0.5.1): under memory exhaustion the second
+    allocation could leave the thread and end Stata. They now keep only the
+    `exception_ptr`; the message is written after the join, threads are
+    joined by RAII, and the fill marks the abort before it tries to word it.
+    The fill's producer and its thread start still worded on failure, before
+    the join: completed in C31 (#244).
+    (3) A `.zsav` reader restarted exactly at the end of a ZLIB block inflated
+    the next block at once, which the one-thread reader does only when it
+    needs its bytes: a damaged block the declared cases never reach became an
+    error, and a corrupt code just after the boundary was reported at
+    another position. The restarted reader now stands where the one-thread
+    reader stands. (4) The full check of #232 skipped dot-prefixed entries,
+    which the reader's `**/*.parquet` takes (verified on both engines): a
+    hidden Parquet file whose labels differ escaped it. Hidden `*.parquet`
+    files and hidden directories that hold Parquet files are now checked;
+    hidden entries the reader ignores (`.DS_Store`, a hidden directory
+    without Parquet files) are passed over. C30 also takes a file named
+    exactly `.parquet`, which the reader's `*.parquet` matches (verified with
+    the DuckDB 1.5 and 2.0 globs) and C29's test of the name skipped. The
+    check still followed links to directories and opened special files,
+    which the reader does not: corrected in C31 (#244). (5) The parallel footer check of
+    #240 held the whole tree's metadata until every chunk was read; it now
+    reads chunks of 64 files in rounds of at most 512 files, the serial
+    bound, taken in file order and released round by round. With two
+    different defects in one tree, the one named can now differ from the
+    order of the old 512-file chunks; the verdict is the same (in C31 the
+    first defect in file order is named whatever the chunk, #244). (6) B2's
+    read-ahead kept two blocks whatever their size, beyond its 64 MiB, and
+    B1's restart readers were in no budget. The implementer's choice,
+    delegated by the maintainer: B2 reads ahead only when two blocks fit in
+    64 MiB (else one at a time, as without threads), with no more threads
+    than window slots; B1 restart readers are used on a `.zsav` only while
+    the workers' largest blocks, inflated and compressed, fit 512 MiB, else
+    the producer decodes as before B1. The values are the same either way.
+    These bounds missed buffers the threads and readers keep (B2's threads
+    held an inflated block each; B1's gate took the largest sum, in 32
+    bits): corrected in C31 (#244).
+    (7) B6 called the profiler's summed operator times "CPU": they are
+    elapsed times summed across threads; the wording is corrected (#241).
+    Evidence: unit tests for each finding (a throttled conversion with a
+    failure before `work()`, ending within 5 s; every restart point of 140
+    generated files read to the end against the one-thread reader, slots and
+    message; the window and budget rules; injected `bad_alloc` in the CSV
+    and query workers), passing on both engines. Restoring findings 1 and 3
+    in a scratch copy fails their tests (a hang, and 2 of 7340 checks); the
+    tests of findings 2 and 6 would not catch their old code (a single
+    injected failure leaves the allocations after it free; the window and
+    budget checks call the helpers only), which C31 corrects (#244); v186 with a hidden disagreeing file (FAIL
+    on C28, PASS on C29); the SPSS equivalence harness differs from C28's
+    reader only in six restart-pass messages, each now the one-thread
+    reader's; TSan 21 scenarios on C29 and 23 on C30 (two more for finding
+    1: a worker fails expanding its block while the producer waits), 0
+    reports; CTest 6/6 on both engines. v186
+    also plants a disagreeing `.parquet`: refused by C30, accepted by C29.
+    C30 also destroys a failed query's result in `query_text_many` when its
+    message cannot be allocated (a leak, not a wrong result).
+
+243. **The SPSS reader inflates ahead and its workers expand the cases (B2,
+    B1; 2026-10-25).** Two items of the Fable plan of 25 Oct, approved by the
+    maintainer and implemented in C25; recorded here, after #239 and #242
+    refined them. B2: a `.zsav` file's ZLIB blocks are inflated ahead on up
+    to 8 threads, in a fixed ring within 64 MiB, each thread with its own
+    file handle opened before it starts; the reader takes a block only when
+    it needs its bytes, so a block's error is raised when the one-thread
+    reader would reach it, with the one-thread inflation's message, and
+    `where()` reports the reader's position. Threads that cannot start leave
+    the blocks to the reader, inflated one at a time as before; since #242,
+    blocks too large for two to fit in 64 MiB are never read ahead. B1: with
+    workers, the producer of a compressed file (bytecode `.sav` or `.zsav`)
+    walks the cases (`skip()`: the checks, errors and end of `next()`
+    without the slots) and records at the start of each block the state to
+    restart from (stream position, command block, next opcode, cases); each
+    worker expands its block with a `CaseReader` of its own from that state
+    (its own file handle, or its own ZLIB blocks). Before the spans of #239
+    the walk cost as much as decoding and B1 lost; with them it gains (#239).
+    Since #242 a restarted reader stands exactly where the one-thread reader
+    stands, a worker's failure before it decodes ends the conversion, and
+    restart readers are used on a `.zsav` only while the workers' largest
+    blocks fit 512 MiB. Values, metadata, notes and messages are those of
+    the one-thread reader. Evidence: unit tests (B2: 3000 cases in ZLIB
+    blocks of 97 bytes, early stop, damaged blocks at the start, middle and
+    end, a corrupt code deep in the stream; B1: 80 random files in five
+    layouts and both byte orders × six block sizes, truncation at every
+    byte, corrupt codes, two defects, failures before and after the defect,
+    4307 assertions equal to the one-thread pass; a mutation that restarts
+    without the position in the command block fails 2388 of them), the
+    span harness of #239, the restart test of #242, TSan (#242), and the
+    SPSS Stata tests v127–v130, v180, v183, v184 and v188 on both engines.
+
+244. **The Codex Astra audit, round 2, and its corrections (CODEX-R2,
+    PART-DIAG-ORDER-1; 2026-10-25).** Round 2 checked C30
+    (`audit_repro/codex_astra_final_20261025/PROMPT_r2.md`, `r2_answer.md`):
+    findings 1, 3, 5 and 7 of round 1 closed, 2, 4 and 6 partly; 2 high, 3
+    medium and 1 low findings, residual or new. All six were read in the code
+    and in the engine's source (the C API and the directory glob of both
+    engines) and corrected in C31. Revises #232, #240, #242 and #243.
+    (1) The `use`/`collect` fill's producer and its thread start (code of
+    0.5.1) worded their failures while handling them, before joining the
+    workers: a second failure there left joinable threads and ended Stata.
+    They now keep the exception; a guard stops and joins the workers
+    whatever leaves the block; the message, the first failure recorded as
+    before, is worded after the join, and one that cannot be worded leaves
+    "fill failed". (2) `duckdb_value_varchar` returns nullptr both for SQL
+    NULL and when its copy cannot be allocated (`capi/cast/utils.hpp`,
+    `generic.hpp`; both engines), and every text read of a query result
+    took a failed copy for NULL: a `parqit.*` key, a column name or a file
+    name could drop out unseen (in the check of #232, a disagreeing file
+    could pass). `parqit::result_varchar` makes a VARCHAR cell that is not
+    NULL but comes back without text an error; all 33 such reads go through
+    it, and so does `text_cell`'s VARCHAR path. Types the old C API does not
+    convert keep its answer. (3) The check of #232 followed links to
+    directories and would open special files, which the reader does not:
+    DuckDB's `**` skips every symbolic link and its listing keeps only
+    regular files and directories (`local_file_system.cpp`, the same in
+    1.5.6 and 2.0.0; run with DuckDB 1.5.5 and a 2.0 CLI). Entries are now
+    classified as the reader does: a link to a regular file is a file;
+    special files and broken links in a partition are passed over (above
+    one, a stray entry is refused, as before); a hidden link to a directory
+    is passed over; and a partition that is a link to a directory is
+    refused, since the reader never reads below it and rows an update
+    writes there could not be read (an append into such a partition has
+    written into the link's target, unseen, since 0.5.1). (4) B2's threads
+    inflated into buffers of their own swapped into the ring, so the
+    read-ahead held the ring, one block per thread and the reader's (up to
+    160 MiB with 32 MiB blocks): each thread now inflates into the slot it
+    claimed, its own until handed over, and the read-ahead is the ring,
+    within 64 MiB; a thread keeps one compressed block. (5) B1's gate took
+    the largest inflated + compressed sum, in 32 bits, while a reader keeps
+    the largest of each: it now adds the file's largest inflated block, its
+    largest compressed block and the block directory, in 64 bits. (6)
+    `query_text_many` leaked the C API's copy when copying it into a string
+    failed; it is owned by RAII. And the round's question on diagnostics
+    (PART-DIAG-ORDER-1): a chunk whose footer query fails is read again one
+    file at a time, so the first file, in file order, that cannot be read or
+    that differs is named, with the same message and return code whatever
+    the chunk size or the threads; since #240 the chunking could change them
+    (the engine's error for one, r(198) for another). Tests: the unit tests
+    of finding 2 now fail the wording too (`PARQIT_TEST_FAULT` takes a
+    comma-separated list of sites), which throws on the calling thread after
+    the join; a text copy failing within the extraction fails its query; the
+    bounds of findings 4 and 5 are checked through what the reading does
+    (`CaseReader::ahead_threads`, `BlockStats::restart_readers`, with
+    `PARQIT_TEST_ZLIB_AHEAD_BYTES` and `PARQIT_TEST_B1_BUDGET_BYTES` for
+    smaller bounds; slots equal to the one-thread reader's), and finding 5's
+    arithmetic; v183 adds three faults of the fill's producer (the read
+    fails, the data in memory stay, the file reads afterwards); v186 adds a
+    disagreeing file and a truncated one read in chunks of 1, 2 and 64 (the
+    same refusal, the same file named), a partition linked to a directory, a
+    link to a disagreeing file, a hidden link to a directory and a FIFO
+    (FAIL on C30: the hidden link was refused). TSan 23 scenarios, 0
+    reports; CTest 6/6 and the 6 "Codex" unit cases (10,372 assertions) on
+    both engines; Stata suites 255/255 in each of the four modes (default and
+    forced, both engines).
+
+245. **The Fable 5.1 final audit and its corrections (FABLE-FINAL; 2026-10-25).**
+    Asked by the maintainer after the two Codex rounds; on C31, in
+    `audit_repro/fable_final_20261025/` (the report, the repros, two rounds
+    with Codex Astra; the agent stopped, out of usage credits, as the second
+    round's answer arrived, so its §7.1 is empty and that answer is read here
+    from `codex/r2_answer.md`). No wrong value found: 140 filter forms under
+    `statamissing on` keep the rows of the full form and of native Stata on
+    both engines, the parallel SPSS reader with 4000 forced blocks gives the
+    160 million cells of pyreadstat's oracle, the frozen identities hold.
+    Corrected in C32. Revises #232, #242, #243 and #244.
+    (A0, high, run) The check of #232 and the refusal of #244 (3) ran only
+    when a probe down the tree's FIRST branch found a visible file
+    (`tree_live`): an empty first leaf, one holding only hidden files, or a
+    partition linked to an empty directory turned every comparison off, and an
+    update was published that the tree then read without its labels, or
+    whose rows the reader never read (through the link). The gate came from
+    PART-MODE-1 (0.5.1). (A1, medium, run) That probe took a FIFO named
+    `*.parquet` as the tree's reference, and the engine's open of it never
+    returned. Now the whole tree is walked as the reader sees it (#244 (3))
+    before anything is written, the reference is the walk's first file, and
+    the walk is repeated after the COPY under the output lock, the
+    comparison running whenever the tree holds a file (A3: structural
+    refusals no longer wait for the COPY). From its Codex consultation: a link
+    to a file of the tree itself (read twice by the reader, and one a replace
+    could leave reading other rows or none) is refused; and publication is
+    exception-safe — each step is journalled before it is made, without
+    allocating, an exception reaches the rollback, and the transaction's root
+    (what was set aside) is kept until publication or rollback is complete
+    (an allocation failing after a swap could let the destructor delete the
+    partitions set aside); a rollback that cannot remove what it added says
+    the tree is not as it was (it said "left as it was"); an appended name
+    already taken is refused under the coordinated-writer contract; a writer
+    outside it racing the same new name is not detected (Codex final audit,
+    finding 4, option B). (A2, medium) The guard of
+    #244 (2) covered VARCHAR only: it covers every type the old C API turns
+    into text (`c_api_text_type`, the same 21 types in both engines), an empty
+    BLOB is told from a failed copy by its text form, and `egen cut(),
+    group()` parses its cutpoints whole and in the C locale (`atod`; strtod
+    took any text as a number and followed `LC_NUMERIC`). (A7, low) The paired
+    text reads began using RAII (`CText`, `ResultGuard`); remaining unguarded
+    results, the relaxed-schema pair and `text_cell` buffers are completed
+    in C33 (#246).
+    (A4, low) A ZLIB block that failed is rethrown if asked for again (the
+    read-ahead waited for ever). Not changed, for the maintainer: (A6) opening
+    a tree of 6336 files takes 1.7–1.8 s longer on 2.0.0 than the same source
+    on 1.5.6 at 48 threads (7.7 against 5.9 s, ABBA, disjoint ranges; the
+    Fable's indicative measurement), a cost not among those #241 accepts; on
+    both engines 48 threads take about twice as long as one to open such a
+    tree (pre-existing). (A5) The certified binaries are this host's (gcc-
+    toolset-12 defaults to x86-64-v2: POPCNT, SSSE3, SSE4.1 appear; no AVX2 or
+    FMA); the CI's binaries were never built with 2.0.0. (A9) The B1/B2
+    bounds are counted from the blocks' declared sizes, not measured
+    capacity. Tests: v191 (the first branch empty, hidden-only, a link to an
+    empty directory, a FIFO and a broken link; a link to a file of the tree;
+    a failure after a partition was swapped in and after a file was added;
+    a taken name; a rollback that cannot remove), PASS on C32 on both
+    engines (on C31: three disagreeing updates published, the FIFO hung);
+    Stata suites 256/256 in each of the four modes, CTest 6/6 on both
+    engines, TSan 23 scenarios with 0 reports; 100M correctness 91/91, every
+    output checked independently (22 checks, 4,957,400,512 cells).
+
+246. **The final Codex Astra audit and C33 (CODEX-FINAL; 2026-10-25).**
+    The maintainer requested all final corrections, with option B for
+    finding 4, without a commit, installation or network access. Revises
+    #232, #240, #244 and #245. (1) File links are followed hop by hop with
+    `read_symlink`, relative targets resolved against their link directory,
+    and parent directories canonicalised. After the independent Astra max
+    review, C33a uses a canonical cursor and pending path components: real
+    directories are checked before consuming `..`, and each actual symbolic
+    link substitution is counted once, with a limit of 40. Internal
+    intermediate links, real directory dependencies outside the initial
+    link's own ancestors, and every final internal target are refused. Those
+    ancestors cannot disappear while the initial link remains; leading `..`
+    to an external file stays supported. (2) Each rollback
+    removal and restoration catches its own exceptions. Newly created
+    parents are journalled before creation and removed when empty. A failed
+    removal really leaves its addition; an incomplete rollback says "NOT
+    as it was" and names only recovery copies verified to remain. (3)
+    Materialised results and extracted buffers use RAII at every text loop,
+    including explain, compact planners, relaxed schemas and `text_cell`,
+    now shared by the plugin and unit tests. A process-wide atomic injects
+    a failed C copy inside the extraction, with no getenv per cell. (4)
+    Option B retains the publication code: parqit writers hold the output
+    lock, an already occupied append name is refused, but an uncoordinated
+    writer racing that same new name is not detected. Atomic no-clobber
+    publication is not claimed. (5) Both reference-file refusals name that
+    file, and #240 describes observed timings without inferring scheduling.
+    Tests include relative and directory-link dependencies, external links
+    with independent retained-row checks, directory inventories, real failed
+    removal and exceptions, faults before and after publication, a trace of
+    both walks/COPY/publication, and a file planted between the walks.
+    Unit tests exercise failed VARCHAR/numeric/BLOB/TIMESTAMP copies,
+    legitimate empty BLOB and unsupported LIST, comma-decimal cutpoints,
+    and a prefetched ZLIB failure requested twice within five seconds.
+    Execution receipts and exact C33/L33 identities are recorded in
+    `audit_repro/codex_astra_final_20261025/CORRECCOES_FINAIS_CODEX_2026-10-25.md`.
+    Open maintainer decisions: A6 (many-file opening cost), persistent
+    footer-check connections, A9 (measured/enforced capacity bounds), A5
+    (CI binaries, native hosts and macOS minimum versions), version, merge
+    and release, and cleanup of incomplete C32 stages. The coordinated-writer
+    publication contract is explicitly retained by option B; atomic
+    no-clobber outside that contract would require a new decision.
+    The user explicitly requested an independent Astra max audit against
+    the original prompt, the previous Codex audit and Claude's evaluation.
+    It found that initial C33 still lost an untouched partition's rows when
+    a link crossed a real directory before `..`, and falsely refused nested
+    external directory links and a relative external portal. Execution
+    confirmed all three: the loss returned rc 0 and left a dangling alias;
+    the extended v192 failed six checks on C33. C33 is held, its four
+    passing suite receipts retained; the corrected source is frozen under
+    new 33a names, without modifying C33/L33. See the independent review and
+    re-review in `fix_final/ASTRA_MAX_*_2026-10-25.md`. T16 invokes `net
+    install` in scratch and is NOT_RUN in every suite mode because hard
+    rule 2 forbids all installation; the canonical runner is unchanged.
+    Final execution on C33a/L33a: builds succeeded, CTest 6/6 on both,
+    9 Codex unit cases / 10,424 assertions on both, and v186/v19 passed.
+    The four final Stata modes have 256 PASS, no FAIL/incomplete, and T16
+    NOT_RUN; default L33a required an unchanged-code isolated full rerun.
+    Its first group attempt failed v73's final stable read with rc 920
+    (Snappy decompression size mismatch), after its writer had stopped.
+    Isolated v73 passed on L33a and L32. The cause is not established;
+    Astra's byte-cache hypothesis is not a proven attribution, and this
+    occurrence remains REVIEW. Tests and engine were not weakened to hide
+    it. The final C33a 100M run passed 91/91; independent verification v3
+    passed 22 checks / 4,957,400,512 cells. TSan's 23 passing reader
+    scenarios retain the same reader source: only plugin_io.cpp changed
+    in the build identity after C33. These scoped results do not confer
+    global runtime, performance, platform or release acceptance.
+
+247. **Source generations in the byte cache (PARQIT-CACHE-IDENTITY;
+    2026-10-26).** The stable-read Snappy failure recorded in #246 led to a
+    deterministic native-cache reproducer. In 1.5.6, an old open handle can
+    insert its bytes after another handle has validated a replacement at
+    the same path. Combining an old Parquet page header with the replacement
+    reproduces the exact Snappy size mismatch on two stable queries, with
+    the disk file independently equal to the valid replacement. In 2.0,
+    local caching is off by default; enabling it and filling the replacement
+    first makes the old handle consume replacement bytes. The preserved
+    binaries reproduce both defects. These experiments establish the
+    mechanisms, not a retrospective proof of the original v73 occurrence:
+    that execution's temporary file was not retained.
+
+    The pinned corrections in `DuckDB156FileCache.cmake` and
+    `DuckDB200FileCache.cmake` bind reads to an entry and content generation,
+    check before selecting cached bytes and before publishing or returning
+    them, and retain the open file handle across global cache toggles.
+    Retired handles read their own source uncached; new handles join the
+    current cache. A lazy NO_VALIDATION full hit needs no open. An actual
+    miss binds and validates its source before returning combined bytes.
+    The 2.0 post-fetch guard covers every consumer, including one awaiting a
+    block that a different lazy reader filled after invalidation. Locks are
+    released before I/O. The guards protect generations distinguished by
+    filesystem validators, not every possible in-place edit; source files
+    must remain stable throughout a command. Raw SQL keeps native syntax
+    and types. The cache correction does not create snapshot isolation.
+
+    Astra's implementation review found two further issues, both corrected:
+    a sequential cache hit must preserve its logical offset when switching
+    to uncached I/O, and a legitimate self-invalidation must update the 2.0
+    handle's generation so that it can reuse the cache again. Synthetic
+    tests exercise different offsets, late insertion, overlaps, lazy opens,
+    global toggles, recent mtime, simultaneous consumers, expiry/no-store,
+    and real stable cache hits without extra I/O. The controlled Snappy
+    experiment passes three repetitions, with two stable queries each and
+    independent PyArrow cell equality. Evidence and final validation are
+    kept under `audit_repro/v73_snappy_20261025/`; source and receipt reviews
+    remain distinct from executions.
+
+    The help review qualifies SPSS's 64 MiB raw-slot sizing target (at least
+    one case, with additional allocation), the soft streaming budget, and
+    the POSIX-only ctime/inode identity fields. These wording corrections do
+    not decide A6 or A9. Their acceptance, CI/platform binaries, the version,
+    integration into main and publication remain maintainer decisions.
+
+248. **Maintainer acceptance and release 0.6.0 (2026-10-26).** After reviewing
+    the C34a/L34a delivery and the comparative timing tables, the maintainer
+    explicitly accepted the recommendations and authorised the version bump,
+    integration into main, commit, push and release. A6 is accepted as a
+    localised many-file opening cost in the historical scenario: about
+    7.6 versus 5.9 seconds for 6336 files at 48 threads, or 3.7 versus 3.0
+    seconds at one thread. These are not new timings of the release binary.
+    A9 is accepted as nominal admission/sizing from declared block sizes,
+    without a guarantee of a hard allocated-capacity or process-RAM ceiling.
+    Both limitations are now stated in the release documentation. Neither
+    acceptance changes values, precision, metadata or the error contract.
+
+    Version 0.6.0 is the minor compatibility boundary for the default
+    DuckDB 2.0.0 engine and its documented native SQL dialect. The optional
+    1.5.6 source build remains available. The numerical contract stays at 4.
+    The earlier no-publication instruction is superseded for the operations
+    expressly authorised above and their required network/CI validation;
+    frozen historical stages, unrelated work and the global ado installation
+    remain protected. Release binaries must come from the four-platform CI,
+    with checksums and an isolated public installation verified separately
+    from the already-passed local C34a/L34a evidence.

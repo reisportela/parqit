@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.5.1 21oct2026}{...}
+{* *! version 0.6.0 26oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -380,15 +380,13 @@ on disk, while delimited text, {cmd:.dta} and Excel are first imported to a
 package-owned Parquet bridge (SPSS and R files are converted to one, as
 described below); this keeps the engine's two-table input contract
 uniform and is intended for a comparatively small using side.
-The delimited using-side adapter uses Stata's {cmd:import delimited}, whose
-type inference can differ from {cmd:read_csv_auto} on the main side (for
-example, date text versus a parsed date). It reads the file as UTF-8 — after
-parqit has decoded it when it is not (CSV-ENC-1), never with the encoding
-{cmd:import delimited} would guess, which for Cyrillic, Chinese or Japanese
-text is wrong without a word (observed: no observations, or mojibake). Excel uses the first worksheet and
-its first row as variable names; there are no sheet/range/header options.
-To retain the main-source CSV inference for a join, open that CSV as its own
-named view and refer to {cmd:view:}{it:name}.
+The delimited using-side adapter reads the file as {cmd:parqit use} reads it,
+with the engine's {cmd:read_csv_auto} (CSV-USING-1): names as written,
+decimals in double, dates as dates, the main side's inference. It reads the
+file as UTF-8 — after parqit has decoded it when it is not (CSV-ENC-1), never
+with a guess of its encoding, which for Cyrillic, Chinese or Japanese text is
+wrong without a word. Excel uses the first worksheet and its first row as
+variable names; there are no sheet/range/header options.
 Delimited-text header names get the same treatment as Parquet column names
 (see {it:Column names} under {help parqit_technical##types:Types and metadata}): a
 repeated name keeps the engine's numbered form ({cmd:a_1}, with
@@ -464,8 +462,8 @@ the binder's error with its dump of the query. A
 forced dialect drives the header-name recovery above as well as the scan, so
 the names come back from the same split the data does; with {opt header(off)}
 there is no header line to recover from. {opt csv()} applies to the main
-{cmd:parqit use} source only — a {cmd:using}-side CSV is bridged through
-{cmd:import delimited}, which has its own options.
+{cmd:parqit use} source only — a {cmd:using}-side CSV is read with the engine's
+own detection, as {cmd:parqit use} reads a CSV without {opt csv()}.
 
 {pstd}
 {opt filename(newvar)} on {cmd:parqit use} adds the engine's provenance column:
@@ -497,8 +495,7 @@ opening a view; a wholly UTF-8 file stays in place unless {cmd:all} is requested
 Delimited text that is not UTF-8 — by its byte-order mark, the patterns of
 UTF-16 or {opt encoding()} — is decoded first into a package-owned UTF-8 copy,
 under the file's own name and the {it:key}{cmd:=}{it:value} directories of its
-path, that the engine scans (or {cmd:import delimited} reads, on the using
-side) instead; see {help parqit_technical##encoding:Text encodings}. Every bridge lives in
+path, that the engine scans instead, on the using side too; see {help parqit_technical##encoding:Text encodings}. Every bridge lives in
 the temporary directory ({cmd:c(tmpdir)}); if its path contains {cmd:=}, the
 engine reads such a directory as a Hive partition column of the bridged data,
 and parqit says so once a session — point TMPDIR (STATATMP on Windows) at a
@@ -561,6 +558,15 @@ kept:
 {pstd}The whole file is decoded and checked first — a truncated or corrupt file
 is refused, naming the case or record, before anything is written — then
 written through the same staged, verified writer as every {cmd:parqit save}.
+A large file is checked and decoded on the engine's threads
+({cmd:parqit set threads}); a small one uses one thread, which is faster
+for it.
+Case-block sizing targets 64 MiB of raw slots, with at least one case per
+block. Decoder buffers, converted batches and allocator capacity require
+additional memory: this is not a ceiling on total allocation.
+The route is chosen from the
+file's header before any case is read, and the Parquet file, its metadata and
+any error are the same on either route.
 The dataset in memory and the open views stay as they were; {opt replace},
 {opt compression()}, {opt compression_level()} and {opt encoding()} work as for
 any save, and options that describe other saves ({opt data}, {opt xmissing},
@@ -696,7 +702,10 @@ corresponding Parquet file, with every R property kept:
 
 {pstd}As for an SPSS file, the whole file is parsed and every column read first,
 so a truncated or corrupt file is refused before anything is written, and the
-dataset in memory and the open views are untouched. {cmd:parqit save}
+dataset in memory and the open views are untouched. A large data frame has its
+columns read and converted on the engine's threads ({cmd:parqit set threads});
+a small one is read in one thread; the Parquet file, its metadata and any
+error are the same on either route. {cmd:parqit save}
 {it:file} {cmd:using} {it:Rfile} takes {opt replace}, {opt compression()},
 {opt compression_level()}, {opt encoding()} and {opt object()}. An R data file is
 also accepted wherever parqit reads a file — {cmd:parqit use} (lazy or with
@@ -1048,28 +1057,10 @@ value or condition reads the replaced variable's other rows ({cmd:x[_n-1]},
 new value feeding the next row, and a lazy plan reads the values before the
 command.
 
-{pstd}{bf:egen (EGEN-ALL-1).} The native functions, with their options and
-native's rules, verified against native {cmd:egen}: an expression —
-{cmd:total}(,{opt missing}) {cmd:mean sd min max}(,{opt missing})
-{cmd:count median pctile}(,{opt p(#)})
-{cmd:iqr kurt skew mad mdev std}(,{opt mean(#)}
-{opt sd(#)}) {cmd:pc}(,{opt prop})
-{cmd:rank}(,{opt field}|{opt track}|{opt unique});
-a varlist — {cmd:group}(,{opt missing} {opt label} {opt lname()}
-{opt truncate()})
-{cmd:tag}(,{opt missing}) {cmd:anycount anymatch anyvalue}({opt values()})
-{cmd:concat}(,{opt punct()} {opt format()} {opt decode} {opt maxlength()})
-{cmd:diff rowtotal}(,{opt missing})
-{cmd:rowmean rowmin rowmax rowmiss rownonmiss}(,{opt strok})
-{cmd:rowsd rowfirst rowlast rowmedian rowpctile}(,{opt p()});
-one variable — {cmd:mode}(,{opt minmode} {opt maxmode} {opt nummode()}
-{opt missing})
-{cmd:cut}({opt at()}|{opt group()} {opt icodes} {opt label})
-{cmd:ends}(,{opt punct()}
-{opt head}|{opt last}|{opt tail} {opt trim}); none — {cmd:seq}(,{opt from()}
-{opt to()}
-{opt block()}). {opt by()} and the {cmd:by} prefix are allowed where native
-allows them; {cmd:fill()} and {cmd:mtr()} are refused. Under {cmd:if}, the
+{pstd}{bf:egen (EGEN-ALL-1).} The functions, their arguments and their options
+are those listed in {help parqit##egen:help parqit}, with native's rules,
+verified against native {cmd:egen}; {opt by()} and the {cmd:by} prefix are
+allowed where that list says. Under {cmd:if}, the
 statistic is computed over the selected rows and only they receive a value;
 {cmd:tag}, {cmd:anycount} and {cmd:anymatch} give 0 and {cmd:concat} and
 {cmd:ends} "" to the others, as native. {cmd:group()} numbers in the sort
@@ -1112,9 +1103,13 @@ the engine's planner and these stages.
 {pstd}{cmd:collapse} statistics:
 {cmd:mean sum rawsum sd semean sebinomial sepoisson count percent min max median p}{it:##}
 {cmd:iqr first last firstnm lastnm} (COLLAPSE-STATS-2). {cmd:semean} is
-sd/sqrt(n), {cmd:sebinomial}
-sqrt(p(1-p)/n) with p the mean, {cmd:sepoisson} sqrt(mean/n) — missing for a
-mean outside 0..1 or negative, or n < 2 where sd is undefined, as native;
+sd/sqrt(n), missing when n < 2. {cmd:sebinomial} is sqrt(p(1-p)/n) with p
+the mean and requires every nonmissing input to be 0 or 1.
+{cmd:sepoisson} is sqrt(round(sum))/n and requires nonnegative inputs;
+the exact total is rounded to the nearest integer, with half ties upward.
+An invalid input or empty group makes that standard error missing.
+The existing exact-value policy applies: intermediate rounding or overflow
+in native Stata is not reproduced when a finite, more accurate result exists;
 {cmd:rawsum} equals {cmd:sum} (no weights); {cmd:percent} is 100 times the
 group's nonmissing observations over every group's, after {cmd:if}; {cmd:iqr}
 is p75 - p25 under the percentile rule. Percentiles follow Stata's
@@ -1651,14 +1646,35 @@ formats, value labels, notes, characteristics, Stata storage types including
 {cmd:str#} widths, and the {cmd:sortedby} marker) — a difference is refused
 before anything is
 published, with the tree untouched, because files that disagree lose their
-labels on read. The refusal names what differs, variable by variable (for
-example {cmd:cae: storage type str5 in the tree, str8 in the result}). A tree
+labels on read. Every file the tree keeps is checked, in every branch, not one
+sample (PART-SCHEMA-ALL-1), hidden ones included since the reader reads them:
+a file that disagrees with the result anywhere in the tree is named in the
+refusal, the first in file order when several disagree or cannot be read. A
+partition directory that is a symbolic link is refused: the reader of a tree
+does not follow links to directories, so rows written below one would not be
+read; so is a file link whose chain passes through an entry of the tree,
+even if its final target is external. Path components are resolved in order:
+real directories are checked before consuming {cmd:..}, and chains beyond
+40 actual symbolic links are refused. The initial link's own directory
+ancestors are allowed: they cannot disappear while that link remains.
+Direct, relative and chained links with only external dependencies remain
+accepted, including nested external directory links.
+The refusal names what differs, variable by
+variable (for example
+{cmd:cae: storage type str5 in the tree, str8 in the result}). A tree
 written by another tool, without {cmd:parqit.*}
 metadata, receives its new partitions without it, with a {cmd:note:}; a tree
 whose files store the partition key inside is refused. A zero-row result
 touches nothing. A note reports how many partitions were replaced, added,
 and, with {cmd:append}, extended with a new file;
-handled publication errors trigger rollback of the touched partitions. Several
+a publication that fails, for lack of memory included, is rolled back, and a
+rollback that cannot remove an addition or restore a previous partition says
+the tree is not as it was, naming only recovery copies verified to remain.
+New empty parent directories are removed on rollback. Under the coordinated-
+writer contract, parqit writers hold the output lock and an append name
+already there is refused. A writer outside that contract racing the same new
+name is not detected; append publication is not an atomic no-clobber operation.
+Several
 directory exchanges do not form one atomic snapshot for concurrent readers;
 see {help parqit_technical##materialisers:atomicity and locks}.
 
@@ -1895,8 +1911,9 @@ the
 first line that is not, and then decoded whole. The notes are written by the
 plugin, file by file where files differ. The engine's own CSV encodings
 (latin-1, UTF-16) are not used: they reject half of windows-1252, and its
-extension hook copies multibyte text wrongly (DuckDB 1.5.3 and the embedded
-1.5.6, {cmd:csv_encoder}, unchanged between them).
+extension hook copies multibyte text wrongly (DuckDB 1.5.3 and 1.5.6,
+{cmd:csv_encoder}, unchanged between them); parqit does not use them with
+2.0.0 either.
 The engine's refusal of text that is not UTF-8 names parqit's {opt encoding()}
 in place of the engine's own advice.
 
@@ -2296,6 +2313,21 @@ idioms {cmd:x == .}, {cmd:x != .}, {cmd:x < .}, {cmd:x >= .} are translated
 to IS NULL tests in either mode. Stata represents string missing by
 {cmd:""}; SQL NULL and {cmd:""} compare alike in lazy string expressions.
 
+{pstd}
+{it:Filters and the scan} (STATAMISS-PUSHDOWN-1). Where only the rows that
+satisfy a condition are kept ({cmd:keep if}, {cmd:count if}, {cmd:list if},
+the {cmd:if} of {cmd:use} and of {cmd:tabulate}), a comparison that a missing
+operand makes false in Stata is passed to the engine without its
+missing-value branches: {cmd:x == c}, {cmd:x < c}, {cmd:x <= c},
+{cmd:c > x} and {cmd:c >= x}, with {it:c} a number, a date literal or
+{cmd:strpos()}; {cmd:inrange(x, a, b)} and {cmd:inlist(x, ...)} with bounds
+and values that cannot be missing; and the same under {cmd:&} and {cmd:|}.
+The engine can then
+apply it while it reads the files and skip row groups by their statistics,
+as with {cmd:statamissing off}; the rows kept are native Stata's.
+{cmd:x > c}, {cmd:x >= c}, {cmd:x != c}, a negation, {cmd:drop if} and a
+comparison used as a value ({cmd:gen y = x == c}) keep their branches.
+
 {pstd}{bf:Migration from releases before 0.5.0.} Set
 {cmd:parqit set statamissing off} explicitly when an older do-file relies on
 SQL comparisons. The old missing-comparison warning is no longer emitted:
@@ -2615,7 +2647,8 @@ session (windows-1252 until set; an {opt encoding()} option still wins; see
 {help parqit_technical##encoding:Text encodings}){p_end}
 {p 8 12 2}{cmd:parqit set fill_threads} {cmd:auto}|{it:#}{space 3}workers that
 fill Stata's memory on
-{cmd:use}/{cmd:collect} ({cmd:auto} = environment override, otherwise one per
+{cmd:use}/{cmd:collect} and read it on {cmd:save ..., data}
+({cmd:auto} = environment override, otherwise one per
 available CPU
 on reads with at least 50,000 rows or 2 million cells;
 {cmd:1} = serial; {cmd:0} aliases {cmd:auto}; any positive count up to those
@@ -2689,6 +2722,20 @@ view's
 or {cmd:LIMIT} constructs that are awkward in the Stata grammar. It does not
 translate Stata expressions or change the view's declared projection, and it
 bind-validates the candidate before changing the plan.
+
+{pstd}{bf:DuckDB 2.0.} Raw {cmd:sql}/{cmd:query} uses the
+selected engine's native SQL dialect. In 2.0, {cmd:2*3!} is 12; write
+{cmd:(2*3)!} for 720. Regex {cmd:~} matches part of a string; use
+{cmd:regexp_full_match()} for a full match. {cmd:X'41'} and {cmd:B'0101'}
+are binary/bit literals, not text. Use ordinary quoted strings when text
+is intended. Use {cmd:lambda x : expression}, rather than the old
+single-arrow lambda. Integer division or modulo by zero is an error;
+{cmd:TRY(expression)} explicitly requests NULL on error.
+Cast an untyped NULL, for example {cmd:NULL::DOUBLE}, when a Stata column
+is required. Very large integer literals retain their native BIGNUM type;
+types without a Stata representation are still refused or dropped with
+a message. These SQL differences do not change the Stata expressions
+accepted by {cmd:gen}, {cmd:egen}, {cmd:replace} or qualifiers.{p_end}
 
 {pstd}{bf:View and installation diagnostics.} {cmd:parqit open _data}
 snapshots
@@ -2821,7 +2868,8 @@ once and reopen the saved file when a fixed random realisation is required.
 
 {pstd}
 The package version and engine version are separate: parqit 0.3.3 embeds
-DuckDB 1.5.3; the 0.4 series embeds 1.5.6. {cmd:parqit version} reports both.
+DuckDB 1.5.3; the 0.4 and 0.5 series embed 1.5.6; version 0.6.0 embeds
+2.0.0 (1.5.6 remains an optional build). {cmd:parqit version} reports both.
 Engine fixes do not promise a speed-up for every query. Compare identical
 inputs, values, types, metadata, order requirements and materialisers; use
 matching ado/plugin versions, fixed {cmd:threads} and {cmd:fill_threads},
@@ -2829,6 +2877,22 @@ warm-up runs and interleaved repetitions of both versions. Record server
 load and distinguish the first plugin/Mata load from subsequent calls.
 Repeat the same version as a control: differences smaller than that variation
 do not establish a regression or a gain.
+
+{pstd}
+With DuckDB 2.0 the engine's window operator is slower than with 1.5.6 on a
+handful of very large groups. Measured on 100 million rows in 18 groups, an
+{cmd:egen mean()} with {cmd:by()} took about 1.2 s longer and {cmd:tabstat}
+percentiles by group about 0.4 s longer; with many groups 2.0 is faster. Small
+files carry a fixed engine cost of a few hundredths of a second. The values are
+the same with either engine.
+
+{pstd}
+Opening a tree of many files can also cost more with 2.0. In a pre-release
+test of 6336 files, opening and counting took about 7.6 s with 2.0 and
+5.9 s with the same parqit source on 1.5.6 at 48 threads. With one thread,
+the times were about 3.7 and 3.0 s. The maintainer accepted this localised
+cost for 0.6.0; these timings are not a guarantee for other files or hosts.
+More threads can help the subsequent query without helping metadata opening.
 
 {pstd}
 Time the whole workflow as well as the materialiser. Lazy opening probes
@@ -2929,7 +2993,10 @@ rows, or of 2 million+ cells, fill Stata's memory with one worker thread per
 CPU available to this process (on Linux the affinity mask — a SLURM/cgroup
 allocation or {cmd:taskset} — elsewhere the hardware count; nothing is
 hard-coded); each worker converts the engine chunk it fills and stores it cell
-by cell. {cmd:parqit set fill_threads} {it:#} chooses the count for the
+by cell. The same workers read the dataset in memory for
+{cmd:parqit save ..., data}, in blocks of whole row groups: numeric cells
+concurrently, string cells one at a time (Stata's string accessors are not
+reentrant). {cmd:parqit set fill_threads} {it:#} chooses the count for the
 session
 ({cmd:1} = the single-threaded path, for example on a platform you have not
 yet verified; any number up to the available CPUs; a larger number is clamped
@@ -3339,7 +3406,7 @@ view plan, while {cmd:codebook}, {cmd:tabstat} without {opt save},
 window twice, so a stack of window stages plans in time growing about 1.8x
 per window (sixteen stacked {cmd:egen mean(), by()}: 0.05 s, eighteen: 0.2 s,
 twenty: 0.5 s, thirty: more than a minute; 0.08 s without it, unchanged in
-the embedded 1.5.6). parqit therefore keeps the session's
+1.5.6). parqit therefore keeps the session's
 {cmd:disabled_optimizers} in step with the current view: {cmd:filter_pushdown}
 is off once the view's stages hold eighteen or more partitioned window terms
 (a mean, total, rank or {cmd:by:} row count is one, a percentile-type or mode
@@ -3349,7 +3416,7 @@ two-table verbs take the using view's needs before their probes.
 {cmd:window_self_join} is off while a view with two or more window stages,
 or with a {cmd:median}, {cmd:pctile}, {cmd:iqr}, {cmd:mad}, {cmd:mdev},
 {cmd:std} or {cmd:mode} stage, is current: DuckDB 1.5.3 failed with an
-internal error on such plans, the embedded 1.5.6 no longer rewrites a window
+internal error on such plans, 1.5.6 no longer rewrites a window
 over a window, and the rule now stands on timing grounds (the Stata timings
 with it on were slower for a stack; a single whole-partition window, which
 the rule never touches, is faster with it). Every other view, and every eager
@@ -3368,14 +3435,23 @@ the time it is embedded, but its underlying files remain live.{p_end}
 same Stata column on both sides. Ambiguous combinations are refused before
 plan mutation (see {help parqit_technical##verbs:Verbs}).{p_end}
 {pstd}{cmd:•} Eager {cmd:use, clear} and direct {cmd:collect} reads check each
-matched file's identity (size, mtime, ctime, inode) before planning and before
-and after the fetch. Fetched column types are compared with the plan; a change fails with
+matched file's size and mtime, plus ctime and inode on POSIX systems, before
+planning and before and after the fetch. Fetched column types are compared
+with the plan; a detected change fails with
 {cmd:r(920)} and the dataset in memory is untouched — retry when the file is
 stable. These checks are not a cross-query snapshot protocol for transformed
 collect, view save or engine-side statistics. A transformed pipeline's result
 is built by an engine query over the sources at execution time; a command
 may also run validation queries or several statistical passes. Its sources
 must remain stable throughout the command.{p_end}
+{pmore}The engine's byte cache guards against mixing file generations
+distinguished by its validators. An already open file handle is retained
+across cache clearing and atomic replacement; it is not a snapshot against
+in-place edits. Open the source again to read a replacement.
+DuckDB 2.0 leaves local-file caching off by default;
+explicitly enabling it does not relax the source-stability requirement.
+The optional 1.5.6 build also guards its byte cache against late reads from
+a replaced file.{p_end}
 {pstd}{cmd:•} {cmd:parqit save ..., data copysource} verifies identity, names,
 kinds, count, {cmd:sortedby} and the first and last 64 observations only; an
 edit confined to the middle rows is not detected and the copy carries the
