@@ -103,7 +103,9 @@ if(WIN32)
     # those annotations.  Build the dependency in its documented static mode
     # so plugin.def is the sole export surface (PKG-019).
     set(EXPORT_DLL_SYMBOLS FALSE CACHE BOOL "" FORCE)
-    add_compile_definitions(DUCKDB_STATIC_BUILD)
+    # ADBC has its own export annotation, independent of DUCKDB_STATIC_BUILD;
+    # its implicit struct assignment operators must stay inside the plugin too.
+    add_compile_definitions(DUCKDB_STATIC_BUILD ADBC_EXPORT=)
 endif()
 # The release tarball has no .git: tell DuckDB its own version explicitly so
 # version()/duckdb_library_version() report the pinned release, not v0.0.1.

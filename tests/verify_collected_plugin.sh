@@ -64,7 +64,7 @@ case "$PLATFORM" in
             awk '/\[Ordinal\/Name Pointer\] Table/{inside=1; next} \
                  inside && $1 ~ /^\[/ {print $NF}' | sort -u)"
         [ "$exports" = "$(printf '%s\n' pginit stata_call | sort)" ] || \
-            die "PE export table must contain exactly pginit and stata_call"
+            die "PE export table must contain exactly pginit and stata_call (got: $(printf '%s' "$exports" | tr '\n' ' '))"
         if LC_ALL=C objdump -p "$FILE_PATH" | grep -Eqi '(vcomp|libomp|libiomp|libgomp)[^[:space:]]*\.dll'; then
             die "Windows artifact must not import or delay-load an OpenMP runtime"
         fi

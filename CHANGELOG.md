@@ -155,6 +155,9 @@ semantic versioning once `v0.1.0` is tagged.
 
 ### Fixed
 
+- The Windows static build suppresses ADBC's separate DLL-export annotation,
+  keeping its implicit structure operators inside the plugin. The distributed
+  binary retains exactly the two Stata entry points, checked after collection.
 - The engine's byte cache keeps open readers tied to one source generation.
   Late reads cannot insert old bytes into a replacement file's cache or
   consume that replacement's bytes. This fixes a deterministic Snappy size
