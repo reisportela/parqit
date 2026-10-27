@@ -1,7 +1,7 @@
 /*
   parqit view - Manage views, run DuckDB SQL, and set engine options
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Views, SQL, and engine settings...
   Launch directly with:  db parqit_views      (menu installed by: parqit menu)
@@ -18,7 +18,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 390
+DEFINE _dlght 370
 INCLUDE header
 HELP hlp1, view("help parqit##settings")
 RESET res1
@@ -27,6 +27,9 @@ SCRIPT PREINIT
 BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -38,8 +41,11 @@ END
 DIALOG main, label("parqit view - Manage views, run DuckDB SQL, and set engine options") ///
 	tabtitle("Main")
 BEGIN
-  GROUPBOX gb_report		_lft	_top	_iwd	_ht2h,		///
-	label("Report on the current view now (the dialog stays open)")
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  GROUPBOX gb_report		_lft	45	_iwd	_ht2h,		///
+	label("Report on the selected view now (the dialog stays open)")
   BUTTON bu_views		_ilft	_ss	70	.,		///
 	onpush(program rep_views)					///
 	tooltip("List the open views (parqit views)")			///
@@ -69,15 +75,15 @@ BEGIN
 	tooltip("End-to-end engine and codec check (parqit selftest)")	///
 	label("Self-test")
 
-  TEXT tx_op			_lft	75	290	.,		///
+  TEXT tx_op			_lft	95	290	.,		///
 	label("Action:")
-  LISTBOX lb_op			_lft	_ss	290	200,		///
+  LISTBOX lb_op			_lft	_ss	290	180,		///
 	contents(op_words)						///
 	values(op_vals)							///
 	onselchangelist(op_change)					///
 	label("Action")
 
-  TEXT tx_name			315	75	275	.,		///
+  TEXT tx_name			315	95	275	.,		///
 	label("View name:")
   EDIT ed_name			315	_ss	_vnwd	.,		///
 	max(32)								///
@@ -87,16 +93,6 @@ BEGIN
 	label("Command to run on it (e.g., count):")
   EDIT ed_cmd			315	_ss	275	.,		///
 	label("Command")
-
-  TEXT tx_sql			315	_ls	275	.,		///
-	label("DuckDB SQL:")
-  EDIT ed_sql			315	_ss	275	.,		///
-	label("DuckDB SQL")
-  CHECKBOX ck_sqlclear		315	_ls	275	.,		///
-	option(clear)							///
-	onclickon(main.ed_name.disable)					///
-	onclickoff(main.ed_name.enable)					///
-	label("Load the result into memory (clear)")
 
   TEXT tx_value			315	_ls	275	.,		///
 	label("Value:")
@@ -119,16 +115,59 @@ BEGIN
 	onclickon(program ts_clear_state)				///
 	onclickoff(program ts_clear_state)				///
 	label("Remove the declaration instead (clear)")
-  TEXT tx_context _lft 345 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
+  TEXT tx_context _lft 325 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
+END
+
+DIALOG opt, tabtitle("SQL")
+BEGIN
+  TEXT tx_sql _lft _top _iwd ., label("DuckDB SQL:")
+  EDIT ed_sql _lft _ss _iwd ., label("DuckDB SQL")
+  CHECKBOX ck_sqlclear _lft _ls _iwd ., option(clear) ///
+	onclickon(program sql_name_state) onclickoff(program sql_name_state) ///
+	label("Load the result into memory (clear)")
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
+	}
 END
 
 LIST sm_list
@@ -239,13 +278,19 @@ END
 
 SCRIPT all_off
 BEGIN
+	main.tx_view.disable
+	main.cb_view.disable
+	main.bu_show.disable
+	main.bu_explain.disable
+	main.bu_desc.disable
+	main.bu_ds.disable
 	main.tx_name.disable
 	main.ed_name.disable
 	main.tx_cmd.disable
 	main.ed_cmd.disable
-	main.tx_sql.disable
-	main.ed_sql.disable
-	main.ck_sqlclear.disable
+	opt.tx_sql.disable
+	opt.ed_sql.disable
+	opt.ck_sqlclear.disable
 	main.tx_value.disable
 	main.cb_sm.hide
 	main.cb_int64.hide
@@ -256,23 +301,31 @@ BEGIN
 	main.ck_tsclear.hide
 	main.tx_name.setlabel "View name:"
 	main.tx_cmd.setlabel "Command to run on it (e.g., count):"
-	main.tx_sql.setlabel "DuckDB SQL:"
+	opt.tx_sql.setlabel "DuckDB SQL:"
 	main.tx_value.setlabel "Value:"
+	program main_refresh
+END
+
+SCRIPT view_on
+BEGIN
+	main.tx_view.enable
+	main.cb_view.enable
+	main.bu_show.enable
+	main.bu_explain.enable
+	main.bu_desc.enable
+	main.bu_ds.enable
 END
 
 SCRIPT op_switch
 BEGIN
 	script all_off
-	main.tx_name.enable
-	main.ed_name.enable
+	script view_on
 END
 
 SCRIPT op_close
 BEGIN
 	script all_off
-	main.tx_name.enable
-	main.ed_name.enable
-	main.tx_name.setlabel "View name (empty = current view):"
+	script view_on
 END
 
 SCRIPT op_closeall
@@ -283,8 +336,7 @@ END
 SCRIPT op_run
 BEGIN
 	script all_off
-	main.tx_name.enable
-	main.ed_name.enable
+	script view_on
 	main.tx_cmd.enable
 	main.ed_cmd.enable
 END
@@ -292,9 +344,7 @@ END
 SCRIPT op_copy
 BEGIN
 	script all_off
-	main.tx_name.enable
-	main.ed_name.enable
-	main.tx_name.setlabel "View to copy (it stays unchanged):"
+	script view_on
 	main.tx_cmd.enable
 	main.ed_cmd.enable
 	main.tx_cmd.setlabel "Variables to keep (blank = all):"
@@ -306,6 +356,7 @@ END
 SCRIPT op_xtset
 BEGIN
 	script all_off
+	script view_on
 	main.tx_name.enable
 	main.ed_name.enable
 	main.tx_name.setlabel "Panel variable:"
@@ -322,6 +373,7 @@ END
 SCRIPT op_tsset
 BEGIN
 	script all_off
+	script view_on
 	main.tx_cmd.enable
 	main.ed_cmd.enable
 	main.tx_cmd.setlabel "Time variable (integer-valued; L. F. D. S. work by time):"
@@ -359,15 +411,15 @@ BEGIN
 	script all_off
 	main.tx_name.enable
 	main.tx_name.setlabel "Name of the view to open (optional):"
-	main.tx_sql.enable
-	main.ed_sql.enable
-	main.ck_sqlclear.enable
+	opt.tx_sql.enable
+	opt.ed_sql.enable
+	opt.ck_sqlclear.enable
 	program sql_name_state
 END
 
 PROGRAM sql_name_state
 BEGIN
-	if main.ck_sqlclear {
+	if opt.ck_sqlclear {
 		call main.ed_name.disable
 	}
 	else {
@@ -378,9 +430,10 @@ END
 SCRIPT op_query
 BEGIN
 	script all_off
-	main.tx_sql.enable
-	main.ed_sql.enable
-	main.tx_sql.setlabel "SQL fragment appended to the pipeline:"
+	script view_on
+	opt.tx_sql.enable
+	opt.ed_sql.enable
+	opt.tx_sql.setlabel "SQL fragment appended to the selected view's pipeline:"
 END
 
 SCRIPT op_statamissing
@@ -457,25 +510,29 @@ END
 
 PROGRAM rep_show
 BEGIN
-	put "parqit show"
+	call program main_require
+	put "parqit view " main.cb_view ": show"
 	stata
 END
 
 PROGRAM rep_explain
 BEGIN
-	put "parqit explain"
+	call program main_require
+	put "parqit view " main.cb_view ": explain"
 	stata
 END
 
 PROGRAM rep_describe
 BEGIN
-	put "parqit describe"
+	call program main_require
+	put "parqit view " main.cb_view ": describe"
 	stata
 END
 
 PROGRAM rep_ds
 BEGIN
-	put "parqit ds"
+	call program main_require
+	put "parqit view " main.cb_view ": ds"
 	stata
 END
 
@@ -493,40 +550,38 @@ END
 
 PROGRAM command
 BEGIN
+	if main.lb_op.equals("switch") | main.lb_op.equals("close") | main.lb_op.equals("run") | ///
+	   main.lb_op.equals("copy") | main.lb_op.equals("query") | main.lb_op.equals("xtset") | main.lb_op.equals("tsset") {
+		call program main_require
+	}
 	if main.lb_op.equals("switch") {
-		require main.ed_name
-		put "parqit view " main.ed_name
+		put "parqit view " main.cb_view
 	}
 	if main.lb_op.equals("close") {
-		put "parqit close"
-		if main.ed_name {
-			put " " main.ed_name
-		}
+		put "parqit close " main.cb_view
 	}
 	if main.lb_op.equals("closeall") {
 		put "parqit close _all"
 	}
 	if main.lb_op.equals("run") {
-		require main.ed_name
 		require main.ed_cmd
-		put "parqit view " main.ed_name ": " main.ed_cmd
+		put "parqit view " main.cb_view ": " main.ed_cmd
 	}
 	if main.lb_op.equals("copy") {
-		require main.ed_name
 		require main.ed_newname
-		put "parqit use "
+		put "parqit view " main.cb_view ": use "
 		if main.ed_cmd {
 			put main.ed_cmd " "
 		}
-		put "using view:" main.ed_name ", name(" main.ed_newname ")"
+		put "using view:" main.cb_view ", name(" main.ed_newname ")"
 	}
 	if main.lb_op.equals("sql") {
-		require main.ed_sql
+		require opt.ed_sql
 		put "parqit sql "
-		put /smartquote main.ed_sql
+		put /smartquote opt.ed_sql
 		beginoptions
-			option main.ck_sqlclear
-			if !main.ck_sqlclear {
+			option opt.ck_sqlclear
+			if !opt.ck_sqlclear {
 				if main.ed_name {
 					put "name(" main.ed_name ")"
 				}
@@ -534,13 +589,13 @@ BEGIN
 		endoptions
 	}
 	if main.lb_op.equals("query") {
-		require main.ed_sql
-		put "parqit query "
-		put /smartquote main.ed_sql
+		require opt.ed_sql
+		put "parqit view " main.cb_view ": query "
+		put /smartquote opt.ed_sql
 	}
 	if main.lb_op.equals("xtset") {
 		if main.ck_tsclear {
-			put "parqit xtset"
+			put "parqit view " main.cb_view ": xtset"
 			beginoptions
 				option main.ck_tsclear
 			endoptions
@@ -548,7 +603,7 @@ BEGIN
 		else {
 			require main.ed_name
 			require main.ed_cmd
-			put "parqit xtset " main.ed_name " " main.ed_cmd
+			put "parqit view " main.cb_view ": xtset " main.ed_name " " main.ed_cmd
 			beginoptions
 				if main.ed_value {
 					put "delta(" main.ed_value ")"
@@ -558,14 +613,14 @@ BEGIN
 	}
 	if main.lb_op.equals("tsset") {
 		if main.ck_tsclear {
-			put "parqit tsset"
+			put "parqit view " main.cb_view ": tsset"
 			beginoptions
 				option main.ck_tsclear
 			endoptions
 		}
 		else {
 			require main.ed_cmd
-			put "parqit tsset " main.ed_cmd
+			put "parqit view " main.cb_view ": tsset " main.ed_cmd
 			beginoptions
 				if main.ed_value {
 					put "delta(" main.ed_value ")"

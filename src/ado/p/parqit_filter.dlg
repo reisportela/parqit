@@ -1,7 +1,7 @@
 /*
   parqit keep - Keep or drop observations, or draw a random sample
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Keep or drop observations, or draw a sample...
   Launch directly with:  db parqit_filter      (menu installed by: parqit menu)
@@ -11,14 +11,14 @@
   if expression is the sampling frame, and strata, whole clusters and an
   indicator follow sample2. The Create... button
   opens Stata's expression builder (date functions td(), tm(), year(), ...
-  included); Variables lists the names of the current view (parqit ds).
+  included); Variables lists the names of the selected view (parqit ds).
   These verbs are lazy: they change the view's plan, not the data in memory.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 485
+DEFINE _dlght 365
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -27,6 +27,9 @@ SCRIPT PREINIT
 BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -38,13 +41,16 @@ END
 DIALOG main, label("parqit keep - Keep or drop observations, or draw a random sample") ///
 	tabtitle("Main")
 BEGIN
-  RADIO rb_keepif		_lft	_top	_lw80	.,		///
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  RADIO rb_keepif		_lft	45	_lw80	.,		///
 	first								///
 	onclickon(program main_mode)					///
 	label("Keep observations satisfying a condition (keep if)")
   BUTTON bu_ds			_rj80	@	80	.,		///
 	onpush(program main_ds)						///
-	tooltip("List the variable names of the current view (parqit ds)") ///
+	tooltip("List the variable names of the selected view (parqit ds)") ///
 	label("Variables")
   RADIO rb_dropif		_lft	_ss	_iwd	.,		///
 	onclickon(program main_mode)					///
@@ -58,7 +64,7 @@ BEGIN
 	label("by/bysort prefix: group variables [(sort variables)] (optional):")
   EDIT ed_bys			@	_ss	300	.,		///
 	label("bysort prefix")
-  CHECKBOX ck_nosort		330	@	160	.,		///
+  CHECKBOX ck_nosort		330	@	260	.,		///
 	label("Already sorted (by, not bysort)")
 
   RADIO rb_keepin		_lft	_ls	_iwd	.,		///
@@ -83,7 +89,15 @@ BEGIN
 	last								///
 	onclickon(program main_mode)					///
 	label("Draw a random sample of the observations (sample)")
-  TEXT tx_amount		_ilft	_ss	140	.,		///
+  TEXT tx_note			_lft	_ls	_iwd	.,		///
+	label("These verbs change the view's plan only; materialise the result with parqit collect or parqit save.")
+  TEXT tx_context _lft 325 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
+END
+
+DIALOG opt, tabtitle("Sampling")
+BEGIN
+  TEXT tx_amount		_ilft	_top	140	.,		///
 	label("Amount:") right
   EDIT ed_amount		165	@	80	.,		///
 	error("Amount")							///
@@ -119,10 +133,6 @@ BEGIN
 	option(generate)						///
 	label("Indicator variable")
 
-  TEXT tx_note			_lft	_ls	_iwd	.,		///
-	label("These verbs change the view's plan only; materialise the result with parqit collect or parqit save.")
-  TEXT tx_context _lft 440 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
 
 LIST rule_words
@@ -141,10 +151,44 @@ END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
+	}
 END
 
 PROGRAM main_mode
@@ -159,18 +203,18 @@ BEGIN
 	call main.tx_to.disable
 	call main.ed_to.disable
 	call main.tx_fl.disable
-	call main.tx_amount.disable
-	call main.ed_amount.disable
-	call main.ck_count.disable
-	call main.tx_seed.disable
-	call main.ed_seed.disable
-	call main.tx_by.disable
-	call main.ed_by.disable
-	call main.tx_cluster.disable
-	call main.ed_cluster.disable
-	call main.cb_rule.disable
-	call main.tx_gen.disable
-	call main.ed_gen.disable
+	call opt.tx_amount.disable
+	call opt.ed_amount.disable
+	call opt.ck_count.disable
+	call opt.tx_seed.disable
+	call opt.ed_seed.disable
+	call opt.tx_by.disable
+	call opt.ed_by.disable
+	call opt.tx_cluster.disable
+	call opt.ed_cluster.disable
+	call opt.cb_rule.disable
+	call opt.tx_gen.disable
+	call opt.ed_gen.disable
 	if main.rb_keepif | main.rb_dropif {
 		call main.tx_if.enable
 		call main.ex_if.enable
@@ -188,82 +232,84 @@ BEGIN
 	if main.rb_sample {
 		call main.tx_if.enable
 		call main.ex_if.enable
-		call main.tx_amount.enable
-		call main.ed_amount.enable
-		call main.ck_count.enable
-		call main.tx_seed.enable
-		call main.ed_seed.enable
-		call main.tx_by.enable
-		call main.ed_by.enable
-		call main.tx_cluster.enable
-		call main.ed_cluster.enable
-		call main.cb_rule.enable
-		call main.tx_gen.enable
-		call main.ed_gen.enable
+		call opt.tx_amount.enable
+		call opt.ed_amount.enable
+		call opt.ck_count.enable
+		call opt.tx_seed.enable
+		call opt.ed_seed.enable
+		call opt.tx_by.enable
+		call opt.ed_by.enable
+		call opt.tx_cluster.enable
+		call opt.ed_cluster.enable
+		call opt.cb_rule.enable
+		call opt.tx_gen.enable
+		call opt.ed_gen.enable
 	}
 END
 
 PROGRAM main_ds
 BEGIN
-	put "parqit ds"
+	call program main_require
+	put "parqit view " main.cb_view ": ds"
 	stata
 END
 
 PROGRAM command
 BEGIN
+	call program main_require
 	if main.rb_keepif {
 		require main.ex_if
 		if main.ed_bys {
 			if main.ck_nosort {
-				put "parqit by " main.ed_bys ": keep if " main.ex_if
+				put "parqit view " main.cb_view ": by " main.ed_bys ": keep if " main.ex_if
 			}
 			else {
-				put "parqit bysort " main.ed_bys ": keep if " main.ex_if
+				put "parqit view " main.cb_view ": bysort " main.ed_bys ": keep if " main.ex_if
 			}
 		}
 		else {
-			put "parqit keep if " main.ex_if
+			put "parqit view " main.cb_view ": keep if " main.ex_if
 		}
 	}
 	if main.rb_dropif {
 		require main.ex_if
 		if main.ed_bys {
 			if main.ck_nosort {
-				put "parqit by " main.ed_bys ": drop if " main.ex_if
+				put "parqit view " main.cb_view ": by " main.ed_bys ": drop if " main.ex_if
 			}
 			else {
-				put "parqit bysort " main.ed_bys ": drop if " main.ex_if
+				put "parqit view " main.cb_view ": bysort " main.ed_bys ": drop if " main.ex_if
 			}
 		}
 		else {
-			put "parqit drop if " main.ex_if
+			put "parqit view " main.cb_view ": drop if " main.ex_if
 		}
 	}
 	if main.rb_keepin {
 		require main.ed_from
 		require main.ed_to
-		put "parqit keep in " main.ed_from "/" main.ed_to
+		put "parqit view " main.cb_view ": keep in " main.ed_from "/" main.ed_to
 	}
 	if main.rb_dropin {
 		require main.ed_from
 		require main.ed_to
-		put "parqit drop in " main.ed_from "/" main.ed_to
+		put "parqit view " main.cb_view ": drop in " main.ed_from "/" main.ed_to
 	}
 	if main.rb_sample {
-		require main.ed_amount
-		put "parqit sample " main.ed_amount
+		require opt.ed_amount
+		put "parqit view " main.cb_view ": sample " opt.ed_amount
 		if main.ex_if {
 			put " if " main.ex_if
 		}
 		beginoptions
-			option main.ck_count
-			optionarg main.ed_seed
-			optionarg main.ed_by
-			optionarg main.ed_cluster
-			if main.ed_cluster & !main.cb_rule.equals("strict") {
-				put " " main.cb_rule
+			option opt.ck_count
+			optionarg opt.ed_seed
+			optionarg opt.ed_by
+			optionarg opt.ed_cluster
+			if opt.ed_cluster & !opt.cb_rule.equals("strict") {
+				put " " opt.cb_rule
 			}
-			optionarg main.ed_gen
+			optionarg opt.ed_gen
 		endoptions
 	}
 END

@@ -20,11 +20,19 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.6.0 — the full surface below is implemented and covered by a
+> **Status:** v0.6.1 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.6.1 makes the native dialogs compact and adds explicit view selection
+throughout the menu. Variable pickers follow the chosen source, lazy combinations
+distinguish master and using views, and ordinary view operations restore which
+view was current. Read offers view copying; the helps describe every current tab
+and scope exception. The engine, numerical contract and CLI grammar are unchanged.
+The [menu validation note](docs/audits/MENU_VIEW_SELECTION_2026-10-27.md) records
+the synthetic GUI and documentation checks completed before the release bump.
 
 Version 0.6.0 embeds DuckDB 2.0.0 by default, by the
 maintainer's decision; 1.5.6 remains an optional source build
@@ -1249,6 +1257,19 @@ parqit view panel                           // all columns, still 2010 on
 ```
 
 ## Tour & examples
+
+In GUI Stata, `parqit menu` adds **User > parqit**. The native dialogs use
+compact windows, with additional options on labelled tabs. Select the operation
+on **Main**, then fill its options on the other tabs before clicking **Submit**
+or **OK**. Stata's native dialog windows have fixed sizes.
+
+Every dialog that operates on a view offers a view selector, initially the
+session's current view. **Refresh** updates the open views and variable pickers.
+Ordinary commands target the chosen view explicitly and leave the session's
+current view unchanged. The selector is disabled for file, memory and session
+operations. **Combine datasets** distinguishes the master view from an optional
+using view; **Read data** offers an explicit view-copy mode. Explicit switching,
+closing and source-opening actions retain their normal session behaviour.
 
 Two self-contained crash courses ship with parqit — as ancillary files of the
 SSC package (`ssc install parqit, all replace` copies them into the current

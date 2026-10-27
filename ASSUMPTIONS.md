@@ -5541,3 +5541,57 @@ entry notes the conservative fallback if the assumption proves wrong.
     remain protected. Release binaries must come from the four-platform CI,
     with checksums and an isolated public installation verified separately
     from the already-passed local C34a/L34a evidence.
+
+249. **Compact native dialogs (2026-10-27).** The maintainer chose to keep
+    Stata's native dialogs after a GUI probe found equal minimum and maximum
+    window sizes in all ten parqit dialogs and native summarize. The documented
+    dialog language provides initial POSITION geometry, not free resizing.
+    Keep the 600-unit wide canvas and cap the content height at 395 units;
+    separate extra options into named tabs rather than reducing font sizes or
+    dropping controls. Main retains the operation and current-view context.
+    Moving a control changes its tab-qualified reference, including the read
+    dialog's source callback in the ado; it must not change defaults, mode
+    gating, generated commands or lazy/materialisation semantics. Validate
+    actual GUI geometry and cross-tab submission as well as the static lint.
+
+250. **Explicit view selection in Explore (2026-10-27).** The maintainer
+    requested a choice among open views in Describe and explore. Initialise
+    the selector from the current view, use the selected view's metadata for
+    variable pickers, and emit the existing `parqit view name:` prefix so
+    exploration leaves the session's current view unchanged. Refresh preserves
+    a live choice; a closed choice is cleared rather than redirected. File
+    descriptions stay independent and work without views. Registry/schema
+    callbacks are queued, preserve r(), and never materialise source rows.
+    Read the live selector when the queued callback executes to avoid acting
+    on an earlier GUI choice. Extra report options move to their own tab;
+    retain the compact window policy and every existing operation/option.
+
+251. **View selectors throughout the native menu (2026-10-27).** The
+    maintainer authorised the same target-selection contract in every
+    view-operating dialog. Share the registry/schema callback as `_dlgviews`,
+    retaining `_dlgexplore` as an internal compatibility wrapper. Initialise
+    from the current view, read live GUI state when queued work runs, and
+    preserve r(). Ordinary view operations, including materialisers, nested
+    by/bysort, reports, query and time declarations, explicitly prefix the
+    chosen view and restore session current. Selector-driven plan copies do
+    so too; explicit Switch, Close and source-opening actions retain their
+    intentional session effects. File/memory/session/all-view modes disable
+    the selector and retain their own inputs. Combine has distinct master
+    and using-view choices; its native memory routes still use a file. Read
+    gains a view-copy mode with a required new name. Clear stale selections
+    rather than silently falling back. Retain all existing controls, options,
+    defaults and precision, and the compact height limit. Validate schema
+    provenance and mode exceptions by real GUI clicks as well as batch
+    checks, with synthetic fixtures and an independent Parquet oracle.
+    Read numeric GUI .value members through class macro expansion; treating
+    them as scalar expressions silently fails under capture and misidentifies
+    the operation mode. GUI checks must assert the detected mode and schema
+    as well as the emitted command and result.
+
+252. **Authorised menu release 0.6.1 (2026-10-27).** The maintainer requested
+    commit, push and release after the menu/help revisions. This authorises
+    the focused product/test/documentation changes and the required version
+    surfaces, not unrelated dirty files or a global ado installation. Use a
+    new 0.6.1 tag, preserve existing tags, and retain DuckDB 2.0.0 and numerical
+    contract 4. Require green platform CI, staged licensed checks and exact
+    artifact/public-install verification before reporting the release done.

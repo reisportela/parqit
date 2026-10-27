@@ -1,4 +1,4 @@
-*! version 0.6.0 26oct2026
+*! version 0.6.1 27oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -31,7 +31,7 @@ program define parqit, rclass
         set merge append joinby reshape pivot sql query summarize tabulate ///
         path view views misstable levelsof ds lookfor codebook             ///
         tabstat correlate pwcorr histogram mergein appendin menu           ///
-        spssencode by bysort tsset xtset unique format _dlgvars _dlgcontext _dlgsource
+        spssencode by bysort tsset xtset unique format _dlgvars _dlgcontext _dlgsource _dlgexplore _dlgviews
     local k : list posof `"`todo'"' in cmds
     if (`k' == 0) {
         di as err `"parqit: unknown subcommand `"`todo'"'"'
@@ -111,7 +111,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.6.0"
+    local ado_version "0.6.1"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -394,6 +394,229 @@ program define _parqit__dlgcontext, rclass
     }
 end
 
+* Shared dialog targets use registry/schema metadata only and preserve r().
+* Keep the original Explore helper as a private compatibility entry point.
+program define _parqit__dlgexplore, rclass
+    version 16.0
+    _parqit__dlgviews `0'
+    return add
+end
+
+program define _parqit__dlgviews, rclass
+    version 16.0
+    syntax namelist(min=1 max=1 name=dlg) [, View(name) Initial Target REPORT]
+    tempname prior
+    _return hold `prior'
+    local views ""
+    local current ""
+    local selected "`view'"
+    if ("`view'" == "" & "`initial'" == "") {
+        capture local selected `"`.`dlg'.main.cb_view.value'"'
+        if ("`selected'" == "(select a view)") local selected ""
+    }
+    local vars ""
+    local numeric ""
+    local usingvars ""
+    local kind "view"
+    local operation ""
+    local previous ""
+    local previous_kind ""
+    local previous_using ""
+    local usingview ""
+    local usingfile ""
+    capture local operation `"`.`dlg'.main.lb_op.value'"'
+    capture local previous `"`.`dlg'.pq_view_name.value'"'
+    capture local previous_kind `"`.`dlg'.pq_target_kind.value'"'
+    capture local previous_using `"`.`dlg'.pq_using_name.value'"'
+    capture local usingview `"`.`dlg'.source.cb_usingview.value'"'
+    capture local usingfile `"`.`dlg'.main.fi_using.value'"'
+    foreach radio in rb_data rb_spss rb_mergein rb_appendin rb_copy rb_open rb_path {
+        local `radio' 0
+        capture local `radio' = `.`dlg'.main.`radio'.value'
+    }
+    local useview 0
+    capture local useview = `.`dlg'.source.ck_usingview.value'
+    if ("`dlg'" == "parqit_explore_dlg" & "`operation'" == "descfile") local kind "source"
+    if ("`dlg'" == "parqit_read_dlg" & !`rb_copy') local kind = cond(`rb_open',"memory","source")
+    if ("`dlg'" == "parqit_gen_dlg" & `rb_spss') local kind "memory"
+    if ("`dlg'" == "parqit_combine_dlg" & (`rb_mergein' | `rb_appendin')) local kind "memory"
+    if ("`dlg'" == "parqit_write_dlg") {
+        if (`rb_data') local kind "memory"
+        if (`rb_spss') local kind "source"
+    }
+    if ("`dlg'" == "parqit_views_dlg") {
+        if ("`operation'" == "sql") local kind "source"
+        if ("`operation'" == "closeall") local kind "all"
+        if (!inlist("`operation'","switch","close","closeall","run","copy","sql","query") & ///
+            !inlist("`operation'","xtset","tsset")) local kind "session"
+    }
+    local context "Selected view: none; open a view or click Refresh"
+    capture {
+        _parqit_ensure_plugin
+        tempfile resp
+        mata: st_local("rhex", _parqit_hex(st_local("resp")))
+        plugin call parqit_plugin, view_list `rhex'
+        mata: _parqit_dlg_view_names("`resp'")
+        mata: st_local("current", _parqit_unhex(st_local("parqit_view_name")))
+    }
+    local registry_rc = _rc
+    if (`registry_rc') local context "Views unavailable; check parqit version and click Refresh"
+    local current_live : list current in views
+    if (!`current_live' | "`current'" == "") local current ""
+    if ("`initial'" != "" & "`selected'" == "") local selected "`current'"
+    local live : list selected in views
+    if ("`selected'" == "") local live 0
+    if (!`live') {
+        if ("`selected'" != "" & !`registry_rc') local context "Selected view `selected' is closed; choose another view"
+        local selected ""
+    }
+    else {
+        local context "Selected view: `selected'"
+    }
+    if ("`kind'" == "view" & `live') {
+        capture quietly _parqit_view `selected': _dlgvars `dlg' vv_list, numeric(numeric_list)
+        if (_rc) local context "Selected view: `selected'; variable names unavailable"
+        else {
+            local vars `"`r(varlist)'"'
+            local numeric `"`r(numeric)'"'
+        }
+    }
+    if ("`kind'" == "memory") {
+        local context "Source: dataset in Stata memory"
+        if ("`dlg'" != "parqit_combine_dlg") {
+            quietly _parqit__dlgvars `dlg' vv_list, data numeric(numeric_list)
+            local vars `"`r(varlist)'"'
+            local numeric `"`r(numeric)'"'
+        }
+    }
+    if ("`kind'" == "source") {
+        local context "Source: file or directory named above"
+        if ("`dlg'" == "parqit_explore_dlg") local context "Source: Parquet file named above"
+        if ("`dlg'" == "parqit_write_dlg") local context "Source: SPSS or R file named above"
+        if ("`dlg'" == "parqit_views_dlg") local context "Source: DuckDB SQL query"
+    }
+    if ("`kind'" == "session") local context "Scope: session settings"
+    if ("`kind'" == "all") local context "Scope: all open views"
+    local using_live : list usingview in views
+    if ("`usingview'" == "(select a view)" | !`using_live') local usingview ""
+    if ("`dlg'" == "parqit_combine_dlg") {
+        if (`useview' & "`kind'" == "view") {
+            if ("`usingview'" != "") {
+                capture quietly _parqit_view `usingview': _dlgvars `dlg' uv_list
+                if (!_rc) local usingvars `"`r(varlist)'"'
+            }
+        }
+        else if (`"`usingfile'"' != "") {
+            if (substr(`"`usingfile'"',1,5) == "view:") {
+                local sourceview = substr(`"`usingfile'"',6,.)
+                capture quietly _parqit_view `sourceview': _dlgvars `dlg' uv_list
+            }
+            else capture quietly _parqit__dlgvars `dlg' uv_list using `"`usingfile'"'
+            if (!_rc) local usingvars `"`r(varlist)'"'
+        }
+        if ("`kind'" == "memory") local vars `"`usingvars'"'
+        if ("`kind'" == "view" & `live' & `useview') {
+            local context = "Master view: `selected'; using view: " + cond("`usingview'"=="","not selected","`usingview'")
+        }
+    }
+    local fields "main.cb_vars opt.cb_by"
+    if ("`dlg'" == "parqit_stats_dlg") local fields "main.cb_sumvars main.cb_tab main.cb_tab2 main.cb_tsvars main.cb_tsby main.cb_corr opt.cb_hvar"
+    if ("`dlg'" == "parqit_filter_dlg" | "`dlg'" == "parqit_views_dlg") local fields ""
+    if ("`dlg'" == "parqit_vars_dlg") local fields "main.cb_vars main.cb_old opt.cb_keys"
+    if ("`dlg'" == "parqit_gen_dlg") local fields "opt.cb_by"
+    if ("`dlg'" == "parqit_pivot_dlg") local fields "main.cb_val1 main.cb_val2 main.cb_by main.cb_rows main.cb_cols opt.cb_cvars opt.cb_stubs opt.cb_i opt.cb_j"
+    if ("`dlg'" == "parqit_combine_dlg") local fields "main.cb_keys main.cb_keepus"
+    if ("`dlg'" == "parqit_write_dlg") local fields "opt.cb_part"
+    if ("`dlg'" == "parqit_read_dlg") local fields "selection.cb_vars"
+    * Repopulation can fire onselchange. Suppress that callback while updating
+    * the selector; actual user changes clear the previous variable selections.
+    capture .`dlg'.pq_refreshing.setvalue 1
+    if ("`target'" == "") {
+        capture .`dlg'.view_list.Arrdropall
+        capture .`dlg'.view_list[1] = "(select a view)"
+        local i 2
+        foreach name of local views {
+            capture .`dlg'.view_list[`i'] = "`name'"
+            local ++i
+        }
+        capture .`dlg'.main.cb_view.repopulate
+        if ("`selected'" != "") capture .`dlg'.main.cb_view.setvalue "`selected'"
+        else capture .`dlg'.main.cb_view.setvalue "(select a view)"
+        if ("`dlg'" == "parqit_combine_dlg") {
+            capture .`dlg'.source.cb_usingview.repopulate
+            if ("`usingview'" != "") capture .`dlg'.source.cb_usingview.setvalue "`usingview'"
+            else capture .`dlg'.source.cb_usingview.setvalue "(select a view)"
+        }
+    }
+    local action = cond("`kind'"=="view","enable","disable")
+    capture .`dlg'.main.tx_view.`action'
+    capture .`dlg'.main.cb_view.`action'
+    capture .`dlg'.main.tx_context.setlabel `"`context'"'
+    local keepfile = ("`dlg'"=="parqit_read_dlg" & "`kind'"=="source")
+    if (!`keepfile' & ("`initial'" != "" | "`previous_kind'"!="`kind'" | ///
+        ("`kind'"=="view" & ("`previous'"!="`selected'" | "`selected'"=="")))) {
+        foreach field of local fields {
+            capture .`dlg'.`field'.setvalue ""
+        }
+    }
+    * Empty or unavailable targets must not leave another view's schema behind.
+    if (!`keepfile') {
+        capture .`dlg'.vv_list.Arrdropall
+        capture .`dlg'.numeric_list.Arrdropall
+        local i 1
+        foreach name of local vars {
+            capture .`dlg'.vv_list[`i'] = "`name'"
+            local ++i
+        }
+        local i 1
+        foreach name of local numeric {
+            capture .`dlg'.numeric_list[`i'] = "`name'"
+            local ++i
+        }
+    }
+    if ("`dlg'" == "parqit_combine_dlg") {
+        local usingkey = cond(`useview' & "`kind'"=="view","view:`usingview'",`"file:`usingfile'"')
+        if (`"`previous_using'"' != `"`usingkey'"') {
+            capture .`dlg'.main.cb_keepus.setvalue ""
+            if ("`kind'"=="memory") capture .`dlg'.main.cb_keys.setvalue ""
+        }
+        capture .`dlg'.uv_list.Arrdropall
+        local i 1
+        foreach name of local usingvars {
+            capture .`dlg'.uv_list[`i'] = "`name'"
+            local ++i
+        }
+        capture .`dlg'.pq_using_name.setvalue `"`usingkey'"'
+    }
+    if (!`keepfile') {
+        foreach field of local fields {
+            capture .`dlg'.`field'.repopulate
+        }
+    }
+    if ("`dlg'" == "parqit_views_dlg") {
+        local action = cond("`kind'"=="view" & `live',"enable","disable")
+        foreach button in bu_show bu_explain bu_desc bu_ds {
+            capture .`dlg'.main.`button'.`action'
+        }
+    }
+    capture .`dlg'.pq_view_name.setvalue "`selected'"
+    capture .`dlg'.pq_target_kind.setvalue "`kind'"
+    capture .`dlg'.pq_view_live.setvalue `live'
+    capture .`dlg'.pq_refreshing.setvalue 0
+    _return restore `prior'
+    return add
+    if ("`report'" != "") {
+        return local views "`views'"
+        return local current "`current'"
+        return local selected "`selected'"
+        return local varlist "`vars'"
+        return local numeric "`numeric'"
+        return local usingvars "`usingvars'"
+        return local kind "`kind'"
+        return local context `"`context'"'
+    }
+end
+
 * File inspection controls apply only to Parquet sources; no adapter is run.
 program define _parqit__dlgsource, rclass
     version 16.0
@@ -409,21 +632,21 @@ program define _parqit__dlgsource, rclass
     local legacy = inlist("`ext'", "dta", "xls", "xlsx", "sav", "zsav") | inlist("`ext'", "rds", "rda", "rdata") | ///
         inlist("`ext'", "csv", "tsv", "txt", "tab")
     local usemode 1
-    capture local usemode = .`dlg'.main.rb_use.value
+    capture local usemode = `.`dlg'.main.rb_use.value'
     if (!`usemode') {
         local footer 0
-        capture local legacy = .`dlg'.main.rb_open.value
+        capture local legacy = `.`dlg'.main.rb_open.value'
     }
     local action = cond(`footer', "enable", "disable")
     capture .`dlg'.main.bu_desc.`action'
-    capture .`dlg'.main.bu_pop.`action'
+    capture .`dlg'.selection.bu_pop.`action'
     local action = cond(`legacy', "enable", "disable")
-    capture .`dlg'.main.tx_enc.`action'
-    capture .`dlg'.main.cb_enc.`action'
+    capture .`dlg'.opt.tx_enc.`action'
+    capture .`dlg'.opt.cb_enc.`action'
     * object() names the data frame of an R file, and only there
     local action = cond(`usemode' & inlist("`ext'", "rds", "rda", "rdata"), "enable", "disable")
-    capture .`dlg'.main.tx_object.`action'
-    capture .`dlg'.main.ed_object.`action'
+    capture .`dlg'.opt.tx_object.`action'
+    capture .`dlg'.opt.ed_object.`action'
     _return restore `prior'
     return add
     if ("`report'" != "") return scalar footer = `footer'
@@ -6602,6 +6825,22 @@ end
 
 version 16.0
 mata:
+
+void _parqit_dlg_view_names(string scalar resp)
+{
+    real scalar      fh
+    string scalar    line, out
+    string rowvector f
+
+    fh = fopen(resp, "r")
+    out = ""
+    while ((line = fget(fh)) != J(0, 0, "")) {
+        f = _parqit_fields(line, 6)
+        if (f[1] == "view") out = out + (out == "" ? "" : " ") + _parqit_unhex(f[5])
+    }
+    fclose(fh)
+    st_local("views", out)
+}
 
 void _parqit_print_views(string scalar resp)
 {

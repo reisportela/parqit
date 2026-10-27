@@ -2,7 +2,7 @@
   parqit merge - Combine the view with a file or another view, or join the
   data in memory with a file
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Combine datasets (merge, append, joinby)...
   Launch directly with:  db parqit_combine      (menu installed by: parqit menu)
@@ -15,14 +15,15 @@
   commands that take it (nonotes for every merge and append, nolabel for
   mergein/appendin, the rest for mergein), appendin's force, and the code page
   of a legacy .dta/Excel/SPSS/R using source. Populate fills the key pickers from the
-  current view (lazy verbs) or from the using file (memory verbs), and the
-  using-variable picker from the Parquet footer of the using file.
+  selected master view (lazy verbs) or from the using file (memory verbs), and the
+  using-variable picker from its own source. The Using source tab can select
+  another open view for a lazy combination; native memory routes use a file.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 520
+DEFINE _dlght 395
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -32,6 +33,10 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
+	create STRING pq_using_name
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -43,7 +48,10 @@ END
 DIALOG main, label("parqit merge - Combine the view with a file or another view, or join the data in memory with a file") ///
 	tabtitle("Main")
 BEGIN
-  GROUPBOX gb_type		_lft	_top	_iwd	_ht10,		///
+  TEXT tx_view _lft _top 80 ., label("Master view:")
+  COMBOBOX cb_view 95 @ 495 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("Master view")
+  GROUPBOX gb_type		_lft	45	_iwd	_ht10,		///
 	label("Type of combination")
   RADIO rb_merge		_ilft	_ss	_ibwd	.,		///
 	first								///
@@ -63,23 +71,18 @@ BEGIN
 	onclickon(program main_mode)					///
 	label("Append a file to the data in memory (appendin; native append)")
 
-  TEXT tx_using			_lft	150	_lw80	.,		///
+  TEXT tx_using			_lft	185	_lw80	.,		///
 	label("Using source: filename, glob, Hive directory, or view:name (lazy types):")
   BUTTON bu_pop			_rj80	@	80	.,		///
 	onpush(program main_populate)					///
-	tooltip("Populate the key picker from the current view (or the using file for mergein/appendin) and the using-variable picker from the using file") ///
+	tooltip("Populate keys from the selected master view (or the using file for native routes) and using variables from their own source") ///
 	label("Populate")
   FILE fi_using			_lft	_ss	_iwd	.,		///
+	onchange(program main_refresh)					///
 	error("Using source")						///
 	defext(parquet)							///
 	filter("Data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav;*.rds;*.rda;*.RData|Parquet|*.parquet|Text|*.csv;*.tsv;*.txt;*.tab|Stata|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|R|*.rds;*.rda;*.RData|All files|*.*") ///
 	label("Browse...")
-
-  TEXT tx_more			_lft	_ls	_iwd	.,		///
-	label("Additional using sources for append (filenames, globs, or view:name, separated by spaces):")
-  EDIT ed_more			@	_ss	@	.,		///
-	tooltip("Use Stata compound quotes around each additional path containing spaces or commas") ///
-	label("Additional using sources")
 
   TEXT tx_kind			_lft	_ls	_vnwd	.,		///
 	label("Merge type:")
@@ -105,7 +108,13 @@ BEGIN
 	contents(uv_list)						///
 	label("Variables to keep from the using source")
 
-  GROUPBOX gb_keep		_lft	_ls	_iwd	_ht2,		///
+  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
+END
+
+DIALOG results, tabtitle("Results")
+BEGIN
+  GROUPBOX gb_keep		_lft	_top	_iwd	_ht2,		///
 	label("Results to keep (merge; leave all unchecked to keep all)")
   CHECKBOX ck_master		_ilft	_ss	180	.,		///
 	label("Record appeared in master only")
@@ -122,22 +131,85 @@ BEGIN
 	label("Name of new variable to mark results")
   CHECKBOX ck_nogen		140	@	450	.,		///
 	option(nogenerate)						///
-	onclickon(main.ed_gen.disable)					///
-	onclickoff(main.ed_gen.enable)					///
+	onclickon(results.ed_gen.disable)					///
+	onclickoff(results.ed_gen.enable)					///
 	label("Do not generate a variable marking merge results")
-  TEXT tx_context _lft 475 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
-	if main.rb_mergein | main.rb_appendin {
-		put ", data"
-	}
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+DIALOG source, tabtitle("Using source")
+BEGIN
+  CHECKBOX ck_usingview _lft _top _iwd ., ///
+	label("Use another open view as the using source (lazy merge, append or joinby)") ///
+	onclickon(program main_mode) onclickoff(program main_mode)
+  TEXT tx_usingview _lft _ls _iwd ., label("Using view:")
+  COMBOBOX cb_usingview _lft _ss _iwd ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_using) label("Using view")
+  TEXT tx_more _lft _ls _iwd ., ///
+	label("Additional using sources for append (filenames, globs, or view:name, separated by spaces):")
+  EDIT ed_more @ _ss @ ., ///
+	tooltip("Use Stata compound quotes around each additional path containing spaces or commas") ///
+	label("Additional using sources")
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_using
+BEGIN
+	call program main_refresh
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open master view. Click Refresh to update the list."
+	}
+END
+
+PROGRAM using_output
+BEGIN
+	if source.ck_usingview {
+		if !source.cb_usingview | source.cb_usingview.iseq("(select a view)") {
+			stopbox stop "Select an open using view on Using source."
+		}
+		put "view:" source.cb_usingview
+	}
+	else {
+		require main.fi_using
+		put /smartquote main.fi_using
+	}
 END
 
 DIALOG opt, tabtitle("Options")
@@ -249,21 +321,21 @@ END
 
 PROGRAM main_mode
 BEGIN
-	call main.tx_more.disable
-	call main.ed_more.disable
+	call source.tx_more.disable
+	call source.ed_more.disable
 	call main.tx_kind.disable
 	call main.cb_kind.disable
 	call main.tx_keys.disable
 	call main.cb_keys.disable
 	call main.tx_keepus.disable
 	call main.cb_keepus.disable
-	call main.gb_keep.disable
-	call main.ck_master.disable
-	call main.ck_using.disable
-	call main.ck_match.disable
-	call main.tx_gen.disable
-	call main.ed_gen.disable
-	call main.ck_nogen.disable
+	call results.gb_keep.disable
+	call results.ck_master.disable
+	call results.ck_using.disable
+	call results.ck_match.disable
+	call results.tx_gen.disable
+	call results.ed_gen.disable
+	call results.ck_nogen.disable
 	call opt.gb_native.disable
 	call opt.ck_update.disable
 	call opt.ck_mreplace.disable
@@ -285,25 +357,25 @@ BEGIN
 		call main.cb_keys.enable
 		call main.tx_keepus.enable
 		call main.cb_keepus.enable
-		call main.gb_keep.enable
-		call main.ck_master.enable
-		call main.ck_using.enable
-		call main.ck_match.enable
-		call main.tx_gen.enable
-		call main.ck_nogen.enable
-		call main.tx_gen.setlabel "Name of new variable to mark merge results (default _merge):"
-		if !main.ck_nogen {
-			call main.ed_gen.enable
+		call results.gb_keep.enable
+		call results.ck_master.enable
+		call results.ck_using.enable
+		call results.ck_match.enable
+		call results.tx_gen.enable
+		call results.ck_nogen.enable
+		call results.tx_gen.setlabel "Name of new variable to mark merge results (default _merge):"
+		if !results.ck_nogen {
+			call results.ed_gen.enable
 		}
 	}
 	if main.rb_append {
-		call main.tx_more.enable
-		call main.ed_more.enable
+		call source.tx_more.enable
+		call source.ed_more.enable
 		call main.tx_keepus.enable
 		call main.cb_keepus.enable
-		call main.tx_gen.enable
-		call main.ed_gen.enable
-		call main.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
+		call results.tx_gen.enable
+		call results.ed_gen.enable
+		call results.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
 	}
 	if main.rb_joinby {
 		call main.tx_keys.enable
@@ -342,63 +414,54 @@ BEGIN
 		call opt.cb_int64.enable
 		call main.tx_keepus.enable
 		call main.cb_keepus.enable
-		call main.tx_gen.enable
-		call main.ed_gen.enable
-		call main.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
+		call results.tx_gen.enable
+		call results.ed_gen.enable
+		call results.tx_gen.setlabel "Name of new variable to mark the source of each observation (optional):"
 		call opt.ck_nolabel.enable
 		call opt.ck_aforce.enable
 	}
-	call program main_context
+	if main.rb_mergein | main.rb_appendin {
+		call main.tx_view.disable
+		call main.cb_view.disable
+		call source.ck_usingview.disable
+		call source.tx_usingview.disable
+		call source.cb_usingview.disable
+		call main.fi_using.enable
+	}
+	else {
+		call main.tx_view.enable
+		call main.cb_view.enable
+		call source.ck_usingview.enable
+		if source.ck_usingview {
+			call source.tx_usingview.enable
+			call source.cb_usingview.enable
+			call main.fi_using.disable
+		}
+		else {
+			call source.tx_usingview.disable
+			call source.cb_usingview.disable
+			call main.fi_using.enable
+		}
+	}
+	call program main_refresh
 END
 
 PROGRAM main_populate
 BEGIN
-	call program main_context
-	call pq_populate_error.setvalue 0
-	if main.rb_merge | main.rb_append | main.rb_joinby {
-		put "parqit _dlgvars "
-		put dlgname
-		put " vv_list"
-		stata hidden immediate
-		if pq_populate_error {
-			stopbox stop "Unable to get the variable names of the current view." ///
-				"Open a view first (User > parqit > Read data...)."
-		}
-	}
-	if main.rb_mergein | main.rb_appendin {
-		require main.fi_using
-		put "parqit _dlgvars "
-		put dlgname
-		put " vv_list using "
-		put /smartquote main.fi_using
-		stata hidden immediate
-	}
-	if main.fi_using {
-		call pq_populate_error.setvalue 0
-		put "parqit _dlgvars "
-		put dlgname
-		put " uv_list using "
-		put /smartquote main.fi_using
-		stata hidden immediate
-		if pq_populate_error {
-			stopbox note "The using-variable picker was not filled: Populate reads the footer of a Parquet file, glob, or Hive directory; type the names for other sources."
-		}
-	}
-	call main.cb_keys.repopulate
-	call main.cb_keepus.repopulate
+	call program main_refresh
 END
 
 PROGRAM main_keep_output
 BEGIN
-	if main.ck_master | main.ck_using | main.ck_match {
+	if results.ck_master | results.ck_using | results.ck_match {
 		put "keep("
-		if main.ck_master {
+		if results.ck_master {
 			put "master "
 		}
-		if main.ck_using {
+		if results.ck_using {
 			put "using "
 		}
-		if main.ck_match {
+		if results.ck_match {
 			put "match"
 		}
 		put ") "
@@ -407,37 +470,38 @@ END
 
 PROGRAM command
 BEGIN
+	if main.rb_merge | main.rb_append | main.rb_joinby {
+		call program main_require
+	}
 	if main.rb_merge {
 		require main.cb_keys
-		require main.fi_using
 		if main.cb_kind.iseq("m:m") {
 			stopbox stop "Lazy merge does not support m:m." ///
 				"Use joinby for all pairwise combinations, or mergein m:m for native Stata's sequential behavior."
 		}
-		put "parqit merge " main.cb_kind " " main.cb_keys " using "
-		put /smartquote main.fi_using
+		put "parqit view " main.cb_view ": merge " main.cb_kind " " main.cb_keys " using "
+		put /program using_output
 		beginoptions
 			put /program main_keep_output
 			if main.cb_keepus {
 				put " keepusing(" main.cb_keepus ") "
 			}
-			option main.ck_nogen
-			if !main.ck_nogen {
-				optionarg main.ed_gen
+			option results.ck_nogen
+			if !results.ck_nogen {
+				optionarg results.ed_gen
 			}
 			option opt.ck_nonotes
 			optionarg /hidedefault opt.cb_enc
 		endoptions
 	}
 	if main.rb_append {
-		require main.fi_using
-		put "parqit append using "
-		put /smartquote main.fi_using
-		if main.ed_more {
-			put " " main.ed_more
+		put "parqit view " main.cb_view ": append using "
+		put /program using_output
+		if source.ed_more {
+			put " " source.ed_more
 		}
 		beginoptions
-			optionarg main.ed_gen
+			optionarg results.ed_gen
 			if main.cb_keepus {
 				put "keep(" main.cb_keepus ") "
 			}
@@ -447,9 +511,8 @@ BEGIN
 	}
 	if main.rb_joinby {
 		require main.cb_keys
-		require main.fi_using
-		put "parqit joinby " main.cb_keys " using "
-		put /smartquote main.fi_using
+		put "parqit view " main.cb_view ": joinby " main.cb_keys " using "
+		put /program using_output
 		beginoptions
 			optionarg /hidedefault opt.cb_enc
 		endoptions
@@ -464,9 +527,9 @@ BEGIN
 			if main.cb_keepus {
 				put " keepusing(" main.cb_keepus ") "
 			}
-			option main.ck_nogen
-			if !main.ck_nogen {
-				optionarg main.ed_gen
+			option results.ck_nogen
+			if !results.ck_nogen {
+				optionarg results.ed_gen
 			}
 			optionarg opt.ed_assert
 			option opt.ck_update
@@ -489,7 +552,7 @@ BEGIN
 			if main.cb_keepus {
 				put "keep(" main.cb_keepus ") "
 			}
-			optionarg main.ed_gen
+			optionarg results.ed_gen
 			option opt.ck_nolabel
 			option opt.ck_nonotes
 			option opt.ck_aforce

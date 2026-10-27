@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.6.0 26oct2026}{...}
+{* *! version 0.6.1 27oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -3066,14 +3066,21 @@ launched directly with {cmd:db} {it:name}.
 {phang2}{bf:User > parqit > Read data (lazy view or into memory)...}{p_end}
 {p 12 12 2}({cmd:db parqit_read}) {cmd:use} — a lazy view, or the data into
 memory with {opt clear} — {cmd:open _data}, and {cmd:path}; {bf:Populate}
-lists the variables recorded in the Parquet footer of the source, and
+lists the variables recorded in the Parquet footer of a file source, and
 {bf:Describe} runs {cmd:describe} on it. These two footer-inspection buttons
 are disabled for recognized delimited-text, Stata, Excel, SPSS and R inputs;
 those
 sources can still be opened, and variable names can be typed. {bf:Browse}
 lists every supported input type together, or one type at a time. An
-{cmd:if} field selects the rows ({cmd:use} [{it:varlist}] {cmd:if} {it:exp}
-{cmd:using}), and {opt compress} is offered with {opt clear}. The
+{cmd:if} field on {bf:Selection} selects the rows of a file read
+({cmd:use} [{it:varlist}] {cmd:if} {it:exp} {cmd:using}), and {opt compress}
+is offered with {opt clear} on {bf:Main}. The fourth operation copies an open
+view's plan: choose {bf:Source view} and supply a new view name on {bf:Main},
+and optionally keep variables on {bf:Selection}. Its Populate uses that view's
+schema. The file picker and file-specific options are disabled in copy mode;
+filter the new copy afterwards. The copy command's view prefix restores which
+view was current. The source selector is disabled for file, memory and path
+operations. On {bf:Source options}, the
 {opt int64()}, {opt binary()}, {opt filename()}, {opt csv()} and
 {opt object()}
 options have their own fields ({opt csv()} a free-text field for the
@@ -3101,7 +3108,13 @@ variables are left empty): one list of operations, every one an
 engine-side query; {cmd:unique} offers {opt by()} and {opt nomissing},
 {cmd:levelsof} takes one variable,
 {cmd:describe} of a file offers {opt labels} and {opt notes}, and the
-{cmd:if} expression field serves every operation that takes one.{p_end}
+{cmd:if} expression field serves every operation that takes one. The
+{bf:View to explore} selector lists the open views and starts with the current
+view. Variable pickers use the selected view's schema; commands emit
+{cmd:parqit view} {it:name}{cmd::}, restoring which view is current afterwards.
+{bf:Refresh} updates the list and schema. A closed selection is cleared,
+requiring a new choice. File description disables the view selector and
+works with no open views. Filters and report options are on {bf:Options}.{p_end}
 
 {phang2}{bf:User > parqit > Summary statistics, tables, and correlations...}{p_end}
 {p 12 12 2}({cmd:db parqit_stats}) {cmd:summarize} [{opt detail}],
@@ -3115,32 +3128,46 @@ when the field is left empty, and one {cmd:if} expression applies to
 whichever statistic is chosen. Calculation pickers show numeric view
 variables;
 the tabulation and {opt by()} pickers also show strings. Tooltips explain
-the group/bin limits and that {cmd:tabstat, save} returns matrices.{p_end}
+the group/bin limits and that {cmd:tabstat, save} returns matrices. The row
+filter and histogram variable, bins and drawing options are on {bf:Options};
+the operation and the other statistic inputs are on {bf:Main}.{p_end}
 
 {phang2}{bf:User > parqit > Keep or drop observations, or draw a sample...}{p_end}
 {p 12 12 2}({cmd:db parqit_filter}) {cmd:keep if}, {cmd:drop if} (both
 with an optional {cmd:by}/{cmd:bysort} prefix), {cmd:keep in}, {cmd:drop in}
 ({cmd:f}, {cmd:l} and negative bounds accepted) and {cmd:sample}, with its
 {cmd:if} frame, strata, whole clusters and indicator; the
-{bf:Create...} button opens Stata's expression builder.{p_end}
+{bf:Create...} button opens Stata's expression builder. Choose the target,
+condition, by/bysort prefix or observation range on {bf:Main}; sample amount,
+count/percentage, seed, strata, clusters and indicator are on {bf:Sampling}.
+{bf:Variables} lists the selected view's names.{p_end}
 
 {phang2}{bf:User > parqit > Keep, drop, order, sort, or rename variables...}{p_end}
 {p 12 12 2}({cmd:db parqit_vars}) {cmd:keep}, {cmd:drop}, {cmd:order},
-{cmd:sort}, {cmd:gsort}, {cmd:rename (oldlist) (newlist)} and
-{cmd:duplicates drop} (with an {cmd:if} expression).{p_end}
+{cmd:sort}, {cmd:gsort}, {cmd:format}, {cmd:rename (oldlist) (newlist)} and
+{cmd:duplicates drop}. Choose the operation on {bf:Main}; duplicate keys,
+the {cmd:if} expression and {opt force} are on {bf:Duplicates}. Dropping
+duplicates on key variables requires a declared view order first.{p_end}
 
 {phang2}{bf:User > parqit > Create or change variables...}{p_end}
 {p 12 12 2}({cmd:db parqit_gen}) {cmd:gen} (with a storage type and an
 {cmd:if} qualifier), {cmd:egen} (function and {opt by()}) and
 {cmd:replace} on the view, and {cmd:spssencode} on the data in memory (the
 labelled numeric version of a string variable read from an SPSS file, or from
-an R file with haven labels).{p_end}
+an R file with haven labels). {bf:Main} holds the target, operation, output
+name/type, expression and row qualifier; {bf:Groups and labels} holds egen's
+{opt by()} and additional options, the by/bysort prefix, and labelled-string
+inputs. Encoding a labelled string uses Stata memory and disables the view
+selector.{p_end}
 
 {phang2}{bf:User > parqit > Collapse, contract, pivot table, or reshape...}{p_end}
 {p 12 12 2}({cmd:db parqit_pivot}) {cmd:collapse} and {cmd:pivot} share two
 statistic rows plus free additional specifications; {cmd:contract};
 {cmd:reshape long}|{cmd:wide}. One {cmd:if} expression serves
-{cmd:collapse}, {cmd:pivot} and {cmd:contract}.{p_end}
+{cmd:collapse}, {cmd:pivot} and {cmd:contract}. {bf:Main} holds the target,
+operation, statistic rows and collapse/pivot groups;
+{bf:Contract, reshape and rows} holds the contract and reshape inputs and row qualifier. The qualifier
+is disabled for reshape.{p_end}
 
 {phang2}{bf:User > parqit > Combine datasets (merge, append, joinby)...}{p_end}
 {p 12 12 2}({cmd:db parqit_combine}) lazy {cmd:merge}, {cmd:append} (several
@@ -3150,11 +3177,18 @@ in memory, with native Stata's merge and append options, an {opt int64()}
 selector and an {opt encoding()} field on the {bf:Options} tab. Each option is
 enabled where the command takes it: {opt nonotes} for every merge and append,
 {opt nolabel} for {cmd:mergein} and {cmd:appendin}, the other merge options
-for
-{cmd:mergein}. The integer selector applies
-only to the memory routes; the encoding field, which names the encoding of the
-using file's text that is not UTF-8, applies to every route. The
-additional-sources field is raw Stata source-list syntax: compound-quote each
+for {cmd:mergein}. The integer selector applies only to the memory routes.
+The encoding field names the code page of text that is not UTF-8 in a file
+input; an existing using view supplies its
+decoded plan. On {bf:Main}, choose {bf:Master view}, the operation, using file,
+keys and using-variable projection. For a lazy combination, {bf:Using source}
+can select an open {bf:Using view} instead; the file picker is then disabled.
+That tab also holds append's additional sources. {bf:Results} holds the merge
+results to keep and result/source marker name; {bf:Options} holds the native
+merge/append options and input policies. Native memory routes disable the
+master/using view selectors and use the file input. Both variable pickers
+follow their own sources. The additional-sources field is raw Stata
+source-list syntax: compound-quote each
 path that contains spaces or commas. {bf:Browse} offers the same file types
 as the read dialog.{p_end}
 
@@ -3169,12 +3203,12 @@ and
 the one the
 file records, and {bf:R object} names the data frame of an {cmd:.RData} that
 holds several), or
-{cmd:collect} [{opt clear} {opt int64()}]. The integer selector is enabled
+{cmd:collect} [{opt clear} {opt compress} {opt int64()}]. The integer selector is enabled
 for collect; {bf:default} inherits the view's option or the session setting.
 View save and collect use
 {cmd:parqit view} {it:name}{cmd::} to name the view shown in the context line;
-closing it cannot silently redirect a save to memory. Refresh after switching
-views to select a different target. Saving offers
+closing it cannot silently redirect a save to memory. Choose the target in
+{bf:View}; {bf:Refresh} updates the registry and its variable pickers. Saving offers
 {opt replace} (an existing file asks first, as in Stata's save dialog),
 {opt compression()}, {opt compression_level()}, {opt partition_by()},
 {opt partitions()}, {opt chunk()}, {opt encoding()}, {opt data},
@@ -3184,34 +3218,61 @@ it disables {opt replace};
 {bf:Populate} lists variables from the view, or from the dataset in memory
 when {opt data} is selected.{p_end}
 
+{p 12 12 2}{bf:Main} holds the selected view, operation, conversion input,
+destination, overwrite/memory-load options and memory-only copy/extended-missing
+options. {bf:Storage and partitions} holds compression, level, row-group size,
+partition variables/update policy, memory-text encoding and the collect integer
+policy. Saving memory or converting a file disables the view selector; both
+work without an open view. Refreshing memory-save settings keeps a valid
+partition selection when there are no views.{p_end}
+
 {phang2}{bf:User > parqit > Views, SQL, and engine settings...}{p_end}
-{p 12 12 2}({cmd:db parqit_views}) buttons that report on the current view at
-once ({cmd:views}, {cmd:show}, {cmd:explain}, {cmd:describe}, {cmd:ds},
-{cmd:version}, {cmd:selftest}); the actions {cmd:view}, {cmd:close},
+{p 12 12 2}({cmd:db parqit_views}) {bf:Show SQL}, {bf:Explain}, {bf:Describe}
+and {bf:Variables} report on the selected view at once. {bf:Views} lists all
+open views; {bf:Version} and {bf:Self-test} are session diagnostics. The action
+list offers {cmd:view}, {cmd:close},
 {cmd:view} {it:name}{cmd::} {it:command}, a copy of a view ({cmd:use} ...
 {cmd:using view:}{it:name}), {cmd:sql}, {cmd:query}, {cmd:xtset} and
 {cmd:tsset} (or their {opt clear}) and all eight
 {cmd:set} options: {cmd:statamissing}, {cmd:int64}, {cmd:encoding},
 {cmd:threads},
 {cmd:fill_threads}, {cmd:stream_buffer_mb}, {cmd:memory_limit},
-{cmd:tempdir}.{p_end}
+{cmd:tempdir}. Choose existing-view targets with {bf:View}, rather than the
+name editor; the name editor instead supplies a new SQL-view name or a panel
+variable where that action requires it. SQL text and the SQL memory-load flag
+are on {bf:SQL}; the other action inputs are on {bf:Main}. SQL sources,
+settings and closing every view disable the selector and the four view-report
+buttons. Explicit Switch and Close retain their session effects; run, copy,
+query, time declarations and view reports restore which view was current.
+Copies require a new name and optionally a variable projection.{p_end}
 
 {phang2}{bf:User > parqit > Version}, {bf:Self-test}, {bf:Help on parqit},
 {bf:Technical reference}{p_end}
 {p 12 12 2}run {cmd:parqit version}, {cmd:parqit selftest} and
 {cmd:help parqit} and {cmd:help parqit_technical} directly.{p_end}
 
-{pstd}Conventions shared by the dialogs, following Stata's own: a
-context line identifies the view or Stata memory. {bf:Refresh} updates that
-context and the relevant variable pickers after a view switch; the write
-dialog
-uses the selected view shown there. Context updates are queued until Stata is
-ready and preserve the existing {cmd:r()} results. Help buttons open the
-relevant
-manual section. A
-{bf:Populate} button fills the variable pickers on demand from the current
-view, from the dataset in memory when the write dialog selects {opt data}, or
-from the Parquet footer of the file named in the dialog, exactly as Stata's
+{pstd}Conventions shared by the dialogs, following Stata's own: each
+view-operating dialog has an open-view selector, initially the session's current
+view, and a context line identifying its target. Selection alone changes no
+plan. Ordinary view-scoped commands use {cmd:parqit view} {it:name}{cmd::} and
+restore which view is current afterwards. Transformations change the selected
+view's plan, including when that view was already current. This also covers by/bysort,
+save/collect, reports, raw query fragments and time declarations. Explicit
+switching, closing and source-opening actions keep their normal session
+effects. View copies made through the selectors preserve the previous current
+view. A stale selected name fails rather than redirecting an operation;
+{bf:Refresh} clears a closed choice and updates the registry and schema.
+The selector is disabled for memory, file, SQL-source and session settings,
+and for actions over every view. In {bf:Combine datasets}, {bf:Using source}
+separately selects another open view for a lazy merge/append/joinby; native
+memory routes keep a file as their using source.{p_end}
+
+{pstd}Registry and schema updates are queued until Stata is ready, preserve
+the existing {cmd:r()} results and do not materialise source rows. Help buttons
+open the relevant manual section. Variable pickers follow the selected view;
+{bf:Populate} and {bf:Refresh} reload their metadata, or use the dataset in
+memory when the write dialog selects {opt data}, or the Parquet footer of a
+file source, exactly as Stata's
 {cmd:use}, {cmd:describe} and {cmd:merge} dialogs populate from a dataset on
 disk (the pickers are editable, so names may also be typed); the
 {bf:Create...} buttons open Stata's expression builder, whose variable list is

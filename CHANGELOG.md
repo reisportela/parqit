@@ -6,6 +6,28 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-27
+
+### Changed
+
+- Native Stata dialogs use shorter windows, with source, storage, sampling,
+  grouping, duplicate and result options on separate tabs. Every window is
+  at most 395 dialog units high; operations and option defaults retain their
+  behaviour. The dialogs remain fixed-size native Stata windows.
+- Every view-operating dialog offers an open-view selector. It starts with
+  the session's current view, populates variables from its chosen target,
+  and emits `parqit view name: ...` for ordinary view-scoped operations,
+  including save/collect, by/bysort, reports, query and time declarations.
+  Refresh updates the registry/schema and clears a closed choice. File,
+  memory, session and all-view operations disable the selector. Combine
+  separates master and using views; Read adds explicit view copying.
+  Selector-driven copies preserve the previous current view. Explicit
+  switching, closing and source-opening actions keep their session effects.
+- The user and technical help describe the current dialog tabs, target and
+  source selectors, plan-copy behaviour and scope exceptions, including the
+  distinction between restoring the current-view selection and transforming
+  the chosen view's plan.
+
 ## [0.6.0] — 2026-10-26
 
 ### Changed

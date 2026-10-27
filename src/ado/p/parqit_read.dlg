@@ -1,13 +1,14 @@
 /*
   parqit use - Open a lazy view or load data into memory
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Read data (lazy view or into memory)...
   Launch directly with:  db parqit_read      (menu installed by: parqit menu)
 
   Builds parqit use (lazy view, or into memory with clear), parqit open _data
-  and parqit path. The Populate button fills the variable picker from the
+  and parqit path, plus a copy of a selected view's plan. Projection and file
+  filters are on Selection. The Populate button fills the variable picker from the
   Parquet footer of the source, as Stata's use/describe/merge dialogs do for a
   dataset on disk; Describe runs parqit describe on the source.
 */
@@ -15,7 +16,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 660
+DEFINE _dlght 395
 INCLUDE header
 HELP hlp1, view("help parqit##lazy")
 RESET res1
@@ -25,6 +26,9 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -36,7 +40,10 @@ END
 DIALOG main, label("parqit use - Open a lazy view or load data into memory") ///
 	tabtitle("Main")
 BEGIN
-  GROUPBOX gb_what		_lft	_top	_iwd	_ht6,		///
+  TEXT tx_view _lft _top 80 ., label("Source view:")
+  COMBOBOX cb_view 95 @ 495 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("Source view")
+  GROUPBOX gb_what		_lft	45	_iwd	105,		///
 	label("Operation")
   RADIO rb_use			_ilft	_ss	_ibwd	.,		///
 	first								///
@@ -46,11 +53,12 @@ BEGIN
 	onclickon(program main_mode)					///
 	label("Open the data in memory as a lazy view (parqit open _data)")
   RADIO rb_path			@	_ss	@	.,		///
-	last								///
 	onclickon(program main_mode)					///
 	label("Resolve a path and report whether it exists (parqit path)")
+  RADIO rb_copy @ _ss @ ., last onclickon(program main_mode) ///
+	label("Copy the selected view's plan into a new named view (use ... using view:)")
 
-  TEXT tx_using			_lft	110	_lw80	.,		///
+  TEXT tx_using			_lft	165	_lw80	.,		///
 	label("Filename, glob (data_*.parquet), Hive directory, or other supported source:")
   BUTTON bu_desc		_rj80	@	80	.,		///
 	onpush(program main_describe)					///
@@ -62,22 +70,6 @@ BEGIN
 	defext(parquet)							///
 	filter("Data files|*.parquet;*.csv;*.tsv;*.txt;*.tab;*.dta;*.xlsx;*.xls;*.sav;*.zsav;*.rds;*.rda;*.RData|Parquet|*.parquet|Text|*.csv;*.tsv;*.txt;*.tab|Stata|*.dta|Excel|*.xlsx;*.xls|SPSS|*.sav;*.zsav|R|*.rds;*.rda;*.RData|All files|*.*") ///
 	label("Browse...")
-
-  TEXT tx_vars			_lft	_ls	_lw80	.,		///
-	label("Variables to read (leave empty for all variables):")
-  BUTTON bu_pop			_rj80	@	80	.,		///
-	onpush(program main_populate)					///
-	tooltip("Populate combobox with the variable names in the Parquet source") ///
-	label("Populate")
-  COMBOBOX cb_vars		_lft	_ss	_iwd	.,		///
-	append								///
-	dropdown							///
-	contents(vv_list)						///
-	label("Variables to read")
-  TEXT tx_if			_lft	_ls	_iwd	.,		///
-	label("If (expression; rows the view keeps, optional):")
-  EXP ex_if			@	_ss	@	.,		///
-	label("Create...")
 
   CHECKBOX ck_clear		_lft	_ls	_iwd	.,		///
 	option(clear)							///
@@ -95,7 +87,23 @@ BEGIN
 	option(name)							///
 	label("View name")
 
-  TEXT tx_enc			_lft2	-20	_cwd1	.,		///
+  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
+END
+
+DIALOG selection, tabtitle("Selection")
+BEGIN
+  TEXT tx_vars _lft _top _lw80 ., label("Variables to read or copy (leave empty for all variables):")
+  BUTTON bu_pop _rj80 @ 80 ., onpush(program main_populate) ///
+	tooltip("Populate from the Parquet file or the selected source view") label("Populate")
+  COMBOBOX cb_vars _lft _ss _iwd ., append dropdown contents(vv_list) label("Variables to read")
+  TEXT tx_if _lft _ls _iwd ., label("If (expression; file reads only, optional):")
+  EXP ex_if @ _ss @ ., label("Create...")
+END
+
+DIALOG opt, tabtitle("Source options")
+BEGIN
+  TEXT tx_enc			_lft	_top	_iwd	.,		///
 	label("Encoding of text that is not UTF-8:")
   COMBOBOX cb_enc		@	_ss	_vnwd	.,		///
 	dropdown							///
@@ -149,8 +157,6 @@ BEGIN
 
   TEXT tx_note			_lft	_ls	_iwd	.,		///
 	label("A lazy view probes the schema and loads no result rows; materialise it later with parqit collect or parqit save.")
-  TEXT tx_context _lft 615 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_context)
 END
 
 LIST vv_list
@@ -207,29 +213,32 @@ END
 
 PROGRAM main_mode
 BEGIN
+	call main.tx_view.disable
+	call main.cb_view.disable
+	call main.tx_name.setlabel "View name (optional; the default view is named default):"
 	if main.rb_use {
 		call main.tx_using.enable
 		call main.fi_using.enable
 		call main.bu_desc.enable
-		call main.tx_vars.enable
-		call main.bu_pop.enable
-		call main.cb_vars.enable
-		call main.tx_if.enable
-		call main.ex_if.enable
+		call selection.tx_vars.enable
+		call selection.bu_pop.enable
+		call selection.cb_vars.enable
+		call selection.tx_if.enable
+		call selection.ex_if.enable
 		call main.ck_clear.enable
-		call main.ck_relaxed.enable
-		call main.tx_srcvar.enable
-		call main.ed_srcvar.enable
-		call main.tx_enc.enable
-		call main.cb_enc.enable
-		call main.tx_int64.enable
-		call main.cb_int64.enable
-		call main.tx_binary.enable
-		call main.cb_binary.enable
-		call main.tx_csv.enable
-		call main.ed_csv.enable
-		call main.tx_object.enable
-		call main.ed_object.enable
+		call opt.ck_relaxed.enable
+		call opt.tx_srcvar.enable
+		call opt.ed_srcvar.enable
+		call opt.tx_enc.enable
+		call opt.cb_enc.enable
+		call opt.tx_int64.enable
+		call opt.cb_int64.enable
+		call opt.tx_binary.enable
+		call opt.cb_binary.enable
+		call opt.tx_csv.enable
+		call opt.ed_csv.enable
+		call opt.tx_object.enable
+		call opt.ed_object.enable
 		if main.ck_clear {
 			call main.tx_name.disable
 			call main.ed_name.disable
@@ -246,64 +255,129 @@ BEGIN
 		call main.tx_using.disable
 		call main.fi_using.disable
 		call main.bu_desc.disable
-		call main.tx_vars.disable
-		call main.bu_pop.disable
-		call main.cb_vars.disable
-		call main.tx_if.disable
-		call main.ex_if.disable
+		call selection.tx_vars.disable
+		call selection.bu_pop.disable
+		call selection.cb_vars.disable
+		call selection.tx_if.disable
+		call selection.ex_if.disable
 		call main.ck_clear.disable
 		call main.ck_compress.disable
-		call main.ck_relaxed.disable
-		call main.tx_srcvar.disable
-		call main.ed_srcvar.disable
+		call opt.ck_relaxed.disable
+		call opt.tx_srcvar.disable
+		call opt.ed_srcvar.disable
 		call main.tx_name.enable
 		call main.ed_name.enable
-		call main.tx_enc.enable
-		call main.cb_enc.enable
-		call main.tx_int64.disable
-		call main.cb_int64.disable
-		call main.tx_binary.disable
-		call main.cb_binary.disable
-		call main.tx_csv.disable
-		call main.ed_csv.disable
-		call main.tx_object.disable
-		call main.ed_object.disable
+		call opt.tx_enc.enable
+		call opt.cb_enc.enable
+		call opt.tx_int64.disable
+		call opt.cb_int64.disable
+		call opt.tx_binary.disable
+		call opt.cb_binary.disable
+		call opt.tx_csv.disable
+		call opt.ed_csv.disable
+		call opt.tx_object.disable
+		call opt.ed_object.disable
 	}
 	if main.rb_path {
 		call main.tx_using.enable
 		call main.fi_using.enable
 		call main.bu_desc.enable
-		call main.tx_vars.disable
-		call main.bu_pop.disable
-		call main.cb_vars.disable
-		call main.tx_if.disable
-		call main.ex_if.disable
+		call selection.tx_vars.disable
+		call selection.bu_pop.disable
+		call selection.cb_vars.disable
+		call selection.tx_if.disable
+		call selection.ex_if.disable
 		call main.ck_clear.disable
 		call main.ck_compress.disable
-		call main.ck_relaxed.disable
-		call main.tx_srcvar.disable
-		call main.ed_srcvar.disable
+		call opt.ck_relaxed.disable
+		call opt.tx_srcvar.disable
+		call opt.ed_srcvar.disable
 		call main.tx_name.disable
 		call main.ed_name.disable
-		call main.tx_enc.disable
-		call main.cb_enc.disable
-		call main.tx_int64.disable
-		call main.cb_int64.disable
-		call main.tx_binary.disable
-		call main.cb_binary.disable
-		call main.tx_csv.disable
-		call main.ed_csv.disable
-		call main.tx_object.disable
-		call main.ed_object.disable
+		call opt.tx_enc.disable
+		call opt.cb_enc.disable
+		call opt.tx_int64.disable
+		call opt.cb_int64.disable
+		call opt.tx_binary.disable
+		call opt.cb_binary.disable
+		call opt.tx_csv.disable
+		call opt.ed_csv.disable
+		call opt.tx_object.disable
+		call opt.ed_object.disable
 	}
+	if main.rb_copy {
+		call main.tx_view.enable
+		call main.cb_view.enable
+		call main.tx_using.disable
+		call main.fi_using.disable
+		call main.bu_desc.disable
+		call selection.tx_vars.enable
+		call selection.bu_pop.enable
+		call selection.cb_vars.enable
+		call selection.tx_if.disable
+		call selection.ex_if.disable
+		call main.ck_clear.disable
+		call main.ck_compress.disable
+		call main.tx_name.enable
+		call main.ed_name.enable
+		call main.tx_name.setlabel "New view name (required for a copy):"
+		call opt.tx_enc.disable
+		call opt.cb_enc.disable
+		call opt.ck_relaxed.disable
+		call opt.tx_int64.disable
+		call opt.cb_int64.disable
+		call opt.tx_binary.disable
+		call opt.cb_binary.disable
+		call opt.tx_srcvar.disable
+		call opt.ed_srcvar.disable
+		call opt.tx_csv.disable
+		call opt.ed_csv.disable
+		call opt.tx_object.disable
+		call opt.ed_object.disable
+	}
+	call program main_refresh
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open source view. Click Refresh to update the list."
+	}
 END
 
 PROGRAM main_source
@@ -330,18 +404,23 @@ END
 
 PROGRAM main_populate
 BEGIN
-	require main.fi_using
-	call pq_populate_error.setvalue 0
-	put "parqit _dlgvars "
-	put dlgname
-	put " vv_list using "
-	put /smartquote main.fi_using
-	stata hidden immediate
-	if pq_populate_error {
-		stopbox stop "Unable to get the variable names from the source." ///
-			"Populate reads the footer of a Parquet file, glob, or Hive directory."
+	if main.rb_copy {
+		call program main_refresh
 	}
-	call main.cb_vars.repopulate
+	else {
+		require main.fi_using
+		call pq_populate_error.setvalue 0
+		put "parqit _dlgvars "
+		put dlgname
+		put " vv_list using "
+		put /smartquote main.fi_using
+		stata hidden immediate
+		if pq_populate_error {
+			stopbox stop "Unable to get the variable names from the source." ///
+				"Populate reads the footer of a Parquet file, glob, or Hive directory."
+		}
+		call selection.cb_vars.repopulate
+	}
 END
 
 PROGRAM command
@@ -349,11 +428,11 @@ BEGIN
 	if main.rb_use {
 		require main.fi_using
 		put "parqit use "
-		if main.cb_vars {
-			put main.cb_vars " "
+		if selection.cb_vars {
+			put selection.cb_vars " "
 		}
-		if main.ex_if {
-			put "if " main.ex_if " "
+		if selection.ex_if {
+			put "if " selection.ex_if " "
 		}
 		put "using "
 		put /smartquote main.fi_using
@@ -365,25 +444,37 @@ BEGIN
 			if !main.ck_clear {
 				optionarg main.ed_name
 			}
-			option main.ck_relaxed
-			optionarg main.ed_srcvar
-			optionarg /hidedefault main.cb_enc
-			optionarg /hidedefault main.cb_int64
-			optionarg /hidedefault main.cb_binary
-			optionarg main.ed_csv
-			optionarg main.ed_object
+			option opt.ck_relaxed
+			optionarg opt.ed_srcvar
+			optionarg /hidedefault opt.cb_enc
+			optionarg /hidedefault opt.cb_int64
+			optionarg /hidedefault opt.cb_binary
+			optionarg opt.ed_csv
+			optionarg opt.ed_object
 		endoptions
 	}
 	if main.rb_open {
 		put "parqit open _data"
 		beginoptions
 			optionarg main.ed_name
-			optionarg /hidedefault main.cb_enc
+			optionarg /hidedefault opt.cb_enc
 		endoptions
 	}
 	if main.rb_path {
 		require main.fi_using
 		put "parqit path "
 		put /smartquote main.fi_using
+	}
+	if main.rb_copy {
+		call program main_require
+		require main.ed_name
+		put "parqit view " main.cb_view ": use "
+		if selection.cb_vars {
+			put selection.cb_vars " "
+		}
+		put "using view:" main.cb_view
+		beginoptions
+			optionarg main.ed_name
+		endoptions
 	}
 END

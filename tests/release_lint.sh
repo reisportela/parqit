@@ -234,7 +234,7 @@ public_cmds=$(awk '
 ' "$REPO/src/ado/p/parqit.ado")
 
 for cmd in $public_cmds; do
-    case "$cmd" in _dlgvars|_dlgcontext|_dlgsource) continue ;; esac
+    case "$cmd" in _dlgvars|_dlgcontext|_dlgsource|_dlgexplore|_dlgviews) continue ;; esac
     # CMD-ABBREV-1: a syntax line may spell the verb with Stata's abbreviation
     # markup, {cmd:parqit} {cmdab:su:mmarize}; any split of the name counts
     needles="{cmd:parqit $cmd"
@@ -350,7 +350,7 @@ fi
 
 # The menu is an entrypoint into the dialog family. Derive both sides from the
 # live dispatcher/dialogs so a future public verb cannot ship as command-line
-# only by accident. `menu` installs the surface; the three private dialog
+# only by accident. `menu` installs the surface; the five private dialog
 # helpers are excluded from the public command contract.
 menu_public_cmds=$(awk '
     /^[[:space:]]*local cmds[[:space:]]/ {
@@ -375,7 +375,7 @@ gui_named_cmds=$(grep -hoE 'put "parqit view "[^\"]*": [A-Za-z0-9_]+' \
 
 for cmd in $menu_public_cmds; do
     [ "$cmd" = "menu" ] && continue
-    case "$cmd" in _dlgvars|_dlgcontext|_dlgsource) continue ;; esac
+    case "$cmd" in _dlgvars|_dlgcontext|_dlgsource|_dlgexplore|_dlgviews) continue ;; esac
     printf '%s\n%s\n' "$gui_cmds" "$gui_named_cmds" | grep -qx "$cmd" || \
         err "public subcommand '$cmd' is not exposed by a parqit dialog"
 done

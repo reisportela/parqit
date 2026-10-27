@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.6.0 26oct2026}{...}
+{* *! version 0.6.1 27oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -317,6 +317,38 @@ repeated in a do-file:
 {p2col:{bf:Save as Parquet or collect into memory}}{cmd:db parqit_write}{p_end}
 {p2col:{bf:Views, SQL, and engine settings}}{cmd:db parqit_views}{p_end}
 {p2colreset}{...}
+
+{pstd}
+Select the operation on {bf:Main}, then fill its options on the other tabs
+before clicking {bf:Submit} or {bf:OK}. The dialogs use compact windows;
+Stata's native dialog windows have fixed sizes.
+
+{pstd}
+Every dialog that operates on a view offers a view selector, initially the
+session's current view. {bf:Refresh} updates the open views and the selected
+view's variable names. Commands name their target explicitly and restore
+which view is current afterwards. Transformations still change the selected
+view's plan; choosing a view does not create a copy. Use the view-copy mode
+to work on a separate plan. A closed target is refused; {bf:Refresh} clears
+that choice so another view can be selected.
+
+{pstd}
+File, memory, SQL-source, session and all-view operations disable the selector.
+{bf:Combine datasets} distinguishes {bf:Master view} from an optional
+{bf:Using view} on {bf:Using source}; its context line names both. {bf:Read data}
+offers a view-copy mode with a required new name and projection on
+{bf:Selection}. Copies made through these selectors preserve which view is
+current. Explicit switching, closing and source-opening actions retain their
+normal session effects.
+
+{pstd}
+Filters and histogram settings are on {bf:Options}; sampling settings on
+{bf:Sampling}; duplicate-removal options on {bf:Duplicates}; grouping and
+labelled-string options on {bf:Groups and labels}; contract, reshape and row
+filters on {bf:Contract, reshape and rows}. Save/collect's storage settings,
+including the integer policy for collect, are on {bf:Storage and partitions}.
+The views/settings dialog has a separate {bf:SQL} tab. See
+{help parqit_technical##dialogs:Menus and dialogs} for each dialog's fields.
 
 {pstd}
 The same menu runs {cmd:parqit version}, {cmd:parqit selftest} and opens both
@@ -643,8 +675,10 @@ values or rows shown.
 verbs. Views are named ({cmd:default} unless {opt name()} says otherwise) and
 several can be open at once, like frames. Verbs act on the current view;
 {cmd:parqit view} {it:name} switches, {cmd:parqit view} {it:name}{cmd::}
-{it:command} runs one command against another view and switches back,
-{cmd:parqit views} lists them, and {cmd:parqit close} closes one or all.
+{it:command} runs one command against another view and switches back;
+transformations modify the named view's plan. Selecting a target in a dialog
+uses this prefix. {cmd:parqit views} lists them, and {cmd:parqit close} closes
+one or all.
 
 {marker copy}{...}
 {pstd}
@@ -652,6 +686,13 @@ several can be open at once, like frames. Verbs act on the current view;
 {opt name(newview)} copies a view's plan, so that verbs can be tried on the copy
 while the original stays as it was. The copy is a plan, not data: both views
 read the same files.
+
+{pstd}
+The command-line copy makes the new view current. The copy modes in
+{bf:Read data} and {bf:Views, SQL, and engine settings} name the source with
+the view selector and require a new name; their echoed view prefix restores
+which view was current after creating the copy. Filtering a copy is a later
+operation on that new view.
 
 {pstd}
 Two commands are deliberately {it:not} view verbs: {cmd:parqit mergein} and

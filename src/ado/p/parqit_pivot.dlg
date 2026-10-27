@@ -2,7 +2,7 @@
   parqit collapse - Make a dataset of summary statistics, frequencies, or a
   pivot table; convert between wide and long
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Collapse, contract, pivot table, or reshape...
   Launch directly with:  db parqit_pivot      (menu installed by: parqit menu)
@@ -11,14 +11,14 @@
   share the statistic rows ((stat) [target=]source, exactly collapse's
   grammar); a pivot table additionally spreads one column per distinct
   value of the cols() variable, Excel-style. Populate fills the pickers
-  from the current view. Lazy: the view's plan changes, not the data in
+  from the selected view. Lazy: the view's plan changes, not the data in
   memory — materialise with parqit collect or parqit save.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 510
+DEFINE _dlght 395
 INCLUDE header
 HELP hlp1, view("help parqit##verbs")
 RESET res1
@@ -28,6 +28,9 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -39,7 +42,10 @@ END
 DIALOG main, label("parqit collapse - Make a dataset of summary statistics, frequencies, or a pivot table; reshape") ///
 	tabtitle("Main")
 BEGIN
-  RADIO rb_collapse		_lft	_top	130	.,		///
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  RADIO rb_collapse		_lft	45	130	.,		///
 	first								///
 	onclickon(program main_mode)					///
 	label("Collapse")
@@ -54,9 +60,9 @@ BEGIN
 	onclickon(program main_mode)					///
 	label("Reshape")
 
-  GROUPBOX gb_stats		_lft	40	_iwd	_ht9,		///
+  GROUPBOX gb_stats		_lft	75	_iwd	_ht9,		///
 	label("Statistics to compute (collapse and pivot table)")
-  TEXT tx_stat			_ilft	60	120	.,		///
+  TEXT tx_stat			_ilft	95	120	.,		///
 	label("Statistic")
   TEXT tx_val			150	@	200	.,		///
 	label("Of variable")
@@ -64,7 +70,7 @@ BEGIN
 	label("Result name (optional)")
   BUTTON bu_pop			510	@	80	.,		///
 	onpush(program main_populate)					///
-	tooltip("Populate the comboboxes with the variable names of the current view") ///
+	tooltip("Populate the comboboxes with the variable names of the selected view") ///
 	label("Populate")
   COMBOBOX cb_stat1		_ilft	_ss	120	.,		///
 	dropdownlist							///
@@ -95,7 +101,7 @@ BEGIN
   EDIT ed_specs			230	@	330	.,		///
 	label("(stat) [target=]source ...")
 
-  TEXT tx_by			_lft	170	_cwd1	.,		///
+  TEXT tx_by			_lft	205	_cwd1	.,		///
 	label("Group by, option by() (collapse; optional):")
   TEXT tx_rows			_lft2	@	_cwd1	.,		///
 	label("Rows of the pivot table, option rows():")
@@ -121,7 +127,15 @@ BEGIN
 	error("Columns of the pivot table")				///
 	label("Columns of the pivot table")
 
-  TEXT tx_cvars			_lft	_ls	_cwd1	.,		///
+  TEXT tx_note			_lft	_ls	_iwd	.,		///
+	label("All four operations are lazy; materialise the result with parqit collect or parqit save.")
+  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
+END
+
+DIALOG opt, tabtitle("Contract, reshape and rows")
+BEGIN
+  TEXT tx_cvars			_lft	_top	_cwd1	.,		///
 	label("Variables to contract:")
   TEXT tx_freq			_lft2	@	_cwd1	.,		///
 	label("Name of frequency variable (optional; default _freq):")
@@ -167,23 +181,52 @@ BEGIN
 	error("j() variable")						///
 	label("j() variable")
 
-  TEXT tx_if			_lft	_ls	_iwd	.,		///
+  TEXT tx_if _lft _ls _iwd ., ///
 	label("If (expression) for collapse, pivot table, and contract (optional):")
-  EXP ex_if			@	_ss	@	.,		///
-	label("Create...")
+  EXP ex_if @ _ss @ ., label("Create...")
 
-  TEXT tx_note			_lft	_ls	_iwd	.,		///
-	label("All four operations are lazy; materialise the result with parqit collect or parqit save.")
-  TEXT tx_context _lft 465 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
+	}
 END
 
 LIST vv_list
@@ -235,23 +278,23 @@ BEGIN
 	call main.cb_rows.disable
 	call main.tx_cols.disable
 	call main.cb_cols.disable
-	call main.tx_cvars.disable
-	call main.cb_cvars.disable
-	call main.tx_freq.disable
-	call main.ed_freq.disable
-	call main.tx_dir.disable
-	call main.cb_dir.disable
-	call main.tx_stubs.disable
-	call main.cb_stubs.disable
-	call main.tx_i.disable
-	call main.cb_i.disable
-	call main.tx_j.disable
-	call main.cb_j.disable
-	call main.tx_if.disable
-	call main.ex_if.disable
+	call opt.tx_cvars.disable
+	call opt.cb_cvars.disable
+	call opt.tx_freq.disable
+	call opt.ed_freq.disable
+	call opt.tx_dir.disable
+	call opt.cb_dir.disable
+	call opt.tx_stubs.disable
+	call opt.cb_stubs.disable
+	call opt.tx_i.disable
+	call opt.cb_i.disable
+	call opt.tx_j.disable
+	call opt.cb_j.disable
+	call opt.tx_if.disable
+	call opt.ex_if.disable
 	if main.rb_collapse | main.rb_pivot {
-		call main.tx_if.enable
-		call main.ex_if.enable
+		call opt.tx_if.enable
+		call opt.ex_if.enable
 		call main.tx_stat.enable
 		call main.tx_val.enable
 		call main.tx_tgt.enable
@@ -275,46 +318,28 @@ BEGIN
 		call main.cb_cols.enable
 	}
 	if main.rb_contract {
-		call main.tx_if.enable
-		call main.ex_if.enable
-		call main.tx_cvars.enable
-		call main.cb_cvars.enable
-		call main.tx_freq.enable
-		call main.ed_freq.enable
+		call opt.tx_if.enable
+		call opt.ex_if.enable
+		call opt.tx_cvars.enable
+		call opt.cb_cvars.enable
+		call opt.tx_freq.enable
+		call opt.ed_freq.enable
 	}
 	if main.rb_reshape {
-		call main.tx_dir.enable
-		call main.cb_dir.enable
-		call main.tx_stubs.enable
-		call main.cb_stubs.enable
-		call main.tx_i.enable
-		call main.cb_i.enable
-		call main.tx_j.enable
-		call main.cb_j.enable
+		call opt.tx_dir.enable
+		call opt.cb_dir.enable
+		call opt.tx_stubs.enable
+		call opt.cb_stubs.enable
+		call opt.tx_i.enable
+		call opt.cb_i.enable
+		call opt.tx_j.enable
+		call opt.cb_j.enable
 	}
 END
 
 PROGRAM main_populate
 BEGIN
-	call program main_context
-	call pq_populate_error.setvalue 0
-	put "parqit _dlgvars "
-	put dlgname
-	put " vv_list"
-	stata hidden immediate
-	if pq_populate_error {
-		stopbox stop "Unable to get the variable names of the current view." ///
-			"Open a view first (User > parqit > Read data...)."
-	}
-	call main.cb_val1.repopulate
-	call main.cb_val2.repopulate
-	call main.cb_by.repopulate
-	call main.cb_rows.repopulate
-	call main.cb_cols.repopulate
-	call main.cb_cvars.repopulate
-	call main.cb_stubs.repopulate
-	call main.cb_i.repopulate
-	call main.cb_j.repopulate
+	call program main_refresh
 END
 
 PROGRAM main_stats_output
@@ -340,16 +365,17 @@ END
 
 PROGRAM command
 BEGIN
+	call program main_require
 	if main.rb_collapse | main.rb_pivot {
 		if !main.cb_val1 & !main.cb_val2 & !main.ed_specs {
 			stopbox stop "At least one statistic with a variable (or an additional specification) must be given."
 		}
 	}
 	if main.rb_collapse {
-		put "parqit collapse "
+		put "parqit view " main.cb_view ": collapse "
 		put /program main_stats_output
-		if main.ex_if {
-			put " if " main.ex_if
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
 			optionarg main.cb_by
@@ -358,10 +384,10 @@ BEGIN
 	if main.rb_pivot {
 		require main.cb_rows
 		require main.cb_cols
-		put "parqit pivot "
+		put "parqit view " main.cb_view ": pivot "
 		put /program main_stats_output
-		if main.ex_if {
-			put " if " main.ex_if
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
 			optionarg main.cb_rows
@@ -369,23 +395,23 @@ BEGIN
 		endoptions
 	}
 	if main.rb_contract {
-		require main.cb_cvars
-		put "parqit contract " main.cb_cvars
-		if main.ex_if {
-			put " if " main.ex_if
+		require opt.cb_cvars
+		put "parqit view " main.cb_view ": contract " opt.cb_cvars
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
-			optionarg main.ed_freq
+			optionarg opt.ed_freq
 		endoptions
 	}
 	if main.rb_reshape {
-		require main.cb_stubs
-		require main.cb_i
-		require main.cb_j
-		put "parqit reshape " main.cb_dir " " main.cb_stubs
+		require opt.cb_stubs
+		require opt.cb_i
+		require opt.cb_j
+		put "parqit view " main.cb_view ": reshape " opt.cb_dir " " opt.cb_stubs
 		beginoptions
-			put "i(" main.cb_i ") "
-			put "j(" main.cb_j ")"
+			put "i(" opt.cb_i ") "
+			put "j(" opt.cb_j ")"
 		endoptions
 	}
 END

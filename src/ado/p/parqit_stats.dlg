@@ -1,20 +1,20 @@
 /*
   parqit summarize - Summary statistics, tables, correlations, and histograms
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Summary statistics, tables, and correlations...
   Launch directly with:  db parqit_stats      (menu installed by: parqit menu)
 
   Every statistic is computed by the engine as a push-down query over the
-  current view; only the summary numbers (or the histogram bin table) reach
+  selected view; only the summary numbers (or the histogram bin table) reach
   Stata, and the data in memory are unchanged.
 */
 
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 470
+DEFINE _dlght 395
 INCLUDE header
 HELP hlp1, view("help parqit##explore")
 RESET res1
@@ -24,6 +24,9 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -35,13 +38,16 @@ END
 DIALOG main, label("parqit summarize - Summary statistics, tables, correlations, and histograms") ///
 	tabtitle("Main")
 BEGIN
-  RADIO rb_sum			_lft	_top	_lw80	.,		///
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  RADIO rb_sum			_lft	45	_lw80	.,		///
 	first								///
 	onclickon(program main_mode)					///
 	label("Summary statistics (summarize)")
   BUTTON bu_pop			_rj80	@	80	.,		///
 	onpush(program main_populate)					///
-	tooltip("Populate the comboboxes with the variable names of the current view") ///
+	tooltip("Populate the comboboxes with the variable names of the selected view") ///
 	label("Populate")
   COMBOBOX cb_sumvars		_ilft	_ss	380	.,		///
 	append								///
@@ -141,29 +147,25 @@ BEGIN
   RADIO rb_hist		_lft	_ls	_iwd	.,			///
 	last								///
 	onclickon(program main_mode)					///
-	label("Histogram with engine-computed bins (histogram)")
-  COMBOBOX cb_hvar		_ilft	_ss	200	.,		///
-	dropdown							///
-	contents(numeric_list)						///
-	error("Variable")						///
-	label("Variable")
-  TEXT tx_bins			230	@	50	.,		///
-	label("Bins:") right
-  EDIT ed_bins			285	@	60	.,		///
-	numonly								///
-	option(bins)							///
-	label("Number of bins") ///
-	tooltip("Empty or 0: automatic; positive integer requests capped at 1000 bins")
-  CHECKBOX ck_nodraw		360	@	230	.,		///
-	option(nodraw)							///
-	label("Do not draw the histogram")
+	label("Histogram with engine-computed bins (histogram; see Options)")
 
-  TEXT tx_if			_lft	_ls	_iwd	.,		///
-	label("Only the rows where (if expression, optional; applies to the statistic chosen above):")
+  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
+END
+
+DIALOG opt, tabtitle("Options")
+BEGIN
+  TEXT tx_if			_lft	_top	_iwd	.,		///
+	label("Only the rows where (if expression, optional; applies to the statistic chosen on Main):")
   EXP ex_if			@	_ss	@	.,		///
 	label("Create...")
-  TEXT tx_context _lft 425 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
+  TEXT tx_hvar _lft _ls _iwd ., label("Histogram variable and bins:")
+  COMBOBOX cb_hvar		_lft	_ss	200	.,		///
+	dropdown contents(numeric_list) error("Variable") label("Variable")
+  TEXT tx_bins 230 @ 50 ., label("Bins:") right
+  EDIT ed_bins 285 @ 60 ., numonly option(bins) label("Number of bins") ///
+	tooltip("Empty or 0: automatic; positive integer requests capped at 1000 bins")
+  CHECKBOX ck_nodraw 360 @ 230 ., option(nodraw) label("Do not draw the histogram")
 END
 
 LIST vv_list
@@ -204,10 +206,11 @@ BEGIN
 	call main.ck_pw.disable
 	call main.ck_obs.disable
 	call main.ck_sig.disable
-	call main.cb_hvar.disable
-	call main.tx_bins.disable
-	call main.ed_bins.disable
-	call main.ck_nodraw.disable
+	call opt.tx_hvar.disable
+	call opt.cb_hvar.disable
+	call opt.tx_bins.disable
+	call opt.ed_bins.disable
+	call opt.ck_nodraw.disable
 	if main.rb_sum {
 		call main.cb_sumvars.enable
 		call main.ck_detail.enable
@@ -249,51 +252,71 @@ BEGIN
 		}
 	}
 	if main.rb_hist {
-		call main.cb_hvar.enable
-		call main.tx_bins.enable
-		call main.ed_bins.enable
-		call main.ck_nodraw.enable
+		call opt.tx_hvar.enable
+		call opt.cb_hvar.enable
+		call opt.tx_bins.enable
+		call opt.ed_bins.enable
+		call opt.ck_nodraw.enable
 	}
 END
 
 PROGRAM main_populate
 BEGIN
-	call program main_context
-	call pq_populate_error.setvalue 0
-	put "parqit _dlgvars "
-	put dlgname
-	put " vv_list, numeric(numeric_list)"
-	stata hidden immediate
-	if pq_populate_error {
-		stopbox stop "Unable to get the variable names of the current view." ///
-			"Open a view first (User > parqit > Read data...)."
-	}
-	call main.cb_sumvars.repopulate
-	call main.cb_tab.repopulate
-	call main.cb_tab2.repopulate
-	call main.cb_tsvars.repopulate
-	call main.cb_tsby.repopulate
-	call main.cb_corr.repopulate
-	call main.cb_hvar.repopulate
+	call program main_refresh
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
 END
 
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
+	}
+END
+
 PROGRAM command
 BEGIN
+	call program main_require
 	if main.rb_sum {
-		put "parqit summarize"
+		put "parqit view " main.cb_view ": summarize"
 		if main.cb_sumvars {
 			put " " main.cb_sumvars
 		}
-		if main.ex_if {
-			put " if " main.ex_if
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
 			option main.ck_detail
@@ -304,12 +327,12 @@ BEGIN
 		if main.cb_tab.isWordCountGT(1) | main.cb_tab2.isWordCountGT(1) {
 			stopbox stop "Enter one variable in each tabulation field."
 		}
-		put "parqit tabulate " main.cb_tab
+		put "parqit view " main.cb_view ": tabulate " main.cb_tab
 		if main.cb_tab2 {
 			put " " main.cb_tab2
 		}
-		if main.ex_if {
-			put " if " main.ex_if
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
 			option main.ck_tmiss
@@ -322,9 +345,9 @@ BEGIN
 	}
 	if main.rb_ts {
 		require main.cb_tsvars
-		put "parqit tabstat " main.cb_tsvars
-		if main.ex_if {
-			put " if " main.ex_if
+		put "parqit view " main.cb_view ": tabstat " main.cb_tsvars
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
 			if main.ck_s_n | main.ck_s_mean | main.ck_s_sd |	///
@@ -366,9 +389,9 @@ BEGIN
 	}
 	if main.rb_corr {
 		if main.ck_pw {
-			put "parqit pwcorr " main.cb_corr
-			if main.ex_if {
-				put " if " main.ex_if
+			put "parqit view " main.cb_view ": pwcorr " main.cb_corr
+			if opt.ex_if {
+				put " if " opt.ex_if
 			}
 			beginoptions
 				option main.ck_obs
@@ -376,21 +399,21 @@ BEGIN
 			endoptions
 		}
 		else {
-			put "parqit correlate " main.cb_corr
-			if main.ex_if {
-				put " if " main.ex_if
+			put "parqit view " main.cb_view ": correlate " main.cb_corr
+			if opt.ex_if {
+				put " if " opt.ex_if
 			}
 		}
 	}
 	if main.rb_hist {
-		require main.cb_hvar
-		put "parqit histogram " main.cb_hvar
-		if main.ex_if {
-			put " if " main.ex_if
+		require opt.cb_hvar
+		put "parqit view " main.cb_view ": histogram " opt.cb_hvar
+		if opt.ex_if {
+			put " if " opt.ex_if
 		}
 		beginoptions
-			optionarg main.ed_bins
-			option main.ck_nodraw
+			optionarg opt.ed_bins
+			option opt.ck_nodraw
 		endoptions
 	}
 END

@@ -1,7 +1,7 @@
 /*
   parqit generate - Create a new variable, or change the contents of a variable
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Create or change variables...
   Launch directly with:  db parqit_gen      (menu installed by: parqit menu)
@@ -17,7 +17,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 545
+DEFINE _dlght 345
 INCLUDE header
 HELP hlp1, view("help parqit##expressions")
 RESET res1
@@ -27,6 +27,9 @@ BEGIN
 	create STRING dlgname
 	dlgname.storeDialogClassName
 	create DOUBLE pq_populate_error
+	create DOUBLE pq_refreshing
+	create STRING pq_view_name
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -38,7 +41,10 @@ END
 DIALOG main, label("parqit generate - Create a new variable, or change the contents of a variable") ///
 	tabtitle("Main")
 BEGIN
-  RADIO rb_gen			_lft	_top	_iwd	.,		///
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  RADIO rb_gen			_lft	45	_iwd	.,		///
 	first								///
 	onclickon(program main_mode)					///
 	label("Create a new variable (generate)")
@@ -61,7 +67,7 @@ BEGIN
 	label("egen function:")
   BUTTON bu_pop			_rj80	@	80	.,		///
 	onpush(program main_populate)					///
-	tooltip("Populate the by() combobox with the variable names of the current view") ///
+	tooltip("Populate the by() combobox with the variable names of the selected view") ///
 	label("Populate")
   COMBOBOX cb_type		_lft	_ss	_vnwd	.,		///
 	dropdown							///
@@ -90,7 +96,15 @@ BEGIN
   EXP ex_if			@	_ss	@	.,		///
 	label("Create...")
 
-  TEXT tx_by			_lft	_ls	_iwd	.,		///
+  TEXT tx_note			_lft	_ls	_iwd	.,		///
+	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
+  TEXT tx_context _lft 305 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
+END
+
+DIALOG opt, tabtitle("Groups and labels")
+BEGIN
+  TEXT tx_by			_lft	_top	_iwd	.,		///
 	label("Group variables for egen, option by() (optional):")
   COMBOBOX cb_by			@	_ss	@	.,		///
 	append								///
@@ -106,7 +120,7 @@ BEGIN
 	label("by/bysort prefix: group variables [(sort variables)] (optional; gen, replace, egen):")
   EDIT ed_bys			@	_ss	300	.,		///
 	label("bysort prefix")
-  CHECKBOX ck_nosort		320	@	160	.,		///
+  CHECKBOX ck_nosort		320	@	270	.,		///
 	label("Already sorted (by, not bysort)")
 
   TEXT tx_src			_lft	_ls	280	.,		///
@@ -124,18 +138,48 @@ BEGIN
 	option(sequential)						///
 	label("Number the codes 1, 2, ... even when they are integers (sequential)")
 
-  TEXT tx_note			_lft	_ls	_iwd	.,		///
-	label("Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage.")
-  TEXT tx_context _lft 500 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_populate)
 END
 
 PROGRAM main_context
 BEGIN
-	put "parqit _dlgcontext "
+	put "parqit _dlgviews "
 	put dlgname
+	put ", initial"
 	stata hidden queue
 	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_target
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
+	}
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
+	}
 END
 
 LIST vv_list
@@ -198,14 +242,16 @@ END
 
 PROGRAM main_mode
 BEGIN
+	call main.tx_view.enable
+	call main.cb_view.enable
 	if !main.rb_spss {
 		call main.tx_exp.enable
 		call main.ex_exp.enable
-		call main.tx_src.disable
-		call main.vn_src.disable
-		call main.tx_lab.disable
-		call main.ed_lab.disable
-		call main.ck_seq.disable
+		call opt.tx_src.disable
+		call opt.vn_src.disable
+		call opt.tx_lab.disable
+		call opt.ed_lab.disable
+		call opt.ck_seq.disable
 		call main.tx_note.setlabel "Untyped numeric generate uses double; egen infers its result type. Select a type to request explicit storage."
 	}
 	if main.rb_gen {
@@ -215,13 +261,13 @@ BEGIN
 		call main.cb_fcn.disable
 		call main.tx_if.enable
 		call main.ex_if.enable
-		call main.tx_by.disable
-		call main.cb_by.disable
-		call main.tx_eopt.disable
-		call main.ed_eopt.disable
-		call main.tx_bys.enable
-		call main.ed_bys.enable
-		call main.ck_nosort.enable
+		call opt.tx_by.disable
+		call opt.cb_by.disable
+		call opt.tx_eopt.disable
+		call opt.ed_eopt.disable
+		call opt.tx_bys.enable
+		call opt.ed_bys.enable
+		call opt.ck_nosort.enable
 		call main.bu_pop.disable
 	}
 	if main.rb_egen {
@@ -231,13 +277,13 @@ BEGIN
 		call main.cb_fcn.enable
 		call main.tx_if.enable
 		call main.ex_if.enable
-		call main.tx_by.enable
-		call main.cb_by.enable
-		call main.tx_eopt.enable
-		call main.ed_eopt.enable
-		call main.tx_bys.enable
-		call main.ed_bys.enable
-		call main.ck_nosort.enable
+		call opt.tx_by.enable
+		call opt.cb_by.enable
+		call opt.tx_eopt.enable
+		call opt.ed_eopt.enable
+		call opt.tx_bys.enable
+		call opt.ed_bys.enable
+		call opt.ck_nosort.enable
 		call main.bu_pop.enable
 	}
 	if main.rb_repl {
@@ -247,16 +293,18 @@ BEGIN
 		call main.cb_fcn.disable
 		call main.tx_if.enable
 		call main.ex_if.enable
-		call main.tx_by.disable
-		call main.cb_by.disable
-		call main.tx_eopt.disable
-		call main.ed_eopt.disable
-		call main.tx_bys.enable
-		call main.ed_bys.enable
-		call main.ck_nosort.enable
+		call opt.tx_by.disable
+		call opt.cb_by.disable
+		call opt.tx_eopt.disable
+		call opt.ed_eopt.disable
+		call opt.tx_bys.enable
+		call opt.ed_bys.enable
+		call opt.ck_nosort.enable
 		call main.bu_pop.disable
 	}
 	if main.rb_spss {
+		call main.tx_view.disable
+		call main.cb_view.disable
 		call main.tx_type.disable
 		call main.cb_type.disable
 		call main.tx_fcn.disable
@@ -265,51 +313,45 @@ BEGIN
 		call main.ex_exp.disable
 		call main.tx_if.disable
 		call main.ex_if.disable
-		call main.tx_by.disable
-		call main.cb_by.disable
-		call main.tx_eopt.disable
-		call main.ed_eopt.disable
-		call main.tx_bys.disable
-		call main.ed_bys.disable
-		call main.ck_nosort.disable
+		call opt.tx_by.disable
+		call opt.cb_by.disable
+		call opt.tx_eopt.disable
+		call opt.ed_eopt.disable
+		call opt.tx_bys.disable
+		call opt.ed_bys.disable
+		call opt.ck_nosort.disable
 		call main.bu_pop.disable
-		call main.tx_src.enable
-		call main.vn_src.enable
-		call main.tx_lab.enable
-		call main.ed_lab.enable
-		call main.ck_seq.enable
+		call opt.tx_src.enable
+		call opt.vn_src.enable
+		call opt.tx_lab.enable
+		call opt.ed_lab.enable
+		call opt.ck_seq.enable
 		call main.tx_note.setlabel "Uses the SPSS codes when they are distinct integers, otherwise 1, 2, ... in code order; user-missing codes become .a-.z."
 	}
+	call program main_refresh
 END
 
 PROGRAM main_populate
 BEGIN
-	call program main_context
-	call pq_populate_error.setvalue 0
-	put "parqit _dlgvars "
-	put dlgname
-	put " vv_list"
-	stata hidden immediate
-	if pq_populate_error {
-		stopbox stop "Unable to get the variable names of the current view." ///
-			"Open a view first (User > parqit > Read data...)."
-	}
-	call main.cb_by.repopulate
+	call program main_refresh
 END
 
 PROGRAM command
 BEGIN
+	if !main.rb_spss {
+		call program main_require
+	}
 	if main.rb_gen {
-		if main.ed_bys {
-			if main.ck_nosort {
-				put "parqit by " main.ed_bys ": gen "
+		if opt.ed_bys {
+			if opt.ck_nosort {
+				put "parqit view " main.cb_view ": by " opt.ed_bys ": gen "
 			}
 			else {
-				put "parqit bysort " main.ed_bys ": gen "
+				put "parqit view " main.cb_view ": bysort " opt.ed_bys ": gen "
 			}
 		}
 		else {
-			put "parqit gen "
+			put "parqit view " main.cb_view ": gen "
 		}
 		if !main.cb_type.isdefault() {
 			put main.cb_type " "
@@ -327,16 +369,16 @@ BEGIN
 			stopbox stop "egen functions produce numeric results." ///
 				"Choose (default), byte, int, long, float, or double."
 		}
-		if main.ed_bys {
-			if main.ck_nosort {
-				put "parqit by " main.ed_bys ": egen "
+		if opt.ed_bys {
+			if opt.ck_nosort {
+				put "parqit view " main.cb_view ": by " opt.ed_bys ": egen "
 			}
 			else {
-				put "parqit bysort " main.ed_bys ": egen "
+				put "parqit view " main.cb_view ": bysort " opt.ed_bys ": egen "
 			}
 		}
 		else {
-			put "parqit egen "
+			put "parqit view " main.cb_view ": egen "
 		}
 		if !main.cb_type.isdefault() {
 			put main.cb_type " "
@@ -351,23 +393,23 @@ BEGIN
 			put " if " main.ex_if
 		}
 		beginoptions
-			optionarg main.cb_by
-			if main.ed_eopt {
-				put main.ed_eopt
+			optionarg opt.cb_by
+			if opt.ed_eopt {
+				put opt.ed_eopt
 			}
 		endoptions
 	}
 	if main.rb_repl {
-		if main.ed_bys {
-			if main.ck_nosort {
-				put "parqit by " main.ed_bys ": replace "
+		if opt.ed_bys {
+			if opt.ck_nosort {
+				put "parqit view " main.cb_view ": by " opt.ed_bys ": replace "
 			}
 			else {
-				put "parqit bysort " main.ed_bys ": replace "
+				put "parqit view " main.cb_view ": bysort " opt.ed_bys ": replace "
 			}
 		}
 		else {
-			put "parqit replace "
+			put "parqit view " main.cb_view ": replace "
 		}
 		require main.ed_name
 		put main.ed_name " = "
@@ -378,13 +420,13 @@ BEGIN
 		}
 	}
 	if main.rb_spss {
-		require main.vn_src
+		require opt.vn_src
 		require main.ed_name
-		put "parqit spssencode " main.vn_src
+		put "parqit spssencode " opt.vn_src
 		beginoptions
 			put "generate(" main.ed_name ") "
-			optionarg main.ed_lab
-			option main.ck_seq
+			optionarg opt.ed_lab
+			option opt.ck_seq
 		endoptions
 	}
 END

@@ -114,8 +114,8 @@ def current_option_contracts(repo: Path, ado: str) -> list[str]:
     for setting in sorted(settings):
         if setting not in values or f'put "parqit set {setting} "' not in command:
             errors.append(f"parqit_views.dlg: missing set {setting} selection/emission")
-    routes = {"parqit_read": ("main", ["main.rb_use"], []),
-              "parqit_write": ("main", ["main.rb_collect"], ["main.rb_save | main.rb_data"]),
+    routes = {"parqit_read": ("opt", ["main.rb_use"], []),
+              "parqit_write": ("opt", ["main.rb_collect"], ["main.rb_save | main.rb_data"]),
               "parqit_combine": ("opt", ["main.rb_mergein", "main.rb_appendin"],
                                   ["main.rb_merge", "main.rb_append", "main.rb_joinby"])}
     for name, (tab, enabled, forbidden) in routes.items():
@@ -185,6 +185,12 @@ def audit_dialog(path: Path) -> list[str]:
 
     if text.count("INCLUDE _std_wide") != 1:
         errors.append("must include _std_wide exactly once")
+    selector = controls.get("main", {}).get("cb_view")
+    if not selector or attribute(selector, "contents") != "view_list" or "dropdownlist" not in selector.block:
+        errors.append("must offer a named open-view selector")
+    height = re.search(r"^DEFINE _dlght (\d+)$", text, re.M)
+    if not height or int(height.group(1)) > 395:
+        errors.append("dialog must fit the compact 395-unit height limit; use tabs for extra options")
     anchor = HELP_ANCHORS[path.stem]
     if f'HELP hlp1, view("help parqit##{anchor}")' not in text:
         errors.append(f"Help must target help parqit##{anchor}")
@@ -224,7 +230,8 @@ def audit_dialog(path: Path) -> list[str]:
     if "SYNCHRONOUS_ONLY" in text:
         errors.append("SYNCHRONOUS_ONLY is not justified")
 
-    for match in re.finditer(r"\b(main|opt)\.(\w+)", text):
+    tabs = "|".join(re.escape(tab) for tab in controls)
+    for match in re.finditer(rf"\b({tabs})\.(\w+)", text):
         tab, name = match.group(1), match.group(2)
         if name not in controls.get(tab, {}):
             errors.append(f"unknown control reference {tab}.{name}")
@@ -253,7 +260,7 @@ def audit_dialog(path: Path) -> list[str]:
                 if lengths and len(set(lengths.values())) != 1:
                     errors.append(f"line {control.line}: {tab}.{control.name} LIST lengths differ: {lengths}")
 
-    for match in re.finditer(r"\b(main|opt)\.(\w+)\.(hide|show)\b", text):
+    for match in re.finditer(rf"\b({tabs})\.(\w+)\.(hide|show)\b", text):
         tab, name, action = match.groups()
         control = controls.get(tab, {}).get(name)
         if control and control.kind == "RADIO":
@@ -316,6 +323,51 @@ def source_filter_contracts(repo: Path, ado: str) -> list[str]:
     return errors
 
 
+def explore_view_contracts(repo: Path) -> list[str]:
+    text = uncomment((repo / "src/ado/p/parqit_explore.dlg").read_text())
+    controls, _ = controls_by_tab(text.splitlines())
+    selector = controls.get("main", {}).get("cb_view")
+    errors = []
+    if not selector or attribute(selector, "contents") != "view_list" or "dropdownlist" not in selector.block:
+        errors.append("parqit_explore.dlg: must offer an explicit open-view selector")
+    blocks = named_blocks(text.splitlines(), "PROGRAM")
+    command = "\n".join(line for _, line in blocks.get("command", []))
+    lists = named_blocks(text.splitlines(), "LIST")
+    for op in list_values(lists["op_vals"]):
+        body = conditional_body(command, f'main.lb_op.equals("{op}")')
+        if op == "descfile":
+            if 'put "parqit describe "' not in body or "main.cb_view" in body:
+                errors.append("parqit_explore.dlg: file description must be independent of view selection")
+        elif 'put "parqit view " main.cb_view ": ' not in body:
+            errors.append(f"parqit_explore.dlg: {op} does not explicitly target the selected view")
+    return errors
+
+
+def view_scope_contracts(repo: Path) -> list[str]:
+    # Existing-view work must name its target; explicit source/memory/session
+    # commands and management actions have their own, deliberately unprefixed
+    # command grammar. A new raw verb here requires a reviewed mode exception.
+    raw_allowed = {
+        "read": {"use", "open", "path", "describe"},
+        "explore": {"describe"}, "stats": set(), "filter": set(),
+        "vars": set(), "gen": {"spssencode"}, "pivot": set(),
+        "combine": {"mergein", "appendin"}, "write": {"save"},
+        "views": {"view", "close", "views", "sql", "set", "version", "selftest"},
+    }
+    errors = []
+    for name, allowed in raw_allowed.items():
+        text = uncomment((repo / f"src/ado/p/parqit_{name}.dlg").read_text())
+        for verb in re.findall(r'\bput "parqit ([A-Za-z_]\w*)', text):
+            if not verb.startswith("_") and verb != "view" and verb not in allowed:
+                errors.append(f"parqit_{name}.dlg: unscoped {verb} command")
+        programs = named_blocks(text.splitlines(), "PROGRAM")
+        for callback in ("main_context", "main_refresh", "main_target"):
+            body = "\n".join(line for _, line in programs.get(callback, []))
+            if 'put "parqit _dlgviews "' not in body or "stata hidden queue" not in body:
+                errors.append(f"parqit_{name}.dlg: {callback} must queue the shared view callback")
+    return errors
+
+
 def main() -> int:
     repo = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     dialogs = sorted((repo / "src/ado/p").glob("parqit_*.dlg"))
@@ -331,12 +383,16 @@ def main() -> int:
         "PROGRAM",
     )
     populate = "\n".join(line for _, line in write_programs.get("main_populate", []))
-    if "main.rb_data" not in populate or 'put ", data"' not in populate:
-        failures.append("parqit_write.dlg: Populate does not select in-memory variables in memory-save mode")
-
     ado = (repo / "src/ado/p/parqit.ado").read_text(encoding="utf-8")
+    if re.search(r"capture local [^=\n]+ = \.`dlg'\.[^\n]+\.value", ado):
+        failures.append("numeric GUI .value members require class macro expansion, not scalar-expression lookup")
+    glue = ado.split("program define _parqit__dlgviews, rclass", 1)[1].split("\nend", 1)[0]
+    if "call program main_refresh" not in populate or '_parqit__dlgvars `dlg\' vv_list, data' not in glue:
+        failures.append("parqit_write.dlg: memory-save Populate is not routed to the data schema")
     failures.extend(current_option_contracts(repo, ado))
     failures.extend(source_filter_contracts(repo, ado))
+    failures.extend(explore_view_contracts(repo))
+    failures.extend(view_scope_contracts(repo))
     if re.search(r"if\s*\(\s*`i'\s*>\s*\d+", ado):
         failures.append("parqit.ado: _dlgvars silently caps the populated variable list")
     if "capture .`dlgname'.`listname'.Arrdropall" not in ado:
@@ -348,7 +404,7 @@ def main() -> int:
         for failure in failures:
             print(f"dialog-lint FAIL: {failure}", file=sys.stderr)
         return 1
-    print("dialog-lint OK: 10 dialogs; controls/lists/options/help/quoting/populate/file-filter/put-program-blank contracts")
+    print("dialog-lint OK: 10 dialogs; compact-height/controls/lists/options/help/quoting/populate/file-filter/put-program-blank contracts")
     return 0
 
 

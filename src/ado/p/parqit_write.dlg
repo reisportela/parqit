@@ -1,12 +1,12 @@
 /*
   parqit save - Write Parquet or collect a view into memory
 
-*!  VERSION 0.6.0  26oct2026
+*!  VERSION 0.6.1  27oct2026
 
   User > parqit > Save as Parquet or collect into memory...
   Launch directly with:  db parqit_write      (menu installed by: parqit menu)
 
-  The two materialisers: parqit collect executes the current view's pipeline
+  The two materialisers: parqit collect executes the selected view's pipeline
   once and replaces the data in memory atomically; parqit save executes it
   and writes Parquet directly (or, with data, writes the dataset in memory).
   The fourth choice converts an SPSS file (.sav, .zsav) or an R data file
@@ -19,7 +19,7 @@
 VERSION 16.0
 
 INCLUDE _std_wide
-DEFINE _dlght 575
+DEFINE _dlght 395
 INCLUDE header
 HELP hlp1, view("help parqit##materialisers")
 RESET res1
@@ -31,6 +31,8 @@ BEGIN
 	create DOUBLE pq_populate_error
 	create DOUBLE pq_view_live
 	create STRING pq_view_name
+	create DOUBLE pq_refreshing
+	create STRING pq_target_kind
 END
 
 PROGRAM POSTINIT_PROGRAM
@@ -42,10 +44,13 @@ END
 DIALOG main, label("parqit save - Write Parquet or collect a view into memory") ///
 	tabtitle("Main")
 BEGIN
-  RADIO rb_save		_lft	_top	_iwd	.,		///
+  TEXT tx_view _lft _top 35 ., label("View:")
+  COMBOBOX cb_view 55 @ 535 ., dropdownlist nomemory contents(view_list) ///
+	default("(select a view)") onselchange(program main_target) label("View")
+  RADIO rb_save		_lft	45	_iwd	.,		///
 	first								///
 	onclickon(program main_mode)					///
-	label("Write the selected view shown below to Parquet (save)")
+	label("Write the selected view to Parquet (save)")
   RADIO rb_data _lft _ss _iwd ., onclickon(program main_mode) ///
 	label("Write the dataset in Stata memory to Parquet (save, data)")
   RADIO rb_spss _lft _ss _iwd ., onclickon(program main_mode) ///
@@ -99,7 +104,13 @@ BEGIN
 	option(xmissing)						///
 	label("Preserve extended missing values .a-.z in companion columns (xmissing)")
 
-  TEXT tx_comp			_ilft	_ls	120	.,		///
+  TEXT tx_context _lft 355 470 ., label("Current view: refresh to check")
+  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
+END
+
+DIALOG opt, tabtitle("Storage and partitions")
+BEGIN
+  TEXT tx_comp			_ilft	_top	120	.,		///
 	label("Compression:")
   TEXT tx_level			160	@	120	.,		///
 	label("Compression level:")
@@ -124,7 +135,7 @@ BEGIN
 	label("Partition by these variables into a Hive directory tree, partition_by() (optional):")
   BUTTON bu_pop			_rj80	@	80	.,		///
 	onpush(program main_populate)					///
-	tooltip("Populate from the current view, or from the dataset in memory when data is selected") ///
+	tooltip("Populate from the selected view, or from the dataset in memory when data is selected") ///
 	label("Populate")
   COMBOBOX cb_part		_ilft	_ss	_ibwd	.,		///
 	append								///
@@ -151,9 +162,7 @@ BEGIN
 	option(encoding)						///
 	tooltip("default: the session code page (windows-1252 unless parqit set encoding); pick or type any encoding parqit reads (add , all for text that is valid UTF-8 by accident)") ///
 	label("Code page")
-  TEXT tx_context _lft 505 470 ., label("Current view: refresh to check")
-  BUTTON bu_context _rj80 @ 80 ., label("Refresh") onpush(program main_refresh)
-  TEXT tx_int64 _ilft 535 300 ., label("Large integers on collect (default = inherit):")
+  TEXT tx_int64 _ilft _ls 300 ., label("Large integers on collect (default = inherit):")
   COMBOBOX cb_int64 330 @ 140 ., dropdownlist contents(i64_list) ///
 	default("default") option(int64) label("Integers beyond 2^53") ///
 	tooltip("default inherits the view/session setting; string keeps exact digits, round accepts loss, refuse stops the load")
@@ -161,30 +170,43 @@ END
 
 PROGRAM main_context
 BEGIN
-	if main.rb_spss {
-		call main.tx_context.setlabel "Source: the SPSS or R file named above"
-	}
-	else {
-		put "parqit _dlgcontext "
+	put "parqit _dlgviews "
+	put dlgname
+	put ", initial"
+	stata hidden queue
+	clear
+END
+
+LIST view_list
+BEGIN
+	(select a view)
+END
+
+PROGRAM main_refresh
+BEGIN
+	if !pq_refreshing {
+		put "parqit _dlgviews "
 		put dlgname
-		if main.rb_data {
-			put ", data"
-		}
-		else {
-			put ", target"
-		}
 		stata hidden queue
 		clear
 	}
 END
 
-PROGRAM main_refresh
+PROGRAM main_target
 BEGIN
-	if main.rb_collect | main.rb_spss {
-		call program main_context
+	if !pq_refreshing {
+		put "parqit _dlgviews "
+		put dlgname
+		put ", target"
+		stata hidden queue
+		clear
 	}
-	else {
-		call program main_populate
+END
+
+PROGRAM main_require
+BEGIN
+	if !main.cb_view | main.cb_view.iseq("(select a view)") {
+		stopbox stop "Select an open view. Click Refresh to update the list."
 	}
 END
 
@@ -282,29 +304,37 @@ END
 
 PROGRAM main_mode
 BEGIN
+	if main.rb_data | main.rb_spss {
+		call main.tx_view.disable
+		call main.cb_view.disable
+	}
+	else {
+		call main.tx_view.enable
+		call main.cb_view.enable
+	}
 	if main.rb_collect {
 		call main.ck_repl.enable
 		call main.ck_compress.enable
-		call main.tx_int64.enable
-		call main.cb_int64.enable
+		call opt.tx_int64.enable
+		call opt.cb_int64.enable
 		call main.tx_out.disable
 		call main.fi_out.disable
 		call main.ck_replace.disable
 		call main.ck_copy.disable
 		call main.ck_xmiss.disable
-		call main.tx_comp.disable
-		call main.cb_comp.disable
-		call main.tx_level.disable
-		call main.ed_level.disable
-		call main.tx_chunk.disable
-		call main.ed_chunk.disable
-		call main.tx_part.disable
-		call main.bu_pop.disable
-		call main.cb_part.disable
-		call main.tx_pmode.disable
-		call main.cb_pmode.disable
-		call main.tx_enc.disable
-		call main.cb_enc.disable
+		call opt.tx_comp.disable
+		call opt.cb_comp.disable
+		call opt.tx_level.disable
+		call opt.ed_level.disable
+		call opt.tx_chunk.disable
+		call opt.ed_chunk.disable
+		call opt.tx_part.disable
+		call opt.bu_pop.disable
+		call opt.cb_part.disable
+		call opt.tx_pmode.disable
+		call opt.cb_pmode.disable
+		call opt.tx_enc.disable
+		call opt.cb_enc.disable
 		call main.tx_spss.disable
 		call main.fi_spss.disable
 		call main.tx_obj.disable
@@ -316,8 +346,8 @@ BEGIN
 	if main.rb_save | main.rb_data {
 		call main.ck_repl.disable
 		call main.ck_compress.disable
-		call main.tx_int64.disable
-		call main.cb_int64.disable
+		call opt.tx_int64.disable
+		call opt.cb_int64.disable
 		call main.tx_spss.disable
 		call main.fi_spss.disable
 		call main.tx_obj.disable
@@ -328,32 +358,32 @@ BEGIN
 		call main.tx_out.enable
 		call main.fi_out.enable
 		call main.ck_replace.enable
-		call main.tx_comp.enable
-		call main.cb_comp.enable
-		call main.tx_level.enable
-		call main.ed_level.enable
-		call main.tx_chunk.enable
-		call main.ed_chunk.enable
-		call main.tx_part.enable
-		call main.bu_pop.enable
-		call main.cb_part.enable
-		call main.tx_pmode.enable
-		call main.cb_pmode.enable
+		call opt.tx_comp.enable
+		call opt.cb_comp.enable
+		call opt.tx_level.enable
+		call opt.ed_level.enable
+		call opt.tx_chunk.enable
+		call opt.ed_chunk.enable
+		call opt.tx_part.enable
+		call opt.bu_pop.enable
+		call opt.cb_part.enable
+		call opt.tx_pmode.enable
+		call opt.cb_pmode.enable
 		if main.rb_data {
-			call main.tx_enc.enable
-			call main.cb_enc.enable
+			call opt.tx_enc.enable
+			call opt.cb_enc.enable
 			call main.ck_copy.enable
 			call main.ck_xmiss.enable
 		}
 		else {
-			call main.tx_enc.disable
-			call main.cb_enc.disable
+			call opt.tx_enc.disable
+			call opt.cb_enc.disable
 			call main.ck_copy.setoff
 			call main.ck_copy.disable
 			call main.ck_xmiss.setoff
 			call main.ck_xmiss.disable
 		}
-		if !main.cb_pmode.isdefault() {
+		if !opt.cb_pmode.isdefault() {
 			call main.ck_replace.setoff
 			call main.ck_replace.disable
 		}
@@ -361,8 +391,8 @@ BEGIN
 	if main.rb_spss {
 		call main.ck_repl.disable
 		call main.ck_compress.disable
-		call main.tx_int64.disable
-		call main.cb_int64.disable
+		call opt.tx_int64.disable
+		call opt.cb_int64.disable
 		call main.tx_spss.enable
 		call main.fi_spss.enable
 		call main.tx_obj.enable
@@ -377,83 +407,65 @@ BEGIN
 		call main.ck_copy.disable
 		call main.ck_xmiss.setoff
 		call main.ck_xmiss.disable
-		call main.tx_comp.enable
-		call main.cb_comp.enable
-		call main.tx_level.enable
-		call main.ed_level.enable
-		call main.tx_chunk.disable
-		call main.ed_chunk.disable
-		call main.tx_part.disable
-		call main.bu_pop.disable
-		call main.cb_part.disable
-		call main.tx_pmode.disable
-		call main.cb_pmode.disable
-		call main.tx_enc.disable
-		call main.cb_enc.disable
+		call opt.tx_comp.enable
+		call opt.cb_comp.enable
+		call opt.tx_level.enable
+		call opt.ed_level.enable
+		call opt.tx_chunk.disable
+		call opt.ed_chunk.disable
+		call opt.tx_part.disable
+		call opt.bu_pop.disable
+		call opt.cb_part.disable
+		call opt.tx_pmode.disable
+		call opt.cb_pmode.disable
+		call opt.tx_enc.disable
+		call opt.cb_enc.disable
 	}
-	call program main_context
+	call program main_refresh
 END
 
 PROGRAM main_populate
 BEGIN
-	call program main_context
-	call pq_populate_error.setvalue 0
-	put "parqit _dlgvars "
-	put dlgname
-	put " vv_list"
-	if main.rb_data {
-		put ", data"
-	}
-	stata hidden immediate
-	if pq_populate_error {
-		if main.rb_data {
-			stopbox stop "Unable to get the variable names of the dataset in memory."
-		}
-		else {
-			stopbox stop "Unable to get the variable names of the current view." ///
-				"Open a view first (User > parqit > Read data...)."
-		}
-	}
-	call main.cb_part.repopulate
+	call program main_refresh
 END
 
 PROGRAM command
 BEGIN
-	if !main.rb_data & !main.rb_spss & !pq_view_live {
-		stopbox stop "No view is selected. Open a view and click Refresh, or select the dataset in Stata memory."
+	if !main.rb_data & !main.rb_spss {
+		call program main_require
 	}
 	if main.rb_collect {
-		put "parqit view " pq_view_name ": collect"
+		put "parqit view " main.cb_view ": collect"
 		beginoptions
 			option main.ck_repl
 			option main.ck_compress
-			optionarg /hidedefault main.cb_int64
+			optionarg /hidedefault opt.cb_int64
 		endoptions
 	}
 	if main.rb_save | main.rb_data {
 		require main.fi_out
-		if !main.ck_replace & main.cb_pmode.isdefault() {
+		if !main.ck_replace & opt.cb_pmode.isdefault() {
 			repfile main.fi_out
 		}
 		if main.rb_data {
 			put "parqit save "
 		}
 		else {
-			put "parqit view " pq_view_name ": save "
+			put "parqit view " main.cb_view ": save "
 		}
 		put /smartquote main.fi_out
 		beginoptions
-			if main.cb_pmode.isdefault() {
+			if opt.cb_pmode.isdefault() {
 				if main.ck_replace | main.fi_out.repfile {
 					put "replace "
 				}
 			}
-			optionarg /hidedefault main.cb_comp
-			optionarg main.ed_level
-			optionarg main.cb_part
-			optionarg /hidedefault main.cb_pmode
-			optionarg main.ed_chunk
-			optionarg /hidedefault main.cb_enc
+			optionarg /hidedefault opt.cb_comp
+			optionarg opt.ed_level
+			optionarg opt.cb_part
+			optionarg /hidedefault opt.cb_pmode
+			optionarg opt.ed_chunk
+			optionarg /hidedefault opt.cb_enc
 			if main.rb_data {
 				put "data "
 			}
@@ -478,8 +490,8 @@ BEGIN
 			if main.ck_replace | main.fi_out.repfile {
 				put "replace "
 			}
-			optionarg /hidedefault main.cb_comp
-			optionarg main.ed_level
+			optionarg /hidedefault opt.cb_comp
+			optionarg opt.ed_level
 			optionarg /hidedefault main.cb_spenc
 			optionarg main.ed_obj
 		endoptions
