@@ -200,6 +200,7 @@ suites run on a licensed machine:
 ```bash
 bash tests/run_stata.sh                # everything, prints a verdict summary
 STATA=/usr/local/stata/stata-mp bash tests/run_stata.sh m0_smoke
+STATA_PYTHON_EXEC=/path/to/python3 bash tests/run_stata.sh
 STATA=stata-mp BUILD_DIR="$PWD/build/dev" \
   bash tests/run_stata.sh x01_bridge_xproc  # two Stata processes, one TMPDIR
 ```
@@ -208,6 +209,12 @@ Each `.do` test is self-contained, generates its own data, prints a final
 `VERDICT(...): PASS/FAIL` line, and where it checks on-disk payloads it does
 so with an independent oracle (pyarrow via Stata's Python, or the duckdb
 CLI) — never with parqit alone.
+
+Set `STATA_PYTHON_EXEC` to an existing Python executable with the oracle
+dependencies (including pyarrow and duckdb) when Stata's default Python does
+not provide them. The runner selects it only inside each batch wrapper,
+before Python is initialised. It does not change permanent Stata settings or
+install packages. The concurrent gates retain their own process setup.
 
 The `x01_bridge_xproc` gate is a purpose-built wrapper rather than a single
 do-file. It starts two licensed Stata processes with the same temporary

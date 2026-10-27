@@ -1372,6 +1372,8 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
         const std::string ref = quote_ident(sp.source);
         const auto promotion = exact.find(sp.source);
         const bool promoted = promotion != exact.end();
+        const bool distinct = sp.stat == "unique" || sp.stat == "nunique";
+        const bool cardinality = sp.stat == "count" || distinct;
         std::string agg;
         char kind = 'n';
         const std::string stat = std::string("(") + (dispersion.count(sp.source) ?
@@ -1429,6 +1431,15 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
             agg = scol.kind == 's'
                       ? "count(*) FILTER (WHERE coalesce(" + ref + ", '') <> '')"
                       : "count(" + ref + ")";
+        else if (distinct) {
+            /* COLLAPSE-UNIQUE-1: exact distinct values, with one missing
+             * level, as in parqit unique. Fold NULL/empty strings and numeric
+             * missing encodings with the same rule; retain the original key
+             * type so adjacent BIGINTs above 2^53 cannot become one value. */
+            const std::string key = norm_group_key(ref, scol.kind);
+            agg = "count(DISTINCT " + key + ") + CASE WHEN count(*) > count(" +
+                  key + ") THEN 1 ELSE 0 END";
+        }
         else if (sp.stat == "median" || sp.stat == "iqr" ||
                  (sp.stat.size() >= 2 && sp.stat[0] == 'p')) {
             double p = 50;
@@ -1468,7 +1479,7 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
         }
         if (kind == 'n' && scol.kind == 's' &&
             !(sp.stat == "first" || sp.stat == "last" || sp.stat == "firstnm" ||
-              sp.stat == "lastnm" || sp.stat == "count"))
+              sp.stat == "lastnm" || cardinality))
             return "collapse: " + sp.stat + " needs a numeric variable (" +
                    sp.source + " is string)";
         if (!sel.empty()) sel += ", ";
@@ -1479,7 +1490,7 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
          * included (collect/save expose `NUEMP`, not `NUEMP_1`); an explicit
          * target is a new Stata-facing name (ci-guarded above). */
         if (sp.target.empty()) nc.stata = scol.stata;
-        nc.kind = (sp.stat == "count") ? 'n' : kind;
+        nc.kind = cardinality ? 'n' : kind;
         /* COLLAPSE-META-1 (audit 2026-08-22, A3-8): native collapse labels the
          * result "(stat) source" and keeps the source's display format; a
          * (count) is a long. first/last/firstnm/lastnm keep the value label
@@ -1491,12 +1502,12 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
          * (parqit's extension; native refuses it) must not inherit a %s
          * format Stata rejects on a numeric variable, which made every
          * collect print "skipping display format %9s" */
-        nc.fmt = (sp.stat == "count" && scol.kind == 's') ? "%8.0g" : scol.fmt;
+        nc.fmt = (cardinality && scol.kind == 's') ? "%8.0g" : scol.fmt;
         if (sp.stat == "first" || sp.stat == "last" || sp.stat == "firstnm" ||
             sp.stat == "lastnm") {
             nc.vallab = scol.vallab;
             nc.meta_type = scol.meta_type;
-        } else if (sp.stat == "count") {
+        } else if (cardinality) {
             nc.meta_type = "long";
         }
         if (sp.stat == "mean" || sp.stat == "sd" || sp.stat == "semean" ||
@@ -1504,7 +1515,7 @@ std::string View::collapse(const std::vector<CollapseSpec> &input_specs,
             ((sp.stat == "sum" || sp.stat == "rawsum") && (floating || promoted))) {
             nc.physical_type = "DOUBLE";
             nc.normalized = true;
-        } else if (sp.stat == "count") {
+        } else if (cardinality) {
             nc.physical_type = "BIGINT";
             nc.normalized = true;
         } else if (sp.stat == "min" || sp.stat == "max" || sp.stat == "first" ||

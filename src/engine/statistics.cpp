@@ -6,6 +6,7 @@
 #include "engine/integer_storage.hpp"
 #include "engine/sort_storage.hpp"
 #include "engine/sum_storage.hpp"
+#include "engine/weighted_moments.hpp"
 #include "engine/typemap.hpp"
 
 #include <new>
@@ -845,6 +846,132 @@ void finalize(duckdb_function_info info, duckdb_aggregate_state *states,
     }
 }
 
+void update_mass_threshold(duckdb_function_info info,duckdb_data_chunk chunk,duckdb_aggregate_state *states) {
+    Input w(duckdb_data_chunk_get_vector(chunk,0)), k(duckdb_data_chunk_get_vector(chunk,1));
+    if (!w.supported || !k.supported || k.floating || k.scale) {
+        duckdb_aggregate_function_set_error(info,"parqit weighted selection requires an integer rank"); return;
+    }
+    const idx_t rows=duckdb_data_chunk_get_size(chunk);
+    for (idx_t i=0;i<rows;++i) {
+        if (!w.valid(i) || !k.valid(i)) continue;
+        const double value=w.number(i).as_double();
+        if (value>0) reinterpret_cast<MassThreshold *>(states[i])->add(value,k.integer(i).word[0]);
+    }
+}
+
+void update_scaled_mass(duckdb_function_info info,duckdb_data_chunk chunk,duckdb_aggregate_state *states) {
+    Input w(duckdb_data_chunk_get_vector(chunk,0));
+    if (!w.supported) { duckdb_aggregate_function_set_error(info,"parqit weight mass requires numeric weights"); return; }
+    const idx_t rows=duckdb_data_chunk_get_size(chunk);
+    for (idx_t i=0;i<rows;++i) if (w.valid(i)) {
+        const double weight=w.number(i).as_double();
+        if (weight>0) reinterpret_cast<ScaledMass *>(states[i])->add(weight);
+    }
+}
+void finalize_scaled_mass(duckdb_function_info,duckdb_aggregate_state *states,
+                          duckdb_vector output,idx_t count,idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    const auto exponent=duckdb_struct_vector_get_child(output,1);
+    duckdb_vector_ensure_validity_writable(exponent);
+    auto *powers=static_cast<int32_t *>(duckdb_vector_get_data(exponent));
+    RealOutput mantissa(duckdb_struct_vector_get_child(output,0));
+    for (idx_t i=0;i<count;++i) {
+        const auto p=reinterpret_cast<ScaledMass *>(states[i])->parts();
+        duckdb_validity_set_row_valid(duckdb_vector_get_validity(output),offset+i);
+        duckdb_validity_set_row_valid(duckdb_vector_get_validity(exponent),offset+i);
+        powers[offset+i]=p.second; mantissa.set(offset+i,p.first);
+    }
+}
+void scalar_mass_share(duckdb_function_info,duckdb_data_chunk chunk,duckdb_vector output) {
+    Input a(duckdb_data_chunk_get_vector(chunk,0)), ae(duckdb_data_chunk_get_vector(chunk,1)),
+          b(duckdb_data_chunk_get_vector(chunk,2)), be(duckdb_data_chunk_get_vector(chunk,3));
+    RealOutput result(output);
+    const idx_t rows=duckdb_data_chunk_get_size(chunk);
+    for (idx_t i=0;i<rows;++i) {
+        if (!a.valid(i) || !b.valid(i) || !ae.valid(i) || !be.valid(i)) { result.set(i,NAN); continue; }
+        const double am=a.number(i).as_double(), bm=b.number(i).as_double();
+        const int ap=static_cast<int>(ae.number(i).as_double()), bp=static_cast<int>(be.number(i).as_double());
+        if (!bm) { result.set(i,NAN); continue; }
+        if (!am) { result.set(i,0); continue; }
+        const double av=std::scalbn(am,ap), bv=std::scalbn(bm,bp), ratio=av/bv;
+        const double share=std::isnormal(ratio) && std::isfinite(ratio) ? ratio*100 :
+            std::scalbn((am/bm)*100,ap-bp);
+        result.set(i,share);
+    }
+}
+
+void update_ordered_gini(duckdb_function_info info,duckdb_data_chunk chunk,duckdb_aggregate_state *states) {
+    Input x(duckdb_data_chunk_get_vector(chunk,0)),w(duckdb_data_chunk_get_vector(chunk,1));
+    if (!x.supported || !w.supported) { duckdb_aggregate_function_set_error(info,"parqit gini requires numeric values"); return; }
+    const idx_t rows=duckdb_data_chunk_get_size(chunk);
+    for (idx_t i=0;i<rows;++i) if (x.valid(i) && w.valid(i)) {
+        const double weight=w.number(i).as_double();
+        if (weight>0) reinterpret_cast<OrderedGini *>(states[i])->add(x.number(i),weight);
+    }
+}
+void finalize_ordered_gini(duckdb_function_info info,duckdb_aggregate_state *states,
+                           duckdb_vector output,idx_t count,idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    RealOutput value(duckdb_struct_vector_get_child(output,0));
+    for (idx_t i=0;i<count;++i) {
+        const auto &state=*reinterpret_cast<OrderedGini *>(states[i]);
+        if (state.invalid) { duckdb_aggregate_function_set_error(info,"parqit gini: sorted-state invariant failed"); return; }
+        duckdb_validity_set_row_valid(duckdb_vector_get_validity(output),offset+i);
+        value.set(offset+i,state.result());
+    }
+}
+void finalize_mass_threshold(duckdb_function_info info,duckdb_aggregate_state *states,
+                             duckdb_vector output,idx_t count,idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    const auto child=duckdb_struct_vector_get_child(output,0);
+    duckdb_vector_ensure_validity_writable(child);
+    auto *values=static_cast<bool *>(duckdb_vector_get_data(child));
+    for (idx_t i=0;i<count;++i) {
+        const auto &state=*reinterpret_cast<MassThreshold *>(states[i]);
+        if (state.invalid) { duckdb_aggregate_function_set_error(info,"parqit weighted selection rank must be constant"); return; }
+        duckdb_validity_set_row_valid(duckdb_vector_get_validity(output),offset+i);
+        duckdb_validity_set_row_valid(duckdb_vector_get_validity(child),offset+i);
+        values[offset+i]=state.reached();
+    }
+}
+
+template<unsigned Order>
+void update_weighted(duckdb_function_info info, duckdb_data_chunk chunk,
+                     duckdb_aggregate_state *states) {
+    Input x(duckdb_data_chunk_get_vector(chunk,0)), w(duckdb_data_chunk_get_vector(chunk,1));
+    if (!x.supported || !w.supported) {
+        duckdb_aggregate_function_set_error(info,"parqit weighted aggregates require numeric values");
+        return;
+    }
+    const idx_t rows=duckdb_data_chunk_get_size(chunk);
+    for (idx_t i=0;i<rows;++i) {
+        if (!x.valid(i) || !w.valid(i)) continue;
+        const double weight=w.number(i).as_double();
+        if (weight>0) reinterpret_cast<WeightedMoments<Order> *>(states[i])->add(x.number(i),weight);
+    }
+}
+
+template<unsigned Order,bool Errors=false>
+void finalize_weighted(duckdb_function_info info, duckdb_aggregate_state *states,
+                       duckdb_vector output,idx_t count,idx_t offset) {
+    duckdb_vector_ensure_validity_writable(output);
+    auto *mask=duckdb_vector_get_validity(output);
+    auto *ns=static_cast<uint64_t *>(duckdb_vector_get_data(duckdb_struct_vector_get_child(output,0)));
+    for (idx_t i=0;i<count;++i) {
+        const auto r=reinterpret_cast<WeightedMoments<Order> *>(states[i])->result(Errors);
+        if (r.invalid) {
+            duckdb_aggregate_function_set_error(info,"parqit weighted central-moment invariant failed");
+            return;
+        }
+        duckdb_validity_set_row_valid(mask,offset+i); ns[offset+i]=r.n;
+        const double values[]={r.mass,r.sum,r.mean,Errors ? r.sebinomial : r.variance,Errors ? r.sepoisson : r.variance_aw,r.sd,r.sd_aw,r.skewness,r.kurtosis};
+        for (idx_t c=0;c<(Errors ? 5 : Order==1 ? 3 : Order==2 ? 7 : 9);++c)
+            RealOutput(duckdb_struct_vector_get_child(output,c+1)).set(offset+i,values[c]);
+        if constexpr (!Errors)
+            RealOutput(duckdb_struct_vector_get_child(output,Order==1 ? 4 : Order==2 ? 8 : 10)).set(offset+i,r.sum_aw);
+    }
+}
+
 void finalize_corr(duckdb_function_info info, duckdb_aggregate_state *states,
                    duckdb_vector output, idx_t count, idx_t offset) {
     duckdb_vector_ensure_validity_writable(output);
@@ -970,6 +1097,25 @@ bool register_functions(duckdb_connection connection, std::string *error) {
            register_aggregate<Moments<4>>(connection, "__parqit_detail", 1,
                {"n", "sum", "mean", "sd", "variance", "skewness", "kurtosis"}, {n, d, d, d, d, d, d},
                update<Moments<4>>, finalize<Moments<4>>, error) &&
+           register_aggregate<MassThreshold>(connection,"__parqit_mass_ge",2,
+               {"value"},{DUCKDB_TYPE_BOOLEAN},update_mass_threshold,finalize_mass_threshold,error) &&
+           register_aggregate<ScaledMass>(connection,"__parqit_mass_parts",1,
+               {"mantissa","exponent"},{d,DUCKDB_TYPE_INTEGER},update_scaled_mass,finalize_scaled_mass,error) &&
+           register_aggregate<OrderedGini>(connection,"__parqit_gini",2,
+               {"value"},{d},update_ordered_gini,finalize_ordered_gini,error) &&
+           register_scalar(connection,"__parqit_mass_share",{d,DUCKDB_TYPE_INTEGER,d,DUCKDB_TYPE_INTEGER},d,scalar_mass_share,error) &&
+           register_aggregate<WeightedMoments<1>>(connection, "__parqit_wtotal", 2,
+               {"n","mass","sum","mean","sum_aw"},{n,d,d,d,d},
+               update_weighted<1>,finalize_weighted<1>,error) &&
+           register_aggregate<WeightedMoments<1>>(connection, "__parqit_werrors", 2,
+               {"n","mass","sum","mean","sebinomial","sepoisson"},{n,d,d,d,d,d},
+               update_weighted<1>,finalize_weighted<1,true>,error) &&
+           register_aggregate<WeightedMoments<2>>(connection, "__parqit_wstats", 2,
+               {"n","mass","sum","mean","variance","variance_aw","sd","sd_aw","sum_aw"},{n,d,d,d,d,d,d,d,d},
+               update_weighted<2>,finalize_weighted<2>,error) &&
+           register_aggregate<WeightedMoments<4>>(connection, "__parqit_wdetail", 2,
+               {"n","mass","sum","mean","variance","variance_aw","sd","sd_aw","skewness","kurtosis","sum_aw"},
+               {n,d,d,d,d,d,d,d,d,d,d},update_weighted<4>,finalize_weighted<4>,error) &&
            register_aggregate<Correlation>(connection, "__parqit_corr", 2,
                {"rho", "n", "unstable", "sine", "perfect"},
                {d, n, DUCKDB_TYPE_BOOLEAN, d, DUCKDB_TYPE_BOOLEAN}, update_corr, finalize_corr, error);

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.6.1 27oct2026}{...}
+{* *! version 0.7.0 27oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -1110,17 +1110,117 @@ the exact total is rounded to the nearest integer, with half ties upward.
 An invalid input or empty group makes that standard error missing.
 The existing exact-value policy applies: intermediate rounding or overflow
 in native Stata is not reproduced when a finite, more accurate result exists;
-{cmd:rawsum} equals {cmd:sum} (no weights); {cmd:percent} is 100 times the
+Without weights {cmd:rawsum} equals {cmd:sum}; {cmd:percent} is 100 times the
 group's nonmissing observations over every group's, after {cmd:if}; {cmd:iqr}
 is p75 - p25 under the percentile rule. Percentiles follow Stata's
 {cmd:summarize} rule exactly and are computed out of core, by rank, so a
 huge group needs no in-memory list. {cmd:first}/{cmd:last} are deterministic
 over
 the declared {cmd:parqit sort} order and keep a missing first value missing.
-Weights ({cmd:[fweight=}{it:exp}{cmd:]}, …) are not supported on
-{cmd:collapse}/{cmd:pivot} and are refused loudly. Results are {cmd:double}
+{cmd:collapse} supports all four weight families as described below;
+{cmd:pivot} remains unweighted. Results are {cmd:double}
 where native stores {cmd:float} (#122); {cmd:collect, compress} narrows what
 fits exactly.
+
+{pstd}{bf:Distinct-value counts (COLLAPSE-UNIQUE-1).}
+{cmd:(unique)} and {cmd:(nunique)} are equivalent extensions on both
+{cmd:collapse} and {cmd:pivot}; native {cmd:collapse} has neither statistic.
+Each source is counted separately, with exact distinct keys of its original
+type, not an approximate cardinality estimate or a conversion to double.
+The missing-key rule is the same as {cmd:parqit unique}: SQL NULL and an
+empty string are one level; all numeric missing encodings are one level.
+All-missing groups therefore return 1. A filtered empty view returns no
+rows. The output follows {cmd:(count)}'s numeric storage and format policy:
+{cmd:long} when it fits, widening losslessly when necessary; numeric source
+formats are retained, string source formats become {cmd:%8.0g}; value labels
+are dropped and the variable label is {cmd:(unique) source} or
+{cmd:(nunique) source}. This is a lazy exact SQL distinct aggregate; it does
+not use the compact scaled sum/mean/count path.
+
+{pstd}{bf:Additional aggregation statistics (GCOLLAPSE-1).}
+{cmd:collapse} and unweighted {cmd:pivot} additionally accept {cmd:geomean},
+{cmd:nmissing}, {cmd:nansum}, {cmd:rawnansum}, {cmd:variance}, {cmd:cv},
+{cmd:skewness}, {cmd:kurtosis}, {cmd:range}, positive/negative
+{cmd:select}{it:#} and {cmd:rawselect}{it:#}, and {cmd:gini},
+{cmd:gini dropneg}, {cmd:gini keepneg}. Geometric means reject negative
+values and return zero with any zero value. Skewness and kurtosis are
+standardised population central moments; variance is the sample variance
+and cv is sd/mean. Constant sources have undefined skewness/kurtosis.
+All-missing nansum/rawnansum return missing instead of zero.
+Selection is one-based over nonmissing values; out-of-range selections are
+missing. The Gini definitions clamp negatives to zero, drop negatives, or
+retain them, respectively; a zero weighted total makes Gini missing.
+
+{pstd}{bf:Weights and sample.} {cmd:collapse} accepts analytic, frequency,
+importance and probability weights. The expression is evaluated against
+the selected view. Negative weights and noninteger frequency weights are
+errors; zero/missing weights leave the common sample, including for raw
+statistics. {cmd:if}, {cmd:in} and {cmd:cw} restrict that sample;
+{cmd:cw} requires every source to be nonmissing. {cmd:in} follows the
+current view order, before the if/cw restrictions, and accepts f/l bounds.
+Data-dependent failures may occur when materialising; a failed collect
+never swaps a partial result into the dataset in memory.
+
+{pstd}Means use sum(wx)/sum(w). Frequency and importance variance divide
+the weighted central sum by sum(w)-1; analytic variance uses
+n/(n-1) times the weighted population variance. Analytic sums are n times
+the weighted mean; other weighted sums are sum(wx). Counts/nmissing use
+sum(w) except that analytic counts use row counts. Percent always uses
+shares of the nonmissing weight sum. Probability weights are refused for
+sd/variance/cv and standard errors; importance weights for standard errors;
+analytic weights for binomial/Poisson standard errors. These restrictions
+are checked even on a {cmd:rawstat()} target. {cmd:rawstat(targets)} selects
+unweighted targets after admission; it accepts target patterns/ranges.
+
+{pstd}Weighted sums, means, sample moments and the frequency-weight
+binomial/Poisson errors use fixed-size exact dyadic accumulators; products
+are accumulated before rounding and integer/decimal coefficients retain
+their original precision. This avoids overflow/cancellation of intermediate
+products and vanishing binomial tails. Weighted percentiles use cumulative
+weights normalised to the nonmissing row count and gtools' 1e-6 position
+tolerance. Weighted select uses the absolute cumulative weight; rawselect
+ignores it; the cumulative comparison is exact. Scaled weight totals keep
+percentages finite across intermediate overflow/underflow. Gini uses bounded
+exact states over the sorted input and forms its pairwise ratio before
+rounding. Rank/window operators can spill, without replicating rows for
+frequency weights. The compact unweighted sum/mean/count path is retained
+for eligible ordinary calls.
+
+{pstd}{bf:Data and metadata options.} {cmd:freq(name)} counts admitted rows,
+including missing sources. {cmd:merge} joins results to the original view,
+assigning targets only on the selected sample and preserving row/column
+order. {cmd:replace} permits existing targets; {cmd:noinit} retains their
+values outside the sample. A materialised CTE keeps a volatile prefix from
+being independently re-evaluated for the source and its grouped result.
+{cmd:wildparse} maps source captures into target names. By keys accept +/-
+directions; {cmd:nods} also interprets concatenated signs in a by list.
+The default/explicit {cmd:ds} retains ordinary Stata varlist ranges.
+{cmd:unsorted} removes the final group-sort requirement.
+
+{pstd}{cmd:double} requests double numeric targets. {cmd:sumcheck} requests
+actual-value integer packing of integer-source sum targets at collect;
+the planner proves the range and integrality from the spillable snapshot,
+and the fill checks the proof. Other columns retain their storage policy.
+Direct Parquet save retains the SQL numeric type and carries this packing
+intent as metadata for a later lazy collect. {cmd:double} takes precedence.
+{cmd:labelformat()} accepts stat case/pretty tokens and source-label
+substrings; {cmd:labelprogram()} is an rclass callback run in an empty
+temporary frame, returning {cmd:r(prettystat)} or {cmd:#default#}. The
+unrelated dataset in memory is preserved. The default label stays parqit's
+existing {cmd:(stat) source-name}; an explicit format can use the source's
+label. Display formats and missing-category folding retain parqit's policy.
+Exact frequency counts use up to 38 decimal digits on disk and keep the
+normal integer precision policy at collect, even with double storage intent;
+an out-of-range integer total is an error.
+
+{pstd}New collapse requests use a distinct internal operation so an older
+plugin rejects them before mutating a view, rather than ignoring weights
+or new options. Use a matching ado/plugin pair. Native {cmd:fast} and the
+gtools hash/I/O/debug controls do not describe the DuckDB execution model;
+engine settings remain under {cmd:parqit set}. Transformations remain lazy;
+gcollapse's eagerly computed r(N)/r(J)/group-size summaries are not scanned
+by a collapse request. {cmd:freq()} and the normal view reports expose the
+corresponding data. Generate time-series source expressions before collapse.
 
 {pstd}{bf:The if qualifier (IF-ALL-1).} {cmd:collapse}, {cmd:contract} and
 {cmd:pivot} filter then aggregate, in one transaction;
@@ -3591,11 +3691,13 @@ view mutation because a lazy plan lacks native physical within-key order. Use
 {cmd:joinby} for Cartesian matches or native {cmd:mergein m:m} for Stata's
 sequential behaviour.{p_end}
 {pstd}{cmd:•} {cmd:reshape wide} and {cmd:pivot} cap the spread dimension at
-2,000 values. {cmd:collapse}/{cmd:pivot} do not implement weights. Lazy
+2,000 values. {cmd:pivot} does not implement weights; {cmd:collapse} does. Lazy
 expressions are the documented subset, not arbitrary Stata syntax; in
-particular {cmd:_n}/{cmd:_N} are unavailable in {cmd:replace}, in the
-{cmd:if} qualifier of {cmd:gen}, and in the read-only {cmd:count if} and
-{cmd:list if} filters; {cmd:egen} also refuses them.{p_end}
+particular {cmd:_n}/{cmd:_N} are unavailable in the read-only {cmd:count if}
+and {cmd:list if} filters. They work in the documented transformation
+expressions, including {cmd:gen}, its {cmd:if}, {cmd:replace} and
+{cmd:egen}; a replace reading the replaced variable's other rows is refused
+because native replacement is sequential.{p_end}
 {pstd}{cmd:•} {cmd:%tC} and {cmd:%tb} are stored as integer counts with
 their format in metadata; third-party readers see the raw counts.{p_end}
 {pstd}{cmd:•} {cmd:discard} refreshes ado programs but does not guarantee a reset

@@ -6,7 +6,7 @@
 *   EXPR-4   chained relational comparisons (1<x<3000) parse left-associatively
 *   TT-A2    append generate() name colliding with a using column errors loudly
 *   TT-A1    m:m master pairing is reproducible for fixed inputs (no engine drift)
-*   COLLAPSE-WEIGHTS  collapse with a weight expression is a clear, loud error
+*   COLLAPSE-WEIGHTS  explicit fweights follow native's weighted mean
 *   COLLAPSE-3        collapse (first) without a sort is deterministic/reproducible
 *   RESHAPE-WIDE-COLORDER  numeric j orders columns numerically (inc2 before inc10)
 *   TAB-FLOAT-1       tabulate of an integer-valued float prints 11, not 11.0
@@ -103,7 +103,7 @@ if (r(N) != 3) di as err "FAIL TT-A1: refused m:m changed the live view"
 local fails = `fails' + (r(N) != 3)
 parqit close
 
-* ---- COLLAPSE-WEIGHTS : weights are a clear, loud error --------------------
+* ---- COLLAPSE-WEIGHTS : weights supported since gcollapse parity -----------
 clear
 input double(g x n)
 1 10 2
@@ -111,9 +111,13 @@ input double(g x n)
 end
 parqit save `"`t'_cw.parquet"', replace data
 parqit use using `"`t'_cw.parquet"'
-capture noisily parqit collapse (mean) x [fweight=n], by(g)
-if (_rc==0) di as err "FAIL COLLAPSE-WEIGHTS: weight expression not rejected"
-local fails = `fails' + (_rc==0)
+parqit collapse (mean) x [fweight=n], by(g)
+parqit collect, clear
+capture assert _N==1 & g==1 & x==16
+local weight_rc=_rc
+if (`weight_rc') di as err "FAIL COLLAPSE-WEIGHTS: weighted mean differs from native"
+local fails = `fails' + (`weight_rc'!=0)
+parqit close _all
 
 * ---- COLLAPSE-3 : (first) without a sort is deterministic ------------------
 clear

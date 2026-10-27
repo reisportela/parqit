@@ -857,6 +857,152 @@ TEST_CASE("collapse: Stata statistics incl. exact percentile rule") {
                      ") WHERE firm='b'") == "true");
 }
 
+TEST_CASE("collapse unique/nunique: exact distinct values including one missing level") {
+    View base;
+    std::vector<ViewCol> cols;
+    for (const char *name : {"g", "x", "d", "s"}) {
+        ViewCol c;
+        c.name = name;
+        c.kind = c.name == "s" ? 's' : 'n';
+        c.physical_type = c.name == "s" ? "VARCHAR" : c.name == "x" ? "BIGINT" : "DOUBLE";
+        c.fmt = c.kind == 's' ? "%12s" : "%21.0g";
+        c.vallab = "source_labels";
+        cols.push_back(c);
+    }
+    base.open("SELECT * FROM (VALUES "
+              "(1::DOUBLE,9007199254740992::BIGINT,0.0::DOUBLE,'a'::VARCHAR),"
+              "(1,9007199254740993,-0.0,'a'),"
+              "(1,NULL,'NaN'::DOUBLE,''),(1,NULL,'Infinity'::DOUBLE,NULL),"
+              "(1,9007199254740992,'-Infinity'::DOUBLE,' '),"
+              "(2,NULL,NULL,''),(2,NULL,1e308,NULL),"
+              "(NULL,7,4,'é'),('NaN'::DOUBLE,7,4,'é')"
+              ") t(g,x,d,s)", cols, nlohmann::json::object(),
+              nlohmann::json::object(), "", "unique fixture");
+    View grouped = base;
+    REQUIRE(grouped.collapse({{"unique", "nx", "x"}, {"nunique", "ax", "x"},
+                              {"unique", "nd", "d"}, {"unique", "ns", "s"},
+                              {"count", "n", "x"}}, {"g"}).empty());
+    const std::string sql = grouped.compile(true);
+    CHECK(run_scalar("SELECT count(*) FROM (" + sql + ")") == "3");
+    CHECK(run_scalar("SELECT nx=3 AND ax=3 AND nd=2 AND ns=3 AND n=3 FROM (" + sql + ") WHERE g=1") == "true");
+    CHECK(run_scalar("SELECT nx=1 AND ax=1 AND nd=1 AND ns=1 AND n=0 FROM (" + sql + ") WHERE g=2") == "true");
+    CHECK(run_scalar("SELECT nx=1 AND ax=1 AND nd=1 AND ns=1 FROM (" + sql + ") WHERE g IS NULL") == "true");
+    for (size_t i = 1; i <= 4; ++i) {
+        CHECK(grouped.cols()[i].kind == 'n');
+        CHECK(grouped.cols()[i].meta_type == "long");
+        CHECK(grouped.cols()[i].physical_type == "BIGINT");
+        CHECK(grouped.cols()[i].normalized);
+        CHECK(grouped.cols()[i].vallab.empty());
+    }
+    CHECK(grouped.cols()[1].fmt == "%21.0g");
+    CHECK(grouped.cols()[1].varlab == "(unique) x");
+    CHECK(grouped.cols()[2].varlab == "(nunique) x");
+    CHECK(grouped.cols()[4].fmt == "%8.0g");
+    CHECK(grouped.compact_collapse_columns().empty());
+    View total = base;
+    REQUIRE(total.collapse({{"nunique", "nx", "x"}, {"unique", "ns", "s"}}, {}).empty());
+    CHECK(run_scalar("SELECT nx=4 AND ns=4 FROM (" + total.compile(false) + ")") == "true");
+    View empty = base;
+    REQUIRE(empty.filter("0", false, true).empty());
+    REQUIRE(empty.collapse({{"unique", "", "s"}}, {}).empty());
+    CHECK(run_scalar("SELECT count(*) FROM (" + empty.compile(false) + ")") == "0");
+}
+
+TEST_CASE("collapse extended: weighted moments, missing counts and raw targets") {
+    View base;
+    std::vector<ViewCol> cols;
+    for (const char *name:{"g","x","w"}) { ViewCol c; c.name=name; c.kind='n'; c.physical_type="DOUBLE"; cols.push_back(c); }
+    base.open("SELECT * FROM (VALUES (1::DOUBLE,0::DOUBLE,1::DOUBLE),(1,1,2),(1,2,3),(1,4,4),(1,NULL,5),(2,NULL,1),(2,NULL,2)) t(g,x,w)",
+              cols,nlohmann::json::object(),nlohmann::json::object(),"","weighted fixture");
+    for (const char *type:{"fweight","aweight","iweight"}) {
+        View v=base;
+        View::CollapseOptions o; o.weight="w"; o.weight_type=type; o.freq="f"; o.rawstat={"rawmean"};
+        REQUIRE(v.collapse_extended({{"mean","m","x"},{"sum","s","x"},{"count","n","x"},
+            {"nmissing","nm","x"},{"variance","v","x"},{"skewness","sk","x"},
+            {"kurtosis","ku","x"},{"rawsum","raw","x"},{"mean","rawmean","x"}}, {"g"},o).empty());
+        const auto sql=v.compile(true);
+        CHECK(run_scalar("SELECT m=2.4 AND raw=7 AND rawmean=1.75 AND f=5 FROM ("+sql+") WHERE g=1")=="true");
+        CHECK(run_scalar("SELECT abs(v-"+std::string(type==std::string("aweight") ? "2.72" : "2.2666666666666666")+")<1e-14 FROM ("+sql+") WHERE g=1")=="true");
+        CHECK(run_scalar("SELECT abs(sk+0.10708024171979)<1e-13 AND abs(ku-1.6136101499423)<1e-13 FROM ("+sql+") WHERE g=1")=="true");
+        CHECK(run_scalar("SELECT nm="+std::string(type==std::string("aweight") ? "2" : "3")+" AND n=0 AND s=0 AND f=2 FROM ("+sql+") WHERE g=2")=="true");
+    }
+}
+
+TEST_CASE("collapse extended: ranks, gini, merge sample and labels") {
+    View v;
+    std::vector<ViewCol> cols;
+    for (const char *name:{"g","x","w"}) { ViewCol c; c.name=name; c.kind='n'; c.varlab="Source #STAT#"; c.physical_type="DOUBLE"; cols.push_back(c); }
+    v.open("SELECT * FROM (VALUES (1,0::DOUBLE,1::DOUBLE),(1,1,2),(1,2,3),(1,4,4)) t(g,x,w)",
+           cols,nlohmann::json::object(),nlohmann::json::object(),"","rank fixture");
+    View ranks=v;
+    View::CollapseOptions o; o.weight="w"; o.weight_type="fweight"; o.labelformat="#stat:pretty#: #sourcelabel#";
+    REQUIRE(ranks.collapse_extended({{"p25","p","x"},{"select2","s","x"},{"rawselect2","r","x"},{"gini","gi","x"}}, {"g"},o).empty());
+    const auto sql=ranks.compile(true);
+    CHECK(run_scalar("SELECT p=1 AND s=1 AND r=1 AND abs(gi-0.325)<1e-14 FROM ("+sql+")")=="true");
+    CHECK(ranks.cols()[4].varlab=="Gini Coefficient: Source GINI");
+    o=View::CollapseOptions{}; o.merge=true; o.ifexpr="x==1 | x==4";
+    REQUIRE(v.collapse_extended({{"mean","m","x"}},{"g"},o).empty());
+    CHECK(run_scalar("SELECT count(*)=4 AND count(m)=2 AND min(m)=2.5 AND max(m)=2.5 FROM ("+v.compile(true)+")")=="true");
+}
+
+TEST_CASE("collapse weighted: cancellation, subnormal mean and binomial tails") {
+    View base;
+    std::vector<ViewCol> cols;
+    for (const char *n:{"g","x","w"}) { ViewCol c; c.name=n; c.kind='n'; c.physical_type="DOUBLE"; cols.push_back(c); }
+    base.open("SELECT * FROM (VALUES (1,8e307::DOUBLE,4::DOUBLE),(1,-8e307,4),(1,1,1),"
+              "(2,4.9406564584124654e-324,1),(2,9.8813129168249309e-324,1),"
+              "(3,1,18014398509481984),(3,0,1)) t(g,x,w)",cols,
+              nlohmann::json::object(),nlohmann::json::object(),"","weighted extremes");
+    View::CollapseOptions o; o.weight="w"; o.weight_type="fweight";
+    REQUIRE(base.collapse_extended({{"mean","m","x"},{"sum","s","x"},{"sebinomial","se","x"}}, {"g"},o).empty());
+    const auto sql=base.compile(true);
+    CHECK(run_scalar("SELECT s=1 AND m=1.0/9 FROM ("+sql+") WHERE g=1")=="true");
+    CHECK(run_scalar("SELECT m=9.8813129168249309e-324 FROM ("+sql+") WHERE g=2")=="true");
+    CHECK(run_scalar("SELECT m=1 AND se>0 AND abs(se-5.551115123125783e-17)<1e-31 FROM ("+sql+") WHERE g=3")=="true");
+}
+
+TEST_CASE("collapse extended: original expression scope and protected merge names") {
+    View v;
+    std::vector<ViewCol> cols;
+    for (const char *n:{"g","x","__parqit_custom_weight"}) { ViewCol c; c.name=n; c.kind='n'; cols.push_back(c); }
+    v.open("SELECT * FROM (VALUES (1,10::DOUBLE,2::DOUBLE),(1,20,3)) t(g,x,__parqit_custom_weight)",
+           cols,nlohmann::json::object(),nlohmann::json::object(),"","scope fixture");
+    v.set_varabbrev(true);
+    View::CollapseOptions o; o.weight="__parqit_c"; o.weight_type="fweight"; o.ifexpr="__parqit_c>0";
+    View valid=v;
+    REQUIRE(valid.collapse_extended({{"mean","m","x"}},{"g"},o).empty());
+    CHECK(run_scalar("SELECT m=16 FROM ("+valid.compile(true)+")")=="true");
+    o.weight="__parqit_crn_1";
+    CHECK_FALSE(v.collapse_extended({{"mean","m","x"}},{"g"},o).empty());
+
+    View aliases;
+    ViewCol g; g.name="g"; ViewCol lower; lower.name="id";
+    ViewCol upper; upper.name="ID_1"; upper.stata="ID";
+    aliases.open("SELECT * FROM (VALUES (1,2::DOUBLE,100::DOUBLE),(1,4,200)) t(g,id,ID_1)",
+        {g,lower,upper},nlohmann::json::object(),nlohmann::json::object(),"","alias fixture");
+    o=View::CollapseOptions{}; o.merge=true; o.replace=true;
+    REQUIRE(aliases.collapse_extended({{"mean","ID","id"}},{"g"},o).empty());
+    CHECK(aliases.cols()[2].name=="ID_1");
+    CHECK(aliases.cols()[2].stata=="ID");
+    CHECK(run_scalar("SELECT sum(id)=6 AND min(ID_1)=3 AND max(ID_1)=3 FROM ("+aliases.compile(true)+")")=="true");
+}
+
+TEST_CASE("collapse merge: quoted source names and case-folded frequency conflicts") {
+    View v;
+    ViewCol g; g.name="g";
+    ViewCol x; x.name="x\"g"; x.stata="xg";
+    v.open("SELECT * FROM (VALUES (1,1::DOUBLE),(1,3),(1,NULL)) t(g,\"x\"\"g\")",
+        {g,x},nlohmann::json::object(),nlohmann::json::object(),"","quoted fixture");
+    View::CollapseOptions o; o.merge=true; o.cw=true;
+    REQUIRE(v.collapse_extended({{"mean","m","xg"}},{"g"},o).empty());
+    CHECK(run_scalar("SELECT count(*)=3 AND count(m)=2 AND min(m)=2 FROM ("+v.compile(true)+")")=="true");
+    View bad=make_view(); o=View::CollapseOptions{}; o.freq="M";
+    CHECK_FALSE(bad.collapse_extended({{"mean","m","wage"}},{"firm"},o).empty());
+    o=View::CollapseOptions{}; o.merge=true;
+    CHECK_FALSE(bad.collapse_extended({{"mean","WAGE","wage"}},{"firm"},o).empty());
+    CHECK_FALSE(bad.collapse_extended({{"gini_typo","g","wage"}},{"firm"},o).empty());
+}
+
 TEST_CASE("contract, duplicates drop, keep in, sample") {
     View v = make_view();
     CHECK(v.contract({"firm"}, "").empty());

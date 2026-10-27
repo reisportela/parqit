@@ -20,11 +20,21 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.6.1 — the full surface below is implemented and covered by a
+> **Status:** v0.7.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.7.0 adds weighted grouped aggregation and the gcollapse analytical
+and data-option surface to lazy `collapse`: distinct and missing counts,
+missing-preserving sums, sample moments, order statistics, Gini variants,
+sample controls, merge-back, target patterns, labels and storage controls.
+The native menu exposes these on a compact Collapse options tab. The
+embedded release engine is DuckDB 2.0.0. The [aggregation validation](docs/audits/GCOLLAPSE_PARITY_2026-10-27.md)
+records native and independent oracles, numerical limits and measured checks.
+The [0.7.0 candidate report](docs/audits/RELEASE_0_7_0_2026-10-27.md) records
+the installed-package validation and the focused performance comparison.
 
 Version 0.6.1 makes the native dialogs compact and adds explicit view selection
 throughout the menu. Variable pickers follow the chosen source, lazy combinations
@@ -553,7 +563,7 @@ meaning. `parqit explain` shows the resulting plan.
 
 `parqit version` reports both the package and embedded DuckDB versions:
 parqit 0.3.3 embeds DuckDB 1.5.3; the 0.4 and 0.5 series embed 1.5.6; the
-next release embeds 2.0.0 (1.5.6 remains an optional build). A newer engine
+0.6 and 0.7 series embed 2.0.0. A newer engine
 does not make every pipeline faster. Compare the same result, thread settings
 and materialiser in interleaved repeated runs, and record server load. Opening
 a lazy view, executing its plan and transferring rows into Stata are separate
@@ -952,7 +962,7 @@ says what was decoded, from what, and how much (ENC-3, CSV-ENC-1).
 | `parqit format varlist %fmt` / `parqit format %fmt varlist` | display metadata only; native Stata validates numeric, date/time and string formats on an empty frame. `format [varlist]` displays formats. No observations are read or changed; `collect` and `save` retain the formats. |
 | `parqit order <varlist>` | column order |
 | `parqit sort <varlist>` / `parqit gsort [-]<varlist>` | `ORDER BY` |
-| `parqit collapse (stat) v ... [if] , by()` | `GROUP BY` + aggregates: every native statistic (mean sum rawsum sd semean sebinomial sepoisson median pXX iqr count percent min max first last firstnm lastnm) |
+| `parqit collapse (stat) v ... [if] , by()` | `GROUP BY` + aggregates: every native statistic (mean sum rawsum sd semean sebinomial sepoisson median pXX iqr count percent min max first last firstnm lastnm), plus unique/nunique (exact distinct values, including one missing level) |
 | `parqit contract <varlist> [if] [, freq()]` | grouped counts |
 | `parqit duplicates drop [varlist] [if] [, force]` | `DISTINCT` / dedup (with `if`, inside the condition only) |
 | `parqit keep in <range>` / `parqit drop in <range>` | validated `LIMIT/OFFSET` and its complement (`f`/`l` and negative bounds accepted) |
@@ -960,6 +970,24 @@ says what was decoded, from what, and how much (ENC-3, CSV-ENC-1).
 | `parqit sample # [if] [, count seed() by() cluster() any all generate()]` | sampling designs after `sample2` (see [Sampling designs](#sampling-designs)): `if` frame, strata, whole clusters, and an indicator instead of dropping |
 | `parqit reshape long\|wide ...` | `UNPIVOT` / `PIVOT` |
 | `parqit pivot (stat) v ... [if], rows() cols()` | Excel-style pivot table: `GROUP BY` the rows()+cols() keys, then one column per distinct cols() value (`collapse` + `reshape wide`, applied atomically) |
+
+`collapse` and `pivot` accept `(unique) firms=firmid` (alias `(nunique)`),
+counting numeric or string values separately for each source and `by()` group.
+Missing counts as one level, as in `parqit unique`; add `if !missing(firmid)`
+to exclude it. Native `collapse` has neither distinct-count statistic.
+`collapse` also provides the gcollapse analytical/data surface: geomean,
+nmissing, nansum/rawnansum, variance, cv, skewness, kurtosis, range,
+select/rawselect in either direction and the three Gini variants; all four
+weight families; `cw`, `in`, `rawstat()`, `freq()`, `merge replace noinit`,
+`wildparse`, signed by keys, `unsorted`, `double`, `sumcheck` and label
+formats/callbacks. It remains a lazy view operation. The original rows stay
+available with `merge`, and only the selected sample receives statistics.
+Ordinary unweighted calls retain the existing exact compact path.
+The menu's Collapse options tab exposes the data controls. gtools-specific
+hash/I/O/debug switches are outside this analytical parity scope; use
+`parqit set` for DuckDB execution settings. Generate lags before aggregation.
+The [gcollapse comparison](docs/audits/GCOLLAPSE_PARITY_2026-10-27.md) records
+the validation and deliberate precision, storage and missing-value policies.
 
 For example, a generated date is still a Stata day count; give it its display
 format before collecting or saving:

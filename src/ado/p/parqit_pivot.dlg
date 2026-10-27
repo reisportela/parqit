@@ -2,7 +2,7 @@
   parqit collapse - Make a dataset of summary statistics, frequencies, or a
   pivot table; convert between wide and long
 
-*!  VERSION 0.6.1  27oct2026
+*!  VERSION 0.7.0  27oct2026
 
   User > parqit > Collapse, contract, pivot table, or reshape...
   Launch directly with:  db parqit_pivot      (menu installed by: parqit menu)
@@ -187,6 +187,40 @@ BEGIN
 
 END
 
+DIALOG agg, label("Collapse options") tabtitle("Collapse options")
+BEGIN
+  TEXT tx_weight 15 10 95 ., label("Weight type:")
+  COMBOBOX cb_wtype 15 28 95 ., dropdownlist contents(weight_list) default("fweight") label("Weight type")
+  TEXT tx_weight_exp 120 10 470 ., label("Weight expression (blank for no weights):")
+  EDIT ed_weight 120 28 470 ., label("Weight expression")
+  CHECKBOX ck_cw 15 65 180 ., label("Complete cases (cw)") option(cw)
+  CHECKBOX ck_unsorted 215 @ 165 ., label("Unsorted result") option(unsorted)
+  CHECKBOX ck_wildparse 405 @ 185 ., label("Wildcard target names") option(wildparse)
+  CHECKBOX ck_merge 15 95 180 ., label("Merge statistics into view") option(merge)
+  CHECKBOX ck_replace 215 @ 165 ., label("Replace existing targets") option(replace)
+  CHECKBOX ck_noinit 405 @ 185 ., label("Keep values outside sample") option(noinit)
+  CHECKBOX ck_double 15 125 180 ., label("Store targets as double") option(double)
+  CHECKBOX ck_sumcheck 215 @ 230 ., label("Pack integer sums (sumcheck)") option(sumcheck)
+  TEXT tx_in 15 160 260 ., label("Observation range, in (optional; e.g. 2/50):")
+  EDIT ed_in 15 178 260 ., label("Observation range")
+  TEXT tx_freq 305 160 285 ., label("Group frequency variable (optional):")
+  EDIT ed_freq 305 178 285 ., option(freq) label("Frequency variable")
+  TEXT tx_rawstat 15 211 575 ., label("Targets to compute without weights, rawstat() (optional):")
+  EDIT ed_rawstat 15 229 575 ., option(rawstat) label("Unweighted targets")
+  TEXT tx_label 15 261 575 ., label("Label format (optional; #stat#, #sourcelabel#, #stat:pretty#):")
+  EDIT ed_label 15 279 575 ., option(labelformat) label("Label format")
+  TEXT tx_labelprogram 15 311 575 ., label("Label program returning r(prettystat) (optional):")
+  EDIT ed_labelprogram 15 329 575 ., option(labelprogram) label("Label program")
+END
+
+LIST weight_list
+BEGIN
+    fweight
+    aweight
+    iweight
+    pweight
+END
+
 PROGRAM main_context
 BEGIN
 	put "parqit _dlgviews "
@@ -243,11 +277,35 @@ LIST stat_list
 BEGIN
 	mean
 	sum
+	rawsum
 	count
+	unique
+	nunique
+	percent
 	min
 	max
 	sd
+	semean
+	sebinomial
+	sepoisson
 	median
+	iqr
+	geomean
+	nmissing
+	nansum
+	rawnansum
+	variance
+	cv
+	skewness
+	kurtosis
+	range
+	select1
+	select-1
+	rawselect1
+	rawselect-1
+	gini
+	gini dropneg
+	gini keepneg
 	p10
 	p25
 	p50
@@ -292,6 +350,21 @@ BEGIN
 	call opt.cb_j.disable
 	call opt.tx_if.disable
 	call opt.ex_if.disable
+	call agg.cb_wtype.disable
+	call agg.ed_weight.disable
+	call agg.ck_cw.disable
+	call agg.ck_unsorted.disable
+	call agg.ck_wildparse.disable
+	call agg.ck_merge.disable
+	call agg.ck_replace.disable
+	call agg.ck_noinit.disable
+	call agg.ck_double.disable
+	call agg.ck_sumcheck.disable
+	call agg.ed_in.disable
+	call agg.ed_freq.disable
+	call agg.ed_rawstat.disable
+	call agg.ed_label.disable
+	call agg.ed_labelprogram.disable
 	if main.rb_collapse | main.rb_pivot {
 		call opt.tx_if.enable
 		call opt.ex_if.enable
@@ -310,6 +383,21 @@ BEGIN
 	if main.rb_collapse {
 		call main.tx_by.enable
 		call main.cb_by.enable
+		call agg.cb_wtype.enable
+		call agg.ed_weight.enable
+		call agg.ck_cw.enable
+		call agg.ck_unsorted.enable
+		call agg.ck_wildparse.enable
+		call agg.ck_merge.enable
+		call agg.ck_replace.enable
+		call agg.ck_noinit.enable
+		call agg.ck_double.enable
+		call agg.ck_sumcheck.enable
+		call agg.ed_in.enable
+		call agg.ed_freq.enable
+		call agg.ed_rawstat.enable
+		call agg.ed_label.enable
+		call agg.ed_labelprogram.enable
 	}
 	if main.rb_pivot {
 		call main.tx_rows.enable
@@ -377,8 +465,26 @@ BEGIN
 		if opt.ex_if {
 			put " if " opt.ex_if
 		}
+		if agg.ed_in {
+			put " in " agg.ed_in
+		}
+		if agg.ed_weight {
+			put " [" agg.cb_wtype "=" agg.ed_weight "]"
+		}
 		beginoptions
 			optionarg main.cb_by
+			option agg.ck_cw
+			option agg.ck_unsorted
+			option agg.ck_wildparse
+			option agg.ck_merge
+			option agg.ck_replace
+			option agg.ck_noinit
+			option agg.ck_double
+			option agg.ck_sumcheck
+			optionarg agg.ed_freq
+			optionarg agg.ed_rawstat
+			optionarg /quoted agg.ed_label
+			optionarg agg.ed_labelprogram
 		endoptions
 	}
 	if main.rb_pivot {

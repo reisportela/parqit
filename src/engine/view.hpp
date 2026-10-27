@@ -50,6 +50,8 @@ struct ViewCol {
      * per-row finite/coalesce guard on already-clean columns. Carried verbs
      * (keep/drop/order/rename) preserve it; recomputing verbs leave it false. */
     bool normalized = false;
+    bool integer_pack = false; /* sumcheck: prove and pack this target at collect */
+    bool exact_integer = false; /* counts retain integer arithmetic even with double storage intent */
     std::string physical_type; /* current numeric SQL type, independent of metadata */
     bool is_float() const {
         return physical_type == "FLOAT" ||
@@ -240,8 +242,9 @@ class View {
     struct CollapseSpec {
         std::string stat; /* mean sum rawsum sd semean sebinomial sepoisson
                              median pNN iqr count percent min max first last
-                             firstnm lastnm (COLLAPSE-STATS-2: the full native
-                             list; weights are refused upstream) */
+                             firstnm lastnm unique nunique (COLLAPSE-STATS-2:
+                             the full native list; unique/nunique are extensions;
+                             weights are refused upstream) */
         std::string target;
         std::string source;
     };
@@ -252,6 +255,17 @@ class View {
     std::string collapse(const std::vector<CollapseSpec> &specs,
                          const std::vector<std::string> &by,
                          const std::map<std::string, ExactSum> &exact = {});
+    struct CollapseOptions {
+        std::string weight_type, weight, ifexpr, first, last, freq, labelformat;
+        std::vector<std::string> rawstat;
+        std::map<std::string,std::string> pretty;
+        bool cw=false, merge=false, replace=false, noinit=false, unsorted=false;
+        bool double_targets=false, sumcheck=false, wildparse=false, missing=false, nods=false;
+    };
+    std::string collapse_extended(const std::vector<CollapseSpec> &specs,
+                                  const std::vector<std::string> &by,
+                                  const CollapseOptions &options,
+                                  bool statamissing=true);
     std::vector<std::string> compact_collapse_columns() const;
     std::vector<std::string> compact_collapse_groups() const;
     /* DERIVED-COLLAPSE-1: the input the proof scans — the source, or the

@@ -6,6 +6,7 @@
 #   bash tests/run_stata.sh m0_smoke        # by name fragment
 #   bash tests/run_stata.sh x01_bridge_xproc # two concurrent Stata processes
 #   STATA=... BUILD_DIR=... bash tests/run_stata.sh
+#   STATA_PYTHON_EXEC=/path/to/python3 bash tests/run_stata.sh
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,6 +14,7 @@ STATA="${STATA:-/usr/local/stata/stata-mp}"
 BUILD_DIR="${BUILD_DIR:-$REPO/build/dev}"
 PLUGIN="$BUILD_DIR/parqit.plugin"
 FILTER="${1:-}"
+PYTHON_EXEC="${STATA_PYTHON_EXEC:-}"
 
 if [ ! -x "$STATA" ] && ! command -v "$STATA" >/dev/null 2>&1; then
     echo "error: Stata not found at '$STATA' (set STATA=...)" >&2
@@ -22,10 +24,22 @@ if [ ! -f "$PLUGIN" ]; then
     echo "error: plugin not found at $PLUGIN (build first: cmake --preset dev && cmake --build build/dev --target parqit_plugin)" >&2
     exit 2
 fi
+if [ -n "$PYTHON_EXEC" ]; then
+    if [ ! -x "$PYTHON_EXEC" ]; then
+        echo "error: Python executable not found at '$PYTHON_EXEC'" >&2
+        exit 2
+    fi
+    case "$PYTHON_EXEC" in
+        *\"*|*\`*|*\$*|*$'\n'*|*$'\r'*)
+            echo "error: STATA_PYTHON_EXEC contains unsupported quote/macro characters" >&2
+            exit 2 ;;
+    esac
+fi
 
 RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/parqit_tests.XXXXXX")"
 cd "$RUNDIR"
 echo "running in $RUNDIR"
+if [ -n "$PYTHON_EXEC" ]; then echo "process-local Python: $PYTHON_EXEC"; fi
 # HARNESS-PATH-1 (audit 2026-09-01, F15): Stata wraps output lines at
 # linesize; a very long temp root pushes messages that quote a path past the
 # wrap and log-grep assertions (v67, v70, …) then miss their phrase.
@@ -51,7 +65,10 @@ for suite in integration verify_suite roundtrip; do
         # Batch Stata names its log after the last token on the command line
         # and exits 0 regardless of errors: run through a same-named wrapper
         # so the log is <test>.log, and judge by VERDICT lines only.
-        printf 'do "%s" "%s" "%s"\n' "$f" "$REPO" "$PLUGIN" > "$RUNDIR/$base.do"
+        {
+            if [ -n "$PYTHON_EXEC" ]; then printf 'python set exec "%s"\n' "$PYTHON_EXEC"; fi
+            printf 'do "%s" "%s" "%s"\n' "$f" "$REPO" "$PLUGIN"
+        } > "$RUNDIR/$base.do"
         # Test do-files legitimately use tempfile and some create directories
         # beside it. Give every invocation a runner-owned temp root, then remove
         # it even if batch Stata returns 0 after an internal abort. This prevents

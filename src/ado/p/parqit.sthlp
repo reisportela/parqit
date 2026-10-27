@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.6.1 27oct2026}{...}
+{* *! version 0.7.0 27oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -152,7 +152,9 @@ Shape the view (lazy: each verb extends the plan)
 {p 8 16 2}{cmd:parqit} {cmdab:form:at} {cmd:%}{it:fmt} {it:varlist}{p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:form:at} [{it:varlist}]{space 4}(display formats){p_end}
 {p 8 16 2}{cmd:parqit} {cmdab:so:rt} {it:varlist} | {cmd:parqit gsort} [{cmd:+}|{cmd:-}]{it:varname} ...{p_end}
-{p 8 16 2}{cmd:parqit collapse} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ... [{cmd:if} {it:exp}] [{cmd:,} {opt by(varlist)}]{p_end}
+{p 8 16 2}{cmd:parqit collapse} {cmd:(}{it:stat}{cmd:)} [{it:tgt}{cmd:=}]{it:src} ...
+[{cmd:if} {it:exp}] [{cmd:in} {it:range}] [{it:weight}]
+[{cmd:,} {opt by(varlist)} {it:collapse_options}]{p_end}
 {p 8 16 2}{cmd:parqit contract} {it:varlist} [{cmd:if} {it:exp}] [{cmd:,} {opt f:req(newvar)}]{p_end}
 {p 8 16 2}{cmd:parqit duplicates drop} [{it:varlist}] [{cmd:if} {it:exp}] [{cmd:,} {opt force}]{p_end}
 {p 8 16 2}{cmd:parqit sample} {it:#} [{cmd:if} {it:exp}] [{cmd:,} {opt c:ount} {opt seed(#)} {opt by(varlist)}
@@ -575,7 +577,67 @@ where the {cmd:double} results of {cmd:collapse} and {cmd:egen} become
 {cmd:sum}, {cmd:rawsum}, {cmd:sd}, {cmd:semean}, {cmd:sebinomial},
 {cmd:sepoisson}, {cmd:median}, {cmd:p}{it:##}, {cmd:iqr}, {cmd:count},
 {cmd:percent}, {cmd:min}, {cmd:max}, {cmd:first}, {cmd:last}, {cmd:firstnm} and
-{cmd:lastnm}, without weights.
+{cmd:lastnm}. {cmd:collapse} also accepts {cmd:aweight}, {cmd:fweight},
+{cmd:iweight} and {cmd:pweight}; {cmd:pivot} remains unweighted.
+
+{phang}
+They also accept {cmd:(unique)} (alias {cmd:(nunique)}), an extension that
+counts distinct values of each source variable, numeric or string. Missing
+counts as one value, as in {cmd:parqit unique}; SQL NULL and {cmd:""} are the
+same missing string, and numeric missing categories have already been folded
+by parqit's boundary policy. An all-missing group has one unique value.
+For example, {cmd:parqit collapse (unique) firms=firmid, by(year)} counts
+distinct firm identifiers within each year. Add {cmd:if !missing(firmid)} to
+exclude missing identifiers. To count distinct combinations, generate a group
+identifier first with {cmd:parqit egen key=group(firmid year), missing}.
+
+{phang}
+The additional {cmd:gcollapse} statistics are available too: {cmd:geomean},
+{cmd:nmissing}, {cmd:nansum}, {cmd:rawnansum}, {cmd:variance}, {cmd:cv},
+{cmd:skewness}, {cmd:kurtosis}, {cmd:range}, {cmd:select}{it:#},
+{cmd:select-}{it:#}, {cmd:rawselect}{it:#}, {cmd:rawselect-}{it:#},
+{cmd:gini}, {cmd:gini dropneg} and {cmd:gini keepneg}. Percentiles may be
+fractional, for example {cmd:p2.5}. Selection is one-based among nonmissing
+values; {cmd:rawselect} ignores weights, while weighted {cmd:select} uses
+cumulative weight. The Gini variants respectively set negatives to zero,
+drop them, or retain them. {cmd:geomean} is missing with any negative input
+and zero with any zero input. {cmd:nansum}/{cmd:rawnansum} return missing
+for all-missing groups; ordinary sums return zero.
+
+{phang}
+{cmd:collapse_options} include {cmd:cw}, {opt rawstat(targets)}, {opt freq(name)},
+{cmd:merge}, {cmd:replace}, {cmd:noinit}, {cmd:wildparse}, {cmd:unsorted},
+{cmd:double}, {cmd:sumcheck}, {opt labelformat(string)}, {opt labelprogram(name)},
+{cmd:ds} and {cmd:nods}. Source names accept the view's wildcards, ranges and
+abbreviations; {cmd:wildparse} maps source patterns into target names.
+{cmd:cw} restricts all statistics to cases nonmissing on every source.
+{cmd:rawstat()} names targets computed without weights, retaining the common
+exclusion of zero/missing weights. {cmd:freq()} counts admitted rows, including
+rows with missing source values. {cmd:merge} adds statistics to the view's
+original rows, assigning results only within the selected sample;
+{cmd:replace} permits existing targets and {cmd:noinit} retains their values
+outside that sample. {cmd:double} stores numeric targets as doubles;
+{cmd:sumcheck} proves and packs integer-source sum targets at collect without
+loss. Labels accept {cmd:#stat#}, {cmd:#Stat#}, {cmd:#STAT#},
+{cmd:#stat:pretty#}, {cmd:#sourcelabel#} and source-label substring tokens.
+A custom label program runs in an empty temporary frame and must return
+{cmd:r(prettystat)}, or {cmd:#default#}; the current dataset is preserved.
+
+{phang}
+Weights must be nonnegative; frequency weights must be integers. Zero and
+missing weights are excluded before every statistic. Probability weights
+are refused for {cmd:sd}, {cmd:variance}, {cmd:cv} and the three standard
+errors; importance weights are refused for the standard errors; analytic
+weights are refused for {cmd:sebinomial} and {cmd:sepoisson}. These restrictions
+also apply with {cmd:rawstat()}. Counts and missing counts use the weight
+sum for frequency, importance and probability weights, and observation counts
+for analytic weights; analytic-weight sums equal the weighted mean times the
+nonmissing observation count. Percentages use weight shares for every family.
+Native {cmd:fast} and gtools execution controls do not apply to the lazy
+DuckDB plan. Generate time-series expressions before collapsing.
+The menu's {bf:Collapse options} tab provides weights, range, complete-case,
+merge, naming, storage and label controls. Additional statistics may be typed
+in the Main tab's additional specifications field.
 
 {phang}
 {cmd:egen} takes the functions, arguments and options listed under
@@ -747,7 +809,8 @@ accept the wildcards {cmd:*} and {cmd:?}.
 Where parqit differs from native Stata:
 
 {phang2}{cmd:•} {cmd:collapse} and {cmd:pivot} take every native statistic,
-without weights; {cmd:egen} takes the functions listed under
+and the additional aggregation statistics described above. {cmd:collapse}
+accepts weights; {cmd:pivot} remains unweighted. {cmd:egen} takes the functions listed under
 {help parqit##egen:egen functions}. Means, sums and the like are
 kept in {cmd:double}; {cmd:collect, compress} narrows what fits.{p_end}
 {phang2}{cmd:•} {cmd:xtset} and {cmd:tsset} declare the panel and time
@@ -815,8 +878,9 @@ checked before they replace anything. {opt partitions(replace)} adds or replaces
 a month of a monthly tree, say, without rewriting the rest.
 
 {pstd}
-Stata holds at most 2,147,483,647 observations; a larger result can still be
-saved to Parquet. The output is always Parquet: to get a {cmd:.dta}, collect the
+The plugin's transfer interface limits {cmd:collect} to 2,147,483,647
+observations; a larger result can still be saved to Parquet. The output is
+always Parquet: to get a {cmd:.dta}, collect the
 result and use {helpb save}. More:
 {help parqit_technical##materialisers:Materialisers}.
 
@@ -1582,14 +1646,18 @@ has finished before retrying. See
 {help parqit_technical##limitations:source stability and caching}.{p_end}
 {p 4 6 2}{cmd:•} Expressions use Stata's missing comparisons by default;
 {cmd:parqit set statamissing off} selects SQL comparisons. {cmd:_n} and {cmd:_N} work in
-{cmd:keep if}, {cmd:drop if} and {cmd:gen}.{p_end}
-{p 4 6 2}{cmd:•} Lazy {cmd:merge m:m} is refused; {cmd:collapse} and {cmd:pivot}
-take no weights; {cmd:reshape wide} and {cmd:pivot} spread at most 2,000
+{cmd:keep if}, {cmd:drop if}, {cmd:gen} and its {cmd:if}, {cmd:replace} and
+the documented {cmd:egen} expressions. A replace reading its own variable's
+other rows is refused because native replacement is sequential.{p_end}
+{p 4 6 2}{cmd:•} Lazy {cmd:merge m:m} is refused. {cmd:pivot} remains unweighted;
+{cmd:collapse} accepts all four weight families with the restrictions above.
+{cmd:reshape wide} and {cmd:pivot} spread at most 2,000
 values.{p_end}
 {p 4 6 2}{cmd:•} A lazy {cmd:merge} or {cmd:joinby} returns its rows ordered by the
 key, not in native Stata's order; sort after collecting if {cmd:_n} matters.{p_end}
-{p 4 6 2}{cmd:•} Stata holds at most 2,147,483,647 observations; the lazy path and
-{cmd:save} are not so bounded.{p_end}
+{p 4 6 2}{cmd:•} The plugin's transfer index limits eager reads and
+{cmd:collect} to 2,147,483,647 observations. The lazy path and {cmd:save}
+are not bounded by that transfer limit.{p_end}
 {p 4 6 2}{cmd:•} Extended missing values {cmd:.a}-{cmd:.z} become plain missing in
 Parquet unless saved with {opt xmissing}, and a lazy view reads them as plain
 missing values.{p_end}

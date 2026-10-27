@@ -5595,3 +5595,42 @@ entry notes the conservative fallback if the assumption proves wrong.
     new 0.6.1 tag, preserve existing tags, and retain DuckDB 2.0.0 and numerical
     contract 4. Require green platform CI, staged licensed checks and exact
     artifact/public-install verification before reporting the release done.
+
+253. **Distinct counts in collapse/pivot (2026-10-27).** The maintainer asked
+    for unique and a comparison with native collapse. Interpret `(unique)`
+    as the exact count of distinct source values, with `(nunique)` as an
+    alias; both work for numeric and string inputs, individually per source.
+    Native collapse has neither statistic. Follow the existing parqit unique
+    missing-value contract: include one missing level, fold NULL/empty
+    strings and numeric missing encodings, and keep original integer keys
+    exact. All-missing groups count as 1; empty inputs produce no rows.
+    Follow count's storage, format and value-label policy. Exclude this new
+    statistic from the compact sum/mean/count path. Assess native syntax
+    gaps without silently changing their semantics or implementing weights.
+
+254. **gcollapse analytical/data parity (2026-10-27).** The maintainer then
+    authorised the gcollapse functionality and explicitly chose analytical
+    and data-option parity, excluding compatibility with gtools-specific
+    execution switches. Add the statistics, weights, sample restrictions,
+    merge/noinit, patterns, labels and storage controls to lazy collapse;
+    retain the ordinary unweighted compiler/compact path. Keep existing
+    double precision, source-name default labels and boundary missing folds.
+    Rawselect follows its documented one-based definition; reproduce native
+    Stata/independent oracles before copying an installed gtools discrepancy.
+    Merge assigns only admitted rows, retains order, and materialises its
+    branch prefix once. Prove sumcheck target storage at collect, with no
+    global ado/Python changes. Use a new private operation name so an old
+    plugin cannot silently ignore a new ado's weights. r() counts remain
+    deferred to explicit view reports/materialisers in the lazy architecture.
+
+255. **Release 0.7.0 preparation and engine scope (2026-10-27).** The
+    maintainer approved 0.7.0 and authorised the implementation, help review
+    and performance checks needed for a new release. Work and validation
+    target DuckDB 2.0.0 exclusively; leave the optional 1.5.6 path untouched.
+    Retain numerical contract 4 and the ordinary unweighted aggregate path.
+    Close the final full-suite gap from the staged installation surface;
+    an optional STATA_PYTHON_EXEC selects an already-installed oracle Python
+    only in runner-owned batch wrappers. Resolve contradictory help claims
+    against code and native/oracle tests. Assess short timing costs at larger
+    scales with interleaved matched builds and preserved host context. Local
+    candidate artefacts remain distinct from platform-CI release assets.

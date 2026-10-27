@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.6.1 LANGUAGES C CXX)
+project(parqit VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -165,6 +165,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/exprtrans.cpp
     src/engine/datefn.cpp
     src/engine/view.cpp
+    src/engine/collapse.cpp
     src/engine/spss_reader.cpp
     src/engine/spss_plan.cpp
     src/engine/spss_parallel.cpp

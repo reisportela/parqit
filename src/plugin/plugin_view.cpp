@@ -593,7 +593,7 @@ std::string compile_for_save(const View &v, const std::string *compiled = nullpt
          * otherwise cmd_view_op has already promoted its intent to DOUBLE.
          * Narrow integer/string metadata is cleared by replace so native
          * range/width promotion remains non-lossy. */
-        if (fcls == parqit::FmtClass::None && !c.meta_type.empty()) {
+        if (fcls == parqit::FmtClass::None && !c.meta_type.empty() && !c.exact_integer) {
             parqit::StType mt;
             int mb = 0;
             if (parqit::sttype_parse(c.meta_type, &mt, &mb) &&
@@ -621,6 +621,8 @@ std::string view_kv_fragment(const View &v) {
         jv["fmt"] = c.fmt;
         jv["varlab"] = c.varlab;
         jv["vallab"] = c.vallab;
+        if (c.integer_pack) jv["integer_pack"]=true;
+        if (c.exact_integer) jv["exact_integer"]=true;
         if (!c.vallab.empty()) used_labs.insert(c.vallab);
         jvars.push_back(jv);
     }
@@ -1460,6 +1462,8 @@ ST_retcode cmd_view_open(const std::vector<std::string> &args) {
         vc.varlab = sget(jm, "varlab");
         vc.vallab = sget(jm, "vallab");
         vc.meta_type = sget(jm, "type");
+        vc.integer_pack=jm && jm->contains("integer_pack") && (*jm)["integer_pack"].is_boolean() && (*jm)["integer_pack"].get<bool>();
+        vc.exact_integer=jm && jm->contains("exact_integer") && (*jm)["exact_integer"].is_boolean() && (*jm)["exact_integer"].get<bool>();
         if (!vc.stata.empty()) {
             /* NAME-CASE-1: exact Stata name kept; alias only inside the view */
             warns.push_back("column \"" + vc.stata + "\" differs only by case from "
@@ -1939,7 +1943,7 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
         if (req.contains("desc") && req["desc"].is_array())
             for (const auto &d : req["desc"]) desc.push_back(d.get<bool>());
         e = candidate.sort(keys, desc);
-    } else if (op == "collapse") {
+    } else if (op == "collapse" || op == "collapse_extended") {
         std::vector<View::CollapseSpec> specs;
         if (req.contains("specs") && req["specs"].is_array()) {
             for (const auto &js : req["specs"]) {
@@ -1961,11 +1965,27 @@ ST_retcode cmd_view_op(const std::vector<std::string> &args) {
             cry(err);
             return kRcUsage;
         }
-        if (!ifex.empty()) {
-            e = candidate.filter(ifex, false, g_statamissing);
-            add_miss(missing_rule_cmps(ifex, true));
-        }
-        if (e.empty()) e = candidate.collapse(specs, req_list_or_empty(req, "by"));
+        parqit::View::CollapseOptions options;
+        options.ifexpr=ifex;
+        for (auto entry:std::vector<std::pair<const char *,std::string *>>{
+                {"weight",&options.weight},{"weight_type",&options.weight_type},
+                {"first",&options.first},{"last",&options.last},{"freq",&options.freq},
+                {"labelformat",&options.labelformat}})
+            if (!parqit::req_text(req,entry.first,entry.second,&err,false)) { cry(err); return kRcUsage; }
+        options.rawstat=req_list_or_empty(req,"rawstat");
+        options.cw=req.value("cw",false); options.merge=req.value("merge",false);
+        options.replace=req.value("replace",false); options.noinit=req.value("noinit",false);
+        options.unsorted=req.value("unsorted",false); options.double_targets=req.value("double",false);
+        options.sumcheck=req.value("sumcheck",false); options.wildparse=req.value("wildparse",false);
+        options.missing=req.value("missing",false); options.nods=req.value("nods",false);
+        if (req.contains("pretty") && req["pretty"].is_object())
+            for (auto it=req["pretty"].begin();it!=req["pretty"].end();++it) {
+                std::string text;
+                if (!parqit::req_text(req["pretty"],it.key().c_str(),&text,&err)) { cry(err); return kRcUsage; }
+                options.pretty[it.key()]=text;
+            }
+        add_miss(missing_rule_cmps(ifex,true));
+        e=candidate.collapse_extended(specs,req_list_or_empty(req,"by"),options,g_statamissing);
     } else if (op == "contract") {
         std::string freq, ifex;
         parqit::req_text(req, "freq", &freq, &err, false);
@@ -2809,6 +2829,25 @@ ST_retcode cmd_view_collect_prepare(const std::vector<std::string> &args) {
     // A nontrivial view already has one spillable snapshot. A pure file read
     // has source-identity guards. Raw SQL without either may be volatile, so
     // leave its compress entirely native instead of evaluating it twice.
+    const bool pack_requested=std::any_of(vcols.begin(),vcols.end(),[](const ViewCol &c){return c.integer_pack;});
+    if (label=="collect" && !req.value("compress",false) && pack_requested) {
+        PlanContext packed;
+        packed.nrows=ctx.nrows;
+        std::vector<size_t> positions;
+        for (size_t i=0;i<ctx.active.size();++i)
+            for (const auto &c:vcols)
+                if (c.name==ctx.active[i].source_name && c.integer_pack) {
+                    positions.push_back(i); packed.active.push_back(ctx.active[i]);
+                }
+        if (!positions.empty()) {
+            rc=plan_integer_compression(s,vsrc,&packed,&err);
+            if (rc!=0) {
+                if (drop_source_after) { std::string ignored; s.exec("DROP TABLE IF EXISTS "+quote_ident(table),&ignored); }
+                cry(who+err); return rc;
+            }
+            for (size_t i=0;i<positions.size();++i) ctx.active[positions[i]]=std::move(packed.active[i]);
+        }
+    }
     if (req.value("compress", false) && label == "collect" &&
         (drop_source_after || !ctx.files.empty())) {
         rc = plan_integer_compression(s, vsrc, &ctx, &err);
@@ -3609,6 +3648,8 @@ ST_retcode prepare_using(Session &s, const std::vector<std::string> &files,
         vc.varlab = sget(jm, "varlab");
         vc.vallab = sget(jm, "vallab");
         vc.meta_type = sget(jm, "type");
+        vc.integer_pack=jm && jm->contains("integer_pack") && (*jm)["integer_pack"].is_boolean() && (*jm)["integer_pack"].get<bool>();
+        vc.exact_integer=jm && jm->contains("exact_integer") && (*jm)["exact_integer"].is_boolean() && (*jm)["exact_integer"].get<bool>();
         if (!sel.empty()) sel += ", ";
         sel += bounds[c].sql + " AS " + quote_ident(vc.name);
         out->cols.push_back(vc);
@@ -4399,7 +4440,7 @@ ST_retcode cmd_view_pivot(const std::vector<std::string> &args) {
     }
     std::vector<std::string> by = rowv;
     by.push_back(col);
-    e = g_view_ref().collapse(specs, by);
+    e = g_view_ref().collapse_extended(specs, by, parqit::View::CollapseOptions{}, g_statamissing);
     if (!e.empty()) {
         g_view_ref() = saved;
         cry("parqit pivot: " + e);

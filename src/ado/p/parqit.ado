@@ -1,4 +1,4 @@
-*! version 0.6.1 27oct2026
+*! version 0.7.0 27oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -111,7 +111,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.6.1"
+    local ado_version "0.7.0"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -2493,6 +2493,10 @@ program define _parqit_parse_aggspecs
             local pend
             gettoken stat 0 : 0, parse(" ()")
             gettoken close 0 : 0, parse(" ()")
+            if ("`stat'"=="gini" & inlist("`close'","dropneg","keepneg")) {
+                local stat "gini_`close'"
+                gettoken close 0 : 0, parse(" ()")
+            }
             if (`"`close'"' != ")") {
                 di as err "parqit `verb': malformed (statistic)"
                 exit 198
@@ -2520,12 +2524,29 @@ program define _parqit_parse_aggspecs
     c_local rest `"`0'"'
 end
 
+program define _parqit_collapse_label, rclass
+    version 16.0
+    syntax , Program(name) STAT(string)
+    tempname scratch
+    frame create `scratch'
+    capture noisily frame `scratch': `program' `stat'
+    local rc=_rc
+    local pretty `"`r(prettystat)'"'
+    frame drop `scratch'
+    if (`rc') exit `rc'
+    if (`"`pretty'"'=="") {
+        di as err "parqit collapse: labelprogram must return r(prettystat)"
+        exit 198
+    }
+    return local prettystat `"`pretty'"'
+end
+
 program define _parqit_collapse
     version 16.0
     * (stat) [tgt=]src ... [(stat) ...] [if exp] , by(varlist)
     * IF-ALL-1: the if belongs to the view and travels as text; it is split
     * off before the spec parser, which would read its tokens as variables
-    mata: _parqit_stats_split()
+    mata: _parqit_collapse_split()
     if (`_sq_if_noexp') _parqit_if_noexp "parqit collapse"
     _parqit_parse_aggspecs collapse `vars' `0'
     local 0 `"`rest'"'
@@ -2533,11 +2554,53 @@ program define _parqit_collapse
         di as err "parqit collapse: nothing to compute"
         exit 198
     }
-    syntax [, by(string)]
+    syntax [, by(string) CW MERGE REPLACE NOINIT FREQ(name) RAWStat(string) ///
+        WILDparse UNsorted DOUBLE SUMcheck MISSing LABELFormat(string) LABELProgram(name) DS NODS]
+    if ("`ds'"!="" & "`nods'"!="") {
+        di as err "parqit collapse: ds and nods are mutually exclusive"
+        exit 198
+    }
+    local _sq_pretty_n 0
+    if ("`labelprogram'"!="") {
+        foreach item of local specs {
+            gettoken stat restitem : item, parse("|")
+            mata: st_local("stat",_parqit_aggregate_statistic(st_local("stat")))
+            local hookstat : subinstr local stat "_" "|", all
+            quietly _parqit_collapse_label, program(`labelprogram') stat(`hookstat')
+            local ++_sq_pretty_n
+            local _sq_pretty`_sq_pretty_n' `"`r(prettystat)'"'
+            if (`"`_sq_pretty`_sq_pretty_n''"'=="") {
+                di as err "parqit collapse: labelprogram must return r(prettystat)"
+                exit 198
+            }
+        }
+        if ("`freq'"!="") {
+            quietly _parqit_collapse_label, program(`labelprogram') stat(freq)
+            local ++_sq_pretty_n
+            local _sq_pretty`_sq_pretty_n' `"`r(prettystat)'"'
+            if (`"`_sq_pretty`_sq_pretty_n''"'=="") {
+                di as err "parqit collapse: labelprogram must return r(prettystat) for freq"
+                exit 198
+            }
+        }
+    }
     _parqit_ensure_plugin
     tempfile req
     local _sq_specs `"`specs'"'
     local _sq_by `"`by'"'
+    local _sq_cw = "`cw'"!=""
+    local _sq_merge = "`merge'"!=""
+    local _sq_replace = "`replace'"!=""
+    local _sq_noinit = "`noinit'"!=""
+    local _sq_unsorted = "`unsorted'"!=""
+    local _sq_double = "`double'"!=""
+    local _sq_sumcheck = "`sumcheck'"!=""
+    local _sq_wildparse = "`wildparse'"!=""
+    local _sq_missing = "`missing'"!=""
+    local _sq_nods = "`nods'"!=""
+    local _sq_freq "`freq'"
+    local _sq_rawstat `"`rawstat'"'
+    local _sq_labelformat `"`labelformat'"'
     mata: _parqit_wr_op_collapse_request("`req'")
     capture noisily plugin call parqit_plugin, view_op `reqhex'
     if (_rc) exit _rc
@@ -5044,7 +5107,7 @@ void _parqit_wr_op_collapse_request(string scalar req)
 {
     string rowvector items, parts, p
     string scalar    sj
-    real scalar      i
+    real scalar      i, npretty
 
     items = tokens(st_local("_sq_specs"))
     sj = "["
@@ -5058,11 +5121,29 @@ void _parqit_wr_op_collapse_request(string scalar req)
     }
     sj = sj + "]"
     p = (_parqit_jtext("cmd", "view_op"),
-         _parqit_jtext("op", "collapse"),
+         _parqit_jtext("op", "collapse_extended"),
          _parqit_jpair("specs", sj),
          _parqit_jpair("by", _parqit_jlist(tokens(st_local("_sq_by")))))
     // IF-ALL-1: the if travels only when given
     if (st_local("_sq_ifexpr") != "") p = (p, _parqit_jtext("ifexpr", st_local("_sq_ifexpr")))
+    items=("weight","weight_type","first","last","freq","labelformat")
+    for (i=1;i<=cols(items);i++)
+        if (st_local("_sq_"+items[i])!="") p=(p,_parqit_jtext(items[i],st_local("_sq_"+items[i])))
+    if (st_local("_sq_rawstat")!="") p=(p,_parqit_jpair("rawstat",_parqit_jlist(tokens(st_local("_sq_rawstat")))))
+    items = ("cw","merge","replace","noinit","unsorted","double","sumcheck","wildparse","missing","nods")
+    for (i=1;i<=cols(items);i++)
+        if (st_local("_sq_"+items[i])=="1") p=(p,_parqit_jpair(items[i],"true"))
+    items=tokens(st_local("_sq_specs"))
+    sj="{"
+    npretty=strtoreal(st_local("_sq_pretty_n"))
+    if (missing(npretty)) npretty=0
+    for (i=1;i<=npretty;i++) {
+        if (i<=cols(items)) parts=_parqit_fields(items[i],3)
+        else parts=("freq","","")
+        if (i>1) sj=sj+","
+        sj=sj+_parqit_jtext(parts[1],st_local("_sq_pretty"+strofreal(i)))
+    }
+    if (npretty>0) p=(p,_parqit_jpair("pretty",sj+"}"))
     _parqit_emit(req, _parqit_jobj(p))
 }
 
@@ -5737,6 +5818,154 @@ void _parqit_split_if(string scalar src)
 // look its variables up in the dataset in memory. Leaves vars, _sq_ifexpr and
 // 0 rewritten as ", options" for syntax, and _sq_if_noexp = 1 when an if has
 // no expression after it.
+string scalar _parqit_aggregate_statistic(string scalar s)
+{
+    string rowvector names
+    real rowvector least
+    real scalar i
+    names=("variance","max","min","range","count","median","percent","semean","sebinomial","sepoisson","nunique","nmissing","skewness","kurtosis","rawsum")
+    least=(3,2,2,1,2,3,4,3,3,3,5,5,2,1,5)
+    for (i=1;i<=cols(names);i++)
+        if (strlen(s)>=least[i] & substr(names[i],1,strlen(s))==s) return(names[i])
+    return(s)
+}
+
+void _parqit_collapse_split()
+{
+    string scalar src, head, opts, w, kind, c
+    real scalar i, j, depth, quoted, comp, eq
+
+    st_local("_sq_weight","")
+    st_local("_sq_weight_type","")
+    st_local("_sq_first","")
+    st_local("_sq_last","")
+    if (strpos(st_local("0"),"[")==0 & strpos(st_local("0")," in ")==0) {
+        _parqit_stats_split()
+        return
+    }
+    _parqit_split_opts(st_local("0"))
+    head=st_local("parqit_head")
+    opts=st_local("parqit_opts")
+    // A weight bracket has a type and '='; brackets inside its expression
+    // are balanced rather than mistaken for the outer closing bracket.
+    depth=0
+    quoted=0
+    comp=0
+    for (i=1;i<=strlen(head);i++) {
+        c=substr(head,i,1)
+        if (c==char(96) & substr(head,i+1,1)==char(34)) {
+            comp++
+            i++
+            continue
+        }
+        if (comp) {
+            if (c==char(34) & substr(head,i+1,1)==char(39)) {
+                comp--
+                i++
+            }
+            continue
+        }
+        if (quoted) {
+            if (c==char(34)) quoted=0
+            continue
+        }
+        if (c==char(34)) {
+            quoted=1
+            continue
+        }
+        if (c=="(") depth++
+        if (c==")") depth--
+        if (depth | c!="[") continue
+        j=i+1
+        while (j<=strlen(head) & substr(head,j,1)!="=") j++
+        if (j>strlen(head)) continue
+        kind=strtrim(substr(head,i+1,j-i-1))
+        if (!anyof(("aw","aweight","fw","fweight","iw","iweight","pw","pweight"),kind)) continue
+        eq=j
+        depth=1
+        quoted=0
+        comp=0
+        for (j=j+1;j<=strlen(head);j++) {
+            c=substr(head,j,1)
+            if (c==char(96) & substr(head,j+1,1)==char(34)) {
+                comp++
+                j++
+                continue
+            }
+            if (comp) {
+                if (c==char(34) & substr(head,j+1,1)==char(39)) {
+                    comp--
+                    j++
+                }
+                continue
+            }
+            if (quoted) {
+                if (c==char(34)) quoted=0
+                continue
+            }
+            if (c==char(34)) {
+                quoted=1
+                continue
+            }
+            if (c=="[") depth++
+            if (c=="]") depth--
+            if (depth==0) break
+        }
+        if (depth) {
+            errprintf("parqit collapse: unclosed weight expression\n")
+            _error(198)
+        }
+        st_local("_sq_weight",strtrim(substr(head,eq+1,j-eq-1)))
+        st_local("_sq_weight_type",substr(kind,1,1)+"weight")
+        head=substr(head,1,i-1)+" "+substr(head,j+1,.)
+        break
+    }
+    depth=0
+    quoted=0
+    comp=0
+    for (i=1;i<=strlen(head)-2;i++) {
+        c=substr(head,i,1)
+        if (c==char(96) & substr(head,i+1,1)==char(34)) {
+            comp++
+            i++
+            continue
+        }
+        if (comp) {
+            if (c==char(34) & substr(head,i+1,1)==char(39)) {
+                comp--
+                i++
+            }
+            continue
+        }
+        if (quoted) {
+            if (c==char(34)) quoted=0
+            continue
+        }
+        if (c==char(34)) {
+            quoted=1
+            continue
+        }
+        if (c=="(") depth++
+        if (c==")") depth--
+        if (depth==0 & substr(head,i,3)=="in " & (i==1 | substr(head,i-1,1)==" ")) {
+            src=strtrim(substr(head,i+3,.))
+            j=strpos(src,"/")
+            if (j) {
+                st_local("_sq_first",strtrim(substr(src,1,j-1)))
+                st_local("_sq_last",strtrim(substr(src,j+1,.)))
+            }
+            else {
+                st_local("_sq_first",src)
+                st_local("_sq_last",src)
+            }
+            head=strtrim(substr(head,1,i-1))
+            break
+        }
+    }
+    st_local("0",head+(opts=="" ? "" : ", "+opts))
+    _parqit_stats_split()
+}
+
 void _parqit_stats_split()
 {
     string rowvector w

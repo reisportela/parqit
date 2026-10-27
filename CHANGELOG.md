@@ -6,6 +6,38 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-27
+
+### Added
+
+- `collapse` adds gcollapse's analytical statistics and data controls:
+  geometric means, missing counts, missing-preserving sums, variance/CV,
+  skewness/kurtosis, range, select/rawselect and Gini variants; all four
+  weight families; sample/range/casewise restrictions; rawstat/freq;
+  merge/replace/noinit; wildcard targets and signed groups; label formatting
+  and callbacks; double/sumcheck. Fixed-size exact weighted accumulators
+  preserve products, cancellation and frequency-weight standard-error tails.
+  Ordinary unweighted plans retain their existing path. A separate private
+  operation makes older plugins refuse rather than ignore the new options.
+  The native dialog has a compact Collapse options tab; both helps document
+  the surface and the existing precision/metadata policies. Unweighted
+  pivot shares the added statistics.
+
+- `collapse` and `pivot` accept `(unique)` and `(nunique)` for exact distinct
+  counts of numeric or string sources, including one missing-value level as
+  in `parqit unique`. All-missing groups return 1. Results use the count
+  storage/format policy, and adjacent large integer keys remain distinct.
+  The menu lists the new statistics and the previously omitted rawsum,
+  percent, semean, sebinomial, sepoisson and iqr. Both helps document the
+  count contract and the remaining syntax differences from native collapse.
+
+### Changed
+
+- The help summaries now consistently describe weighted collapse and the
+  supported row-context expressions. The integration runner can select an
+  existing oracle Python per batch process with `STATA_PYTHON_EXEC`, so the
+  final package suite does not depend on permanent local Python settings.
+
 ## [0.6.1] — 2026-10-27
 
 ### Changed
