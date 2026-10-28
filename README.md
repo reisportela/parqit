@@ -20,11 +20,18 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.8.0 — the full surface below is implemented and covered by a
+> **Status:** v0.8.1 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.8.1 fixes dropped timezone-aware nanosecond Parquet timestamps
+on DuckDB 2.0. `TIMESTAMPTZ_NS` now retains the UTC instant as a Stata
+`double` with `%tc` on eager, lazy and view-save paths, applying the existing
+documented millisecond floor. Negative instants, finite int64 limits, nulls
+and atomic infinity refusals have independent regression coverage. Both helps
+describe the mapping; the engine and numerical contract remain unchanged.
 
 Version 0.8.0 exposes the embedded DuckDB's native settings through
 `parqit set duckdb`: discover names/types/scopes, inspect an effective value,
@@ -1388,6 +1395,7 @@ rescales a date.
 | `strL` | `VARCHAR` (large) | values wider than 2045 UTF-8 bytes |
 | `%td` | `DATE` | days since epoch (correct conversion) |
 | `%tc` | `TIMESTAMP` | milliseconds; tz instant preserved |
+| foreign `TIMESTAMPTZ_NS` | → `double` with `%tc` | UTC instant retained; nanoseconds floor to the earlier millisecond with a note, including before 1970 |
 | `%tm %tq %th %ty %tw` | `INTEGER` (period count) | **kept as integers with the period code**, never mis-scaled to calendar dates |
 | `%tC %tb` | `BIGINT` / `INTEGER` counts | kept as integer counts with their display format; third-party readers see the raw counts |
 | boolean | `BOOLEAN` → `byte` 0/1 | |

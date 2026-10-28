@@ -5653,3 +5653,29 @@ entry notes the conservative fallback if the assumption proves wrong.
     Native row-reordering is an explicit semantic choice, never an automatic
     speed policy. Compare equivalent settings/results in matched builds,
     recording dispersion, and validate exact CI assets before publication.
+
+257. **DuckDB 2.0 timezone-aware nanoseconds (2026-10-28).** The reported
+    dropped `timestamp` warning is reproduced with synthetic Parquet using
+    `TIMESTAMPTZ_NS` (NANOS with `isAdjustedToUTC=true`), whose C API type
+    is `DUCKDB_TYPE_TIMESTAMP_TZ_NS`. Add this 2.0-only mapping without
+    changing the optional 1.5.6 path. The pinned engine's cast to
+    `TIMESTAMP_NS` reinterprets the same UTC nanosecond integer; pass that
+    to the existing checked integer-floor converter, never through a
+    microsecond cast or floating-point division first. Keep the documented
+    Stata millisecond boundary, null handling, explicit precision note,
+    finite-boundary safety and atomic infinity refusals. Cover eager and
+    lazy reads, arithmetic, view-save, invalid source names and four Arrow
+    timezone annotations with independent Python integer/PyArrow oracles.
+    The maintainer's source is read-only; synthetic fixtures are sufficient
+    for the regression and no individual source records are printed.
+
+258. **Release 0.8.1 on main (2026-10-28).** The maintainer explicitly
+    authorised committing the timestamp correction to main and publishing
+    a release. Use 0.8.1 for this focused fix; retain DuckDB 2.0.0 and
+    numerical contract 4. Preserve unrelated dirty/untracked material and
+    the global Stata installation. Keep new local test children on CPUs
+    46 and 47 while the shared server is busy. Run the full Stata suite on
+    the privately installed exact tag-CI plugin, verify all four platforms
+    and the complete distribution, then read back a public installation.
+    The source file's path was not supplied; do not equate the independently
+    reproduced warning with inspection of the maintainer's actual records.

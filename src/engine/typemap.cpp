@@ -256,6 +256,19 @@ ColumnPlan plan_read_column(const std::string &source_name, duckdb_logical_type 
         p.stata_format = "%tc";
         p.note = "nanosecond timestamp truncated to Stata millisecond resolution";
         break;
+#ifdef PARQIT_DUCKDB_200
+    case DUCKDB_TYPE_TIMESTAMP_TZ_NS:
+        /* DuckDB 2.0 reads UTC-adjusted Parquet NANOS as TIMESTAMPTZ_NS.
+         * Its TIMESTAMP_NS cast reinterprets the same UTC nanosecond count;
+         * reuse the checked integer floor, without a lossy us cast first. */
+        p.cast_sql = timestamp_ns_floor_us_sql("CAST(" + ref + " AS TIMESTAMP_NS)");
+        p.transfer = Transfer::TimestampUs;
+        p.stata_type = StType::Double;
+        p.stata_format = "%tc";
+        p.note = "timezone-aware nanosecond timestamp stored as the UTC instant; "
+                 "truncated to Stata millisecond resolution";
+        break;
+#endif
     case DUCKDB_TYPE_TIMESTAMP_TZ:
         p.cast_sql = "CAST(" + ref + " AS TIMESTAMP)";
         p.transfer = Transfer::TimestampUs;

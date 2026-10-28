@@ -303,6 +303,67 @@ TEST_CASE("TS-NS-FLOOR-1: nanosecond instants floor to microseconds toward -infi
     CHECK(p.transfer == Transfer::TimestampUs);
 }
 
+#ifdef PARQIT_DUCKDB_200
+TEST_CASE("TZ-NS-1: timezone-aware nanoseconds retain UTC and exact finite boundaries") {
+    Session &s = Session::instance();
+    REQUIRE(s.ensure_open());
+    const ColumnPlan p = plan_for(DUCKDB_TYPE_TIMESTAMP_TZ_NS, "t");
+    REQUIRE_FALSE(p.dropped);
+    CHECK(p.transfer == Transfer::TimestampUs);
+    CHECK(p.stata_type == StType::Double);
+    CHECK(p.stata_format == "%tc");
+    CHECK(p.note.find("UTC instant") != std::string::npos);
+    CHECK(p.note.find("millisecond") != std::string::npos);
+    const std::string sql = "SELECT epoch_us(" + p.cast_sql +
+                            ") FROM (SELECT $1::TIMESTAMPTZ_NS AS t)";
+    duckdb_prepared_statement stmt = nullptr;
+    REQUIRE(duckdb_prepare(s.con(), sql.c_str(), &stmt) == DuckDBSuccess);
+    struct Sample { int64_t ns; int64_t us; };
+    const Sample samples[] = {
+        {-9223372036854775806LL, -9223372036854776LL},
+        {-9223372036854775500LL, -9223372036854776LL},
+        {-315619200000000001LL, -315619200000001LL},
+        {-1000001, -1001}, {-1000000, -1000}, {-999999, -1000},
+        {-1001, -2}, {-1000, -1}, {-999, -1}, {-1, -1}, {0, 0},
+        {1, 0}, {999, 0}, {1000, 1}, {1001, 1},
+        {1609459200123456789LL, 1609459200123456LL},
+        {9223372036854775806LL, 9223372036854775LL}
+    };
+    for (const auto &sample : samples) {
+        INFO("UTC nanoseconds = " << sample.ns);
+        duckdb_value value = duckdb_create_timestamp_tz_ns({sample.ns});
+        CHECK(duckdb_bind_value(stmt, 1, value) == DuckDBSuccess);
+        duckdb_destroy_value(&value);
+        duckdb_result result;
+        const auto rc = duckdb_execute_prepared(stmt, &result);
+        CHECK_MESSAGE(rc == DuckDBSuccess, duckdb_result_error(&result));
+        if (rc == DuckDBSuccess) {
+            CHECK_FALSE(duckdb_value_is_null(&result, 0, 0));
+            CHECK(duckdb_value_int64(&result, 0, 0) == sample.us);
+        }
+        duckdb_destroy_result(&result);
+    }
+    CHECK(duckdb_bind_null(stmt, 1) == DuckDBSuccess);
+    duckdb_result null_result;
+    const auto null_rc = duckdb_execute_prepared(stmt, &null_result);
+    CHECK(null_rc == DuckDBSuccess);
+    if (null_rc == DuckDBSuccess) CHECK(duckdb_value_is_null(&null_result, 0, 0));
+    duckdb_destroy_result(&null_result);
+    for (const int64_t infinity : {-9223372036854775807LL, 9223372036854775807LL}) {
+        duckdb_value value = duckdb_create_timestamp_tz_ns({infinity});
+        CHECK(duckdb_bind_value(stmt, 1, value) == DuckDBSuccess);
+        duckdb_destroy_value(&value);
+        duckdb_result failed;
+        const auto failure = duckdb_execute_prepared(stmt, &failed);
+        CHECK(failure == DuckDBError);
+        if (failure == DuckDBError)
+            CHECK(std::string(duckdb_result_error(&failed)).find("infinite TIMESTAMP_NS") != std::string::npos);
+        duckdb_destroy_result(&failed);
+    }
+    duckdb_destroy_prepare(&stmt);
+}
+#endif
+
 TEST_CASE("TIME-NS-FLOOR-1: nanosecond times of day floor to the millisecond, never round") {
     /* CAST(TIME_NS AS TIME) rounds to the microsecond, so the last 500 ns
      * before a millisecond boundary read one millisecond later (the last

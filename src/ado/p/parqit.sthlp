@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.8.0 28oct2026}{...}
+{* *! version 0.8.1 28oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -392,6 +392,12 @@ restored on read; the files stay plain Parquet for pandas, polars, R and Spark.
 way. SPSS and R files are read by parqit's own readers, without SPSS or R, with
 their labels and missing-value codes. Text in any language and code page is
 decoded to UTF-8, with a note saying what was decoded.
+
+{pstd}
+Foreign timezone-aware nanosecond timestamps ({cmd:TIMESTAMPTZ_NS} in
+DuckDB 2.0) load as {cmd:double} with {cmd:%tc}, keeping the UTC instant.
+Sub-millisecond precision is truncated to the earlier millisecond with a note,
+including before 1970; the column is retained on both eager and lazy reads.
 
 {pstd}
 {bf:Statistics.} The summaries follow the definitions of the native commands and

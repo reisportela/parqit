@@ -6,6 +6,18 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-10-28
+
+### Fixed
+
+- Retain timezone-aware nanosecond Parquet timestamps on DuckDB 2.0.
+  `TIMESTAMPTZ_NS` columns were incorrectly dropped as unsupported. They
+  now load as `double` with `%tc`, preserving the UTC instant and applying
+  the existing documented millisecond floor on eager, lazy and view-save
+  paths, including negative instants and finite int64 limits. Nulls remain
+  null; infinite instants still refuse atomically. Both helps describe the
+  mapping.
+
 ## [0.8.0] — 2026-10-28
 
 ### Added

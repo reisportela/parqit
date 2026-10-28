@@ -19,7 +19,7 @@ authors:
     given-names: "Marta"
     affiliation: "BPLIM / Banco de Portugal"
     email: "msilva@bportugal.pt"
-version: "0.8.0"
+version: "0.8.1"
 date-released: 2026-10-28
 url: "https://github.com/reisportela/parqit"
 license: MIT

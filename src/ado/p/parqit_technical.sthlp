@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.8.0 28oct2026}{...}
+{* *! version 0.8.1 28oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -2650,6 +2650,14 @@ their Stata day or millisecond counts, so date arithmetic is ordinary
 arithmetic. Saving a fractional day, millisecond or period count rounds to the
 nearest integer using native Stata's exact-half rule (toward +infinity), on
 both memory and lazy paths, and names the affected column.
+
+{pstd}DuckDB 2.0 reads Parquet nanosecond timestamps with
+{cmd:isAdjustedToUTC=true} as {cmd:TIMESTAMPTZ_NS}. These load as
+{cmd:double} with {cmd:%tc}, preserving the UTC instant on eager, lazy and
+view-save paths. The conversion uses the original integer nanoseconds and
+floors to the earlier millisecond, including before 1970 and near the finite
+signed 64-bit limits; it reports the sub-millisecond precision boundary.
+All-null columns keep their datetime type, and infinite instants are refused.
 
 {pstd}Finite microsecond timestamps near the signed 64-bit limits also use
 integer flooring without an intermediate subtraction overflow. Their Stata

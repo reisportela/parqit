@@ -459,6 +459,14 @@ BoundaryCol boundary_for(const std::string &name, duckdb_logical_type lt,
         b.sql = "__parqit_timestamp_ns_ms(" + ref + ")";
         b.fmt = "%tc";
         break;
+#ifdef PARQIT_DUCKDB_200
+    case DUCKDB_TYPE_TIMESTAMP_TZ_NS:
+        /* Preserve the UTC nanosecond count, then use the same exact floor. */
+        b.sql = "__parqit_timestamp_ns_ms(CAST(" + ref + " AS TIMESTAMP_NS))";
+        b.fmt = "%tc";
+        b.note = parqit::plan_read_column(name, lt, binary).note;
+        break;
+#endif
     case DUCKDB_TYPE_TIME:
     case DUCKDB_TYPE_TIME_NS:
     case DUCKDB_TYPE_TIME_TZ: {
