@@ -112,6 +112,12 @@ _v201_read "**/*.parquet" "`all_expected'" 6 4 "recursive relative glob"
 cd "`root'/year=2021/month=2"
 _v201_read "part-000.parquet" "`second_expected'" 3 4 "different cwd and partition"
 
+* Home paths retain DuckDB's native home_directory expansion, not cwd.
+parqit set duckdb home_directory "`root'"
+_v201_read "~/year=2020/month=1/part-000.parquet" "`first_expected'" 3 4 "native home-directory expansion"
+parqit set duckdb reset home_directory
+_v201_read "file:`root'/year=2020/month=1/part-000.parquet" "`first_expected'" 3 4 "native single-slash file URI"
+
 * A relative source is fixed at lazy open, not re-resolved by collect/save.
 cd "`root'/year=2020/month=1"
 parqit use using "part-000.parquet"

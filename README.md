@@ -31,8 +31,8 @@ is opened by a relative name from inside its partition directory. Local
 Parquet paths are fixed to their absolute working-directory context at open,
 so eager/lazy reads agree and a view keeps its source after `cd`. Existing
 glob and symlink selection rules are retained. Relative Parquet inputs now
-give absolute `filename()` provenance; CSV and URI spellings retain their
-existing policy. Both helps document the behaviour.
+give absolute `filename()` provenance; CSV, URI and native home-expansion
+policies are retained. Both helps document the behaviour.
 
 Version 0.8.1 fixes dropped timezone-aware nanosecond Parquet timestamps
 on DuckDB 2.0. `TIMESTAMPTZ_NS` now retains the UTC instant as a Stata
@@ -721,7 +721,7 @@ absolute working-directory context when opened. A basename inside
 path does; moving the `.do` file does not define the schema. A lazy view keeps
 reading the same source after `cd`. Paths through links retain their logical
 Hive spelling and `link/..` is resolved physically by the operating system.
-CSV paths and URI spellings keep their existing policy.
+CSV paths, URI spellings and DuckDB's `~` home expansion keep their existing policy.
 
 **Where did this row come from?** `filename(newvar)` adds one string variable
 holding the path each observation was read from — absolute for local Parquet

@@ -255,7 +255,8 @@ Local Parquet files, directories and globs are fixed to their absolute
 working-directory context at open. A basename inside a Hive partition
 directory includes its partition columns, and a lazy view keeps reading the
 same source after {cmd:cd}. The location of the {cmd:.do} file does not define
-the schema. CSV paths and URI spellings retain their existing policy.
+the schema. CSV paths, URI spellings and native {cmd:~} home expansion retain
+their existing policy.
 
 {pstd}
 Subcommands and options take the abbreviations native Stata accepts for the same

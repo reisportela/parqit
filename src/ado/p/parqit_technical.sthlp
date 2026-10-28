@@ -305,6 +305,8 @@ components and symlink spelling remain intact: {cmd:link/..} is resolved by
 the operating system, and a logical Hive path through a link retains its
 keys. Working-directory characters are literal even before a live glob.
 Absolute paths, URI spellings and CSV paths retain their existing policy.
+Paths starting with {cmd:~} keep DuckDB's native {cmd:home_directory}
+expansion rather than being interpreted relative to the working directory.
 
 {pstd}{opt filename(newvar)} adds one string variable holding the path each
 observation was read from — absolute for local Parquet sources, including

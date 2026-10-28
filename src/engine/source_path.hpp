@@ -8,7 +8,7 @@
 namespace parqit {
 
 struct ParquetSourcePath {
-    std::string path;          /* unescaped absolute local path, or original URI */
+    std::string path;          /* absolute local path, or native URI/home spelling */
     std::string prefix;        /* known literal cwd prefix, including separator */
     std::string tail;          /* caller's remaining path/glob components */
     bool anchored = false;

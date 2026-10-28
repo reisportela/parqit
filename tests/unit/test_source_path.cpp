@@ -52,7 +52,12 @@ TEST_CASE("PARQUET-PATH-1: absolute paths and URI schemes retain their spelling"
     for (const auto &input : {absolute, std::string("https://host/year=2020/part.parquet"),
                              std::string("s3://bucket/year=*/part?.parquet"),
                              std::string("hf://datasets/name/data.parquet"),
-                             std::string("file:///data/year=2020/part.parquet"), std::string()}) {
+                             std::string("file:///data/year=2020/part.parquet"),
+                             std::string("file:/data/year=2020/part.parquet"),
+                             std::string("file://localhost/data/year=2020/part.parquet"),
+                             std::string("~"), std::string("~/year=2020/part.parquet"),
+                             std::string("~\\year=2020\\part.parquet"),
+                             std::string("~suffix/part.parquet"), std::string()}) {
         const auto p = resolver.resolve(input);
         CHECK_FALSE(p.anchored);
         CHECK(p.path == input);

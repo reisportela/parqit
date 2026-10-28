@@ -7,6 +7,8 @@ namespace parqit {
 namespace {
 
 bool source_uri(const std::string &s) {
+    /* DuckDB also accepts the single-slash file:/ form. */
+    if (s.compare(0, 6, "file:/") == 0) return true;
     auto alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
     if (s.empty() || !alpha(s[0])) return false;
     size_t i = 1;
@@ -23,7 +25,10 @@ ParquetPathResolver::ParquetPathResolver(const std::filesystem::path &cwd) : cwd
 
 ParquetSourcePath ParquetPathResolver::resolve(std::string input) {
     namespace fs = std::filesystem;
-    if (input.empty() || source_uri(input)) return {std::move(input), {}, {}, false};
+    /* DuckDB expands every leading '~' through its home_directory setting.
+     * Keep that native policy, just as URI schemes keep their own resolver. */
+    if (input.empty() || input[0] == '~' || source_uri(input))
+        return {std::move(input), {}, {}, false};
     const fs::path p = fs::u8path(input);
     if (p.is_absolute()) return {std::move(input), {}, {}, false};
     if (!cwd_) cwd_ = fs::current_path();

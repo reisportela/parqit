@@ -5688,7 +5688,9 @@ entry notes the conservative fallback if the assumption proves wrong.
     components; retain later components and logical symlink spelling so
     link/.. keeps OS resolution and Hive keys are not lost by canonicalising.
     Escape the known cwd prefix literally before appending a live glob.
-    Absolute and URI spellings remain intact; CSV keeps its existing path
+    Absolute and URI spellings remain intact; leading ~ keeps DuckDB's
+    native home_directory expansion (verified against the published 0.8.1
+    binary); CSV keeps its existing path
     and provenance policy. Local relative Parquet filename() becomes
     absolute, a documented effect of the correction. Keep the optional
     1.5.6 runtime path unchanged; validate DuckDB 2.0.0 only. Use synthetic
