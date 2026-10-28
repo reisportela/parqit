@@ -56,6 +56,7 @@
 #include "engine/legacy_encoding.hpp"
 #include "engine/parquet_footer.hpp"
 #include "engine/sanitize.hpp"
+#include "engine/source_path.hpp"
 #include "engine/save_blocks.hpp"
 #include "engine/test_fault.hpp"
 
@@ -488,23 +489,40 @@ Source source_for(const std::vector<std::string> &files, bool relaxed,
                   const CsvOptions &csv_opts) {
     std::string list;
     bool any_dir = false, one_file = !csv && files.size() == 1;
+#ifdef PARQIT_DUCKDB_200
+    parqit::ParquetPathResolver path_resolver;
+#endif
     for (size_t i = 0; i < files.size(); i++) {
+#ifdef PARQIT_DUCKDB_200
+        auto resolved = csv ? parqit::ParquetSourcePath{files[i], {}, {}, false} : path_resolver.resolve(files[i]);
+        std::string &f = resolved.path;
+        const auto native_path = std::filesystem::u8path(f);
+#else
         std::string f = files[i];
+        const auto native_path = std::filesystem::path(f);
+#endif
         std::error_code ec;
-        if (!csv && std::filesystem::is_directory(f, ec)) {
+        if (!csv && std::filesystem::is_directory(native_path, ec)) {
             any_dir = true;
             one_file = false;
             /* the directory name itself may contain glob metacharacters */
             f = glob_escape(f);
             if (!f.empty() && f.back() != '/' && f.back() != '\\') f += "/";
             f += "**/*.parquet";
-        } else if (std::filesystem::exists(f, ec)) {
+        } else if (std::filesystem::exists(native_path, ec)) {
             /* a path that names an existing file is that file, never a
              * pattern — every metacharacter is literal (GLOB-2) */
             f = glob_escape(f);
         } else {
             /* pattern: `*`/`?` stay live, `[` is literal (GLOB-2) */
+#ifdef PARQIT_DUCKDB_200
+            /* The cwd prefix is literal; only the caller's tail is a glob. */
+            f = resolved.anchored
+                ? glob_escape(resolved.prefix) + glob_escape_brackets(resolved.tail)
+                : glob_escape_brackets(f);
+#else
             f = glob_escape_brackets(f);
+#endif
             one_file = false;
         }
         if (i) list += ", ";

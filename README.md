@@ -20,11 +20,19 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.8.1 — the full surface below is implemented and covered by a
+> **Status:** v0.8.2 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.8.2 fixes missing Hive partition columns when a local Parquet file
+is opened by a relative name from inside its partition directory. Local
+Parquet paths are fixed to their absolute working-directory context at open,
+so eager/lazy reads agree and a view keeps its source after `cd`. Existing
+glob and symlink selection rules are retained. Relative Parquet inputs now
+give absolute `filename()` provenance; CSV and URI spellings retain their
+existing policy. Both helps document the behaviour.
 
 Version 0.8.1 fixes dropped timezone-aware nanosecond Parquet timestamps
 on DuckDB 2.0. `TIMESTAMPTZ_NS` now retains the UTC instant as a Stata
@@ -707,9 +715,18 @@ failure removes it, while a successful lazy operation keeps it until the last
 view whose plan references it is closed or replaced. `parqit close _all` is the
 final package-owned cleanup sweep.
 
+**Local Parquet paths.** A relative file, directory or glob is fixed to its
+absolute working-directory context when opened. A basename inside
+`year=2020/month=1/` therefore includes those Hive keys, just as its absolute
+path does; moving the `.do` file does not define the schema. A lazy view keeps
+reading the same source after `cd`. Paths through links retain their logical
+Hive spelling and `link/..` is resolved physically by the operating system.
+CSV paths and URI spellings keep their existing policy.
+
 **Where did this row come from?** `filename(newvar)` adds one string variable
-holding the path each observation was read from — the path *as matched*, so an
-absolute pattern gives absolute paths. It is an ordinary variable: lazy verbs
+holding the path each observation was read from — absolute for local Parquet
+inputs, including relative files and patterns; CSV keeps the matched spelling.
+It is an ordinary variable: lazy verbs
 filter on it, `collect` and `save` carry it, and a saved file holds it as plain
 Parquet text. It is never confused with a Hive partition key, and a name the
 source already loads is refused rather than quietly renamed. A `.dta`/Excel/SPSS/R

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.8.1 28oct2026}{...}
+{* *! version 0.8.2 28oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -295,9 +295,20 @@ the widest value ({cmd:strL} beyond 2045 bytes), with a note naming the mode.
 A lazy view's columns are decided when it is opened, so give the option to
 {cmd:parqit use using}, not to {cmd:parqit collect}.
 
+{pstd}Local Parquet file, directory and glob paths are fixed to an absolute
+working-directory context when opened. A basename inside
+{cmd:year=2020/month=1/} therefore includes both partition columns, just as the
+absolute source does. A lazy view keeps its source after {cmd:cd}; the
+{cmd:.do} file's location does not define the schema. Leading {cmd:.} and
+{cmd:..} components resolve against the physical working directory. Later
+components and symlink spelling remain intact: {cmd:link/..} is resolved by
+the operating system, and a logical Hive path through a link retains its
+keys. Working-directory characters are literal even before a live glob.
+Absolute paths, URI spellings and CSV paths retain their existing policy.
+
 {pstd}{opt filename(newvar)} adds one string variable holding the path each
-observation was read from — the path {it:as matched}, so an absolute pattern
-gives absolute paths and a relative one gives relative paths. It is an ordinary
+observation was read from — absolute for local Parquet sources, including
+relative files and patterns; CSV retains the matched spelling. It is an ordinary
 variable: lazy verbs can filter on it, {cmd:collect} and {cmd:save} carry it,
 and a saved file holds it as plain text. It is added even when a
 {it:varlist} selects only some columns; naming it in the {it:varlist} places it
@@ -467,7 +478,8 @@ own detection, as {cmd:parqit use} reads a CSV without {opt csv()}.
 
 {pstd}
 {opt filename(newvar)} on {cmd:parqit use} adds the engine's provenance column:
-one string variable holding the path each row was read from, as matched. In the
+one string variable holding the path each row was read from: absolute for local
+Parquet sources and as matched for CSV. In the
 scan it sits after the files' own columns and before any Hive partition keys,
 but it is not one of them — it takes no {cmd:parqit.*} metadata, is never
 mistaken for a partition key, and carries a note saying what it is. A name the
@@ -1998,8 +2010,8 @@ and the {it:key}{cmd:=}{it:value} directories of its path (the engine reads
 them as Hive partition columns); a glob whose files need it becomes the same
 tree of copies, read through the same pattern (files that need no decoding are
 copied as they are; with a single-byte code page every file is read line by
-line, its lines that are valid UTF-8 kept). The path is used as given, never
-normalized: the system resolves {it:link}{cmd:/..} physically, and the engine
+line, its lines that are valid UTF-8 kept). CSV paths keep their supplied
+spelling: the system resolves {it:link}{cmd:/..} physically, and the engine
 reads Hive keys from the path it is given. A path that names a file is that
 file, even with {cmd:*} or {cmd:?} in it; otherwise {cmd:*} and {cmd:?} are
 live

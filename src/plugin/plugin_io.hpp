@@ -108,6 +108,9 @@ std::string friendly_engine_error(const std::string &err);
  * paths — dup-name recovery, parqit.* labels, F2 stats sizing — are skipped and
  * columns size from a scan). .dta/.xlsx are not engine-scannable and are
  * converted to a Parquet bridge in the ado before reaching here.
+ * Local Parquet paths are fixed to an absolute cwd context on 2.0 builds;
+ * URI and CSV spellings retain their existing policy. filename() therefore
+ * reports absolute local Parquet paths, including for relative inputs.
  * filename_column: FILENAME-1 — add the provenance column under this name.
  * csv_opts: CSV-OPT-1 — the validated csv(...) fragment (csv sources only). */
 Source source_for(const std::vector<std::string> &files, bool relaxed = false,

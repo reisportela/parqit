@@ -5679,3 +5679,20 @@ entry notes the conservative fallback if the assumption proves wrong.
     and the complete distribution, then read back a public installation.
     The source file's path was not supplied; do not equate the independently
     reproduced warning with inspection of the maintainer's actual records.
+
+259. **Relative Hive paths and release 0.8.2 (2026-10-28).** The maintainer
+    authorised this correction, current helps, main, bump, commit, push and
+    release after the 0.8.1 binary reproduced the missing-key case. Anchor
+    local relative Parquet file/directory/glob paths at open, using one
+    physical cwd context per source list. Consume only leading dot/parent
+    components; retain later components and logical symlink spelling so
+    link/.. keeps OS resolution and Hive keys are not lost by canonicalising.
+    Escape the known cwd prefix literally before appending a live glob.
+    Absolute and URI spellings remain intact; CSV keeps its existing path
+    and provenance policy. Local relative Parquet filename() becomes
+    absolute, a documented effect of the correction. Keep the optional
+    1.5.6 runtime path unchanged; validate DuckDB 2.0.0 only. Use synthetic
+    negative controls, independent values and source hashes, then the full
+    privately installed exact tag-CI package before publication. Retain
+    numerical contract 4, unrelated local work, global Stata and the two-CPU
+    validation envelope while the shared server is busy.

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.8.1 28oct2026}{...}
+{* *! version 0.8.2 28oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -249,6 +249,13 @@ where {it:filename} is a Parquet file, a glob such as {it:data_*.parquet}, a
 Hive-partitioned directory, or a delimited-text, Stata, Excel, SPSS or R file;
 and each two-table {it:source} is such a file or {cmd:view:}{it:viewname},
 another open view.
+
+{pstd}
+Local Parquet files, directories and globs are fixed to their absolute
+working-directory context at open. A basename inside a Hive partition
+directory includes its partition columns, and a lazy view keeps reading the
+same source after {cmd:cd}. The location of the {cmd:.do} file does not define
+the schema. CSV paths and URI spellings retain their existing policy.
 
 {pstd}
 Subcommands and options take the abbreviations native Stata accepts for the same
@@ -507,6 +514,8 @@ dropped with a message, as UTF-8 text or as hexadecimal digits.
 
 {phang}
 {opt filename(newvar)} adds a variable holding the file each row was read from.
+Local Parquet paths are absolute, including for relative inputs; CSV paths
+keep their matched spelling.
 
 {phang}
 {opt csv(read_options)} states the dialect and the column types of delimited

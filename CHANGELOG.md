@@ -6,6 +6,19 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-10-28
+
+### Fixed
+
+- Local relative Parquet paths retain the working directory's Hive keys,
+  matching the equivalent absolute source. Eager and lazy reads agree, and
+  a lazy source remains fixed after `cd`. Known working-directory bytes are
+  escaped literally before a live glob, while symlink spelling and physical
+  `link/..` resolution are preserved. Relative local Parquet inputs now
+  produce absolute `filename()` provenance; CSV and URI policies are
+  retained. Both helps explain the correction and regression coverage checks
+  payloads, partition keys, source bytes, provenance and atomic refusals.
+
 ## [0.8.1] — 2026-10-28
 
 ### Fixed

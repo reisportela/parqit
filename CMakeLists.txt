@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.8.1 LANGUAGES C CXX)
+project(parqit VERSION 0.8.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -155,6 +155,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/legacy_encoding.cpp
     src/engine/encoding_tables.cpp
     src/engine/text_file.cpp
+    src/engine/source_path.cpp
     src/engine/parquet_footer.cpp
     src/engine/session.cpp
     src/engine/duckdb_settings.cpp
@@ -368,6 +369,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_hexcodec.cpp
         tests/unit/test_legacy_encoding.cpp
         tests/unit/test_text_file.cpp
+        tests/unit/test_source_path.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
         tests/unit/test_duckdb_settings.cpp
