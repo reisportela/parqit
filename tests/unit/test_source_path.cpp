@@ -39,8 +39,8 @@ TEST_CASE("PARQUET-PATH-1: literal cwd bytes stay separate from a live glob") {
     const auto p = resolver.resolve(input);
     CHECK(p.anchored);
     CHECK(p.prefix == base.u8string() + static_cast<char>(fs::path::preferred_separator));
-    CHECK(p.tail == fs::u8path(input).u8string());
-    CHECK(p.path == (base / fs::u8path(input)).u8string());
+    CHECK(p.tail == fs::u8path(input).make_preferred().u8string());
+    CHECK(p.path == (base / fs::u8path(input)).make_preferred().u8string());
     const auto physical = resolver.resolve("link/../parent.parquet");
     CHECK(physical.path == (base / "link" / ".." / "parent.parquet").u8string());
     CHECK(physical.tail == (fs::path("link") / ".." / "parent.parquet").u8string());
