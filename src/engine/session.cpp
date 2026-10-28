@@ -651,6 +651,10 @@ bool Session::ensure_open() {
         close();
         return false;
     }
+    if (!replay_native_settings(con_, false, &last_error_)) {
+        close();
+        return false;
+    }
     return true;
 }
 
@@ -666,7 +670,8 @@ bool Session::set_threads(long long n, std::string *err) {
     }
     if (!apply_set(*this, "SET threads = " + std::to_string(n), err)) return false;
 #ifdef PARQIT_DUCKDB_200
-    if (!apply_set(*this, "SET async_threads = " + std::to_string(n), err)) {
+    if (!native_overrides_.count("async_threads") &&
+        !apply_set(*this, "SET async_threads = " + std::to_string(n), err)) {
         std::string ignored;
         apply_set(*this, "SET threads = " +
             std::to_string(threads_ > 0 ? threads_ : available_cpus()), &ignored);
@@ -674,6 +679,7 @@ bool Session::set_threads(long long n, std::string *err) {
     }
 #endif
     threads_ = n;
+    release_native_setting("threads");
     return true;
 }
 
@@ -686,6 +692,7 @@ bool Session::set_memory_limit(const std::string &limit, std::string *err) {
         memory_limit_ = prev;
         return false;
     }
+    release_native_setting("max_memory");
     return true;
 }
 
@@ -696,6 +703,7 @@ bool Session::set_temp_directory(const std::string &dir, std::string *err) {
         temp_directory_ = prev;
         return false;
     }
+    release_native_setting("temp_directory");
     return true;
 }
 
@@ -730,15 +738,27 @@ bool Session::set_streaming_buffer_bytes(long long bytes, std::string *err) {
 }
 
 bool Session::set_optimizers(bool window_self_join, bool filter_pushdown, std::string *err) {
-    if (window_self_join == window_self_join_ && filter_pushdown == filter_pushdown_) return true;
+    if (!native_optimizer_dirty_ && window_self_join == window_self_join_ &&
+        filter_pushdown == filter_pushdown_) return true;
     std::string off;
-    if (!window_self_join) off += "window_self_join";
-    if (!filter_pushdown) off += std::string(off.empty() ? "" : ",") + "filter_pushdown";
+    if (native_disabled_optimizers_.empty()) {
+        if (!window_self_join) off += "window_self_join";
+        if (!filter_pushdown) off += std::string(off.empty() ? "" : ",") + "filter_pushdown";
+    } else {
+        off = native_disabled_optimizers_;
+        auto disable = [&](const std::string &name) {
+            if (("," + off + ",").find("," + name + ",") == std::string::npos)
+                off += (off.empty() ? "" : ",") + name;
+        };
+        if (!window_self_join) disable("window_self_join");
+        if (!filter_pushdown) disable("filter_pushdown");
+    }
     if (!exec(off.empty() ? "RESET disabled_optimizers"
-                          : "SET disabled_optimizers = '" + off + "'", err))
+                          : "SET disabled_optimizers = " + quote_literal(off), err))
         return false;
     window_self_join_ = window_self_join;
     filter_pushdown_ = filter_pushdown;
+    native_optimizer_dirty_ = false;
     return true;
 }
 
@@ -893,6 +913,14 @@ std::vector<Session::TextResult> Session::query_text_many(const std::vector<std:
             for (size_t w = 1; w < workers; w++) {
                 duckdb_connection c = nullptr;
                 if (duckdb_connect(db_, &c) != DuckDBSuccess) break;
+                if (!native_local_keys_.empty()) {
+                    std::string setting_error;
+                    if (!replay_native_settings(c, true, &setting_error)) {
+                        duckdb_disconnect(&c);
+                        for (auto &result : out) result.err = setting_error;
+                        return out;
+                    }
+                }
                 cons.push_back(c);
             }
             for (duckdb_connection c : cons) pool.emplace_back(loop, c);

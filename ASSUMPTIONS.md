@@ -5634,3 +5634,22 @@ entry notes the conservative fallback if the assumption proves wrong.
     against code and native/oracle tests. Assess short timing costs at larger
     scales with interleaved matched builds and preserved host context. Local
     candidate artefacts remain distinct from platform-CI release assets.
+
+256. **Native DuckDB settings and 0.8.0 (2026-10-28).** The maintainer
+    authorised implementation, review, tests, help updates, version bump,
+    commit, push and release of a generic native setting interface. Use
+    0.8.0 for this additive public API. Target DuckDB 2.0.0 only; no engine
+    pin, optional 1.5.6 patch or global Stata installation changes. Discover
+    names, aliases, input types and scopes from the engine rather than a
+    manually maintained optimization whitelist. Forward literal SET/RESET
+    and preserve native read-only, startup and state restrictions. Retain
+    original literals (including SQL NULL and quoted emptiness), keep the
+    live engine and views, and propagate local settings to query workers.
+    Explicit native overrides must survive automatic streaming policies;
+    native I/O threads remain independent; user optimizer choices compose
+    with required guards. Existing controls/defaults and the default utf8
+    path retain their behaviour. Inspect non-default Arrow text schemas
+    and support large-utf8/string-view without changing values or metadata.
+    Native row-reordering is an explicit semantic choice, never an automatic
+    speed policy. Compare equivalent settings/results in matched builds,
+    recording dispersion, and validate exact CI assets before publication.

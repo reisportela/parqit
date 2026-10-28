@@ -109,6 +109,8 @@ ST_retcode cmd_version(const std::vector<std::string> &) {
         const long long sb = parqit_plugin::stream_buffer_session();
         save_local("_parqit_stream_buffer_mb",
                    sb < 0 ? std::string("auto") : std::to_string(sb));
+        save_local("_parqit_native_streaming",
+                   parqit::Session::instance().native_streaming_override() ? "1" : "0");
     }
     // Retain the public diagnostic fields introduced in 0.1.36.
     save_local("_parqit_openmp", "0");
@@ -298,6 +300,7 @@ PARQIT_EXPORT ST_retcode stata_call(int argc, char *argv[]) try {
         return 0;
     }
     if (cmd == "set") return parqit_plugin::cmd_set(args);
+    if (cmd == "duckdb_setting") return parqit_plugin::cmd_duckdb_setting(args);
 
     cry("parqit plugin: unknown subcommand '" + cmd + "'");
     return kRcUsage;

@@ -13,6 +13,8 @@ set varabbrev off
 args repo plugin
 adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
+quietly parqit version
+local expected_workers = min(4,r(cpus))
 local fails 0
 tempfile s1 s2 x1 x2 e1 e2 l1 l2 l3
 local serial `"`s1'.parquet"'
@@ -104,7 +106,7 @@ from sfi import Macro, Scalar
 import math, pyarrow.parquet as pq
 ok = 1
 trace = open(Macro.getLocal("tracelog"), encoding="utf-8").read()
-if "save cell pass: blocks 126, workers 4" not in trace: ok = 0
+if "save cell pass: blocks 126, workers " + Macro.getLocal("expected_workers") not in trace: ok = 0
 pairs = (("serial", "parallel"), ("xserial", "xparallel"))
 for a, b in pairs:
     ta = pq.read_table(Macro.getLocal(a)); tb = pq.read_table(Macro.getLocal(b))

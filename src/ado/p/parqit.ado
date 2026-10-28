@@ -1,4 +1,4 @@
-*! version 0.7.0 27oct2026
+*! version 0.8.0 28oct2026
 *! parqit — a grammar of data manipulation for Stata, backed by Parquet (embedded DuckDB engine)
 *! Authors: Miguel Portela (Universidade do Minho & NIPE), Rute Costa, Paulo Guimarães and Marta Silva (BPLIM / Banco de Portugal)
 *! License: MIT (see LICENSE in the parqit repository)
@@ -111,7 +111,7 @@ end
 program define _parqit_check_plugin_release
     version 16.0
     args plugin_version
-    local ado_version "0.7.0"
+    local ado_version "0.8.0"
     if ("`plugin_version'" == "`ado_version'") exit
     if ("`plugin_version'" == "") {
         * an older plugin reports its release to version only
@@ -169,6 +169,10 @@ program define _parqit_version, rclass
     return scalar cpus = `parqit_cpus'
     return scalar threads = `parqit_threads'
     return local stream_buffer_mb "`parqit_stream_buffer_mb'"
+    return scalar native_streaming = real("`parqit_native_streaming'")
+    if ("`parqit_native_streaming'" == "1") {
+        di as txt "Native streaming buffer override active; query parqit set duckdb streaming_buffer_size"
+    }
     return scalar openmp = 0
     return scalar openmp_version = real("`parqit_openmp_version'")
     return scalar openmp_max_threads = real("`parqit_openmp_max_threads'")
@@ -3812,6 +3816,11 @@ end
 program define _parqit_set
     version 16.0
     gettoken what 0 : 0, parse(" ")
+    if ("`what'" == "duckdb") {
+        _parqit_set_duckdb `0'
+        exit
+    }
+    if ("`what'" == "temp_directory") local what "tempdir"
     /* SET-TEMPDIR-2: take the value via macro expansion so ONE surrounding pair
      * of quotes the caller used — regular "..." OR compound `"..."' (mandatory
      * for a path with spaces) — is stripped and `value' is the literal setting.
@@ -3824,7 +3833,7 @@ program define _parqit_set
     local value `0'
     local value = strtrim(`"`value'"')
     if !inlist("`what'", "statamissing", "int64", "encoding", "fill_threads", "stream_buffer_mb", "threads", "memory_limit", "tempdir") {
-        di as err "parqit set: expected statamissing|int64|encoding|fill_threads|stream_buffer_mb|threads|memory_limit|tempdir <value>"
+        di as err "parqit set: expected duckdb or statamissing|int64|encoding|fill_threads|stream_buffer_mb|threads|memory_limit|tempdir <value>"
         exit 198
     }
     * ENC-3: the session's code page for text that declares none (the plugin
@@ -3875,6 +3884,54 @@ program define _parqit_set
     if ("`what'" == "encoding") {
         di as txt "(legacy text that declares no encoding is decoded from " ///
             as res "`parqit_set_value'" as txt " for the rest of this session)"
+    }
+end
+
+program define _parqit_set_duckdb, rclass
+    version 16.0
+    local _ds_action "list"
+    local _ds_name
+    local _ds_value
+    local _ds_null 0
+    gettoken _ds_name 0 : 0, parse(" ")
+    if ("`_ds_name'" == "reset") {
+        local _ds_action "reset"
+        gettoken _ds_name 0 : 0, parse(" ")
+        if ("`_ds_name'" == "" | strtrim(`"`0'"') != "") {
+            di as err "parqit set duckdb reset: specify one native setting name"
+            exit 198
+        }
+    }
+    else if ("`_ds_name'" != "") {
+        local _ds_action "get"
+        if (strtrim(`"`0'"') != "") {
+            local _ds_action "set"
+            gettoken _ds_rawvalue 0 : 0, quotes
+            if (strtrim(`"`0'"') != "") {
+                di as err "parqit set duckdb: quote a value containing spaces"
+                exit 198
+            }
+            mata: st_local("_ds_null", strofreal(strlower(st_local("_ds_rawvalue")) == "null"))
+            mata: st_local("_ds_value", _parqit_native_literal(st_local("_ds_rawvalue")))
+        }
+    }
+    _parqit_ensure_plugin
+    tempfile req resp
+    local _ds_response `"`resp'"'
+    mata: _parqit_wr_native_request("`req'")
+    capture noisily plugin call parqit_plugin, duckdb_setting `reqhex'
+    if (_rc) exit _rc
+    mata: _parqit_print_native_settings("`resp'", st_local("_ds_action"))
+    return scalar N = `_ds_n'
+    return local settings `"`_ds_settings'"'
+    if ("`_ds_action'" != "list") {
+        return local name `"`_ds_name'"'
+        return local canonical `"`_ds_canonical'"'
+        return local value `"`macval(_ds_effective)'"'
+        return local type `"`_ds_type'"'
+        return local scope `"`_ds_scope'"'
+        return scalar is_null = `_ds_is_null'
+        return scalar overridden = `_ds_overridden'
     }
 end
 
@@ -6694,6 +6751,29 @@ void _parqit_wr_sql_request(string scalar req)
         _parqit_jtext("tmpdir", st_global("c(tmpdir)")))))
 }
 
+string scalar _parqit_native_literal(string scalar value)
+{
+    real scalar n
+    n = strlen(value)
+    if (n >= 4 & substr(value, 1, 2) == char(96) + char(34) &
+        substr(value, n-1, 2) == char(34) + char(39)) return(substr(value, 3, n-4))
+    if (n >= 2 & substr(value, 1, 1) == char(34) &
+        substr(value, n, 1) == char(34)) return(substr(value, 2, n-2))
+    return(value)
+}
+
+void _parqit_wr_native_request(string scalar req)
+{
+    string rowvector p
+    p = (_parqit_jtext("action", st_local("_ds_action")),
+         _parqit_jtext("name", st_local("_ds_name")),
+         _parqit_jtext("response", st_local("_ds_response")),
+         _parqit_jtext("tmpdir", st_global("c(tmpdir)")))
+    if (st_local("_ds_null") == "1") p = p, _parqit_jpair("value", "null")
+    else p = p, _parqit_jtext("value", st_local("_ds_value"))
+    _parqit_emit(req, _parqit_jobj(p))
+}
+
 void _parqit_wr_query_request(string scalar req)
 {
     _parqit_emit(req, _parqit_jobj((
@@ -7090,6 +7170,49 @@ void _parqit_print_views(string scalar resp)
     }
     fclose(fh)
     printf("    (* = current)\n\n")
+}
+
+void _parqit_print_native_settings(string scalar resp, string scalar action)
+{
+    real scalar fh, n
+    string scalar line, names, name, value
+    string rowvector f
+    fh = fopen(resp, "r")
+    n = 0
+    names = ""
+    displayas("text")
+    if (action == "list") printf("\n%-55s %-12s %s\n", "DuckDB setting", "type", "scope")
+    while ((line = fget(fh)) != J(0, 0, "")) {
+        f = _parqit_fields(line, 10)
+        if (f[1] != "native_setting") continue
+        n++
+        name = _parqit_unhex(f[4])
+        names = names + (names == "" ? "" : " ") + name
+        if (action == "list") {
+            printf("%-55s %-12s %s\n", _parqit_smcl_plain(name),
+                   _parqit_smcl_plain(_parqit_unhex(f[7])), _parqit_unhex(f[8]))
+        }
+        else {
+            value = _parqit_unhex(f[6])
+            printf("%s = %s (%s; %s)\n", _parqit_smcl_plain(name),
+                   f[2] == "1" ? "NULL" : (value == "" ? char(34)+char(34) : _parqit_smcl_plain(value)),
+                   _parqit_unhex(f[7]), _parqit_unhex(f[8]))
+            printf("    %s\n", _parqit_smcl_plain(_parqit_unhex(f[10])))
+            if (_parqit_unhex(f[5]) == "preserve_insertion_order" & value == "false") {
+                printf("note: unordered results may change row order; positional verbs follow that order\n")
+            }
+            st_local("_ds_name", name)
+            st_local("_ds_canonical", _parqit_unhex(f[5]))
+            st_local("_ds_effective", value)
+            st_local("_ds_type", _parqit_unhex(f[7]))
+            st_local("_ds_scope", _parqit_unhex(f[8]))
+            st_local("_ds_is_null", f[2])
+            st_local("_ds_overridden", f[3])
+        }
+    }
+    fclose(fh)
+    st_local("_ds_n", strofreal(n))
+    st_local("_ds_settings", names)
 }
 end
 

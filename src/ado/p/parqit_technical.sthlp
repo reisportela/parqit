@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.7.0 27oct2026}{...}
+{* *! version 0.8.0 28oct2026}{...}
 {vieweralsosee "[PARQIT] parqit" "help parqit"}{...}
 {viewerjumpto "Description" "parqit_technical##description"}{...}
 {viewerjumpto "Syntax conventions" "parqit_technical##conventions"}{...}
@@ -2734,8 +2734,9 @@ truncating it could select the wrong column and is never allowed.
 {marker settings}{...}
 {title:Settings, raw SQL and diagnostics}
 
-{pstd}{bf:Engine settings.} {cmd:parqit set} takes one of eight names and a
-value:
+{pstd}{bf:Existing parqit controls.} {cmd:parqit set} retains these eight
+controls; {cmd:temp_directory} also aliases {cmd:tempdir}. The native interface
+below discovers the larger DuckDB configuration catalog dynamically.
 
 {p 8 12 2}{cmd:parqit set statamissing on}|{cmd:off}{space 4}expression
 missing-value mode{p_end}
@@ -2773,6 +2774,87 @@ process (the default; a larger number is clamped to them and said){p_end}
 {p 8 12 2}{cmd:parqit set tempdir} {it:path}{space 9}spill directory for
 out-of-core
 execution (warns if the directory does not exist yet){p_end}
+
+{marker native_settings}{...}
+{pstd}{bf:Native DuckDB 2.0 settings.}
+{cmd:parqit set duckdb} lists registered names, input types and scopes using
+the embedded engine's catalog and SET-scope resolver, including aliases,
+read-only, debug and
+deprecated entries. Listing prints metadata rather than all values.
+{cmd:parqit set duckdb name} reads one effective value;
+{cmd:parqit set duckdb name value} forwards a literal SET; and
+{cmd:parqit set duckdb reset name} forwards RESET. This interface does not
+maintain a separate whitelist of optimization names. An unregistered setting
+or invalid value is refused. Parameters of read_parquet and COPY, and ATTACH
+options, remain separate interfaces.
+
+{pstd}
+One surrounding pair of ordinary or Stata compound quotes is removed from
+the value. Spaces require quotes. Unquoted {cmd:NULL} is SQL NULL; quoted
+{cmd:"NULL"} and {cmd:""} are literal strings. The name is checked as an
+identifier, resolved to the engine's canonical alias, and the value is passed
+as a typed native value to DuckDB's setting executor. No string-to-double
+conversion or SQL-expression evaluation is performed by the wrapper.
+DuckDB performs type conversion and
+validation. Native errors, including read-only and startup restrictions,
+reach the caller without silently replacing the database instance.
+
+{pstd}
+Connection-scoped settings are reported as {cmd:LOCAL}; SET uses the
+engine's default mutation scope. The catalog's effective-value origin is not
+assumed to be the mutation scope. GLOBAL means this DuckDB instance, not the operating
+system or a permanent Stata preference. Local settings are replayed onto
+auxiliary connections used by parallel metadata/statistics queries. Explicit
+overrides retain their original literals or RESET action, including exact
+byte counts; the native formatted value is for display. Aliases share one
+override. Native get/SET/RESET invoke the engine's setting callbacks without
+SQL parsing, so a restrictive expression-depth setting cannot block its RESET.
+Cached metadata remains available when SQL catalog queries are restricted.
+A SET accepted by DuckDB followed by a failed value
+inspection is reported explicitly as accepted, and its override is retained.
+
+{pstd}
+An explicit native {cmd:async_threads} survives legacy thread changes.
+The native {cmd:threads}/worker_threads route uses DuckDB's range and does not
+apply the legacy available-CPU clamp; choose a value within your allocation.
+The existing {cmd:parqit set threads} clamp and automatic I/O policy retain
+their defaults. Native {cmd:streaming_buffer_size}/max_streaming_buffer_size
+suppresses automatic per-fetch sizing and environment caps until a legacy
+{cmd:parqit set stream_buffer_mb auto|0|n} hands control back. Native RESET is
+an explicit engine-default choice and also suppresses automatic sizing.
+{cmd:parqit version} reports {cmd:r(native_streaming)} without changing the
+existing {cmd:r(stream_buffer_mb)} field.
+
+{pstd}
+User {cmd:disabled_optimizers} choices are combined with, and restored
+alongside, the package's required window/filter plan guards. Native Arrow
+options are inspected through the C API: an opt-in text profile selects its
+result schema's regular utf8, large-utf8 or string-view decoder. The existing
+default transfer walker is unchanged. Lengths, view buffer indexes and
+offsets are checked; strL uses the same sidecar representation. No Arrow C++
+or PyArrow library is linked into the plugin. The vendored C ABI header was
+byte-identical to the current Apache upstream when reviewed on 28 October
+2026; that ABI is distinct from Arrow package and output-format versions.
+
+{pstd}
+Native restrictions remain meaningful: standard_vector_size is compiled-in;
+custom_user_agent cannot change on an open database; temp_directory cannot
+switch after temporary storage has been used; and block_allocator_memory
+cannot shrink, even via RESET. Empty temp_directory disables DuckDB spill,
+not every bridge, string sidecar or staged-output file used by parqit.
+prefetch_all_parquet_files is a deprecated no-op in this pin;
+pandas_analyze_sample is not registered in the C API engine. Native
+preserve_insertion_order=false permits row reordering and can change
+positional semantics. Retain true when order is required. The same settings
+do not guarantee the same speed on different inputs or hosts.
+
+{pstd}
+List returns {cmd:r(N)} and {cmd:r(settings)}. Get/SET/RESET additionally return
+{cmd:r(name)}, {cmd:r(canonical)}, {cmd:r(value)}, {cmd:r(type)},
+{cmd:r(scope)}, {cmd:r(is_null)} and {cmd:r(overridden)}. The null flag
+distinguishes SQL NULL from an empty string. The override flag identifies a
+native-interface SET/RESET, rather than a legacy parqit control. No data are collected into
+Stata by these commands, and the current view selection is preserved.
 
 {pstd}
 {cmd:statamissing} defaults to {cmd:on}. {cmd:threads} controls DuckDB query
@@ -3541,6 +3623,8 @@ Native {cmd:tabstat} instead reports error 2000 for that empty-group case.
 {cmd:r(fill_threads)} ({cmd:auto}, or the number chosen with
 {cmd:parqit set fill_threads}),
 and {cmd:r(stream_buffer_mb)} ({cmd:auto}, {cmd:0}, or the chosen MB cap).
+Scalar {cmd:r(native_streaming)} is 1 when an explicit native buffer setting
+currently takes precedence over that transfer policy.
 Scalar {cmd:r(numeric_contract)} reports the numerical revision (4).
 Scalars {cmd:r(cpus)} and {cmd:r(threads)} report the available CPU count and
 the active engine thread count. The two setting locals report the session

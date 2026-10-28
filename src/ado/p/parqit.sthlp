@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.7.0 27oct2026}{...}
+{* *! version 0.8.0 28oct2026}{...}
 {viewerdialog "parqit use" "dialog parqit_read"}{...}
 {viewerdialog "parqit describe" "dialog parqit_explore"}{...}
 {viewerdialog "parqit summarize" "dialog parqit_stats"}{...}
@@ -238,6 +238,8 @@ Manage views and the engine
 {p 8 16 2}{cmd:parqit} {cmdab:se:t} {it:setting} {it:value}{space 2}where {it:setting} is
 {cmd:statamissing}, {cmd:int64}, {cmd:encoding}, {cmd:fill_threads},
 {cmd:stream_buffer_mb}, {cmd:threads}, {cmd:memory_limit} or {cmd:tempdir}{p_end}
+{p 8 16 2}{cmd:parqit set duckdb} [{it:name} [{it:value}]]{space 2}native catalog, effective value, or SET{p_end}
+{p 8 16 2}{cmd:parqit set duckdb reset} {it:name}{space 2}native RESET{p_end}
 {p 8 16 2}{cmd:parqit version}{space 4}(plugin + engine versions){p_end}
 {p 8 16 2}{cmd:parqit selftest}{space 3}(end-to-end engine and codec check, useful on new installs/HPC nodes){p_end}
 {p 8 16 2}{cmd:parqit menu}{space 8}(add parqit to the {bf:User} menu — GUI Stata only){p_end}
@@ -1351,6 +1353,65 @@ observations, as in Stata.{p_end}
 
 {pstd}
 {cmd:parqit set} {it:setting} {it:value} changes a setting for the session:
+
+{pstd}{bf:Native DuckDB settings.}
+{cmd:parqit set duckdb} lists the embedded engine's registered names, input
+types and scopes, including aliases, advanced and deprecated settings. It
+does not print all configuration values. Add a name to read its effective
+value; add a literal to set it. For example:
+{p_end}
+{phang2}{cmd:. parqit set duckdb threads 4}{p_end}
+{phang2}{cmd:. parqit set duckdb async_threads 8}{p_end}
+{phang2}{cmd:. parqit set duckdb memory_limit 8GB}{p_end}
+{phang2}{cmd:. parqit set duckdb threads}{p_end}
+{phang2}{cmd:. parqit set duckdb reset read_ahead_depth}{p_end}
+
+{pstd}
+Names, aliases, types, accepted values and restrictions come from DuckDB 2.0.
+Changes apply to the live engine without restarting Stata. Quote a value
+containing spaces; {cmd:NULL} means SQL NULL, {cmd:"NULL"} means that literal
+string, and {cmd:""} means an empty string. Values are literals, not SQL
+expressions or multiple statements. {cmd:reset} uses the engine's native
+default; it does not restart the engine or close views. Some native defaults
+differ from parqit's automatic policies.
+
+{pstd}
+An explicit native streaming-buffer choice outranks automatic per-read sizing
+and environment caps. {cmd:parqit set stream_buffer_mb auto} returns control
+to the existing transfer policy. An explicit {cmd:async_threads} choice stays
+independent when the legacy {cmd:threads} control changes. Connection-local
+choices are also applied to auxiliary query connections. Original literals
+are retained for replay; formatted memory values are not rounded and reused.
+
+{pstd}
+DuckDB can refuse a change: {cmd:standard_vector_size} is read-only,
+{cmd:custom_user_agent} is startup-only, a used {cmd:temp_directory} cannot
+be switched, and reserved {cmd:block_allocator_memory} cannot be reduced.
+The native error is returned and the engine is not recreated. If SET succeeds
+but its new restrictions prevent value inspection, the message says it was
+accepted; {cmd:reset name} remains available through native callbacks and
+cached metadata, without requiring SQL parsing.
+
+{pstd}
+Keep {cmd:preserve_insertion_order true} when observation order matters.
+{cmd:false} permits reordering without a final ORDER BY and can change
+positional results such as {cmd:_n}, {cmd:in}, {cmd:first} and {cmd:last}.
+The default remains true. User optimizer choices are retained alongside the
+package's required plan guards. There is no universal fastest combination of
+threads, memory, prefetch and cache settings; compare equivalent results.
+
+{pstd}
+Native file cache settings control cached file blocks, not a reusable
+materialisation of a view. Parameters of {cmd:read_parquet}, Parquet COPY
+options and {cmd:ATTACH} are separate from SET. Arrow C output options are
+also distinct from an Arrow C++ library version: parqit uses the stable C Data
+Interface, with DuckDB performing conversion. Regular utf8, large-utf8 and
+string-view text layouts preserve the same Stata values and metadata.
+More: {help parqit_technical##native_settings:Native settings reference}.
+
+{pstd}{bf:Existing parqit controls.} These retain their behaviour; the names
+{cmd:fill_threads} and {cmd:stream_buffer_mb} belong to parqit, while
+{cmd:temp_directory} is also accepted as an alias for {cmd:tempdir}.
 
 {p2colset 9 38 40 2}{...}
 {p2col:{cmd:statamissing on}|{cmd:off}}Stata's (default) or SQL's missing-value rule{p_end}

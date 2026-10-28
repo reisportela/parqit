@@ -20,11 +20,21 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.7.0 — the full surface below is implemented and covered by a
+> **Status:** v0.8.0 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.8.0 exposes the embedded DuckDB's native settings through
+`parqit set duckdb`: discover names/types/scopes, inspect an effective value,
+set a literal or SQL NULL, and reset the engine's default in the same Stata
+session. Aliases and validation come from DuckDB. Explicit overrides survive
+the package's automatic streaming policy and are propagated to auxiliary
+connections where needed; the existing optimizer guards retain user choices.
+The compact settings dialog and both helps describe the interface and native
+restrictions. Arrow utf8, large-utf8 and string-view transfers retain the same
+values and metadata. The default engine remains DuckDB 2.0.0.
 
 Version 0.7.0 adds weighted grouped aggregation and the gcollapse analytical
 and data-option surface to lazy `collapse`: distinct and missing counts,
@@ -1147,12 +1157,38 @@ Labels come from the view, and the current dataset stays unchanged.
 
 ### Escape hatches
 
+Native configuration is separate from raw query text. For example,
+`parqit set duckdb threads 4` changes CPU parallelism,
+`parqit set duckdb async_threads 8` independently changes I/O workers,
+and `parqit set duckdb memory_limit 8GB` changes the buffer-manager budget.
+`parqit set duckdb threads` reads an effective value; `parqit set duckdb`
+lists names, types and scopes without dumping every configuration value.
+Quote values containing spaces. Unquoted `NULL`, quoted `"NULL"` and an
+empty quoted string remain distinct. Aliases share one explicit override;
+original literals are retained for exact replay onto auxiliary connections.
+`reset name` invokes the native default, which can differ from parqit's
+automatic policy. `temp_directory` also aliases the legacy `tempdir` control.
+
+Explicit native streaming-buffer settings suppress per-read automatic sizing;
+the legacy `parqit set stream_buffer_mb auto|0|n` hands control back to that
+policy. Explicit native I/O workers survive legacy CPU-thread changes, and
+optimizer choices compose with the package's plan guards. No default is
+changed. Native settings can affect semantics: keep
+`preserve_insertion_order true` when row order or positional verbs matter.
+Not every combination is faster, and `memory_limit` is not a process-RSS cap.
+Read-only and state restrictions remain native: for example, a used spill
+directory cannot change and allocated block-allocator memory cannot shrink.
+Per-read Parquet parameters, COPY options, ATTACH and reusable view
+materialisation are separate from SET. The [native settings audit](docs/audits/NATIVE_DUCKDB_SETTINGS_2026-10-28.md)
+records validation, defaults, compatibility and performance evidence.
+
 | Command | Effect |
 |---|---|
 | `parqit sql "<DuckDB SQL>" [, clear name()]` | Run raw DuckDB SQL; lazy by default (opens/replaces a view, current dataset untouched), or `clear` collects it. `name()` opens under a view name. A column named with a reserved SQL word (auto's `foreign`) is written in double quotes, `"foreign"`; parqit names the word when the engine stops at it. |
 | `parqit query "<sql fragment>"` | Inject a raw fragment into the current pipeline (e.g. a `QUALIFY`). |
 | `parqit show` / `parqit explain` | Print the generated SQL / the query plan. |
 | `parqit set statamissing\|int64\|encoding\|fill_threads\|stream_buffer_mb\|threads\|memory_limit\|tempdir <value>` | Engine settings (missing-value mode, integer precision policy, the code page of legacy text that declares none, fill workers, streaming-buffer MB, DuckDB threads, memory budget and spill directory). Engine threads default to the available CPUs (`r(cpus)`; the affinity mask on Linux). Automatic fill workers also depend on result size and environment overrides; small reads use the serial path. Explicit positive counts up to the available CPUs are accepted; larger ones are clamped with a note. `version` reports `r(threads)`, `r(fill_threads)` and `r(stream_buffer_mb)`. |
+| `parqit set duckdb [name [value]]` / `parqit set duckdb reset name` | Native catalog, effective value, literal SET or RESET in the live embedded engine. Names, aliases, input types and scopes come from DuckDB. Read-only, startup and state restrictions return the native error; views and the database instance are not silently recreated. |
 | `parqit path <file>` / `parqit menu` / `db parqit_*` | Resolve a path (→ `r(path)`, `r(exists)`); install the **User > parqit** submenu (GUI Stata; one line in `profile.do` keeps it); the ten point-and-click dialogs, also listed in the help file's Dialog menu. |
 
 ### Point and click

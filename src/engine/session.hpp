@@ -13,11 +13,13 @@
 
 #include <exception>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "duckdb.h"
+#include "duckdb_settings.hpp"
 
 namespace parqit {
 
@@ -38,6 +40,16 @@ class Session {
     bool set_threads(long long n, std::string *err);
     bool set_memory_limit(const std::string &limit, std::string *err);
     bool set_temp_directory(const std::string &dir, std::string *err);
+    /* Native settings are discovered from this engine, with its own aliases,
+     * types, scopes and validation. A missing value denotes SQL NULL, not "".
+     * Listing deliberately returns metadata rather than every setting value. */
+    bool native_settings(std::vector<DuckDBSetting> *out, std::string *err);
+    bool native_setting_get(const std::string &name, DuckDBSetting *out, std::string *err);
+    bool native_setting_set(const std::string &name, const std::optional<std::string> &value,
+                            bool reset, DuckDBSetting *out, std::string *err);
+    void release_native_setting(const std::string &canonical);
+    bool native_streaming_override() const { return native_streaming_override_; }
+    bool native_arrow_layout() const { return native_arrow_layout_; }
     /* CPUS-1: the engine thread count in force — the user's `parqit set
      * threads`, else the CPUs available to this process (the default applied
      * at open). Does not open the engine. */
@@ -124,6 +136,16 @@ class Session {
     long long threads_ = 0;            /* 0 = engine default */
     std::string memory_limit_;         /* "" = engine default */
     std::string temp_directory_;       /* "" = default_temp_dir_ */
+    std::map<std::string, DuckDBSettingOverride> native_overrides_;
+    std::vector<DuckDBSetting> native_metadata_;
+    std::vector<std::string> native_local_keys_;
+    bool native_streaming_override_ = false;
+    bool native_arrow_layout_ = false;
+    bool native_optimizer_dirty_ = false;
+    std::string native_disabled_optimizers_;
+    bool replay_native_settings(duckdb_connection con, bool local_only, std::string *err);
+    bool native_setting_info(const std::string &name, DuckDBSetting *out, std::string *err);
+    void rebuild_native_local_sql();
 };
 
 /* SQL single-quote escaping for string literals (doubles embedded quotes).

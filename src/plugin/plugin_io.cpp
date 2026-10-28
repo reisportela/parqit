@@ -4041,6 +4041,142 @@ ST_retcode cmd_use_prepare(const std::vector<std::string> &args) {
 
 namespace {
 
+enum class TextLayout : unsigned char { Utf8, LargeUtf8, View };
+
+/* Non-default native Arrow output options are decoded from the result's own
+ * schema. The ordinary utf8 path below remains unchanged. */
+bool fill_alternate_text(const ColumnPlan &p, int variable, long long base,
+                         const ArrowArray *column, TextLayout layout, std::FILE *sidecar,
+                         long long *nul_seen, std::string *error) {
+    if (column->length == 0) return true;
+    if (column->length < 0 || column->offset < 0) {
+        *error = "invalid Arrow text extent for " + p.stata_name;
+        return false;
+    }
+    if (!column->buffers || column->n_buffers < 3 || !column->buffers[1]) {
+        *error = "invalid Arrow text buffers for " + p.stata_name;
+        return false;
+    }
+    const auto *validity = static_cast<const uint8_t *>(column->buffers[0]);
+    const bool strl = p.stata_type == StType::StrL;
+    std::string buffer;
+    for (int64_t row = 0; row < column->length; ++row) {
+        const auto index = column->offset + row;
+        if (validity && !((validity[index >> 3] >> (index & 7)) & 1)) continue;
+        const char *data = nullptr;
+        int64_t length = 0;
+        if (layout == TextLayout::LargeUtf8) {
+            const auto *offsets = static_cast<const int64_t *>(column->buffers[1]);
+            const auto begin = offsets[index], end = offsets[index + 1];
+            if (begin < 0 || end < begin || (end > begin && !column->buffers[2])) {
+                *error = "invalid Arrow large-utf8 offsets for " + p.stata_name;
+                return false;
+            }
+            length = end - begin;
+            if (length) data = static_cast<const char *>(column->buffers[2]) + begin;
+        } else {
+            const auto *view = static_cast<const char *>(column->buffers[1]) + index * 16;
+            int32_t n = 0;
+            std::memcpy(&n, view, 4);
+            if (n < 0) {
+                *error = "invalid Arrow string-view length for " + p.stata_name;
+                return false;
+            }
+            length = n;
+            if (n <= 12) data = view + 4;
+            else {
+                int32_t number = 0, offset = 0;
+                std::memcpy(&number, view + 8, 4);
+                std::memcpy(&offset, view + 12, 4);
+                const auto *sizes = static_cast<const int64_t *>(column->buffers[column->n_buffers - 1]);
+                if (number < 0 || number >= column->n_buffers - 3 || offset < 0 || !sizes ||
+                    !column->buffers[2 + number] || offset > sizes[number] || n > sizes[number] - offset) {
+                    *error = "invalid Arrow string-view buffer for " + p.stata_name;
+                    return false;
+                }
+                data = static_cast<const char *>(column->buffers[2 + number]) + offset;
+            }
+        }
+        if (!length) continue;
+        if (length > 2147483647LL) {
+            *error = "Arrow text exceeds Stata's string limit for " + p.stata_name;
+            return false;
+        }
+        if (strl) {
+            if (!sidecar) {
+                *error = "internal: no strL sidecar for " + p.stata_name;
+                return false;
+            }
+            char header[64];
+            std::snprintf(header, sizeof(header), "%010d%013lld%012lld", variable,
+                          static_cast<long long>(base + row + 1), static_cast<long long>(length));
+            if (std::fwrite(header, 1, 35, sidecar) != 35 ||
+                std::fwrite(data, 1, static_cast<size_t>(length), sidecar) != static_cast<size_t>(length)) {
+                *error = "could not write the strL sidecar (disk full?)";
+                return false;
+            }
+        } else {
+            if (nul_seen && std::memchr(data, '\0', static_cast<size_t>(length))) ++*nul_seen;
+            buffer.assign(data, static_cast<size_t>(length));
+            const auto rc = SF_sstore(variable, static_cast<ST_int>(base + row + 1),
+                                     const_cast<char *>(buffer.c_str()));
+            if (rc) {
+                *error = "could not store Arrow text in " + p.stata_name;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool result_text_layouts(duckdb_result &result, duckdb_arrow_options options,
+                         const std::vector<ColumnPlan> &plans,
+                         std::vector<TextLayout> *layouts, std::string *error) {
+    if (std::none_of(plans.begin(), plans.end(), [](const ColumnPlan &p) {
+            return p.transfer == Transfer::Utf8;
+        })) return true;
+    const auto count = duckdb_column_count(&result);
+    std::vector<duckdb_logical_type> types(count, nullptr);
+    std::vector<const char *> names(count, "");
+    ArrowSchema schema{};
+    struct Release {
+        std::vector<duckdb_logical_type> &types;
+        ArrowSchema &schema;
+        ~Release() {
+            for (auto &type : types) if (type) duckdb_destroy_logical_type(&type);
+            if (schema.release) schema.release(&schema);
+        }
+    } release{types, schema};
+    for (idx_t i = 0; i < count; ++i) {
+        types[i] = duckdb_column_logical_type(&result, i);
+        const char *name = duckdb_column_name(&result, i);
+        names[i] = name ? name : "";
+    }
+    auto failure = duckdb_to_arrow_schema(options, types.data(), names.data(), count, &schema);
+    if (failure) {
+        *error = duckdb_error_data_message(failure);
+        duckdb_destroy_error_data(&failure);
+        return false;
+    }
+    if (schema.n_children < static_cast<int64_t>(plans.size()) || !schema.children) {
+        *error = "internal: Arrow result schema has too few columns";
+        return false;
+    }
+    layouts->assign(plans.size(), TextLayout::Utf8);
+    for (size_t i = 0; i < plans.size(); ++i) {
+        if (plans[i].transfer != Transfer::Utf8) continue;
+        const char *format = schema.children[i] ? schema.children[i]->format : nullptr;
+        if (format && std::strcmp(format, "u") == 0) continue;
+        if (format && std::strcmp(format, "U") == 0) (*layouts)[i] = TextLayout::LargeUtf8;
+        else if (format && std::strcmp(format, "vu") == 0) (*layouts)[i] = TextLayout::View;
+        else {
+            *error = "unsupported native Arrow text format for " + plans[i].stata_name;
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Walk one Arrow column of one chunk into Stata variable i (1-based),
  * starting at observation base+1. strL cells go to the binary sidecar
  * (the SPI has no strL write call); Mata pours them in afterwards. */
@@ -4049,7 +4185,9 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
                  long long *rng_seen, long long *subms_seen, std::string *err,
                  /* XMISS-1: the column's extended-missing companion (TINYINT
                   * codes) from the same chunk, or nullptr */
-                 const ArrowArray *xm = nullptr) {
+                 const ArrowArray *xm = nullptr, TextLayout text_layout = TextLayout::Utf8) {
+    if (p.transfer == Transfer::Utf8 && text_layout != TextLayout::Utf8)
+        return fill_alternate_text(p, i, base, col, text_layout, strl_spill, nul_seen, err);
     const uint8_t *validity = static_cast<const uint8_t *>(col->buffers[0]);
     const int64_t off = col->offset;
     auto valid = [&](int64_t r) -> bool {
@@ -4281,11 +4419,8 @@ bool fill_column(const ColumnPlan &p, int i, long long base, const ArrowArray *c
         return true;
     }
     case Transfer::Utf8: {
-        /* This walker assumes Arrow `utf8`: 3 buffers (validity, int32 offsets,
-         * data). DuckDB 1.5.3 emits exactly that for VARCHAR (the canonical
-         * transfer type). Guard the layout so a future engine change to
-         * large_utf8 / string-view (different buffer count) fails loudly here
-         * instead of silently reading garbage offsets (STR-2). */
+        /* The default utf8 path uses int32 offsets. Explicit native Arrow
+         * profiles use the schema-selected walkers above. */
         if (col->n_buffers != 3) {
             *err = "internal: unexpected Arrow string layout (" +
                    std::to_string(col->n_buffers) + " buffers) for " +
@@ -4543,6 +4678,7 @@ struct FillQueue {
  * (disjoint cells); strL columns fill under strl_mu. inf/nul tally into this
  * worker's own vectors. */
 void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
+                 const std::vector<TextLayout> &text_layouts,
                  const std::vector<int> &regular_cols,
                  const std::vector<int> &strl_cols, std::FILE *strl_spill,
                  duckdb_arrow_options aopts,
@@ -4609,7 +4745,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                                      &inf_local[col], &nul_local[col], &rng_local[col],
                                      &subms_local[col], &lerr,
                                      xm_idx[col] >= 0 ? arr.children[xm_idx[col]]
-                                                      : nullptr)) {
+                                                      : nullptr,
+                                     text_layouts.empty() ? TextLayout::Utf8 : text_layouts[col])) {
                         ok = false;
                         break;
                     }
@@ -4619,7 +4756,8 @@ void fill_worker(FillQueue &fq, const std::vector<ColumnPlan> &plans,
                     if (!fill_column(plans[col], col + 1, slot.base,
                                      arr.children[col], strl_spill,
                                      &inf_local[col], &nul_local[col],
-                                     &rng_local[col], &subms_local[col], &lerr)) {
+                                     &rng_local[col], &subms_local[col], &lerr, nullptr,
+                                     text_layouts.empty() ? TextLayout::Utf8 : text_layouts[col])) {
                         ok = false;
                         break;
                     }
@@ -4744,7 +4882,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
      * consumer and leaves many GB cold before the fill. Bound only its auto
      * policy at 1024 MB; explicit session/environment caps remain authoritative.
      * These are soft limits on produced chunks, never memory reservations. */
-    if (!materialized) {
+    if (!materialized && !s.native_streaming_override()) {
         const long long cap = stream_buffer_cap_bytes();
         if (cap < 0) {
             /* CA-01: a previous read may have changed this connection setting. */
@@ -4859,6 +4997,9 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
      * which is what duckdb_connection_get_arrow_options reads too
      * (capi/duckdb-c.cpp:159-171). */
     duckdb_arrow_options aopts = duckdb_result_get_arrow_options(&res);
+    std::vector<TextLayout> text_layouts;
+    const bool arrow_ready = !s.native_arrow_layout() ||
+        result_text_layouts(res, aopts, prep.plans, &text_layouts, &err);
 
     std::vector<long long> inf_counts(k, 0), nul_counts(k, 0), rng_counts(k, 0),
         subms_counts(k, 0);
@@ -4875,7 +5016,9 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
     std::string injected_err;
     bool end_of_stream = false;
 
-    if (nthreads <= 1) {
+    if (!arrow_ready) {
+        rc = kRcEngine;
+    } else if (nthreads <= 1) {
         /* Serial path — unchanged: one chunk at a time, every column inline.
          * Used for small reads and as the PARQIT_FILL_THREADS=0 escape hatch. */
         while (true) {
@@ -4905,7 +5048,8 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                     if (!fill_column(prep.plans[i], i + 1, base, arr.children[i],
                                      strl_spill, &inf_counts[i], &nul_counts[i],
                                      &rng_counts[i], &subms_counts[i], &err,
-                                     xi >= 0 ? arr.children[xi] : nullptr))
+                                     xi >= 0 ? arr.children[xi] : nullptr,
+                                     text_layouts.empty() ? TextLayout::Utf8 : text_layouts[i]))
                         rc = kRcEngine;
                 }
             }
@@ -4995,7 +5139,7 @@ ST_retcode cmd_use_fetch(const std::vector<std::string> &args) {
                         "deterministic test injection at worker " +
                         std::to_string(t));
                 workers.emplace_back(
-                    fill_worker, std::ref(fq), std::cref(prep.plans),
+                    fill_worker, std::ref(fq), std::cref(prep.plans), std::cref(text_layouts),
                     std::cref(regular_cols), std::cref(strl_cols), strl_spill,
                     aopts, ntotal, std::cref(xm_idx),
                     std::ref(inf_locals[t]), std::ref(nul_locals[t]),

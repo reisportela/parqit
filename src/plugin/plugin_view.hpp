@@ -55,6 +55,7 @@ bool eager_filter_sql(const std::string &scan_sql, const std::string &expr,
 /* name of the current view ("" when none is live) */
 std::string view_current_name();
 ST_retcode cmd_set(const std::vector<std::string> &args);
+ST_retcode cmd_duckdb_setting(const std::vector<std::string> &args);
 
 bool view_is_live();
 

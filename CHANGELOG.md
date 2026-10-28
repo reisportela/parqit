@@ -6,6 +6,35 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-28
+
+### Added
+
+- `parqit set duckdb` lists native setting names, types and scopes; a name
+  reads its effective value, a literal changes it, and `reset name` restores
+  the engine default without restarting Stata. Discovery, aliases, types and
+  validation come from the embedded DuckDB. Quoted empty strings and SQL
+  NULL remain distinct. Native read-only, startup and state restrictions
+  surface as errors without recreating the engine or clearing views.
+- Explicit native settings compose with the existing controls: independent
+  asynchronous I/O workers, an authoritative native streaming budget,
+  original literals retained for exact replay, connection-local propagation
+  to auxiliary workers, and user optimizer choices combined with plan guards.
+  `temp_directory` also aliases the existing `tempdir` control.
+- The compact settings dialog exposes native list/get/set/reset. Both helps
+  distinguish engine options, transfer controls, per-command Parquet options
+  and materialisation; document scope, precedence, ordering and native
+  limitations; and identify the Arrow C interface separately from Arrow C++.
+- Native Arrow large-utf8 and string-view settings are supported by explicit
+  schema-selected transfer paths, preserving the existing default utf8 path.
+
+### Changed
+
+- Five existing Stata tests derive worker and AUTO-route expectations from
+  the process's allocated CPUs. Their former fixed 3/4/9-worker expectations
+  also failed on unchanged 0.7.0 under a two-CPU allocation. Payload, metadata,
+  error, fault-injection and independent-oracle checks remain intact.
+
 ## [0.7.0] — 2026-10-27
 
 ### Added

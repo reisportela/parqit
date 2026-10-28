@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(parqit VERSION 0.7.0 LANGUAGES C CXX)
+project(parqit VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -157,6 +157,7 @@ set(PARQIT_ENGINE_SOURCES
     src/engine/text_file.cpp
     src/engine/parquet_footer.cpp
     src/engine/session.cpp
+    src/engine/duckdb_settings.cpp
     src/engine/scalar_registration.cpp
     src/engine/statistics.cpp
     src/engine/typemap.cpp
@@ -369,6 +370,7 @@ if(PARQIT_BUILD_TESTS)
         tests/unit/test_text_file.cpp
         tests/unit/test_name_case.cpp
         tests/unit/test_session.cpp
+        tests/unit/test_duckdb_settings.cpp
         tests/unit/test_file_cache.cpp
         tests/unit/test_parallelism.cpp
         tests/unit/test_partitioned_copy.cpp

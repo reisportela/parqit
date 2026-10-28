@@ -20,6 +20,8 @@ set linesize 255
 args repo plugin
 adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
+quietly parqit version
+local allocated_cpus = r(cpus)
 local fix `"`repo'/tests/fixtures/spss"'
 local fails 0
 tempfile stem
@@ -158,15 +160,23 @@ stem = Macro.getLocal("stem")
 ok = 1
 trace = open(Macro.getLocal("tl") + ".log", encoding="utf-8").read().splitlines()
 spss = [l.split(", ")[0].split()[-1] for l in trace if l.startswith("spss conversion: route ")]
-want = ["serial", "parallel", "parallel", "serial", "serial", "parallel", "serial", "parallel", "serial", "parallel",
-        "parallel", "parallel", "parallel"]
+cpus = int(Macro.getLocal("allocated_cpus"))
+# Public AUTO policy: the high-thread regime starts at eight effective workers.
+high = "parallel" if cpus >= 8 else "serial"
+zlib = "parallel" if cpus > 1 else "serial"
+want = ["serial", high, high, "serial", "serial", high, "serial", zlib, "serial", zlib,
+        high, zlib, zlib]
 if spss != want:
     print("FAIL: SPSS routes", spss, "not", want); ok = 0
 nocount = [l for l in trace if l.startswith("spss conversion: route ")][-3:]
-if not all(l.endswith("batches 9, workers 9") for l in nocount):
+planned = "batches 9, workers " + str(min(9,cpus))
+serial = "batches 0, workers 1"
+expected_nocount = [planned if cpus >= 8 else serial,
+                   planned if cpus > 1 else serial, planned if cpus > 1 else serial]
+if len(nocount) != 3 or not all(l.endswith(want) for l,want in zip(nocount,expected_nocount)):
     print("FAIL: a file without a declared count planned other workers:", nocount); ok = 0
 rdata = [l.split(", ")[0].split()[-1] for l in trace if l.startswith("rdata conversion: route ")]
-want_r = ["serial", "parallel", "parallel", "serial", "parallel", "serial"]
+want_r = ["serial", high, high, "serial", high, "serial"]
 if rdata != want_r:
     print("FAIL: R routes", rdata, "not", want_r); ok = 0
 def same(a, b):

@@ -74,11 +74,14 @@ end
 
 * --- setting surface: report, accept, refuse ---
 parqit version
+local cpus = r(cpus)
+local want3 = min(3,`cpus')
+local want4 = min(4,`cpus')
 check `"r(fill_threads) == "auto""' "version reports auto by default (got `r(fill_threads)')"
 local fails = `fails' + r(bad)
 parqit set fill_threads 3
 parqit version
-check `"r(fill_threads) == "3""' "set 3 is reported"
+check `"r(fill_threads) == "`want3'""' "set 3 is reported subject to the CPU bound"
 local fails = `fails' + r(bad)
 parqit set fill_threads 1
 parqit version
@@ -241,7 +244,7 @@ os.environ["PARQIT_FILL_THREADS"] = "1"
 end
 parqit set fill_threads 4
 parqit version
-check `"r(fill_threads) == "4""' "session setting outranks PARQIT_FILL_THREADS"
+check `"r(fill_threads) == "`want4'""' "session setting outranks PARQIT_FILL_THREADS"
 local fails = `fails' + r(bad)
 load_sig `"`tall'"'
 local sig_p "`r(sig)'"

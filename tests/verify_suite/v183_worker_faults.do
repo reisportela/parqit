@@ -16,6 +16,9 @@ set linesize 255
 args repo plugin
 adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
+quietly parqit version
+local expected_two = min(2,r(cpus))
+local expected_four = min(4,r(cpus))
 local fails 0
 local spss `"`repo'/tests/fixtures/spss/survey.sav"'
 local rds `"`repo'/tests/fixtures/r/frame.rds"'
@@ -89,7 +92,9 @@ for tag in ("thr", "wrk"):
         ok = 0
         print("FAIL: the " + tag + " save differs from the serial one")
 lines = [l for l in open(Macro.getLocal("tracelog"), encoding="utf-8") if "save cell pass:" in l]
-if len(lines) < 2 or "blocks 126, workers 2" not in lines[0] or "blocks 126, workers 4" not in lines[1]:
+two = "blocks 126, workers " + Macro.getLocal("expected_two")
+four = "blocks 126, workers " + Macro.getLocal("expected_four")
+if len(lines) < 2 or two not in lines[0] or four not in lines[1]:
     ok = 0
     print("FAIL: trace", lines)
 if not any("reading the dataset failed" in l for l in open(Macro.getLocal("tracelog"), encoding="utf-8")):

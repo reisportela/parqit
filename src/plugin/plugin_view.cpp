@@ -3348,6 +3348,75 @@ ST_retcode cmd_view_list(const std::vector<std::string> &args) {
     return 0;
 }
 
+ST_retcode cmd_duckdb_setting(const std::vector<std::string> &args) {
+    json req;
+    std::string err, action, name, response, tmpdir;
+    if (!load_req(args, &req, &err) ||
+        !parqit::req_text(req, "action", &action, &err) ||
+        !parqit::req_text(req, "name", &name, &err, false) ||
+        !parqit::req_text(req, "response", &response, &err) ||
+        !parqit::req_text(req, "tmpdir", &tmpdir, &err)) {
+        cry("parqit set duckdb: " + err);
+        return kRcUsage;
+    }
+    if (action != "list" && action != "get" && action != "set" && action != "reset") {
+        cry("parqit set duckdb: invalid action");
+        return kRcUsage;
+    }
+    Session &s = Session::instance();
+    s.set_default_temp_dir(tmpdir + parqit::spill_suffix());
+    std::vector<parqit::DuckDBSetting> settings;
+    if (action == "list") {
+        if (!s.native_settings(&settings, &err)) {
+            cry("parqit set duckdb: " + err);
+            return kRcUsage;
+        }
+    } else {
+        parqit::DuckDBSetting setting;
+        bool ok = false;
+        if (action == "get") ok = s.native_setting_get(name, &setting, &err);
+        else {
+            std::optional<std::string> value;
+            const auto field = req.find("value");
+            if (action == "set" && (field == req.end() || (!field->is_null() && !field->is_string()))) {
+                cry("parqit set duckdb: a literal value or SQL NULL is required");
+                return kRcUsage;
+            }
+            if (field != req.end() && field->is_string()) {
+                std::string literal;
+                if (!parqit::req_text(req, "value", &literal, &err)) {
+                    cry("parqit set duckdb: " + err);
+                    return kRcUsage;
+                }
+                value = std::move(literal);
+            }
+            ok = s.native_setting_set(name, value, action == "reset", &setting, &err);
+        }
+        if (!ok) {
+            cry("parqit set duckdb: " + err);
+            return kRcUsage;
+        }
+        settings.push_back(std::move(setting));
+    }
+    parqit::ResponseWriter writer;
+    if (!writer.open(response, &err)) {
+        cry(err);
+        return kRcEngine;
+    }
+    for (const auto &setting : settings) {
+        std::string aliases;
+        for (const auto &alias : setting.aliases) aliases += (aliases.empty() ? "" : ",") + alias;
+        writer.rec("native_setting", {setting.value ? "0" : "1", setting.explicit_override ? "1" : "0"},
+                   {setting.name, setting.canonical, setting.value.value_or(""), setting.input_type,
+                    setting.scope, aliases, setting.description});
+    }
+    if (!writer.close(&err)) {
+        cry(err);
+        return kRcEngine;
+    }
+    return 0;
+}
+
 ST_retcode cmd_set(const std::vector<std::string> &args) {
     std::string what, value;
     if (args.size() < 3 || !parqit::hex_decode(args[1], what) ||
@@ -3436,6 +3505,7 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
          * caps the buffer at n megabytes. No upper bound: it is a cap. */
         if (value == "auto") {
             stream_buffer_session() = -1;
+            s.release_native_setting("max_streaming_buffer_size");
             save_local("_parqit_set_value", "auto");
             return 0;
         }
@@ -3451,6 +3521,7 @@ ST_retcode cmd_set(const std::vector<std::string> &args) {
             return kRcUsage;
         }
         stream_buffer_session() = n;
+        s.release_native_setting("max_streaming_buffer_size");
         save_local("_parqit_set_value", std::to_string(n));
         return 0;
     }

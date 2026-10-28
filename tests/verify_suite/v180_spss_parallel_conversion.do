@@ -17,6 +17,8 @@ args repo plugin
 adopath ++ `"`repo'/src/ado/p"'
 global PARQIT_PLUGIN_PATH `"`plugin'"'
 parqit set threads 4
+quietly parqit version
+local expected_workers = min(4,r(cpus))
 tempfile stem nat
 local fix `"`repo'/tests/fixtures/spss"'
 local fails 0
@@ -99,7 +101,8 @@ for f in ("survey", "survey_bc", "survey_z"):
         print("FAIL", f, "physical types"); ok = 0
 trace = open(Macro.getLocal("tl") + ".log", encoding="utf-8").read()
 # 60 cases / 7 = 9 batches; per file one save and one use
-if trace.count("spss conversion: route parallel, profile parallel, batches 9, workers 4") != 6: ok = 0
+expected = "spss conversion: route parallel, profile parallel, batches 9, workers " + Macro.getLocal("expected_workers")
+if trace.count(expected) != 6: ok = 0
 Scalar.setValue("pyok", ok)
 end
 if (scalar(pyok) != 1) {
