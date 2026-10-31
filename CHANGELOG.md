@@ -18,6 +18,8 @@ semantic versioning once `v0.1.0` is tagged.
   stored results, and keep the function-coverage lint on the moved catalogue.
 - Document the existing `collapse, missing` option: all-missing source groups
   return missing from sum/rawsum instead of zero, while counts are unchanged.
+- Move the ARM macOS CI job to macOS 15 because GitHub is retiring the
+  macOS 14 runner image. Platform binary compatibility remains a release gate.
 
 ## [0.8.2] — 2026-10-28
 

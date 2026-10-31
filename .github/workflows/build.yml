@@ -32,7 +32,7 @@ jobs:
             preset: macos-x86_64
             artifact: parqit_macos_x86_64
           - label: macos-arm64
-            os: macos-14
+            os: macos-15
             preset: macos-arm64
             artifact: parqit_macos_arm64
           - label: windows-x86_64
