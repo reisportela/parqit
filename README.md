@@ -20,11 +20,18 @@ enters Stata's current dataset only when collected, or it can be written straigh
 back to Parquet without loading that result into the current dataset. SQL is
 available for power users, but no one has to learn it.
 
-> **Status:** v0.8.2 — the full surface below is implemented and covered by a
+> **Status:** v0.8.3 — the full surface below is implemented and covered by a
 > correctness suite (C++ unit tests run against the embedded engine; Stata
 > integration and audit-derived verify suites run against StataNow MP with
 > pyarrow/duckdb as independent oracles). `parqit` is **not** affiliated with
 > StataCorp.
+
+Version 0.8.3 adopts Rute Costa's revised user-help structure, with concise
+syntax, options and examples. The complete expression and egen catalogues,
+aggregation details and engine contracts live in the technical reference.
+Current command coverage, dialog links and precision caveats are retained;
+the existing `collapse, missing` option and conditional stored results are
+clarified. Command behaviour, DuckDB 2.0.0 and numerical contract 4 are unchanged.
 
 Version 0.8.2 fixes missing Hive partition columns when a local Parquet file
 is opened by a relative name from inside its partition directory. Local

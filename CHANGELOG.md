@@ -6,6 +6,19 @@ semantic versioning once `v0.1.0` is tagged.
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-10-31
+
+### Changed
+
+- Reorganise the user help around syntax, options, views and worked examples,
+  following Rute Costa's editorial review. Move the complete expression and
+  egen catalogues and detailed aggregation, engine and dialog contracts to
+  the technical reference, retaining practical caveats and current 0.8.2
+  syntax in the main help. Preserve dialog/help anchors, clarify conditional
+  stored results, and keep the function-coverage lint on the moved catalogue.
+- Document the existing `collapse, missing` option: all-missing source groups
+  return missing from sum/rawsum instead of zero, while counts are unchanged.
+
 ## [0.8.2] — 2026-10-28
 
 ### Fixed

@@ -253,7 +253,7 @@ for cmd in $public_cmds; do
         err "public subcommand '$cmd' is absent from the help syntax section"
 done
 
-# The help carries one delimited block listing the expression functions. Both
+# The technical help carries the delimited expression-function catalogue. Both
 # directions are release-blocking: an implemented function missing from the
 # block (undocumented surface) and a name in the block that the translator does
 # not implement (a promise parqit cannot keep).
@@ -277,9 +277,9 @@ help_fns=$(awk '
         gsub(/[^[:alnum:]_]/, " ", out)
         print out
     }
-' "$REPO/src/ado/p/parqit.sthlp" | tr ' ' '\n' | grep -v '^$' | sort -u)
+' "$REPO/src/ado/p/parqit_technical.sthlp" | tr ' ' '\n' | grep -v '^$' | sort -u)
 [ -n "$help_fns" ] || \
-    err "could not read the delimited expression-function list from parqit.sthlp"
+    err "could not read the delimited expression-function list from parqit_technical.sthlp"
 
 for fn in $expr_fns; do
     printf '%s\n' "$help_fns" | grep -qx "$fn" || \
@@ -291,9 +291,10 @@ for fn in $help_fns; do
 done
 
 # Every internal reference — viewerjumpto targets and inline {help parqit##x:…}
-# links alike — must resolve to a marker in the same file.
-jump_targets=$(grep -oE 'parqit##[A-Za-z0-9_]+' \
-                   "$REPO/src/ado/p/parqit.sthlp" \
+# links alike, including ado diagnostics and dialog HELP targets — must
+# resolve to a marker in the user help.
+jump_targets=$(grep -ohE 'parqit##[A-Za-z0-9_]+' \
+                   "$REPO/src/ado/p/parqit.sthlp" "$REPO/src/ado/p/parqit.ado" "$REPO"/src/ado/p/*.dlg \
                | sed 's/^parqit##//' | sort -u)
 [ -n "$jump_targets" ] || err "no parqit## targets found in parqit.sthlp"
 for target in $jump_targets; do
